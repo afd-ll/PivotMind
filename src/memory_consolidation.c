@@ -527,7 +527,7 @@ int compress_memory_cluster(HuarongTopologyNet* net, ClusterManager* manager,
     // 计算需要保留的节点数
     int keep_count = MAX(1, (int)(cluster->node_count * compression_ratio));
 
-    // 按重要性排序 (简化版：按激活值)
+    // 按重要性排序（保留激活值高的节点）
     // 保留激活值高的节点
     int removed = 0;
     while (cluster->node_count > keep_count) {

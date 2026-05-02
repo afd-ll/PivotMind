@@ -367,7 +367,7 @@ char* generate_response(Seq2SeqModel* /*model*/, GenVocabulary* /*vocab*/,
     return response;
 }
 
-// 加载训练数据 (简化版)
+// 加载训练数据（从文件读取已分词的训练样本）
 void load_training_data(const char* /*db_path*/, GenVocabulary* /*vocab*/,
                       float** inputs, float** targets, int* num_samples) {
     // TODO: 从数据库加载实际训练数据

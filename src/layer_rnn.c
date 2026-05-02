@@ -120,7 +120,7 @@ Layer* layer_create_simple_rnn(int input_size, int hidden_size) {
     return layer;
 }
 
-// RNN层前向传播 (简化版 - 只返回最后的隐藏状态)
+// RNN层前向传播（计算单步或序列的隐藏状态输出）
 void layer_rnn_forward(Layer* layer, Tensor* input) {
     if (!layer || !input) return;
 

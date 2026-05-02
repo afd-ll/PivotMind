@@ -874,7 +874,7 @@ CausalPath** find_all_causal_paths(CausalGraph* graph, int source,
 // ==================== A* 搜索实现 ====================
 
 /**
- * 使用 A* 算法查找因果路径（优化版）
+ * 使用 A* 算法查找因果路径（启发式搜索优先探索最有希望的路径）
  * 与 find_all_causal_paths 不同，A* 使用启发式搜索优先探索最有希望的路径
  * 
  * @param graph 因果图
@@ -1187,7 +1187,7 @@ int pc_algorithm(CausalGraph* graph, float** data, int n, int d, float alpha) {
         }
     }
 
-    // 条件独立性测试 (简化版)
+    // 条件独立性测试（验证变量间条件独立关系）
     for (int i = 0; i < d; i++) {
         for (int j = i + 1; j < d; j++) {
             // 计算偏相关

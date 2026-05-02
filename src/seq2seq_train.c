@@ -90,7 +90,7 @@ Tensor* matrix_transpose(Tensor* tensor) {
     return result;
 }
 
-// Teacher Forcing训练 (简化版:只计算前向损失)
+// Teacher Forcing训练（使用目标序列作为解码器输入进行前向传播和损失计算）
 float seq2seq_train_with_teacher_forcing(Seq2SeqModel* model,
                                       Tensor* input_seq,
                                       Tensor* target_seq,

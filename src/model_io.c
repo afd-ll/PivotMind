@@ -455,7 +455,7 @@ cleanup:
     return NULL;
 }
 
-// 保存模型权重(简化版)
+// 保存模型权重（序列化权重和偏置到二进制文件）
 bool model_save_weights(Model* model, const char* filepath) {
     FILE* fp = NULL;
     bool success = false;

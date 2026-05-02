@@ -943,7 +943,7 @@ int master_propagate_parallel(MasterTopology* master, int max_concurrent) {
 
 // ==================== 生成式推理实现 ====================
 
-// 基于多拓扑网络的生成式推理（优化版）
+// 基于多拓扑网络的生成式推理（通过拓扑激活状态生成自然语言回复）
 char* master_generate_response(MasterTopology* master,
                               const char* input_text,
                               int max_output_len) {
@@ -970,12 +970,14 @@ char* master_generate_response(MasterTopology* master,
             // 基于联想生成回复
             char* assoc_response = generate_from_associations(assoc_engine, max_output_len);
             if (assoc_response && strlen(assoc_response) > 0) {
+                // 先复制回复内容，再释放引擎（避免assoc_response指向引擎内部内存）
+                char* safe_response = strdup(assoc_response);
                 assoc_engine_free(assoc_engine);
-                // 清理 tokens
+                free(assoc_response);
                 for (int i = 0; i < token_count; i++) {
                     free(tokens[i]);
                 }
-                return assoc_response;
+                return safe_response;
             }
             if (assoc_response) {
                 free(assoc_response);

@@ -290,7 +290,7 @@ void node_hash_reserve(NodeHashTable* hash, int node_count) {
 }
 
 /**
- * 获取哈希表统计信息（扩展版）
+ * 获取哈希表统计信息（含链长分布和负载因子）
  */
 void node_hash_stats_ex(NodeHashTable* hash,
                        int* max_chain_length,

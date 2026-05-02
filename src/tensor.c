@@ -477,7 +477,7 @@ Tensor* tensor_softmax(Tensor* tensor, size_t dim)
     Tensor* result = tensor_create(tensor->dtype, tensor->ndim, tensor->shape);
     if (!result) return NULL;
     
-    // Softmax实现（简化版）
+    // Softmax实现（沿指定维度归一化为概率分布）
     float* input = (float*)tensor->data;
     float* output = (float*)result->data;
     
