@@ -99,3 +99,9 @@ make linux
 ## 作者
 
 陈道祥
+
+## 许可证
+
+Apache License 2.0。详见 [LICENSE](LICENSE) 文件。
+
+Copyright 2026 陈道祥
