@@ -1,0 +1,97 @@
+{
+  "model_name": "Test Model",
+  "model_version": "1.0",
+  "created_at": "2026-02-11",
+  "description": "Test model configuration for integration testing",
+
+  "architecture": {
+    "type": "sequential",
+    "layers": [
+      {
+        "layer_type": "linear",
+        "input_size": 10,
+        "output_size": 20,
+        "activation": "relu",
+        "use_bias": true,
+        "trainable": true
+      },
+      {
+        "layer_type": "linear",
+        "input_size": 20,
+        "output_size": 15,
+        "activation": "relu",
+        "use_bias": true,
+        "trainable": true
+      },
+      {
+        "layer_type": "linear",
+        "input_size": 15,
+        "output_size": 5,
+        "activation": "softmax",
+        "use_bias": true,
+        "trainable": true
+      }
+    ]
+  },
+
+  "training": {
+    "learning_rate": 0.001,
+    "batch_size": 32,
+    "epochs": 10,
+    "weight_decay": 0.0,
+    "gradient_clipping": 1.0,
+    "shuffle": true,
+    "early_stopping": {
+      "enabled": true,
+      "patience": 3,
+      "min_delta": 0.001
+    }
+  },
+
+  "optimizer": {
+    "type": "adam",
+    "beta1": 0.9,
+    "beta2": 0.999,
+    "epsilon": 1e-8
+  },
+
+  "loss_function": {
+    "type": "categorical_crossentropy",
+    "reduction": "mean"
+  },
+
+  "metrics": [
+    "accuracy",
+    "precision",
+    "recall",
+    "f1_score"
+  ],
+
+  "data": {
+    "input_features": 10,
+    "output_classes": 5,
+    "normalization": {
+      "method": "min_max",
+      "range": [0, 1]
+    }
+  },
+
+  "regularization": {
+    "dropout_rate": 0.5,
+    "l2_lambda": 0.0
+  },
+
+  "checkpoint": {
+    "enabled": true,
+    "directory": "checkpoints",
+    "save_best_only": true,
+    "monitor": "val_loss",
+    "mode": "min"
+  },
+
+  "logging": {
+    "log_interval": 100,
+    "tensorboard": false,
+    "save_predictions": true
+  }
+}

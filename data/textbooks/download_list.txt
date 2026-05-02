@@ -1,0 +1,12 @@
+# PDF下载列表
+# 格式: 文件名|URL
+# 每行一个任务，以#开头的行为注释
+
+# 示例（请替换为实际URL）：
+# 一年级语文上册.pdf|https://example.com/grade1_up.pdf
+# 一年级语文下册.pdf|https://example.com/grade1_down.pdf
+
+# 提示：
+# 1. 从国家中小学智慧教育平台获取PDF直链
+# 2. 将链接粘贴到此文件
+# 3. 运行 python tools/batch_download_pdfs.py

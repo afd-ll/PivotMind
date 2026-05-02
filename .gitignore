@@ -1,0 +1,60 @@
+# 编译输出
+build/
+build_cmake/
+*.exe
+*.out
+*.o
+*.obj
+*.a
+*.lib
+*.dll
+*.so
+*.dylib
+
+# 调试文件
+*.pdb
+*.ilk
+*.log
+debug_output.txt
+
+# IDE配置
+.vscode/
+.idea/
+*.suo
+*.user
+*.sln.docstates
+
+# 临时文件
+*~
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# 数据文件（保留结构，忽略内容）
+data/models/*.bin
+data/models/*.dat
+logs/*.log
+pivotmind_state.dat
+nul
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+.Python
+venv/
+ENV/
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile.bak
+
+# 测试输出
+test_output/
+coverage/
+*.gcda
+*.gcno

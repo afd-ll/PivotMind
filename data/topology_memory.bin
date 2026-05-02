@@ -1,0 +1,8 @@
+# 训练统计报告
+total_files=8
+total_texts=0
+total_chars=0
+vocab_nodes=0
+semantic_nodes=0
+culture_nodes=0
+syntax_nodes=0
