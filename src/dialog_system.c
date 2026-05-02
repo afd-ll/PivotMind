@@ -734,7 +734,24 @@ char* dialog_generate(DialogReasoning* reasoning, const char* input,
     
     DialogSystem* dsys = (DialogSystem*)sys;
     
-    (void)dsys; // 联想引擎回复（master_generate_response）暂禁用，v0.1用简化回复
+    // 拓扑驱动生成：当拓扑节点足够时使用联想引擎生成更自然的回复
+    if (dsys && dsys->master && dsys->master->sub_topo_count > 0) {
+        int total_nodes = 0;
+        for (int t = 0; t < dsys->master->sub_topo_count; t++) {
+            SubTopology* sub = dsys->master->sub_topologies[t];
+            if (sub && sub->net) total_nodes += sub->net->node_count;
+        }
+        if (total_nodes >= 10) {
+            char* topo_response = master_generate_response(
+                dsys->master, input, max_len);
+            if (topo_response && strlen(topo_response) > 0) {
+                char* safe = strdup(topo_response);
+                free(topo_response);
+                return safe;
+            }
+            if (topo_response) free(topo_response);
+        }
+    }
     
     char* response = (char*)malloc(max_len);
     if (!response) return strdup("内存不足...");
@@ -1452,9 +1469,6 @@ char* dialog_process(DialogSystem* sys, const char* user_input, DialogReasoning*
                         strlen(response) + 1, MEMORY_TYPE_STRING, 0.3f);
             ui_print_thinking_line("学习", "已存入");
         }
-        
-        // 在线训练Seq2Seq模型：每轮对话一步（当前版本已禁用，待调试）
-        (void)user_input; (void)response;
         
         if (sys->learner && user_input && response) {
             learn_from_dialog(sys->learner, user_input, response, NULL);
