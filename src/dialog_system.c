@@ -734,26 +734,7 @@ char* dialog_generate(DialogReasoning* reasoning, const char* input,
     
     DialogSystem* dsys = (DialogSystem*)sys;
     
-    // 优先使用拓扑驱动生成（master_generate_response）
-    // 当拓扑有足够的节点时启用
-    if (dsys && dsys->master && dsys->master->sub_topo_count > 0) {
-        int total_nodes = 0;
-        for (int t = 0; t < dsys->master->sub_topo_count; t++) {
-            SubTopology* sub = dsys->master->sub_topologies[t];
-            if (sub && sub->net) total_nodes += sub->net->node_count;
-        }
-        if (total_nodes >= 20) {
-            char* topo_response = master_generate_response(
-                dsys->master, input, max_len);
-            if (topo_response && strlen(topo_response) > 0) {
-                // 复制一份，避免引擎清理导致指针失效
-                char* safe_response = strdup(topo_response);
-                free(topo_response);
-                return safe_response;
-            }
-            if (topo_response) free(topo_response);
-        }
-    }
+    (void)dsys; // 联想引擎回复（master_generate_response）暂禁用，v0.1用简化回复
     
     char* response = (char*)malloc(max_len);
     if (!response) return strdup("内存不足...");
@@ -1472,56 +1453,8 @@ char* dialog_process(DialogSystem* sys, const char* user_input, DialogReasoning*
             ui_print_thinking_line("学习", "已存入");
         }
         
-        // 在线训练Seq2Seq模型：每轮对话一步
-        if (sys->gen_vocab && sys->seq2seq && user_input && response) {
-            GenVocabulary* vocab = (GenVocabulary*)sys->gen_vocab;
-            printf("[神经] 词汇表当前大小: %d\\n", vocab->size);
-            // 将用户输入和回复中的词加入词汇表（使用utf8_tokenize）
-            char* tokens[32];
-            int n = utf8_tokenize(user_input, tokens, 32);
-            for (int i = 0; i < n; i++) {
-                gen_vocab_add_word(vocab, tokens[i]);
-                free(tokens[i]);
-            }
-            n = utf8_tokenize(response, tokens, 32);
-            for (int i = 0; i < n; i++) {
-                gen_vocab_add_word(vocab, tokens[i]);
-                free(tokens[i]);
-            }
-            // 构建训练序列（vocab>=5时开始训练）
-            if (vocab->size >= 5) {
-                int in_ids[20] = {0}, out_ids[20] = {0};
-                int in_len = 0, out_len = 0;
-                n = utf8_tokenize(user_input, tokens, 20);
-                for (int i = 0; i < n && i < 20; i++) {
-                    int id = gen_vocab_get_word_id(vocab, tokens[i]);
-                    in_ids[in_len++] = (id >= 0) ? id : 3;
-                    free(tokens[i]);
-                }
-                n = utf8_tokenize(response, tokens, 20);
-                for (int i = 0; i < n && i < 20; i++) {
-                    int id = gen_vocab_get_word_id(vocab, tokens[i]);
-                    out_ids[out_len++] = (id >= 0) ? id : 3;
-                    free(tokens[i]);
-                }
-                if (in_len > 0 && out_len > 0) {
-                    // 创建并填充1D tensor
-                    size_t in_shape[] = {(size_t)in_len};
-                    size_t out_shape[] = {(size_t)out_len};
-                    Tensor* in_t = tensor_create(DT_FLOAT32, 1, in_shape);
-                    Tensor* out_t = tensor_create(DT_FLOAT32, 1, out_shape);
-                    if (in_t && out_t) {
-                        float* in_d = (float*)in_t->data;
-                        float* out_d = (float*)out_t->data;
-                        for (int i = 0; i < in_len; i++) in_d[i] = (float)in_ids[i];
-                        for (int i = 0; i < out_len; i++) out_d[i] = (float)out_ids[i];
-                        seq2seq_train((Seq2SeqModel*)sys->seq2seq, in_t, out_t, 0.01f);
-                        tensor_destroy(in_t);
-                        tensor_destroy(out_t);
-                    }
-                }
-            }
-        }
+        // 在线训练Seq2Seq模型：每轮对话一步（当前版本已禁用，待调试）
+        (void)user_input; (void)response;
         
         if (sys->learner && user_input && response) {
             learn_from_dialog(sys->learner, user_input, response, NULL);

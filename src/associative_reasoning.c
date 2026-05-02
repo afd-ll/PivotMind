@@ -369,7 +369,6 @@ char* generate_from_associations(AssociativeEngine* engine, int max_len) {
         if (strcmp(engine->cache_keys[i], cache_key) == 0) {
             engine->cache_hits[i]++;
             char* cached_result = strdup(engine->cache_values[i]);
-            printf("[缓存命中] 键='%s', 命中次数=%d\n", cache_key, engine->cache_hits[i]);
             return cached_result;
         }
     }

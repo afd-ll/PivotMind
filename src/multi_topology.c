@@ -373,8 +373,7 @@ static void auto_connect_new_node(MasterTopology* master, SubTopology* sub, Reas
     }
     
     if (connect_count > 0) {
-        printf("  [连接密度] 为节点 '%s' 自动建立 %d 个语义连接\n", 
-               new_node->concept, connect_count);
+        // 调试信息已静音
     }
 }
 
@@ -944,15 +943,7 @@ int master_propagate_parallel(MasterTopology* master, int max_concurrent) {
 
 // ==================== 生成式推理实现 ====================
 
-/**
- * 基于多拓扑网络的生成式推理
- * 
- * 核心思想：
- * 1. 分词 → 激活词汇拓扑中的节点
- * 2. 传播到语义、情绪、上下文拓扑
- * 3. 收集激活的节点，计算注意力权重
- * 4. 生成回复（基于拓扑状态，而非预设模板）
- */
+// 基于多拓扑网络的生成式推理（优化版）
 char* master_generate_response(MasterTopology* master,
                               const char* input_text,
                               int max_output_len) {
@@ -960,12 +951,9 @@ char* master_generate_response(MasterTopology* master,
         return strdup("...");
     }
     
-    printf("\n===== 生成式推理 (优化版) =====\n");
-    printf("输入: %s\n", input_text);
-    
     master->total_inferences++;
     
-    // ==================== 优化1: UTF-8分词 ====================
+    // ==================== UTF-8分词 ====================
     char* tokens[100];
     int token_count = utf8_tokenize(input_text, tokens, 100);
     
@@ -973,182 +961,42 @@ char* master_generate_response(MasterTopology* master,
         return strdup("...");
     }
     
-    printf("UTF-8分词: %d 个 token\n", token_count);
-    for (int i = 0; i < token_count && i < 10; i++) {
-        printf("  [%d] %s\n", i, tokens[i]);
-    }
-    
-    // ==================== 优化2: 使用联想引擎 ====================
-    printf("\n执行联想推理:\n");
+    // ==================== 使用联想引擎 ====================
     AssociativeEngine* assoc_engine = assoc_engine_create(master);
     if (assoc_engine) {
         int assoc_count = associate_from_text(assoc_engine, input_text, 3);
-        printf("联想结果: %d 个关联概念\n", assoc_count);
         
         if (assoc_count > 0) {
-            // 打印联想路径
-            print_associations(assoc_engine);
-            
             // 基于联想生成回复
             char* assoc_response = generate_from_associations(assoc_engine, max_output_len);
             if (assoc_response && strlen(assoc_response) > 0) {
-                printf("\n联想生成: %s\n", assoc_response);
                 assoc_engine_free(assoc_engine);
-                
                 // 清理 tokens
                 for (int i = 0; i < token_count; i++) {
                     free(tokens[i]);
                 }
-                
                 return assoc_response;
             }
-            free(assoc_response);
+            if (assoc_response) {
+                free(assoc_response);
+                assoc_response = NULL;
+            }
         }
+        
         assoc_engine_free(assoc_engine);
     }
     
-    // ==================== 降级方案: 基于拓扑网络生成 ====================
-    printf("\n使用拓扑网络生成:\n");
-    
-    // 获取词汇拓扑
-    SubTopology* vocab_topo = master_get_sub_topology_by_type(master, TOPO_VOCABULARY);
-    
-    if (!vocab_topo) {
-        printf("[警告] 词汇拓扑不存在，使用默认回复\n");
-        for (int i = 0; i < token_count; i++) free(tokens[i]);
-        return strdup("我正在学习中，请稍后再试。");
-    }
-    
-    // 激活词汇节点
-    printf("\n激活词汇节点 (哈希表查找):\n");
-    for (int i = 0; i < token_count; i++) {
-        // ==================== 优化3: 使用哈希表查找 ====================
-        ReasoningNode* node = node_hash_find(vocab_topo->node_hash, tokens[i]);
-        
-        if (!node) {
-            // 创建新节点
-            node = huarong_net_add_node(vocab_topo->net, tokens[i], NULL, 0);
-            if (node) {
-                // 添加到哈希表
-                node_hash_add(vocab_topo->node_hash, node);
-                // 自动建立语义连接
-                auto_connect_new_node(master, vocab_topo, node);
-                printf("  新增节点: %s\n", tokens[i]);
-            }
-        } else {
-            printf("  命中缓存: %s\n", tokens[i]);
-        }
-        
-        if (node) {
-            master_activate_node(master, vocab_topo->topo_id, 
-                               node->node_id, 0.9f);
-        }
-    }
-    
-    // 收集激活的节点（修复：记录 topo_id + node_id 对）
-    printf("\n收集激活节点:\n");
-    typedef struct { int topo_id; int node_id; } ActiveNodeRef;
-    ActiveNodeRef active_nodes[100];
-    int active_count = 0;
-
-    for (int t = 0; t < master->sub_topo_count; t++) {
-        SubTopology* sub = master->sub_topologies[t];
-        for (int n = 0; n < sub->net->node_count && active_count < 100; n++) {
-            ReasoningNode* node = sub->net->nodes[n];
-            if (node->activation > 0.1f) {
-                active_nodes[active_count].topo_id = t;
-                active_nodes[active_count].node_id = n;
-                active_count++;
-
-                printf("  拓扑=%s, 节点=%s, 激活=%.3f\n",
-                       sub->name, node->concept ? node->concept : "?",
-                       node->activation);
-            }
-        }
-    }
-    
-    // 生成回复
-    char* response = (char*)malloc(max_output_len);
-    if (!response) {
-        for (int i = 0; i < token_count; i++) free(tokens[i]);
-        return strdup("...");
-    }
-    
-    response[0] = '\0';
-    int pos = 0;
-    
-    if (active_count > 0) {
-        // 找到激活度最高的拓扑
-        int max_topo_id = 0;
-        float max_activation = 0.0f;
-        for (int t = 0; t < master->sub_topo_count; t++) {
-            if (master->activation_levels[t] > max_activation) {
-                max_activation = master->activation_levels[t];
-                max_topo_id = t;
-            }
-        }
-        
-        SubTopology* dominant_topo = master_get_sub_topology(master, max_topo_id);
-        
-        if (dominant_topo) {
-            // 基于主拓扑类型生成不同风格的回复
-            switch (dominant_topo->type) {
-                case TOPO_VOCABULARY:
-                    pos = snprintf(response, max_output_len, 
-                                  "你提到了: ");
-                    break;
-                case TOPO_SEMANTIC:
-                    pos = snprintf(response, max_output_len, 
-                                  "从语义角度理解, ");
-                    break;
-                case TOPO_EMOTION:
-                    pos = snprintf(response, max_output_len, 
-                                  "我能感受到你的情绪, ");
-                    break;
-                case TOPO_CONTEXT:
-                    pos = snprintf(response, max_output_len, 
-                                  "在这个上下文中, ");
-                    break;
-                default:
-                    pos = snprintf(response, max_output_len, 
-                                  "关于这个话题, ");
-            }
-            
-            // 添加激活的概念（修复：使用正确的 topo_id 查找节点）
-            for (int i = 0; i < active_count && pos < max_output_len - 20; i++) {
-                SubTopology* sub = master_get_sub_topology(master,
-                    active_nodes[i].topo_id);
-                if (sub && active_nodes[i].node_id < sub->net->node_count) {
-                    ReasoningNode* node = sub->net->nodes[active_nodes[i].node_id];
-                    if (node && node->concept) {
-                        pos += snprintf(response + pos, max_output_len - pos,
-                                       "%s", node->concept);
-                        if (i < active_count - 1) {
-                            pos += snprintf(response + pos, max_output_len - pos,
-                                          ", ");
-                        }
-                    }
-                }
-            }
-            
-            pos += snprintf(response + pos, max_output_len - pos, "。");
-        }
-    } else {
-        snprintf(response, max_output_len, 
-                "我理解了你的输入，正在思考中...");
-    }
-    
-    master->successful_inferences++;
-    
-    printf("\n生成回复: %s\n", response);
-    printf("======================\n");
-    
-    // 清理
+    // 清理 tokens
     for (int i = 0; i < token_count; i++) {
         free(tokens[i]);
     }
     
-    return response;
+    // 默认回复
+    char* result = (char*)malloc(max_output_len);
+    if (result) {
+        snprintf(result, max_output_len, "我理解了，正在学习这个概念。");
+    }
+    return result;
 }
 
 // ==================== 可视化实现 ====================
