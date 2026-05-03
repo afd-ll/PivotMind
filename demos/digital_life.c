@@ -98,7 +98,7 @@ DigitalLifeSystem* digital_life_create() {
     
     // 1. 创建记忆系统
     printf("[1/4] 创建记忆系统...\n");
-    sys->memory = memory_system_create(100, 500, 2000);
+    sys->memory = memory_system_create(500, 2000, 5000);
     if (!sys->memory) {
         printf("错误: 无法创建记忆系统\n");
         free(sys);
@@ -116,16 +116,16 @@ DigitalLifeSystem* digital_life_create() {
         return NULL;
     }
     
-    // 添加子拓扑
-    master_add_sub_topology(sys->topology, TOPO_VOCABULARY, "词汇拓扑", 1000, 10);
-    master_add_sub_topology(sys->topology, TOPO_SEMANTIC, "语义拓扑", 500, 9);
-    master_add_sub_topology(sys->topology, TOPO_EMOTION, "情绪拓扑", 200, 8);
-    master_add_sub_topology(sys->topology, TOPO_SYNTAX, "语法拓扑", 300, 7);
-    master_add_sub_topology(sys->topology, TOPO_CONTEXT, "上下文拓扑", 300, 6);
-    master_add_sub_topology(sys->topology, TOPO_DOMAIN, "领域拓扑", 200, 5);
-    master_add_sub_topology(sys->topology, TOPO_PRAGMA, "语用拓扑", 150, 4);
-    master_add_sub_topology(sys->topology, TOPO_CULTURE, "文化拓扑", 150, 3);
-    master_add_sub_topology(sys->topology, TOPO_CONCEPT, "概念拓扑", 500, 9);
+    // 添加子拓扑（扩容以支持书籍数量）
+    master_add_sub_topology(sys->topology, TOPO_VOCABULARY, "词汇拓扑", 6000, 10);
+    master_add_sub_topology(sys->topology, TOPO_SEMANTIC, "语义拓扑", 2000, 9);
+    master_add_sub_topology(sys->topology, TOPO_EMOTION, "情绪拓扑", 500, 8);
+    master_add_sub_topology(sys->topology, TOPO_SYNTAX, "语法拓扑", 500, 7);
+    master_add_sub_topology(sys->topology, TOPO_CONTEXT, "上下文拓扑", 500, 6);
+    master_add_sub_topology(sys->topology, TOPO_DOMAIN, "领域拓扑", 500, 5);
+    master_add_sub_topology(sys->topology, TOPO_PRAGMA, "语用拓扑", 500, 4);
+    master_add_sub_topology(sys->topology, TOPO_CULTURE, "文化拓扑", 500, 3);
+    master_add_sub_topology(sys->topology, TOPO_CONCEPT, "概念拓扑", 6000, 9);
     
     // 添加初始知识（可以通过训练扩展）
     printf("     添加初始知识...\n");
