@@ -188,16 +188,19 @@ void seq2seq_train(Seq2SeqModel* model, Tensor* input_seq,
     float* dWh = (float*)rnn->Wh->grad->data;
     float* dbh = (float*)rnn->bh->grad->data;
     
+    // 动态分配梯度缓冲区（避免硬编码 200 的限制）
+    float* grad_out = (float*)malloc(vocab_size * sizeof(float));
+    float* dh = (float*)calloc(hidden_dim, sizeof(float));
+    
     for (int t = seq_len - 1; t >= 0; t--) {
         // 输出层梯度: (pred_t - onehot(target_t)) / seq_len
-        float grad_out[200];
         int target_idx = (int)target_data[t];
         if (target_idx < 0 || target_idx >= vocab_size) target_idx = 3;
         for (int v = 0; v < vocab_size; v++) {
             float pred = output_data[t * vocab_size + v];
+            if (pred < 1e-10f) pred = 1e-10f;
             grad_out[v] = (pred - (v == target_idx ? 1.0f : 0.0f)) / seq_len;
         }
-        
         // 获取此时间步的RNN输出h_t（Linear层的输入）
         float* h_t = rnn_outputs ? &rnn_outputs[t * hidden_dim] : NULL;
         
@@ -210,7 +213,7 @@ void seq2seq_train(Seq2SeqModel* model, Tensor* input_seq,
         for (int j = 0; j < lin_out; j++) db_lin[j] += grad_out[j];
         
         // RNN梯度: dh_t = W_lin^T · grad_out
-        float dh[64] = {0};
+        memset(dh, 0, hidden_dim * sizeof(float));
         for (int i = 0; i < hidden_dim; i++)
             for (int j = 0; j < vocab_size; j++)
                 dh[i] += W_lin[i * vocab_size + j] * grad_out[j];
@@ -244,92 +247,60 @@ void seq2seq_train(Seq2SeqModel* model, Tensor* input_seq,
     
     printf("  [训练] Loss: %.4f (lr=%.4f, grad_norm=%.4f)\n", loss, lr, 
            dec_linear->weights->grad->data ? ((float*)dec_linear->weights->grad->data)[0] : 0);
+    
+    free(grad_out);
+    free(dh);
 }
 
-// 分词 (支持中英文混合)
+// 分词 (支持中英文混合 - UTF-8 字符级)
 int tokenize_text(const char* text, char** tokens, int max_tokens) {
     int count = 0;
     if (!text || !tokens) return 0;
 
-    printf("\n[调试] 分词输入: %s\n", text);
-    printf("[调试] 输入长度: %zu 字节\n", strlen(text));
-
-    // 先尝试按空格、换行符、标点符号分词
-    char* copy = strdup(text);
-    // 添加常见分隔符: 空格、换行、回车、逗号、句号、顿号、问号、感叹号、分号、冒号
-    char* delimiters = " \n\r,，。、？！；：";
-    char* token = strtok(copy, delimiters);
-
-    while (token != NULL && count < max_tokens) {
-        tokens[count] = strdup(token);
-        count++;
-        token = strtok(NULL, delimiters);
-    }
-    free(copy);
-
-    // 如果没有分词成功（中文文本没有空格），按字符分词
-    if (count == 0) {
-        printf("[调试] 按空格分词失败，改为按字符分词\n");
-        int len = strlen(text);
-        for (int i = 0; i < len && count < max_tokens; ) {
-            // 跳过UTF-8 BOM或控制字符
-            if ((unsigned char)text[i] < 32) {
-                i++;
-                continue;
-            }
-
-            // 检测UTF-8中文字符 (0xE0-0xEF 开头)
-            if ((unsigned char)text[i] >= 0xE0 && (unsigned char)text[i] <= 0xEF) {
-                // 中文: 3字节
-                if (i + 3 <= len && count < max_tokens) {
-                    char* ch = (char*)malloc(4);
-                    memcpy(ch, text + i, 3);
-                    ch[3] = '\0';
-                    tokens[count] = ch;
-                    count++;
-                    i += 3;
-                } else {
-                    break;
-                }
-            } else if ((unsigned char)text[i] >= 0xC0 && (unsigned char)text[i] <= 0xDF) {
-                // 2字节 UTF-8 (Latin扩展等)
-                if (i + 2 <= len && count < max_tokens) {
-                    char* ch = (char*)malloc(3);
-                    memcpy(ch, text + i, 2);
-                    ch[2] = '\0';
-                    tokens[count] = ch;
-                    count++;
-                    i += 2;
-                } else {
-                    break;
-                }
-            } else {
-                // ASCII 字符
-                if (count < max_tokens) {
-                    char* ch = (char*)malloc(2);
-                    ch[0] = text[i];
-                    ch[1] = '\0';
-                    tokens[count] = ch;
-                    count++;
-                }
-                i++;
+    int len = strlen(text);
+    
+    // UTF-8 字符级分词：逐字符分割
+    for (int i = 0; i < len && count < max_tokens; ) {
+        // 跳过控制字符
+        if ((unsigned char)text[i] < 32) { i++; continue; }
+        
+        int char_len;
+        if ((unsigned char)text[i] >= 0xF0) char_len = 4;       // 4字节
+        else if ((unsigned char)text[i] >= 0xE0) char_len = 3; // 中文等3字节
+        else if ((unsigned char)text[i] >= 0xC0) char_len = 2; // 拉丁扩展
+        else char_len = 1;                                       // ASCII
+        
+        if (i + char_len > len) break;
+        
+        // 跳过标点符号（ASCII 标点 + 中英文标点）
+        if (char_len == 1 && strchr(" ，。、？！；：""''（）【】《》?.,!;:()[]{}\"' \t\n\r", text[i])) {
+            i += char_len;
+            continue;
+        }
+        // 跳过中文标点（3字节）
+        if (char_len == 3) {
+            unsigned char c0 = text[i], c1 = text[i+1], c2 = text[i+2];
+            if ((c0==0xEF&&c1==0xBC&&c2>=0x8C) || // 全角逗号等
+                (c0==0xE3&&c1==0x80&&c2>=0x80) || // CJK符号
+                0) {
+                // 具体标点范围
+                const char* punct_chars = "，。、？！；：""''（）【】《》";
+                char tmp[4] = {c0,c1,c2,0};
+                if (strstr(punct_chars, tmp)) { i += char_len; continue; }
             }
         }
-    }
-
-    // 调试：显示分词结果
-    printf("[调试] 分词结果: %d 个 token\n", count);
-    for (int i = 0; i < count && i < 10; i++) {
-        printf("  Token %d: '%s'\n", i, tokens[i]);
-    }
-    if (count > 10) {
-        printf("  ... (共 %d 个 token)\n", count);
+        
+        char* token = (char*)malloc(char_len + 1);
+        memcpy(token, text + i, char_len);
+        token[char_len] = '\0';
+        tokens[count++] = token;
+        i += char_len;
     }
 
     return count;
 }
 
-// 全局主拓扑（延迟初始化）
+
 static MasterTopology* g_master_topo = NULL;
 
 // 初始化多拓扑网络

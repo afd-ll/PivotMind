@@ -27,6 +27,7 @@
 #include "dialog_system.h"
 #include "huarong_topology.h"
 #include "node_hash.h"
+#include "common.h"
 
 // 最大支持
 #define MAX_CONCEPTS 50000
@@ -174,6 +175,13 @@ static int parse_knowledge_json(const char* filepath,
 }
 
 // 添加单个概念到各层拓扑
+static float* make_random_feat() {
+    float* f = malloc(NODE_FEATURE_DIM * sizeof(float));
+    for (int i = 0; i < NODE_FEATURE_DIM; i++)
+        f[i] = ((float)rand() / RAND_MAX - 0.5f) * 0.1f;
+    return f;
+}
+
 static void add_concept(MasterTopology* master, const char* concept) {
     if (!master || !concept || !*concept) return;
     int len = strlen(concept);
@@ -184,7 +192,9 @@ static void add_concept(MasterTopology* master, const char* concept) {
         if (ct && ct->net) {
             ReasoningNode* n = node_hash_find(ct->node_hash, concept);
             if (!n) {
-                n = huarong_net_add_node(ct->net, concept, NULL, 0);
+                float* feat = make_random_feat();
+                n = huarong_net_add_node(ct->net, concept, feat, NODE_FEATURE_DIM);
+                free(feat);
                 if (n) { node_hash_add(ct->node_hash, n); n->activation = 0.8f; }
             }
         }
@@ -206,7 +216,9 @@ static void add_concept(MasterTopology* master, const char* concept) {
             if (!sub || !sub->net) continue;
             ReasoningNode* n = node_hash_find(sub->node_hash, ch);
             if (!n) {
-                n = huarong_net_add_node(sub->net, ch, NULL, 0);
+                float* feat = make_random_feat();
+                n = huarong_net_add_node(sub->net, ch, feat, NODE_FEATURE_DIM);
+                free(feat);
                 if (n) {
                     node_hash_add(sub->node_hash, n);
                     n->activation = (t == 0) ? 0.4f : 0.5f;

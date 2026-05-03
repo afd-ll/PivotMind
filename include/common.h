@@ -19,8 +19,30 @@
 // ========== Constants ==========
 #define PI 3.14159265358979323846f
 #define EPSILON 1e-10f
+#define NODE_FEATURE_DIM 24  // 拓扑节点语义向量维度
 
 // ========== Utility Functions ==========
+
+/** 向量的余弦相似度 */
+static inline float cosine_similarity(const float* a, const float* b, int dim) {
+    float dot = 0, na = 0, nb = 0;
+    for (int i = 0; i < dim; i++) {
+        dot += a[i] * b[i];
+        na += a[i] * a[i];
+        nb += b[i] * b[i];
+    }
+    float norm = sqrtf(na) * sqrtf(nb);
+    return (norm < 1e-10f) ? 0.0f : dot / norm;
+}
+
+/** Hebbian 更新: 将两个向量互相拉近 */
+static inline void hebbian_update(float* a, float* b, int dim, float lr) {
+    for (int i = 0; i < dim; i++) {
+        float diff = b[i] - a[i];
+        a[i] += lr * diff;
+        b[i] -= lr * diff;  // 对称更新
+    }
+}
 
 /**
  * Initialize random number generator (only once)

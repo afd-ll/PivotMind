@@ -294,8 +294,9 @@ void digital_life_start(DigitalLifeSystem* sys) {
     
     printf("\n[系统] 启动溯智系统...\n");
     
-    // 启动主动学习器
-    active_learner_start(sys->learner);
+    // 启动主动学习器（暂关，排查 heap corruption）
+    // active_learner_start(sys->learner);
+    (void)sys;
     
     sys->is_running = 1;
     

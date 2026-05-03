@@ -24,6 +24,7 @@
 #include "string_pool.h"
 #include "generative_model.h"
 #include "tensor.h"
+#include "common.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -624,10 +625,21 @@ DialogReasoning* dialog_reason(DialogInput* input, MasterTopology* master) {
                     }
                     
                     float confidence_factor = avg_confidence;
+                    
+                    // 语义向量相似度加权：同层拓扑中 embedding 越接近，激活越强
+                    float embed_factor = 1.0f;
+                    if (node->features && connected->features &&
+                        node->feature_dim > 0 && node->feature_dim == connected->feature_dim) {
+                        float sim = cosine_similarity(node->features, connected->features,
+                                                       node->feature_dim);
+                        embed_factor = 0.5f + 0.5f * (sim + 1.0f) / 2.0f;  // 映射到 [0.5, 1.0]
+                    }
+                    
                     float new_activation = node->connection_weights[c] * 
                                           node->activation * 
                                           confidence_factor *
                                           activation_multiplier *
+                                          embed_factor *
                                           DECAY_RATE;
                     
                     if (new_activation > ACTIVATION_THRESHOLD) {
@@ -1108,7 +1120,10 @@ static int get_or_create_concept(SubTopology* topo, const char* concept) {
     if (!topo || !topo->net || !concept) return -1;
     int existing = concept_exists(topo->net, concept);
     if (existing >= 0) return existing;
-    ReasoningNode* node = huarong_net_add_node(topo->net, concept, NULL, 0);
+    float feat[NODE_FEATURE_DIM];
+    for (int i = 0; i < NODE_FEATURE_DIM; i++)
+        feat[i] = ((float)rand() / RAND_MAX - 0.5f) * 0.1f;
+    ReasoningNode* node = huarong_net_add_node(topo->net, concept, feat, NODE_FEATURE_DIM);
     return node ? node->node_id : -1;
 }
 
@@ -1201,6 +1216,18 @@ void auto_learn_concepts(MasterTopology* master, const char* text, void* str_poo
                 huarong_net_add_connection(vocab->net,
                     concept_ids[i], concept_ids[j], 0.5f);
             }
+        }
+    }
+    
+    // 第四步：在线更新节点 embedding（Hebbian: 共现节点互相拉近）
+    float lr = 0.02f;
+    for (int i = 0; i < valid_count; i++) {
+        ReasoningNode* ni = vocab->net->nodes[concept_ids[i]];
+        if (!ni || !ni->features || ni->feature_dim != NODE_FEATURE_DIM) continue;
+        for (int j = i + 1; j < valid_count; j++) {
+            ReasoningNode* nj = vocab->net->nodes[concept_ids[j]];
+            if (!nj || !nj->features || nj->feature_dim != NODE_FEATURE_DIM) continue;
+            hebbian_update(ni->features, nj->features, NODE_FEATURE_DIM, lr);
         }
     }
 

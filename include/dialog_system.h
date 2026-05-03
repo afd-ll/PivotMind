@@ -136,6 +136,12 @@ typedef struct {
     DialogAssociation associations[MAX_ASSOCIATIONS];
     int assoc_count;
     
+    // 推理路径（每个推理步骤）
+    int path_nodes[MAX_ASSOCIATIONS];       // 节点ID序列
+    int path_topos[MAX_ASSOCIATIONS];        // 对应拓扑ID
+    float path_scores[MAX_ASSOCIATIONS];     // 每步置信度
+    int path_depth;                          // 当前路径深度
+    
     // 统计信息
     int total_activations;
     float avg_activation;
