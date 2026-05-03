@@ -121,6 +121,16 @@ static void train_epoch(int* ids, int n, float lr) {
     if (!cooc) {
         cooc_max = vocab_size;
         cooc = calloc(cooc_max * cooc_max, sizeof(int));
+    } else if (vocab_size > cooc_max) {
+        // 词表扩容，重新分配共现矩阵
+        int old_max = cooc_max;
+        cooc_max = vocab_size;
+        int* new_cooc = calloc(cooc_max * cooc_max, sizeof(int));
+        for (int i = 0; i < old_max; i++)
+            for (int j = 0; j < old_max; j++)
+                new_cooc[i * cooc_max + j] = cooc[i * old_max + j];
+        free(cooc);
+        cooc = new_cooc;
     }
     
     for (int t = WINDOW; t < n - WINDOW; t++) {
@@ -212,38 +222,37 @@ static int export_seed(const char* out_path) {
         }
     }
 
-    // 建立连接：基于训练时记录的共现次数
+    // 建立连接：每个字只连共现次数最高的前 3 个字
     int links = 0;
-    int min_cooc = 3; // 至少共现这么多次才连线
+    int min_cooc = 5;
     
-    // 方法1: 共现计数高的互相连线
     if (cooc) {
         for (int a = 4; a < vocab_size && links < 5000; a++) {
-            int node_a = a - 4; // 拓扑中的 node_id
-            for (int b = a + 1; b < vocab_size && links < 5000; b++) {
-                int cnt = cooc[a * cooc_max + b] + cooc[b * cooc_max + a];
-                if (cnt >= min_cooc) {
-                    int node_b = b - 4;
-                    float weight = 0.3f + 0.7f * (cnt < 50 ? (float)cnt / 50.0f : 1.0f);
-                    master_add_cross_link(master, 0, node_a, 0, node_b, weight, "cooc");
-                    links++;
-                }
-            }
-        }
-    }
-    
-    // 如果共现太稀疏，用余弦相似度补充
-    if (links < 100) {
-        for (int a = 4; a < vocab_size && links < 5000; a++) {
-            float best_sim = 0;
-            int best_idx = -1;
+            int node_a = a - 4;
+            // 找与 a 共现最高的 3 个字
+            int best[3] = {-1, -1, -1};
+            int best_cnt[3] = {0};
             for (int b = 4; b < vocab_size; b++) {
                 if (a == b) continue;
-                float sim = cosine_similarity(vocab_emb[a], vocab_emb[b], NODE_FEATURE_DIM);
-                if (sim > best_sim) { best_sim = sim; best_idx = b; }
+                int cnt = cooc[a * cooc_max + b] + cooc[b * cooc_max + a];
+                if (cnt >= min_cooc) {
+                    for (int k = 0; k < 3; k++) {
+                        if (cnt > best_cnt[k]) {
+                            for (int l = 2; l > k; l--) {
+                                best[l] = best[l-1];
+                                best_cnt[l] = best_cnt[l-1];
+                            }
+                            best[k] = b;
+                            best_cnt[k] = cnt;
+                            break;
+                        }
+                    }
+                }
             }
-            if (best_idx >= 0 && best_sim > 0.2f) {
-                master_add_cross_link(master, 0, a-4, 0, best_idx-4, best_sim, "semantic");
+            for (int k = 0; k < 3 && best[k] >= 0; k++) {
+                int node_b = best[k] - 4;
+                float weight = 0.3f + 0.7f * (best_cnt[k] < 50 ? (float)best_cnt[k]/50.0f : 1.0f);
+                master_add_cross_link(master, 0, node_a, 0, node_b, weight, "cooc");
                 links++;
             }
         }
@@ -268,33 +277,47 @@ int main(int argc, char* argv[]) {
     const char* book_path = argc > 1 ? argv[1] : NULL;
     int epochs = argc > 2 ? atoi(argv[2]) : MAX_EPOCHS;
     if (!book_path) {
-        printf("用法: ./build/bin/reader 书.txt [epochs]\n");
+        printf("用法: ./build/bin/reader 书1.txt [书2.txt ...] [epochs]\n");
+        printf("  最后一个参数如为纯数字则作为epoch数\n");
         return 1;
     }
 
-    // 1. 读文本
-    printf("[1/4] 阅读: %s\n", book_path);
-    long len;
-    char* text = read_file(book_path, &len);
-    if (!text) return 1;
-    printf("  ✓ %ld 字节\n", len);
+    // 判断最后一个参数是否为数字（epoch）
+    const char* last = argv[argc - 1];
+    char* endp = NULL;
+    long last_val = strtol(last, &endp, 10);
+    if (endp && *endp == '\0' && last_val > 0 && argc > 2) {
+        epochs = (int)last_val;
+        argc--;
+    }
 
-    // 2. 转 token 序列
-    printf("[2/4] 分词...\n");
-    static int ids[MAX_CHARS];
-    int n = text_to_ids(text, len, ids, MAX_CHARS);
-    free(text);
-    printf("  ✓ %d 个 token, 词表 %d 个字\n", n, vocab_size);
+    // 1. 逐本读书
+    time_t start_all = time(NULL);
+    for (int fi = 1; fi < argc; fi++) {
+        const char* path = argv[fi];
+        printf("[1/4] 阅读: %s\n", path);
+        long len;
+        char* text = read_file(path, &len);
+        if (!text) continue;
+        printf("  ✓ %ld 字节\n", len);
 
-    // 3. 训练
-    printf("[3/4] 训练 %d epoch (窗口=%d, lr=%.3f)...\n", epochs, WINDOW, LR);
-    time_t start = time(NULL);
-    for (int ep = 0; ep < epochs; ep++) {
-        float lr = LR * (1.0f - (float)ep / epochs * 0.8f);
-        train_epoch(ids, n, lr);
-        if ((ep + 1) % 5 == 0 || ep == 0) {
-            double elapsed = difftime(time(NULL), start);
-            printf("  [epoch %3d/%d]  %.0fs\n", ep + 1, epochs, elapsed);
+        // 2. 转 token 序列
+        printf("[2/4] 分词...\n");
+        static int ids[MAX_CHARS];
+        int n = text_to_ids(text, len, ids, MAX_CHARS);
+        free(text);
+        printf("  ✓ %d 个 token（累计词表 %d 字）\n", n, vocab_size);
+
+        // 3. 训练这本书
+        printf("[3/4] 训练 %d epoch (窗口=%d, lr=%.3f)...\n", epochs, WINDOW, LR);
+        time_t start = time(NULL);
+        for (int ep = 0; ep < epochs; ep++) {
+            float lr = LR * (1.0f - (float)ep / epochs * 0.8f);
+            train_epoch(ids, n, lr);
+            if ((ep + 1) % 5 == 0 || ep == 0) {
+                double elapsed = difftime(time(NULL), start);
+                printf("  [epoch %3d/%d]  %.0fs\n", ep + 1, epochs, elapsed);
+            }
         }
     }
 
@@ -308,10 +331,11 @@ int main(int argc, char* argv[]) {
         printf("  × 导出失败\n");
 
     // 清理词表
+    free(cooc);
     for (int i = 4; i < vocab_size; i++)
         free(vocab_words[i]);
 
-    double total = difftime(time(NULL), start);
+    double total = difftime(time(NULL), start_all);
     printf("\n✓ 读完！耗时 %.0f 秒\n", total);
     return 0;
 }
