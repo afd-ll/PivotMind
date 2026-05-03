@@ -23,8 +23,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install ARM cross-compiler
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends gcc-arm-linux-gnueabihf
-      - name: Build ARM (no OpenMP — not available for target)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends gcc-arm-linux-gnueabihf libc6-dev-armhf-cross
+      - name: Build ARM (no OpenMP — no libgomp for ARM target)
         run: make linux CC=arm-linux-gnueabihf-gcc CFLAGS="-Wall -Wextra -O2 -Iinclude -I. -Ilibs -std=gnu99" LDFLAGS="-lm -pthread"
       - name: Verify ARM ELF
         run: |
