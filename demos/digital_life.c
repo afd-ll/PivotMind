@@ -125,6 +125,7 @@ DigitalLifeSystem* digital_life_create() {
     master_add_sub_topology(sys->topology, TOPO_DOMAIN, "领域拓扑", 200, 5);
     master_add_sub_topology(sys->topology, TOPO_PRAGMA, "语用拓扑", 150, 4);
     master_add_sub_topology(sys->topology, TOPO_CULTURE, "文化拓扑", 150, 3);
+    master_add_sub_topology(sys->topology, TOPO_CONCEPT, "概念拓扑", 500, 9);
     
     // 添加初始知识（可以通过训练扩展）
     printf("     添加初始知识...\n");
@@ -216,6 +217,10 @@ DigitalLifeSystem* digital_life_create() {
             printf("     ✓ 已加载拓扑状态 (%d 节点)\n", loaded);
         }
     }
+    
+    // 加载记忆种子
+    const char* mem_file = "memory_seed.dat";
+    memory_load_seed(sys->memory, mem_file);
     
     // 初始化配置
     sys->is_running = 0;

@@ -1182,7 +1182,9 @@ int master_batch_train(MasterTopology* master, const char* train_file_path) {
     return added_count;
 }
 
-// ==================== 状态持久化功能 ====================
+// ==================== 状态持久化功能 (v2 format: 含拓扑ID+连接数据) ====================
+
+#define STATE_FORMAT_VERSION 2
 
 int master_save_state(MasterTopology* master, const char* file_path) {
     if (!master || !file_path) return -1;
@@ -1193,6 +1195,10 @@ int master_save_state(MasterTopology* master, const char* file_path) {
         return -1;
     }
     
+    // 写文件头: 格式版本
+    int fmt_ver = STATE_FORMAT_VERSION;
+    fwrite(&fmt_ver, sizeof(int), 1, fp);
+    
     int saved_nodes = 0;
     int saved_links = 0;
     
@@ -1202,21 +1208,41 @@ int master_save_state(MasterTopology* master, const char* file_path) {
         
         for (int n = 0; n < sub->net->node_count; n++) {
             ReasoningNode* node = sub->net->nodes[n];
-            if (!node) continue;
+            if (!node || !node->concept) continue;
             
+            // [v2] 写拓扑类型 + 节点ID
+            int topo_type = (int)sub->type;
+            fwrite(&topo_type, sizeof(int), 1, fp);
             fwrite(&node->node_id, sizeof(int), 1, fp);
             
+            // 概念字符串
             int concept_len = strlen(node->concept) + 1;
             fwrite(&concept_len, sizeof(int), 1, fp);
             fwrite(node->concept, 1, concept_len, fp);
             
+            // 激活值
             fwrite(&node->activation, sizeof(float), 1, fp);
+            
+            // [v2] 写连接数 + 连接数据 (target_node_id, weight, bias, confidence)
             fwrite(&node->connection_count, sizeof(int), 1, fp);
+            for (int c = 0; c < node->connection_count; c++) {
+                if (node->connections[c]) {
+                    int target_id = node->connections[c]->node_id;
+                    fwrite(&target_id, sizeof(int), 1, fp);
+                } else {
+                    int target_id = -1;
+                    fwrite(&target_id, sizeof(int), 1, fp);
+                }
+                fwrite(&node->connection_weights[c], sizeof(float), 1, fp);
+                fwrite(&node->connection_motivational_bias[c], sizeof(float), 1, fp);
+                fwrite(&node->connection_confidences[c], sizeof(float), 1, fp);
+            }
             
             saved_nodes++;
         }
     }
     
+    // 跨拓扑连接
     for (int i = 0; i < master->cross_link_count; i++) {
         CrossTopologyLink* link = master->cross_links[i];
         if (!link) continue;
@@ -1235,7 +1261,7 @@ int master_save_state(MasterTopology* master, const char* file_path) {
     printf("[状态持久化] 已保存到 %s (节点=%d, 链接=%d)\n", 
            file_path, saved_nodes, saved_links);
     
-    return 0;
+    return saved_nodes;
 }
 
 int master_load_state(MasterTopology* master, const char* file_path) {
@@ -1247,18 +1273,40 @@ int master_load_state(MasterTopology* master, const char* file_path) {
         return -1;
     }
     
+    // 读文件头: 格式版本
+    int fmt_ver = 1;
+    if (fread(&fmt_ver, sizeof(int), 1, fp) != 1) {
+        fclose(fp);
+        return -1;
+    }
+    // v1格式: 没有版本头，读到的其实是node_id，回退重读
+    if (fmt_ver != STATE_FORMAT_VERSION) {
+        // 旧格式: 文件开头就是节点数据，回退
+        fseek(fp, 0, SEEK_SET);
+        fmt_ver = 1;
+    }
+    
     int loaded_nodes = 0;
     int loaded_links = 0;
     
-    while (!feof(fp)) {
+    while (1) {
+        int topo_type;
+        if (fmt_ver >= 2) {
+            if (fread(&topo_type, sizeof(int), 1, fp) != 1) break;
+        } else {
+            topo_type = TOPO_VOCABULARY; // v1: 全部塞进词汇拓扑
+        }
+        
         int node_id;
         if (fread(&node_id, sizeof(int), 1, fp) != 1) break;
         
         int concept_len;
         if (fread(&concept_len, sizeof(int), 1, fp) != 1) break;
+        if (concept_len <= 0 || concept_len > 4096) break;
         
-        char concept[256];
+        char concept[4096];
         if (fread(concept, 1, concept_len, fp) != (size_t)concept_len) break;
+        concept[concept_len - 1] = '\0';
         
         float activation;
         if (fread(&activation, sizeof(float), 1, fp) != 1) break;
@@ -1266,25 +1314,59 @@ int master_load_state(MasterTopology* master, const char* file_path) {
         int conn_count;
         if (fread(&conn_count, sizeof(int), 1, fp) != 1) break;
         
-        SubTopology* vocab_topo = master_get_sub_topology_by_type(master, TOPO_VOCABULARY);
-        if (vocab_topo) {
-            ReasoningNode* node = node_hash_find(vocab_topo->node_hash, concept);
-            if (!node) {
-                node = huarong_net_add_node(vocab_topo->net, concept, NULL, 0);
-                if (node) {
-                    node_hash_add(vocab_topo->node_hash, node);
-                    auto_connect_new_node(master, vocab_topo, node);
-                }
+        // 找到目标拓扑
+        SubTopology* target_topo = NULL;
+        for (int t = 0; t < master->sub_topo_count; t++) {
+            SubTopology* sub = master->sub_topologies[t];
+            if (sub && (int)sub->type == topo_type) {
+                target_topo = sub;
+                break;
             }
+        }
+        if (!target_topo) {
+            loaded_nodes++;
+            if (fmt_ver == 1) continue;
+            // v2: 跳过连接数据
+            for (int c = 0; c < conn_count && conn_count > 0 && conn_count < 10000; c++) {
+                int skip_id; float skip_w, skip_b, skip_c;
+                if (fread(&skip_id, sizeof(int), 1, fp) != 1) break;
+                if (fread(&skip_w, sizeof(float), 1, fp) != 1) break;
+                if (fread(&skip_b, sizeof(float), 1, fp) != 1) break;
+                if (fread(&skip_c, sizeof(float), 1, fp) != 1) break;
+            }
+            continue;
+        }
+        
+        // 添加或查找节点
+        ReasoningNode* node = node_hash_find(target_topo->node_hash, concept);
+        if (!node) {
+            node = huarong_net_add_node(target_topo->net, concept, NULL, 0);
             if (node) {
-                node->activation = activation;
+                node_hash_add(target_topo->node_hash, node);
+                auto_connect_new_node(master, target_topo, node);
+            }
+        }
+        if (node) {
+            node->activation = activation;
+            // 不覆盖 node_id：huarong_net_add_node 已分配正确的数组下标
+        }
+        
+        // [v2] 读取并丢弃连接数据（重建由主动学习器完成）
+        if (fmt_ver >= 2) {
+            for (int c = 0; c < conn_count && conn_count > 0 && conn_count < 10000; c++) {
+                int skip_id; float skip_w, skip_b, skip_c;
+                if (fread(&skip_id, sizeof(int), 1, fp) != 1) break;
+                if (fread(&skip_w, sizeof(float), 1, fp) != 1) break;
+                if (fread(&skip_b, sizeof(float), 1, fp) != 1) break;
+                if (fread(&skip_c, sizeof(float), 1, fp) != 1) break;
             }
         }
         
         loaded_nodes++;
     }
     
-    while (!feof(fp)) {
+    // 加载跨拓扑连接（v1和v2通用）
+    while (1) {
         int from_topo, from_node, to_topo, to_node;
         float weight;
         int use_count;
@@ -1296,11 +1378,15 @@ int master_load_state(MasterTopology* master, const char* file_path) {
         if (fread(&weight, sizeof(float), 1, fp) != 1) break;
         if (fread(&use_count, sizeof(int), 1, fp) != 1) break;
         
+        // 启发式验证：from_topo应在合法范围内
+        if (from_topo < 0 || from_topo > 20 || to_topo < 0 || to_topo > 20) {
+            break;
+        }
+        
         int link_result = master_add_cross_link(master, from_topo, from_node,
                                                        to_topo, to_node, 
-                                                       weight, "learned");
+                                                       weight, "seed");
         if (link_result == 0) {
-            // 查找刚添加的连接并更新 use_count
             for (int i = 0; i < master->cross_link_count; i++) {
                 CrossTopologyLink* link = master->cross_links[i];
                 if (link && link->from_topo_id == from_topo && 
@@ -1320,7 +1406,7 @@ int master_load_state(MasterTopology* master, const char* file_path) {
     printf("[状态持久化] 已从 %s 加载 (节点=%d, 链接=%d)\n", 
            file_path, loaded_nodes, loaded_links);
     
-    return 0;
+    return loaded_nodes;
 }
 
 // ==================== 统计输出 ====================

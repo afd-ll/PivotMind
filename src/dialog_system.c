@@ -734,6 +734,17 @@ char* dialog_generate(DialogReasoning* reasoning, const char* input,
     
     DialogSystem* dsys = (DialogSystem*)sys;
     
+    // 优先检查记忆系统：精确匹配完整输入
+    if (memory && input && input[0]) {
+        char exact_key[512] = {0};
+        snprintf(exact_key, sizeof(exact_key), "response:%s", input);
+        MemoryEntry* exact = memory_retrieve(memory, exact_key);
+        if (exact && exact->data) {
+            printf("[响应模式] 精确匹配: %s\n", (char*)exact->data);
+            return strdup((char*)exact->data);
+        }
+    }
+    
     // 拓扑驱动生成：当拓扑节点足够时使用联想引擎生成更自然的回复
     if (dsys && dsys->master && dsys->master->sub_topo_count > 0) {
         int total_nodes = 0;

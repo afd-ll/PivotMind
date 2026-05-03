@@ -309,4 +309,26 @@ MemoryLevel memory_get_causal_rule_level(MemorySystem* memory,
                                         const char* cause_key,
                                         const char* effect_key);
 
+// ========== 记忆种子持久化 ==========
+
+/**
+ * 保存永久记忆到种子文件
+ * @param memory 记忆系统
+ * @param filepath 文件路径
+ * @return 保存的条目数，失败返回 -1
+ */
+int memory_save_seed(MemorySystem* memory, const char* filepath);
+
+/**
+ * 从种子文件加载永久记忆
+ * @param memory 记忆系统
+ * @param filepath 文件路径
+ * @return 加载的条目数，失败返回 -1
+ */
+int memory_load_seed(MemorySystem* memory, const char* filepath);
+
+#ifdef __cplusplus
+}
+#endif
+
 #endif // MEMORY_SYSTEM_H

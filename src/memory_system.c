@@ -853,3 +853,80 @@ MemoryLevel memory_get_causal_rule_level(MemorySystem* memory,
 
     return MEMORY_LEVEL_CONTEXT;
 }
+
+// ==================== 记忆种子持久化 ====================
+
+int memory_save_seed(MemorySystem* memory, const char* filepath) {
+    if (!memory || !filepath) return -1;
+    
+    FILE* fp = fopen(filepath, "wb");
+    if (!fp) return -1;
+    
+    LongTermMemory* ltm = memory->permanent_memory;
+    int count = 0;
+    
+    for (int i = 0; i < ltm->size; i++) {
+        MemoryEntry* entry = ltm->entries[i];
+        if (!entry || !entry->key) continue;
+        
+        int key_len = strlen(entry->key) + 1;
+        fwrite(&key_len, sizeof(int), 1, fp);
+        fwrite(entry->key, 1, key_len, fp);
+        fwrite(&entry->data_size, sizeof(size_t), 1, fp);
+        fwrite(entry->data, 1, entry->data_size, fp);
+        int type = (int)entry->type;
+        fwrite(&type, sizeof(int), 1, fp);
+        fwrite(&entry->importance, sizeof(float), 1, fp);
+        count++;
+    }
+    
+    fclose(fp);
+    printf("[记忆种子] 已保存 %d 条到 %s\n", count, filepath);
+    return count;
+}
+
+int memory_load_seed(MemorySystem* memory, const char* filepath) {
+    if (!memory || !filepath) return -1;
+    
+    FILE* fp = fopen(filepath, "rb");
+    if (!fp) return 0;
+    
+    int count = 0;
+    while (1) {
+        int key_len;
+        if (fread(&key_len, sizeof(int), 1, fp) != 1) break;
+        if (key_len <= 0 || key_len > 10000) break;
+        
+        char* key = (char*)malloc(key_len);
+        if (fread(key, 1, key_len, fp) != (size_t)key_len) { free(key); break; }
+        key[key_len - 1] = '\0';
+        
+        size_t data_size;
+        if (fread(&data_size, sizeof(size_t), 1, fp) != 1) { free(key); break; }
+        if (data_size <= 0 || data_size > 100000) { free(key); break; }
+        
+        void* data = malloc(data_size);
+        if (fread(data, 1, data_size, fp) != data_size) { free(key); free(data); break; }
+        
+        int type;
+        if (fread(&type, sizeof(int), 1, fp) != 1) { free(key); free(data); break; }
+        
+        float importance;
+        if (fread(&importance, sizeof(float), 1, fp) != 1) { free(key); free(data); break; }
+        
+        MemoryEntry* existing = memory_retrieve(memory, key);
+        if (!existing) {
+            memory_store(memory, key, data, data_size, (MemoryType)type, importance);
+        }
+        
+        free(key);
+        free(data);
+        count++;
+    }
+    
+    fclose(fp);
+    if (count > 0) {
+        printf("[记忆种子] 已加载 %d 条从 %s\n", count, filepath);
+    }
+    return count;
+}
