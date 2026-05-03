@@ -182,6 +182,9 @@ static float train_epoch(Seq2SeqModel* model, TrainPair* pairs, int count,
             ((float*)target_t->data)[j] = (float)pairs[i].target_ids[j];
 
         // 训练
+        seq2seq_train(model, input_t, target_t, lr);
+        // 注意: seq2seq_train 不返回 loss, 需要手动算
+        // 用 teacher_forcing 版本算 loss 做监控
         float loss = seq2seq_train_with_teacher_forcing(model, input_t, target_t, lr, 0);
         total_loss += loss;
 
@@ -277,19 +280,7 @@ int main(int argc, char* argv[]) {
         test_generation(model, vocab, questions[i], 50);
     }
 
-    // 6. 保存模型
-    printf("[6/6] 保存模型...\n");
-    const char* model_file = "seq2seq_model.bin";
-    bool ok = model_save(model->encoder, "seq2seq_encoder.bin", NULL);
-    ok = ok && model_save(model->decoder, "seq2seq_decoder.bin", NULL);
-    
-    if (ok) {
-        printf("  ✓ 模型已保存到 seq2seq_encoder.bin / seq2seq_decoder.bin\n");
-    } else {
-        printf("  × 保存失败\n");
-    }
-
-    // 保存词表
+    // 6. 保存词表
     FILE* vf = fopen("seq2seq_vocab.txt", "w");
     if (vf) {
         for (int i = 0; i < vocab->size; i++)
