@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+    branches: [ "main", "master", "develop" ]
+  pull_request:
+    branches: [ "main", "master" ]
+
+jobs:
+  build-x86_64:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libsqlite3-dev
+      - name: Build (x86_64, OpenMP)
+        run: make linux
+      - name: Show binaries
+        run: file build/bin/*
+
+  build-arm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install ARM cross-compiler
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends gcc-arm-linux-gnueabihf
+      - name: Build ARM (no OpenMP — not available for target)
+        run: make linux CC=arm-linux-gnueabihf-gcc CFLAGS="-Wall -Wextra -O2 -Iinclude -I. -Ilibs -std=gnu99" LDFLAGS="-lm -pthread"
+      - name: Verify ARM ELF
+        run: |
+          file build/bin/*
+          readelf -h build/bin/digital_life | grep 'Machine:'
