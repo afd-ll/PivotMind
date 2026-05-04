@@ -272,6 +272,12 @@ void digital_life_destroy(DigitalLifeSystem* sys) {
     }
     
     if (sys->memory) {
+        // 保存记忆种子
+        const char* mem_file = "memory_seed.dat";
+        int saved = memory_save_seed(sys->memory, mem_file);
+        if (saved >= 0) {
+            printf("  ✓ 已保存记忆种子 (%d 条)\n", saved);
+        }
         memory_system_destroy(sys->memory);
     }
 
