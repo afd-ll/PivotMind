@@ -10,6 +10,7 @@
 #include "memory_system.h"
 #include "causal_reasoning.h"
 #include "active_learner.h"
+#include "cognitive_params.h"
 #include <stdbool.h>
 #include <time.h>
 
@@ -174,6 +175,7 @@ typedef struct {
     int max_hop_count;         // 最大推理跳数
     float activation_threshold;// 激活阈值
     float decay_rate;          // 衰减率
+    CognitiveState* cognitive_state;  // 认知状态（情感/动机系统）
 } DialogSystem;
 
 // ==================== API函数 ====================

@@ -4,6 +4,7 @@
 #include "../include/associative_reasoning.h"
 #include "../include/utf8_tokenizer.h"
 #include "../include/cognitive_params.h"
+#include "../include/common.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -337,8 +338,11 @@ static void auto_connect_new_node(MasterTopology* master, SubTopology* sub, Reas
     
     typedef struct {
         int node_id;
-        int similarity;
+        float similarity;
     } CandidateNode;
+    
+    // 使用特征向量还是回退到字符相似度
+    int use_vector_sim = (new_node->features != NULL && new_node->feature_dim > 0);
     
     CandidateNode candidates[20];
     int candidate_count = 0;
@@ -347,12 +351,21 @@ static void auto_connect_new_node(MasterTopology* master, SubTopology* sub, Reas
         if (sub->net->nodes[i] == new_node) continue;
         if (sub->net->nodes[i]->node_id == new_node->node_id) continue;
         
-        int sim = calculate_semantic_similarity(new_node->concept, sub->net->nodes[i]->concept);
-        if (sim > 20) {
-            candidates[candidate_count].node_id = i;
-            candidates[candidate_count].similarity = sim;
-            candidate_count++;
+        float sim;
+        ReasoningNode* peer = sub->net->nodes[i];
+        
+        if (use_vector_sim && peer->features != NULL && peer->feature_dim == new_node->feature_dim) {
+            sim = cosine_similarity(new_node->features, peer->features, new_node->feature_dim);
+            if (sim <= 0.2f) continue;
+        } else {
+            int bigram = calculate_semantic_similarity(new_node->concept, peer->concept);
+            if (bigram <= 20) continue;
+            sim = (float)bigram / 100.0f;  // 归一化到 [0.0, 1.0]
         }
+        
+        candidates[candidate_count].node_id = i;
+        candidates[candidate_count].similarity = sim;
+        candidate_count++;
     }
     
     for (int i = 0; i < candidate_count - 1; i++) {
@@ -368,7 +381,12 @@ static void auto_connect_new_node(MasterTopology* master, SubTopology* sub, Reas
     int connect_count = (candidate_count < max_connections) ? candidate_count : max_connections;
     for (int i = 0; i < connect_count; i++) {
         int target_id = candidates[i].node_id;
-        float weight = base_weight + (candidates[i].similarity / 200.0f);
+        float weight;
+        if (use_vector_sim) {
+            weight = base_weight + 0.5f * (candidates[i].similarity + 1.0f) / 2.0f;
+        } else {
+            weight = base_weight + candidates[i].similarity * 0.5f;
+        }
         huarong_net_add_connection(sub->net, new_node->node_id, target_id, weight);
     }
     

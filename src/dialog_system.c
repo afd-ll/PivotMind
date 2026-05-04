@@ -1324,6 +1324,12 @@ DialogSystem* dialog_system_create(MasterTopology* master, MemorySystem* memory,
     sys->activation_threshold = 0.3f;
     sys->decay_rate = 0.7f;
 
+    sys->cognitive_state = cognitive_state_create();
+    if (sys->cognitive_state) {
+        cognitive_state_init(sys->cognitive_state);
+        printf("[对话系统] 认知状态（情感/动机系统）: 已就绪\n");
+    }
+
     printf("[对话系统] 创建成功，会话ID: %ld\n", sys->session_id);
     printf("[对话系统] 因果图: %s\n", causal_graph ? "已连接" : "未连接");
     printf("[对话系统] 主动学习器: %s\n", learner ? "已连接" : "未连接");
@@ -1346,6 +1352,9 @@ void dialog_system_destroy(DialogSystem* sys) {
     }
     if (sys->gen_vocab) {
         gen_vocab_destroy((GenVocabulary*)sys->gen_vocab);
+    }
+    if (sys->cognitive_state) {
+        cognitive_state_destroy(sys->cognitive_state);
     }
     free(sys);
 }
@@ -1542,6 +1551,17 @@ char* dialog_process(DialogSystem* sys, const char* user_input, DialogReasoning*
                 huarong_net_add_node(context_sub->net, context_key, NULL, 0);
             }
         }
+    }
+
+    // === 更新认知状态（情感/动机系统）===
+    if (sys->cognitive_state) {
+        Interaction interaction;
+        memset(&interaction, 0, sizeof(Interaction));
+        interaction.user_input = (char*)user_input;
+        interaction.system_response = response;
+        interaction.timestamp = time(NULL);
+        // 使用中性置信度作为 outcome，后期可接 knowledge_quality
+        cognitive_state_update(sys->cognitive_state, &interaction, 0.5f);
     }
 
     ui_print_thinking_end();
