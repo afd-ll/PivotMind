@@ -176,6 +176,7 @@ typedef struct {
     float activation_threshold;// 激活阈值
     float decay_rate;          // 衰减率
     CognitiveState* cognitive_state;  // 认知状态（情感/动机系统）
+    float last_knowledge_quality;    // 上一轮知识质量（供CognitiveState使用）
 } DialogSystem;
 
 // ==================== API函数 ====================

@@ -261,7 +261,7 @@ int extract_key_concepts(SemanticUnderstanding* sem, char** concepts, int max_co
  * @param concept 概念名称
  * @return 节点ID，-1 表示未找到
  */
-int find_node_id_by_concept(MasterTopology* master, const char* concept) {
+static int find_node_id_by_concept(MasterTopology* master, const char* concept) {
     if (!master || !concept) return -1;
 
     // 在所有子拓扑中查找
@@ -292,7 +292,7 @@ int find_node_id_by_concept(MasterTopology* master, const char* concept) {
  * @param sem 语义理解结果
  * @param master 多拓扑网络
  */
-void resolve_causal_query(SemanticUnderstanding* sem, MasterTopology* master) {
+static void resolve_causal_query(SemanticUnderstanding* sem, MasterTopology* master) {
     if (!sem || !sem->causal_query || !master) return;
 
     // 为所有关键概念查找节点ID
@@ -1484,6 +1484,7 @@ char* dialog_process(DialogSystem* sys, const char* user_input, DialogReasoning*
         
         // 自我验证结果用于指导回复生成
         reasoning->knowledge_quality = knowledge_quality;
+        sys->last_knowledge_quality = knowledge_quality;
         
         // 进行自我验证
         SelfVerificationResult verify = self_verify_knowledge(reasoning, sys->memory);
@@ -1504,6 +1505,7 @@ char* dialog_process(DialogSystem* sys, const char* user_input, DialogReasoning*
         dialog_input_destroy(input);
     } else {
         response = strdup("我理解了，但暂时不知道如何回答。");
+        sys->last_knowledge_quality = 0.0f;
     }
 
     if (sys->memory && response) {
@@ -1560,8 +1562,8 @@ char* dialog_process(DialogSystem* sys, const char* user_input, DialogReasoning*
         interaction.user_input = (char*)user_input;
         interaction.system_response = response;
         interaction.timestamp = time(NULL);
-        // 使用中性置信度作为 outcome，后期可接 knowledge_quality
-        cognitive_state_update(sys->cognitive_state, &interaction, 0.5f);
+        // 使用 knowledge_quality 作为 outcome 信号
+        cognitive_state_update(sys->cognitive_state, &interaction, sys->last_knowledge_quality);
     }
 
     ui_print_thinking_end();
