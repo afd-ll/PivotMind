@@ -55,7 +55,8 @@ ALL_SRC = \
 	src/cognitive_params.c \
 	src/memory_arena.c \
 	src/ui.c \
-	src/concept_processor.c
+	src/concept_processor.c \
+	src/thread_pool.c
 
 # 静态库
 LIB_OBJ = $(ALL_SRC:.c=.o)

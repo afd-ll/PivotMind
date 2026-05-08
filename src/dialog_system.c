@@ -31,6 +31,9 @@
 #include <math.h>
 #include <time.h>
 #include <stdbool.h>
+#include <pthread.h>
+
+#include "thread_pool.h"
 
 #ifdef _WIN32
 #ifdef _WIN32
@@ -40,6 +43,86 @@
 
 // 前向声明
 static const char* get_confidence_level_name(CausalConfidenceLevel level);
+
+// ==================== 并行拓扑传播任务（每跳内部） ====================
+
+/** 单跳内子拓扑传播任务 */
+typedef struct {
+    MasterTopology* master;
+    DialogReasoning* reasoning;
+    int topo_id;
+    int hop;
+    pthread_mutex_t* assoc_mutex;
+    volatile int* hop_propagated;
+} DialogTopoTask;
+
+/** Worker：在指定子拓扑内执行一跳传播 */
+static void dialog_topo_worker(void* arg) {
+    DialogTopoTask* task = (DialogTopoTask*)arg;
+    MasterTopology* master = task->master;
+    DialogReasoning* reasoning = task->reasoning;
+    SubTopology* sub = master_get_sub_topology(master, task->topo_id);
+    if (!sub || !sub->net) return;
+
+    for (int n = 0; n < sub->net->node_count; n++) {
+        ReasoningNode* node = sub->net->nodes[n];
+        if (!node || node->activation < 0.15f) continue;
+        if (task->hop > 1 && node->is_visited) continue;
+
+        node->is_visited = 1;
+
+        for (int c = 0; c < node->connection_count; c++) {
+            ReasoningNode* connected = node->connections[c];
+            if (!connected) continue;
+
+            float edge_confidence = node->connection_confidences[c];
+            float avg_confidence = (node->confidence + connected->confidence + edge_confidence) / 3.0f;
+
+            float activation_multiplier = 1.0f;
+            if (avg_confidence < 0.3f) activation_multiplier = 1.3f;
+            else if (avg_confidence > 0.7f) activation_multiplier = 0.7f;
+
+            float confidence_factor = avg_confidence;
+
+            float embed_factor = 1.0f;
+            if (node->features && connected->features &&
+                node->feature_dim > 0 && node->feature_dim == connected->feature_dim) {
+                float sim = cosine_similarity(node->features, connected->features, node->feature_dim);
+                embed_factor = 0.5f + 0.5f * (sim + 1.0f) / 2.0f;
+            }
+
+            float new_activation = node->connection_weights[c] *
+                                  node->activation *
+                                  confidence_factor *
+                                  activation_multiplier *
+                                  embed_factor *
+                                  DECAY_RATE;
+
+            if (new_activation > ACTIVATION_THRESHOLD) {
+                if (new_activation > connected->activation)
+                    connected->activation = new_activation;
+
+                pthread_mutex_lock(task->assoc_mutex);
+                dialog_add_association(reasoning,
+                    connected->concept, new_activation,
+                    sub->type, task->hop,
+                    connected->node_id, node->node_id);
+
+                if (reasoning->chain_length < 10 && task->hop <= 3) {
+                    snprintf(reasoning->reasoning_chain[reasoning->chain_length],
+                             256, "%s -> %s",
+                             node->concept ? node->concept : "?",
+                             connected->concept ? connected->concept : "?");
+                    reasoning->chain_length++;
+                }
+                pthread_mutex_unlock(task->assoc_mutex);
+
+                (*task->hop_propagated)++;
+            }
+        }
+        master_propagate_activation(master, sub->topo_id, n);
+    }
+}
 
 // ==================== 辅助函数 ====================
 
@@ -595,86 +678,51 @@ DialogReasoning* dialog_reason(DialogInput* input, MasterTopology* master) {
         }
     }
     
+    // ===== 并行传播：每跳内子拓扑并行 =====
     for (int hop = 1; hop <= DEFAULT_HOP_COUNT; hop++) {
-        
-        int propagated_this_hop = 0;
-        
-        for (int t = 0; t < master->sub_topo_count; t++) {
+        // 1. 统计活跃子拓扑
+        int topo_ids[16], active_topos = 0;
+        for (int t = 0; t < master->sub_topo_count && active_topos < 16; t++) {
             SubTopology* sub = master->sub_topologies[t];
             if (!sub || !sub->net) continue;
-            
             for (int n = 0; n < sub->net->node_count; n++) {
                 ReasoningNode* node = sub->net->nodes[n];
-                if (!node || node->activation < 0.15f) continue;
-                if (hop > 1 && node->is_visited) continue;
-                
-                node->is_visited = 1;
-                
-                for (int c = 0; c < node->connection_count; c++) {
-                    ReasoningNode* connected = node->connections[c];
-                    if (!connected) continue;
-                    
-                    float edge_confidence = node->connection_confidences[c];
-                    float avg_confidence = (node->confidence + connected->confidence + edge_confidence) / 3.0f;
-                    
-                    float activation_multiplier = 1.0f;
-                    if (avg_confidence < 0.3f) {
-                        activation_multiplier = 1.3f;
-                    } else if (avg_confidence > 0.7f) {
-                        activation_multiplier = 0.7f;
-                    }
-                    
-                    float confidence_factor = avg_confidence;
-                    
-                    // 语义向量相似度加权：同层拓扑中 embedding 越接近，激活越强
-                    float embed_factor = 1.0f;
-                    if (node->features && connected->features &&
-                        node->feature_dim > 0 && node->feature_dim == connected->feature_dim) {
-                        float sim = cosine_similarity(node->features, connected->features,
-                                                       node->feature_dim);
-                        embed_factor = 0.5f + 0.5f * (sim + 1.0f) / 2.0f;  // 映射到 [0.5, 1.0]
-                    }
-                    
-                    float new_activation = node->connection_weights[c] * 
-                                          node->activation * 
-                                          confidence_factor *
-                                          activation_multiplier *
-                                          embed_factor *
-                                          DECAY_RATE;
-                    
-                    if (new_activation > ACTIVATION_THRESHOLD) {
-                        if (new_activation > connected->activation) {
-                            connected->activation = new_activation;
-                        }
-                        
-                        dialog_add_association(reasoning,
-                            connected->concept,
-                            new_activation,
-                            sub->type,
-                            hop,
-                            connected->node_id,
-                            node->node_id);
-                        
-                        // 记录推理链
-                        if (reasoning->chain_length < 10 && hop <= 3) {
-                            snprintf(reasoning->reasoning_chain[reasoning->chain_length], 
-                                     256, "%s -> %s", 
-                                     node->concept ? node->concept : "?",
-                                     connected->concept ? connected->concept : "?");
-                            reasoning->chain_length++;
-                        }
-                        
-                        propagated_this_hop++;
-                    }
+                if (node && node->activation >= 0.15f && (hop <= 1 || !node->is_visited)) {
+                    topo_ids[active_topos++] = t;
+                    break;
                 }
-                
-                master_propagate_activation(master, sub->topo_id, n);
             }
         }
-        
-        if (propagated_this_hop == 0) {
-            break;
+        if (active_topos == 0) break;
+
+        // 2. 构建并行任务
+        pthread_mutex_t assoc_mutex = PTHREAD_MUTEX_INITIALIZER;
+        int hop_propagated = 0;
+
+        DialogTopoTask tasks[16];
+        ThreadTask th_tasks[16];
+        for (int i = 0; i < active_topos; i++) {
+            tasks[i].master = master;
+            tasks[i].reasoning = reasoning;
+            tasks[i].topo_id = topo_ids[i];
+            tasks[i].hop = hop;
+            tasks[i].assoc_mutex = &assoc_mutex;
+            tasks[i].hop_propagated = &hop_propagated;
+            th_tasks[i].func = dialog_topo_worker;
+            th_tasks[i].arg = &tasks[i];
         }
+
+        // 3. 提交到线程池（拓扑间并行传播）
+        ThreadPool* pool = master_get_thread_pool(master);
+        if (pool && active_topos > 1) {
+            thread_pool_batch(pool, th_tasks, active_topos);
+        } else {
+            // 单拓扑或线程池不可用：串行回退
+            for (int i = 0; i < active_topos; i++)
+                dialog_topo_worker(&tasks[i]);
+        }
+
+        if (hop_propagated == 0) break;
     }
     
     for (int t = 0; t < master->sub_topo_count; t++) {

@@ -5,6 +5,7 @@
 #include "../include/utf8_tokenizer.h"
 #include "../include/cognitive_params.h"
 #include "../include/common.h"
+#include "../include/thread_pool.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -85,6 +86,10 @@ MasterTopology* master_topology_create(int max_sub_topos) {
     master->training_data_count = 0;
     master->created_time = time(NULL);
 
+    // 线程池初始化（懒创建，首次并行时再分配）
+    master->thread_pool = NULL;
+    master->parallel_mode = 0;
+
     // 初始化跨拓扑邻接表索引
     master->cross_adj = (CrossTopoAdjEntry**)calloc(
         CROSS_ADJ_INITIAL_SIZE, sizeof(CrossTopoAdjEntry*));
@@ -137,6 +142,13 @@ void master_topology_destroy(MasterTopology* master) {
 
     free(master->active_node_ids);
     free(master->activation_levels);
+
+    // 销毁线程池
+    if (master->thread_pool) {
+        thread_pool_destroy(master->thread_pool);
+        master->thread_pool = NULL;
+    }
+
     free(master);
 }
 
@@ -752,212 +764,148 @@ void batch_self_verify(MasterTopology* master) {
     }
 }
 
-// ==================== 并行激活传播实现 ====================
+// ==================== 拓扑级并行激活传播 ====================
+//
+// 原理：
+// - 每个活跃子拓扑作为一个独立任务
+// - 提交到线程池，由 x 个 worker 并行窃取执行
+// - 未来新增子拓扑（语音/图像等）自动加入线程池调度
+// - 线程数 = CPU核数，由 thread_pool 自动检测和管理
 
+/** 拓扑级传播任务 */
 typedef struct {
     MasterTopology* master;
-    int source_topo_id;
-    int source_node_id;
-    float activation_value;
-    int result_count;
-} PropagationTask;
+    int topo_id;                // 子拓扑ID
+    float threshold;            // 激活阈值
+    int propagated_count;       // 输出：该拓扑内传播了多少节点
+} TopoPropTask;
 
-#ifdef _WIN32
-static unsigned int __stdcall parallel_propagate(void* arg) {
-    PropagationTask* task = (PropagationTask*)arg;
+/** worker 函数：在指定子拓扑内传播激活 */
+static void topo_propagate_worker(void* arg) {
+    TopoPropTask* task = (TopoPropTask*)arg;
     MasterTopology* master = task->master;
-    int source_topo_id = task->source_topo_id;
-    int source_node_id = task->source_node_id;
-    float activation_value = task->activation_value;
-    
-    int propagated = 0;
-    
-    SubTopology* sub = master_get_sub_topology(master, source_topo_id);
-    if (!sub || !sub->net) {
-        task->result_count = 0;
-        return 0;
+    SubTopology* sub = master_get_sub_topology(master, task->topo_id);
+    if (!sub || !sub->net || !sub->is_active) {
+        task->propagated_count = 0;
+        return;
     }
-    
-    ReasoningNode* node = sub->net->nodes[source_node_id];
-    if (!node) {
-        task->result_count = 0;
-        return 0;
-    }
-    
-    for (int i = 0; i < node->connection_count; i++) {
-        ReasoningNode* target = node->connections[i];
-        if (!target) continue;
-        
-        float transferred = activation_value * node->connection_weights[i];
-        if (transferred > 0.1f) {
-            master_activate_node(master, source_topo_id, target->node_id, transferred);
-            propagated++;
+
+    int count = 0;
+    for (int n = 0; n < sub->net->node_count; n++) {
+        ReasoningNode* node = sub->net->nodes[n];
+        if (!node || node->activation < task->threshold) continue;
+
+        for (int c = 0; c < node->connection_count; c++) {
+            ReasoningNode* target = node->connections[c];
+            if (!target) continue;
+            float transferred = node->activation * node->connection_weights[c];
+            if (transferred > 0.1f) {
+                // 线程安全：每个拓扑只在一个线程内处理
+                target->activation += transferred;
+                if (target->activation > 1.0f) target->activation = 1.0f;
+                count++;
+            }
         }
     }
-    
-    task->result_count = propagated;
-    return propagated;
+    task->propagated_count = count;
 }
 
-int master_propagate_parallel(MasterTopology* master, int max_concurrent) {
-    if (!master) return -1;
-    if (max_concurrent < 1) max_concurrent = 1;
-    if (max_concurrent > 8) max_concurrent = 8;
-    
-    int propagated_total = 0;
-    HANDLE threads[8];
-    PropagationTask tasks[8];
-    
-    printf("[并行传播] 开始多拓扑并行激活传播 (并发度=%d)\n", max_concurrent);
-    
-    for (int topo_id = 0; topo_id < master->sub_topo_count; topo_id++) {
-        SubTopology* sub = master->sub_topologies[topo_id];
-        if (!sub || !sub->net) continue;
-        
-        int active_threads = 0;
-        
-        for (int node_id = 0; node_id < sub->net->node_count; node_id++) {
-            ReasoningNode* node = sub->net->nodes[node_id];
-            if (!node || node->activation < 0.3f) continue;
-            
-            if (active_threads < max_concurrent) {
-                tasks[active_threads].master = master;
-                tasks[active_threads].source_topo_id = topo_id;
-                tasks[active_threads].source_node_id = node_id;
-                tasks[active_threads].activation_value = node->activation;
-                
-                threads[active_threads] = (HANDLE)_beginthreadex(
-                    NULL, 0, parallel_propagate, &tasks[active_threads],
-                    0, NULL
-                );
-                active_threads++;
-            } else {
-                WaitForMultipleObjects(active_threads, threads, TRUE, INFINITE);
-                for (int t = 0; t < active_threads; t++) {
-                    propagated_total += tasks[t].result_count;
-                    CloseHandle(threads[t]);
-                }
-                
-                tasks[0].master = master;
-                tasks[0].source_topo_id = topo_id;
-                tasks[0].source_node_id = node_id;
-                tasks[0].activation_value = node->activation;
-                
-                threads[0] = (HANDLE)_beginthreadex(
-                    NULL, 0, parallel_propagate, &tasks[0],
-                    0, NULL
-                );
-                active_threads = 1;
-            }
-        }
-        
-        if (active_threads > 0) {
-            WaitForMultipleObjects(active_threads, threads, TRUE, INFINITE);
-            for (int t = 0; t < active_threads; t++) {
-                propagated_total += tasks[t].result_count;
-                CloseHandle(threads[t]);
-            }
-        }
+/** 获取或创建线程池（懒创建，自动检测CPU核数） */
+ThreadPool* master_get_thread_pool(MasterTopology* master) {
+    if (!master) return NULL;
+    if (!master->thread_pool) {
+        master->thread_pool = thread_pool_create();
+        master->parallel_mode = 1;  // 自动切换到并行模式
     }
-    
-    printf("[并行传播] 完成，共传播 %d 个节点\n", propagated_total);
-    return propagated_total;
-}
-#else
-static void* parallel_propagate(void* arg) {
-    PropagationTask* task = (PropagationTask*)arg;
-    MasterTopology* master = task->master;
-    int source_topo_id = task->source_topo_id;
-    int source_node_id = task->source_node_id;
-    float activation_value = task->activation_value;
-    
-    int propagated = 0;
-    
-    SubTopology* sub = master_get_sub_topology(master, source_topo_id);
-    if (!sub || !sub->net) {
-        task->result_count = 0;
-        return NULL;
-    }
-    
-    ReasoningNode* node = sub->net->nodes[source_node_id];
-    if (!node) {
-        task->result_count = 0;
-        return NULL;
-    }
-    
-    for (int i = 0; i < node->connection_count; i++) {
-        ReasoningNode* target = node->connections[i];
-        if (!target) continue;
-        
-        float transferred = activation_value * node->connection_weights[i];
-        if (transferred > 0.1f) {
-            master_activate_node(master, source_topo_id, target->node_id, transferred);
-            propagated++;
-        }
-    }
-    
-    task->result_count = propagated;
-    return NULL;
+    return master->thread_pool;
 }
 
-int master_propagate_parallel(MasterTopology* master, int max_concurrent) {
+/**
+ * 增强版并行激活传播 — 拓扑级并行
+ *
+ * 1. 扫描所有子拓扑，找出有活跃节点的
+ * 2. 每个活跃子拓扑作为一个任务提交到线程池
+ * 3. workers + 主线程并发窃取执行
+ * 4. 全部完成后返回总传播数
+ *
+ * @param master    主拓扑
+ * @param threshold 激活阈值（activation >= threshold 的节点才传播）
+ * @return 总传播节点数
+ */
+int master_propagate_parallel_topology(MasterTopology* master, float threshold) {
     if (!master) return -1;
-    if (max_concurrent < 1) max_concurrent = 1;
-    if (max_concurrent > 8) max_concurrent = 8;
-    
-    int propagated_total = 0;
-    pthread_t threads[8];
-    PropagationTask tasks[8];
-    
-    printf("[并行传播] 开始多拓扑并行激活传播 (并发度=%d)\n", max_concurrent);
-    
-    for (int topo_id = 0; topo_id < master->sub_topo_count; topo_id++) {
-        SubTopology* sub = master->sub_topologies[topo_id];
-        if (!sub || !sub->net) continue;
-        
-        int active_threads = 0;
-        
-        for (int node_id = 0; node_id < sub->net->node_count; node_id++) {
-            ReasoningNode* node = sub->net->nodes[node_id];
-            if (!node || node->activation < 0.3f) continue;
-            
-            if (active_threads < max_concurrent) {
-                tasks[active_threads].master = master;
-                tasks[active_threads].source_topo_id = topo_id;
-                tasks[active_threads].source_node_id = node_id;
-                tasks[active_threads].activation_value = node->activation;
-                
-                pthread_create(&threads[active_threads], NULL,
-                               parallel_propagate, &tasks[active_threads]);
-                active_threads++;
-            } else {
-                for (int t = 0; t < active_threads; t++) {
-                    pthread_join(threads[t], NULL);
-                    propagated_total += tasks[t].result_count;
-                }
-                
-                tasks[0].master = master;
-                tasks[0].source_topo_id = topo_id;
-                tasks[0].source_node_id = node_id;
-                tasks[0].activation_value = node->activation;
-                
-                pthread_create(&threads[0], NULL, parallel_propagate, &tasks[0]);
-                active_threads = 1;
-            }
-        }
-        
-        if (active_threads > 0) {
-            for (int t = 0; t < active_threads; t++) {
-                pthread_join(threads[t], NULL);
-                propagated_total += tasks[t].result_count;
+
+    // 1. 统计活跃子拓扑数
+    int active_count = 0;
+    for (int t = 0; t < master->sub_topo_count; t++) {
+        SubTopology* sub = master->sub_topologies[t];
+        if (!sub || !sub->net || !sub->is_active) continue;
+
+        for (int n = 0; n < sub->net->node_count; n++) {
+            if (sub->net->nodes[n] && sub->net->nodes[n]->activation >= threshold) {
+                active_count++;
+                break;
             }
         }
     }
-    
-    printf("[并行传播] 完成，共传播 %d 个节点\n", propagated_total);
-    return propagated_total;
+
+    if (active_count == 0) return 0;
+
+    // 2. 获取线程池
+    ThreadPool* pool = master_get_thread_pool(master);
+    if (!pool) return -1;
+
+    int nworkers = thread_pool_num_workers(pool);
+    printf("[并行传播] %d 个活跃拓扑 → %d 个 worker\n", active_count, nworkers);
+
+    // 3. 构建任务数组（栈分配，上限9个子拓扑）
+    TopoPropTask tasks[10];
+    ThreadTask th_tasks[10];
+    int task_idx = 0;
+
+    for (int t = 0; t < master->sub_topo_count && task_idx < 10; t++) {
+        SubTopology* sub = master->sub_topologies[t];
+        if (!sub || !sub->net || !sub->is_active) continue;
+
+        int has_active = 0;
+        for (int n = 0; n < sub->net->node_count; n++) {
+            if (sub->net->nodes[n] && sub->net->nodes[n]->activation >= threshold) {
+                has_active = 1;
+                break;
+            }
+        }
+        if (!has_active) continue;
+
+        tasks[task_idx].master = master;
+        tasks[task_idx].topo_id = t;
+        tasks[task_idx].threshold = threshold;
+        tasks[task_idx].propagated_count = 0;
+        th_tasks[task_idx].func = topo_propagate_worker;
+        th_tasks[task_idx].arg = &tasks[task_idx];
+        task_idx++;
+    }
+
+    if (task_idx == 0) return 0;
+
+    // 4. 批量提交 — 主线程 + workers 并行窃取执行
+    thread_pool_batch(pool, th_tasks, task_idx);
+
+    // 5. 汇总结果
+    int total = 0;
+    for (int i = 0; i < task_idx; i++) total += tasks[i].propagated_count;
+
+    printf("[并行传播] 完成，共传播 %d 个节点（%d 个拓扑并行）\n", total, task_idx);
+    return total;
 }
-#endif
+
+/**
+ * 旧版并行传播（向后兼容）
+ * 内部调用新的拓扑级并行实现
+ */
+int master_propagate_parallel(MasterTopology* master, int max_concurrent) {
+    (void)max_concurrent;  // 不再使用固定并发数，由线程池自动管理
+    return master_propagate_parallel_topology(master, 0.3f);
+}
 
 // ==================== 生成式推理实现 ====================
 
