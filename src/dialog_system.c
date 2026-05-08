@@ -746,48 +746,6 @@ char* dialog_generate(DialogReasoning* reasoning, const char* input,
     
     DialogSystem* dsys = (DialogSystem*)sys;
     
-    // ===== 优先检测教学指令 =====
-    // 格式: "当我说xxx你需要回复:yyy"
-    if (memory && input && input[0] &&
-        strstr(input, "需要") && strstr(input, "回复")) {
-        // 提取回复内容
-        char teach_input[256] = {0};
-        char teach_response[1024] = {0};
-        char* reply_pos = strstr(input, "回复");
-        if (reply_pos) {
-            char* start = reply_pos + strlen("回复");
-            while (*start == ' ' || *start == ':' || *start == '：') start++;
-            int i = 0;
-            while (*start && i < 250 && *start != ',' && *start != '.') {
-                teach_response[i++] = *start++;
-            }
-            if (strstr(input, "你好")) {
-                snprintf(teach_input, sizeof(teach_input), "%s", "你好");
-            } else if (strstr(input, "你是谁")) {
-                snprintf(teach_input, sizeof(teach_input), "%s", "你是谁");
-            } else if (strstr(input, "再见")) {
-                snprintf(teach_input, sizeof(teach_input), "%s", "再见");
-            } else if (strstr(input, "读过什么书")) {
-                snprintf(teach_input, sizeof(teach_input), "%s", "你读过什么书");
-            } else {
-                snprintf(teach_input, sizeof(teach_input), "%s", input);
-            }
-            if (strlen(teach_input) > 0 && strlen(teach_response) > 0) {
-                char key[512] = {0};
-                snprintf(key, sizeof(key), "response:%s", teach_input);
-                memory_store(memory, key, strdup(teach_response),
-                           strlen(teach_response) + 1, MEMORY_TYPE_STRING, 0.95f);
-                printf("\n[教学] ✓ 已学会: 「%s」 → 「%s」\n", teach_input, teach_response);
-                printf("[教学] 下回听到「%s」就会直接回答\n\n", teach_input);
-            }
-        }
-        // 教学指令本身也给个友好回复
-        char* msg = malloc(max_len);
-        if (!msg) return strdup("好的");
-        snprintf(msg, max_len, "好的，我学会了「%s」该怎么回答！", teach_input);
-        return msg;
-    }
-    
     // 优先检查记忆系统：精确匹配完整输入
     if (memory && input && input[0]) {
         char exact_key[512] = {0};
@@ -799,8 +757,7 @@ char* dialog_generate(DialogReasoning* reasoning, const char* input,
         }
     }
     
-    // 拓扑驱动生成
-    char* topo_response = NULL;
+    // 拓扑驱动生成：认知网络做联想推理
     if (dsys && dsys->master && dsys->master->sub_topo_count > 0) {
         int total_nodes = 0;
         for (int t = 0; t < dsys->master->sub_topo_count; t++) {
@@ -808,17 +765,22 @@ char* dialog_generate(DialogReasoning* reasoning, const char* input,
             if (sub && sub->net) total_nodes += sub->net->node_count;
         }
         if (total_nodes >= 10) {
-            topo_response = master_generate_response(
+            char* topo_response = master_generate_response(
                 dsys->master, input, max_len);
             if (topo_response && strlen(topo_response) > 0) {
-                return topo_response; // 直接返回，调用方负责free
-            }
-            if (topo_response) {
+                char* safe = strdup(topo_response);
                 free(topo_response);
-                topo_response = NULL;
+                return safe;
             }
+            if (topo_response) free(topo_response);
         }
     }
+    
+    char* response = (char*)malloc(max_len);
+    if (!response) return strdup("内存不足...");
+
+    response[0] = '\0';
+    int pos = 0;
     
     // 按拓扑分类收集概念
     #define MAX_PER_CATEGORY 20
@@ -871,11 +833,6 @@ char* dialog_generate(DialogReasoning* reasoning, const char* input,
                 }
         }
     }
-    
-    // 分配回复缓冲区（备用生成路径）
-    char response[4096];
-    int pos = 0;
-    response[0] = '\0';
     
     // 根据激活情况生成回复
     
