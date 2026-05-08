@@ -4,6 +4,7 @@
 #include "huarong_topology.h"
 #include "node_hash.h"
 #include "string_pool.h"
+#include "thread_pool.h"
 #include <time.h>
 
 // ==================== 多拓扑嵌套架构 ====================
@@ -119,6 +120,10 @@ typedef struct MasterTopology {
     long successful_inferences;
     int training_data_count;
     time_t created_time;
+
+    // ========== 线程池（并行推理引擎核心） ==========
+    struct ThreadPool* thread_pool;   // 共享线程池，首次并行时懒创建
+    int parallel_mode;                // 0=串行（默认） 1=拓扑级并行 2=节点级并行
 } MasterTopology;
 
 // ==================== API函数声明 ====================
@@ -167,6 +172,27 @@ int master_set_edge_confidence(MasterTopology* master,
 int master_propagate_activation(MasterTopology* master,
                                int source_topo_id,
                                int source_node_id);
+
+/**
+ * 增强版并行激活传播 — 拓扑级并行
+ *
+ * 原理：
+ * - 检测所有活跃子拓扑（有节点 activation >= threshold）
+ * - 每个活跃子拓扑作为一个独立任务提交到线程池
+ * - 线程数 = min(活跃拓扑数, CPU核数)
+ * - 未来新增子拓扑（语音/图像）自动进入线程池
+ *
+ * @param master 主拓扑
+ * @param threshold 激活阈值（通常0.1f）
+ * @return 总传播节点数
+ */
+int master_propagate_parallel_topology(MasterTopology* master, float threshold);
+
+/**
+ * 获取或创建线程池
+ * 首次调用时自动检测CPU核数并创建
+ */
+ThreadPool* master_get_thread_pool(MasterTopology* master);
 
 void master_reset_activations(MasterTopology* master);
 
