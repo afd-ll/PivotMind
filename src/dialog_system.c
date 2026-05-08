@@ -44,6 +44,16 @@
 // 前向声明
 static const char* get_confidence_level_name(CausalConfidenceLevel level);
 
+// ==================== 推理常量 ====================
+
+#define MAX_TOKENS 64
+#define MAX_ASSOCIATIONS 100
+#define MAX_RESPONSE_LENGTH 2048
+#define MAX_PATH_LENGTH 10
+#define ACTIVATION_THRESHOLD 0.3f
+#define DECAY_RATE 0.7f
+#define DEFAULT_HOP_COUNT 3
+
 // ==================== 并行拓扑传播任务（每跳内部） ====================
 
 /** 单跳内子拓扑传播任务 */
@@ -125,14 +135,6 @@ static void dialog_topo_worker(void* arg) {
 }
 
 // ==================== 辅助函数 ====================
-
-#define MAX_TOKENS 64
-#define MAX_ASSOCIATIONS 100
-#define MAX_RESPONSE_LENGTH 2048
-#define MAX_PATH_LENGTH 10
-#define ACTIVATION_THRESHOLD 0.3f
-#define DECAY_RATE 0.7f
-#define DEFAULT_HOP_COUNT 3
 
 // ==================== 意图识别 ====================
 
