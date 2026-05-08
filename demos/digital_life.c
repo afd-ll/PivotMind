@@ -457,8 +457,26 @@ void handle_dialog(DigitalLifeSystem* sys, char* input) {
                 // 用户提供更好的答案 - 学习新知识
                 const char* better_answer = feedback + (strncmp(feedback, "更好的回答:", 11) == 0 ? 11 : 8);
                 while (*better_answer == ' ') better_answer++;
-                printf("\n★ 已记录更好的回答: %s\n", better_answer);
-                // TODO: 将更好的回答存入记忆
+                printf("\n★ 已学习更好的回答: %s\n", better_answer);
+                // 存入记忆系统，下次直接命中
+                if (sys && sys->memory && response) {
+                    // 用用户输入作为key，存入response模式
+                    // 提取用户输入中的关键词
+                    char* input_copy = strdup(input);
+                    char* stripped = input_copy;
+                    while (*stripped == ' ') stripped++;
+                    // 去掉末尾的换行
+                    size_t len = strlen(stripped);
+                    while (len > 0 && (stripped[len-1] == '\n' || stripped[len-1] == '\r')) stripped[--len] = 0;
+                    if (strlen(stripped) > 0) {
+                        char key[512];
+                        snprintf(key, sizeof(key), "response:%s", stripped);
+                        memory_store(sys->memory, key, strdup(better_answer),
+                                   strlen(better_answer) + 1, MEMORY_TYPE_STRING, 0.95f);
+                        printf("  → 已存入记忆: 下次听到「%s」就会用这个回答\n", stripped);
+                    }
+                    free(input_copy);
+                }
             }
         }
         

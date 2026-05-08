@@ -746,6 +746,48 @@ char* dialog_generate(DialogReasoning* reasoning, const char* input,
     
     DialogSystem* dsys = (DialogSystem*)sys;
     
+    // ===== 优先检测教学指令 =====
+    // 格式: "当我说xxx你需要回复:yyy"
+    if (memory && input && input[0] &&
+        strstr(input, "需要") && strstr(input, "回复")) {
+        // 提取回复内容
+        char teach_input[256] = {0};
+        char teach_response[1024] = {0};
+        char* reply_pos = strstr(input, "回复");
+        if (reply_pos) {
+            char* start = reply_pos + strlen("回复");
+            while (*start == ' ' || *start == ':' || *start == '：') start++;
+            int i = 0;
+            while (*start && i < 250 && *start != ',' && *start != '.') {
+                teach_response[i++] = *start++;
+            }
+            if (strstr(input, "你好")) {
+                snprintf(teach_input, sizeof(teach_input), "%s", "你好");
+            } else if (strstr(input, "你是谁")) {
+                snprintf(teach_input, sizeof(teach_input), "%s", "你是谁");
+            } else if (strstr(input, "再见")) {
+                snprintf(teach_input, sizeof(teach_input), "%s", "再见");
+            } else if (strstr(input, "读过什么书")) {
+                snprintf(teach_input, sizeof(teach_input), "%s", "你读过什么书");
+            } else {
+                snprintf(teach_input, sizeof(teach_input), "%s", input);
+            }
+            if (strlen(teach_input) > 0 && strlen(teach_response) > 0) {
+                char key[512] = {0};
+                snprintf(key, sizeof(key), "response:%s", teach_input);
+                memory_store(memory, key, strdup(teach_response),
+                           strlen(teach_response) + 1, MEMORY_TYPE_STRING, 0.95f);
+                printf("\n[教学] ✓ 已学会: 「%s」 → 「%s」\n", teach_input, teach_response);
+                printf("[教学] 下回听到「%s」就会直接回答\n\n", teach_input);
+            }
+        }
+        // 教学指令本身也给个友好回复
+        char* msg = malloc(max_len);
+        if (!msg) return strdup("好的");
+        snprintf(msg, max_len, "好的，我学会了「%s」该怎么回答！", teach_input);
+        return msg;
+    }
+    
     // 优先检查记忆系统：精确匹配完整输入
     if (memory && input && input[0]) {
         char exact_key[512] = {0};
@@ -757,7 +799,8 @@ char* dialog_generate(DialogReasoning* reasoning, const char* input,
         }
     }
     
-    // 拓扑驱动生成：当拓扑节点足够时使用联想引擎生成更自然的回复
+    // 拓扑驱动生成
+    char* topo_response = NULL;
     if (dsys && dsys->master && dsys->master->sub_topo_count > 0) {
         int total_nodes = 0;
         for (int t = 0; t < dsys->master->sub_topo_count; t++) {
@@ -765,74 +808,14 @@ char* dialog_generate(DialogReasoning* reasoning, const char* input,
             if (sub && sub->net) total_nodes += sub->net->node_count;
         }
         if (total_nodes >= 10) {
-            char* topo_response = master_generate_response(
+            topo_response = master_generate_response(
                 dsys->master, input, max_len);
             if (topo_response && strlen(topo_response) > 0) {
-                char* safe = strdup(topo_response);
+                return topo_response; // 直接返回，调用方负责free
+            }
+            if (topo_response) {
                 free(topo_response);
-                return safe;
-            }
-            if (topo_response) free(topo_response);
-        }
-    }
-    
-    char* response = (char*)malloc(max_len);
-    if (!response) return strdup("内存不足...");
-
-    response[0] = '\0';
-    int pos = 0;
-    
-    // 检测是否是教学语句（如"你需要回复xxx"）
-    // 从教学语句中学习响应模式
-    if (memory && strstr(input, "需要") && strstr(input, "回复")) {
-        char input_pattern[256] = {0};
-        char response_pattern[256] = {0};
-        
-        // 简单提取：找到"回复"后面的内容作为响应模式
-        char* reply_pos = strstr(input, "回复");
-        if (reply_pos) {
-            char* start = reply_pos + strlen("回复");
-            while (*start == ' ' || *start == ':') start++;
-            
-            int i = 0;
-            while (*start && i < 250 && *start != ',' && *start != '.') {
-                response_pattern[i++] = *start++;
-            }
-            
-            // 提取输入模式：找"你好"这类词
-            if (strstr(input, "你好")) {
-                strcpy(input_pattern, "你好");
-            } else if (strstr(input, "再见")) {
-                strcpy(input_pattern, "再见");
-            } else {
-                // 用分词获取
-                for (int j = 0; j < reasoning->assoc_count && j < 3; j++) {
-                    if (j > 0) strcat(input_pattern, " ");
-                    strcat(input_pattern, reasoning->associations[j].concept);
-                }
-            }
-            
-            // 存储响应模式
-            if (strlen(input_pattern) > 0 && strlen(response_pattern) > 0) {
-                char key[512] = {0};
-                snprintf(key, sizeof(key), "response:%s", input_pattern);
-                memory_store(memory, key, strdup(response_pattern), 
-                           strlen(response_pattern) + 1, MEMORY_TYPE_STRING, 0.9f);
-                printf("[教学] 学会: %s -> %s\n", input_pattern, response_pattern);
-            }
-        }
-    }
-    
-    // 尝试查找已学习的响应模式
-    if (pos == 0 && memory) {
-        for (int i = 0; i < reasoning->assoc_count; i++) {
-            char key[512] = {0};
-            snprintf(key, sizeof(key), "response:%s", reasoning->associations[i].concept);
-            MemoryEntry* pattern = memory_retrieve(memory, key);
-            if (pattern && pattern->data) {
-                pos += snprintf(response + pos, max_len - pos, "%s", (char*)pattern->data);
-                printf("[响应模式] 找到已学习的回复: %s\n", (char*)pattern->data);
-                break;
+                topo_response = NULL;
             }
         }
     }
@@ -888,6 +871,11 @@ char* dialog_generate(DialogReasoning* reasoning, const char* input,
                 }
         }
     }
+    
+    // 分配回复缓冲区（备用生成路径）
+    char response[4096];
+    int pos = 0;
+    response[0] = '\0';
     
     // 根据激活情况生成回复
     
