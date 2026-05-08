@@ -1355,7 +1355,32 @@ char* dialog_process(DialogSystem* sys, const char* user_input, DialogReasoning*
     }
 
     if (sem->causal_query) {
-        ui_print_thinking_line("因果", "检测到因果查询");
+        ui_print_thinking_line("因果", "检测到因果查询，正在构建因果图...");
+        
+        // 激活因果推理：解析因果查询
+        if (sys->master) {
+            resolve_causal_query(sem, sys->master);
+            
+            // 运行 A* 最强路径因果联想搜索
+            int causal_count = 0;
+            CausalSearchResult* causal_results = causal_associative_search(
+                sys->master, user_input, 5, 10, &causal_count);
+            
+            if (causal_results && causal_count > 0) {
+                char causal_info[512] = {0};
+                int cpos = 0;
+                for (int i = 0; i < causal_count && i < 3; i++) {
+                    cpos += snprintf(causal_info + cpos, sizeof(causal_info) - cpos,
+                                    "[%.2f] ", causal_results[i].total_strength);
+                }
+                if (causal_count > 3) {
+                    snprintf(causal_info + cpos, sizeof(causal_info) - cpos,
+                            "...(+%d条)", causal_count - 3);
+                }
+                ui_print_thinking_line("因果链", causal_info);
+            }
+            causal_search_results_free(causal_results, causal_count);
+        }
     }
 
     // 概念处理：检测数学表达式
@@ -1476,6 +1501,20 @@ char* dialog_process(DialogSystem* sys, const char* user_input, DialogReasoning*
                 if (vocab && vocab->net && vocab->net->node_count >= 2) {
                     build_concept_hierarchy(vocab->net,
                         (ConceptHierarchy*)sys->concept_hierarchy, NULL);
+                    
+                    // 基于概念层级推断因果方向
+                    if (sys->causal_graph) {
+                        int directed = infer_causal_direction_from_hierarchy(
+                            sys->causal_graph,
+                            (ConceptHierarchy*)sys->concept_hierarchy,
+                            sys->master, 0.5f);
+                        if (directed > 0) {
+                            char dir_info[64];
+                            snprintf(dir_info, sizeof(dir_info),
+                                    "%d 条边已确定方向", directed);
+                            ui_print_thinking_line("因果方向", dir_info);
+                        }
+                    }
                 }
             }
             

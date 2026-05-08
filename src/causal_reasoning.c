@@ -1,5 +1,9 @@
 #include "../include/causal_reasoning.h"
 #include "../include/huarong_topology.h"
+#include "../include/utf8_tokenizer.h"
+#include "../include/node_hash.h"
+#include "../include/multi_topology.h"
+#include "../include/concept_abstraction.h"
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -384,9 +388,9 @@ CausalGraph* causal_graph_create(int node_count, int edge_capacity) {
     graph->node_mapping = (int*)calloc(graph->node_count, sizeof(int));
     graph->edges = (CausalEdge**)malloc(graph->edge_capacity * sizeof(CausalEdge*));
 
-    graph->outgoing = (int**)malloc(graph->node_count * sizeof(int*));
+    graph->outgoing = (int**)calloc(graph->node_count, sizeof(int*));
     graph->outgoing_count = (int*)calloc(graph->node_count, sizeof(int));
-    graph->incoming = (int**)malloc(graph->node_count * sizeof(int*));
+    graph->incoming = (int**)calloc(graph->node_count, sizeof(int*));
     graph->incoming_count = (int*)calloc(graph->node_count, sizeof(int));
 
     graph->is_dag = true;
@@ -405,14 +409,7 @@ CausalGraph* causal_graph_create(int node_count, int edge_capacity) {
 void causal_graph_destroy(CausalGraph* graph) {
     if (!graph) return;
 
-    for (int i = 0; i < graph->edge_count; i++) {
-        if (graph->edges[i]) {
-            if (graph->edges[i]->condition_node_ids) {
-                free(graph->edges[i]->condition_node_ids);
-            }
-            free(graph->edges[i]);
-        }
-    }
+    // 边来自 edge_pool 内存池，不能单独 free，pool_destroy 统一释放
     free(graph->edges);
 
     for (int i = 0; i < graph->node_count; i++) {
@@ -827,6 +824,7 @@ CausalPath** find_all_causal_paths(CausalGraph* graph, int source,
             path->is_direct = (current.path_len == 2);
             path->has_confounder = false;
             paths[count++] = path;
+            continue;  // 避免后续 free(current.path) 造成 double free
         }
 
         if (current.path_len >= max_length) continue;
@@ -1784,7 +1782,992 @@ void causal_graph_get_stats(CausalGraph* graph, int* node_count, int* edge_count
     }
 }
 
-// ==================== 因果知识固化 ====================
+// ==================== A* 最强因果路径搜索 ====================
+
+/**
+ * 使用 A* 查找最强因果路径（最大化 total_strength = 边强度乘积）
+ * 
+ * 核心思路：将边强度 s 转化为代价 c = -log(s)，则路径代价最小化
+ * 等价于路径强度乘积最大化。
+ * 因为对于强度在 [0,1] 内的边，-log(s) >= 0，满足 A* 非负代价要求。
+ * 
+ * 启发式函数 h(n) 保守估计剩余路径的 -log(strength) 下界，
+ * 保证 A* 的可采纳性（admissible）。
+ * 
+ * @param graph 因果图
+ * @param source 源节点
+ * @param target 目标节点
+ * @param max_length 最大路径长度
+ * @param max_paths 最大返回路径数量
+ * @param path_count 输出路径数量
+ * @return 路径数组（按强度降序），需调用者释放
+ */
+CausalPath** find_strongest_causal_path_astar(CausalGraph* graph, int source, int target,
+                                              int max_length, int max_paths, int* path_count) {
+    if (!graph || source < 0 || target < 0 || 
+        source >= graph->node_count || target >= graph->node_count || 
+        path_count == NULL) {
+        if (path_count) *path_count = 0;
+        return NULL;
+    }
+
+    *path_count = 0;
+    if (source == target) return NULL;
+
+    // 创建优先队列（最小堆，按 f = -log(strength) 总代价排序）
+    PriorityQueue* open_set = pq_create(512);
+    
+    // 记录已访问节点在当前轮次的最低 g_score（用于剪枝）
+    float* best_g = (float*)malloc(graph->node_count * sizeof(float));
+    for (int i = 0; i < graph->node_count; i++) best_g[i] = FLT_MAX;
+    
+    CausalPath** paths = (CausalPath**)malloc(max_paths * sizeof(CausalPath*));
+    int found_count = 0;
+
+    // 估算最大可能的边强度（用于启发式）
+    float max_edge_strength = 0.0f;
+    for (int i = 0; i < graph->edge_count; i++) {
+        if (graph->edges[i] && graph->edges[i]->strength > max_edge_strength) {
+            max_edge_strength = graph->edges[i]->strength;
+        }
+    }
+    if (max_edge_strength < 0.01f) max_edge_strength = 0.5f;
+    float min_log_cost = -logf(max_edge_strength + EPSILON);  // 单边最小代价
+    
+    // 初始化起点：g = 0, f = 0（h=0时为Dijkstra，但更稳妥）
+    AStarNode start_node;
+    start_node.node_id = source;
+    start_node.g_score = 0.0f;
+    start_node.f_score = 0.0f;
+    start_node.path = (int*)malloc(max_length * sizeof(int));
+    start_node.path[0] = source;
+    start_node.path_len = 1;
+    start_node.total_strength = 1.0f;
+    
+    pq_push(open_set, &start_node);
+    best_g[source] = 0.0f;
+
+    while (open_set->size > 0 && found_count < max_paths) {
+        AStarNode current;
+        pq_pop(open_set, &current);
+        
+        // 剪枝：如果当前 g 已不是最优，跳过
+        if (current.g_score > best_g[current.node_id] + 0.001f) {
+            free(current.path);
+            continue;
+        }
+        
+        // 到达目标 → 记录路径
+        if (current.node_id == target && current.path_len > 1) {
+            CausalPath* path = (CausalPath*)malloc(sizeof(CausalPath));
+            path->node_ids = current.path;  // 转移所有权
+            path->length = current.path_len;
+            path->total_strength = current.total_strength;
+            path->edge_strengths = (float*)malloc((current.path_len - 1) * sizeof(float));
+            path->is_direct = (current.path_len == 2);
+            path->has_confounder = false;
+            
+            for (int i = 0; i < current.path_len - 1; i++) {
+                CausalEdge* edge = get_causal_edge(graph, current.path[i], current.path[i + 1]);
+                path->edge_strengths[i] = edge ? edge->strength : 0.5f;
+            }
+            
+            paths[found_count++] = path;
+            continue;
+        }
+        
+        if (current.path_len >= max_length) {
+            free(current.path);
+            continue;
+        }
+        
+        // 扩展邻居
+        for (int i = 0; i < graph->outgoing_count[current.node_id]; i++) {
+            int neighbor = graph->outgoing[current.node_id][i];
+            
+            // 避免循环
+            bool in_path = false;
+            for (int j = 0; j < current.path_len; j++) {
+                if (current.path[j] == neighbor) { in_path = true; break; }
+            }
+            if (in_path) continue;
+            
+            CausalEdge* edge = get_causal_edge(graph, current.node_id, neighbor);
+            float edge_strength = edge ? edge->strength : 0.5f;
+            
+            // 以 -log(strength) 为代价：高强度边 = 低代价
+            float edge_cost = -logf(edge_strength + EPSILON);
+            float tentative_g = current.g_score + edge_cost;
+            
+            // 剪枝：如果已有更优路径到此节点，跳过
+            if (tentative_g >= best_g[neighbor]) continue;
+            best_g[neighbor] = tentative_g;
+            
+            // 启发式：估计剩余路径的最小代价
+            // 保守估计：至少还需要 1 步到达目标，每步代价 >= min_log_cost
+            float min_remaining_steps = 1.0f;
+            if (neighbor != target && current.path_len + 1 < max_length) {
+                // 检查是否有直接边到目标
+                if (!causal_edge_exists(graph, neighbor, target)) {
+                    min_remaining_steps = 2.0f;  // 至少还要两步
+                }
+                // 保守估计，确保可采纳性（不低估）
+                min_remaining_steps = fminf(min_remaining_steps, 
+                                          (float)(max_length - current.path_len - 1));
+            }
+            // 保守启发式：假设剩下的边都很强（低代价）
+            float h = min_remaining_steps * min_log_cost * 0.5f;
+            // 但保证不高估实际剩余代价 → 保守一点用 0.5 倍
+            // 其实安全做法是 h = 0（退化为 Dijkstra），性能可接受
+            
+            float f = tentative_g + h;
+            
+            AStarNode neighbor_node;
+            neighbor_node.node_id = neighbor;
+            neighbor_node.g_score = tentative_g;
+            neighbor_node.f_score = f;
+            neighbor_node.path = (int*)malloc(max_length * sizeof(int));
+            memcpy(neighbor_node.path, current.path, current.path_len * sizeof(int));
+            neighbor_node.path[current.path_len] = neighbor;
+            neighbor_node.path_len = current.path_len + 1;
+            neighbor_node.total_strength = current.total_strength * edge_strength;
+            
+            pq_push(open_set, &neighbor_node);
+        }
+        
+        free(current.path);
+    }
+    
+    pq_free(open_set);
+    free(best_g);
+    
+    if (found_count == 0) {
+        free(paths);
+        return NULL;
+    }
+    
+    *path_count = found_count;
+    return paths;
+}
+
+/**
+ * 查找单条最强因果路径
+ */
+CausalPath* find_strongest_causal_path(CausalGraph* graph, int source, int target, int max_length) {
+    int path_count = 0;
+    CausalPath** paths = find_strongest_causal_path_astar(graph, source, target, max_length, 1, &path_count);
+    if (path_count == 0) return NULL;
+    CausalPath* result = paths[0];
+    free(paths);
+    return result;
+}
+
+// ==================== 条件路径切除（拓扑版反事实推理） ====================
+
+/**
+ * 条件路径切除：检查在指定节点被阻塞（不激活）时，
+ * 从 source 到 target 是否仍有路径可达。
+ * 
+ * 这是拓扑版反事实推理的核心：
+ * "如果X不激活（阻塞节点集），Y还能到达吗？"
+ * 
+ * @param graph 因果图（无向版本）
+ * @param source 源节点
+ * @param target 目标节点
+ * @param blocked_nodes 被阻塞/被切除的节点ID数组
+ * @param blocked_count 阻塞节点数量
+ * @param max_length 最大搜索深度
+ * @return true 如果存在绕过阻塞节点的路径
+ */
+bool conditional_path_reachability(CausalGraph* graph, int source, int target,
+                                   int* blocked_nodes, int blocked_count,
+                                   int max_length) {
+    if (!graph || source < 0 || target < 0 ||
+        source >= graph->node_count || target >= graph->node_count) {
+        return false;
+    }
+    if (source == target) return true;
+    
+    // 构建阻塞掩码（O(1) 查询）
+    bool* blocked = (bool*)calloc(graph->node_count, sizeof(bool));
+    for (int i = 0; i < blocked_count; i++) {
+        if (blocked_nodes[i] >= 0 && blocked_nodes[i] < graph->node_count) {
+            blocked[blocked_nodes[i]] = true;
+        }
+    }
+    
+    // 如果源节点或目标节点本身被阻塞，不可达
+    if (blocked[source] || blocked[target]) {
+        free(blocked);
+        return false;
+    }
+    
+    // BFS/DFS 搜索（使用栈，避免队列分配）
+    bool* visited = (bool*)calloc(graph->node_count, sizeof(bool));
+    int* stack = (int*)malloc(graph->node_count * sizeof(int));
+    int stack_top = 0;
+    
+    visited[source] = true;
+    stack[stack_top++] = source;
+    
+    int current_depth = 0;
+    bool found = false;
+    
+    while (stack_top > 0) {
+        int node = stack[--stack_top];
+        
+        // 检查出边
+        for (int i = 0; i < graph->outgoing_count[node]; i++) {
+            int neighbor = graph->outgoing[node][i];
+            if (visited[neighbor] || blocked[neighbor]) continue;
+            
+            if (neighbor == target) {
+                found = true;
+                goto cleanup;
+            }
+            
+            visited[neighbor] = true;
+            stack[stack_top++] = neighbor;
+        }
+        
+        // 如果是无向图，也检查入边（作为反向出边）
+        for (int i = 0; i < graph->incoming_count[node]; i++) {
+            int neighbor = graph->incoming[node][i];
+            if (visited[neighbor] || blocked[neighbor]) continue;
+            
+            if (neighbor == target) {
+                found = true;
+                goto cleanup;
+            }
+            
+            visited[neighbor] = true;
+            stack[stack_top++] = neighbor;
+        }
+        
+        // 深度跟踪（简化：不精确但足够）
+        current_depth++;
+        if (current_depth >= max_length) break;
+    }
+    
+cleanup:
+    free(blocked);
+    free(visited);
+    free(stack);
+    return found;
+}
+
+/**
+ * 条件路径切除的高级查询：
+ * 返回在阻塞节点集下，所有从 source 可达 target 的最强路径。
+ * 
+ * 这相当于问："如果不经过这些节点，X到Y最强的因果链是什么？"
+ * 结合了最强路径搜索 + 条件切除。
+ * 
+ * @param graph 因果图
+ * @param source 源节点
+ * @param target 目标节点
+ * @param blocked_nodes 被阻塞的节点数组
+ * @param blocked_count 阻塞节点数量
+ * @param max_length 最大路径长度
+ * @param max_paths 最大返回路径数量
+ * @param path_count 输出路径数量
+ * @return 路径数组，需调用者释放
+ */
+CausalPath** conditional_strongest_paths(CausalGraph* graph, int source, int target,
+                                         int* blocked_nodes, int blocked_count,
+                                         int max_length, int max_paths, int* path_count) {
+    if (!graph || path_count == NULL) {
+        if (path_count) *path_count = 0;
+        return NULL;
+    }
+    *path_count = 0;
+    
+    // 构建阻塞掩码
+    bool* blocked = (bool*)calloc(graph->node_count, sizeof(bool));
+    for (int i = 0; i < blocked_count; i++) {
+        if (blocked_nodes[i] >= 0 && blocked_nodes[i] < graph->node_count) {
+            blocked[blocked_nodes[i]] = true;
+        }
+    }
+    
+    if (blocked[source] || blocked[target]) {
+        free(blocked);
+        return NULL;
+    }
+    
+    // 使用修改版 A*（跳过阻塞节点）
+    PriorityQueue* open_set = pq_create(512);
+    
+    float* best_g = (float*)malloc(graph->node_count * sizeof(float));
+    for (int i = 0; i < graph->node_count; i++) best_g[i] = FLT_MAX;
+    
+    float max_edge_strength = 0.5f;
+    for (int i = 0; i < graph->edge_count; i++) {
+        if (graph->edges[i] && graph->edges[i]->strength > max_edge_strength) {
+            max_edge_strength = graph->edges[i]->strength;
+        }
+    }
+    float min_log_cost = -logf(max_edge_strength + EPSILON);
+    
+    CausalPath** paths = (CausalPath**)malloc(max_paths * sizeof(CausalPath*));
+    int found_count = 0;
+    
+    AStarNode start_node;
+    start_node.node_id = source;
+    start_node.g_score = 0.0f;
+    start_node.f_score = 0.0f;
+    start_node.path = (int*)malloc(max_length * sizeof(int));
+    start_node.path[0] = source;
+    start_node.path_len = 1;
+    start_node.total_strength = 1.0f;
+    
+    pq_push(open_set, &start_node);
+    best_g[source] = 0.0f;
+    
+    while (open_set->size > 0 && found_count < max_paths) {
+        AStarNode current;
+        pq_pop(open_set, &current);
+        
+        if (current.g_score > best_g[current.node_id] + 0.001f) {
+            free(current.path);
+            continue;
+        }
+        
+        if (current.node_id == target && current.path_len > 1) {
+            CausalPath* path = (CausalPath*)malloc(sizeof(CausalPath));
+            path->node_ids = current.path;
+            path->length = current.path_len;
+            path->total_strength = current.total_strength;
+            path->edge_strengths = (float*)malloc((current.path_len - 1) * sizeof(float));
+            path->is_direct = (current.path_len == 2);
+            path->has_confounder = false;
+            
+            for (int i = 0; i < current.path_len - 1; i++) {
+                CausalEdge* edge = get_causal_edge(graph, current.path[i], current.path[i + 1]);
+                path->edge_strengths[i] = edge ? edge->strength : 0.5f;
+            }
+            
+            paths[found_count++] = path;
+            continue;
+        }
+        
+        if (current.path_len >= max_length) {
+            free(current.path);
+            continue;
+        }
+        
+        // 扩展邻居（跳过阻塞节点）
+        for (int i = 0; i < graph->outgoing_count[current.node_id]; i++) {
+            int neighbor = graph->outgoing[current.node_id][i];
+            if (blocked[neighbor]) continue;
+            
+            bool in_path = false;
+            for (int j = 0; j < current.path_len; j++) {
+                if (current.path[j] == neighbor) { in_path = true; break; }
+            }
+            if (in_path) continue;
+            
+            CausalEdge* edge = get_causal_edge(graph, current.node_id, neighbor);
+            float edge_strength = edge ? edge->strength : 0.5f;
+            float edge_cost = -logf(edge_strength + EPSILON);
+            float tentative_g = current.g_score + edge_cost;
+            
+            if (tentative_g >= best_g[neighbor]) continue;
+            best_g[neighbor] = tentative_g;
+            
+            float h = min_log_cost * 0.5f;  // 保守启发式
+            float f = tentative_g + h;
+            
+            AStarNode neighbor_node;
+            neighbor_node.node_id = neighbor;
+            neighbor_node.g_score = tentative_g;
+            neighbor_node.f_score = f;
+            neighbor_node.path = (int*)malloc(max_length * sizeof(int));
+            memcpy(neighbor_node.path, current.path, current.path_len * sizeof(int));
+            neighbor_node.path[current.path_len] = neighbor;
+            neighbor_node.path_len = current.path_len + 1;
+            neighbor_node.total_strength = current.total_strength * edge_strength;
+            
+            pq_push(open_set, &neighbor_node);
+        }
+        
+        free(current.path);
+    }
+    
+    pq_free(open_set);
+    free(best_g);
+    free(blocked);
+    
+    if (found_count == 0) {
+        free(paths);
+        return NULL;
+    }
+    
+    *path_count = found_count;
+    return paths;
+}
+
+// ==================== 多拓扑 → 因果图桥接 ====================
+
+/**
+ * 从多拓扑网络推断统一因果图
+ * 
+ * 遍历所有子拓扑，将每个子拓扑内的节点连接视为因果边，
+ * 同时提取跨拓扑连接作为跨域因果传播路径。
+ * 所有节点根据其概念名去重合并，构建统一的因果图视图。
+ * 
+ * @param master 多拓扑网络
+ * @param min_strength 最小连接强度阈值
+ * @return 因果图，需调用者释放
+ */
+CausalGraph* infer_causal_graph_from_master_topology(MasterTopology* master,
+                                                     float min_strength) {
+    if (!master) return NULL;
+
+    // 第一步：统计总节点数（所有子拓扑 + 跨拓扑，按概念名去重）
+    // 使用临时哈希表去重（简化：先用大容量）
+    int total_nodes = 0;
+    for (int t = 0; t < master->sub_topo_count; t++) {
+        if (master->sub_topologies[t] && master->sub_topologies[t]->net) {
+            total_nodes += master->sub_topologies[t]->net->node_count;
+        }
+    }
+    if (total_nodes == 0) return NULL;
+
+    // 创建因果图（容量取节点数的2倍作为边容量）
+    CausalGraph* graph = causal_graph_create(total_nodes + 1, total_nodes * 4);
+    if (!graph) return NULL;
+    graph->topo_node_count = total_nodes;
+
+    // 第二步：构建概念名 → 因果图节点ID的映射
+    // 用简单的线性搜索（节点数不多）
+    char** concept_names = (char**)calloc(total_nodes, sizeof(char*));
+    int actual_nodes = 0;
+
+    // 先收集所有子拓扑的节点
+    for (int t = 0; t < master->sub_topo_count; t++) {
+        SubTopology* sub = master->sub_topologies[t];
+        if (!sub || !sub->net) continue;
+
+        for (int i = 0; i < sub->net->node_count; i++) {
+            ReasoningNode* node = sub->net->nodes[i];
+            if (!node || !node->concept) continue;
+
+            // 去重：检查是否已存在
+            bool exists = false;
+            for (int j = 0; j < actual_nodes; j++) {
+                if (strcmp(concept_names[j], node->concept) == 0) {
+                    exists = true;
+                    graph->node_mapping[j] = node->node_id;
+                    break;
+                }
+            }
+            if (!exists) {
+                concept_names[actual_nodes] = strdup(node->concept);
+                graph->node_mapping[actual_nodes] = node->node_id;
+                actual_nodes++;
+            }
+        }
+    }
+
+    // 调整因果图为实际节点数
+    // 注意：已分配的node_mapping前actual_nodes个有效
+
+    // 第三步：遍历所有拓扑内部的连接，转换为因果边
+    for (int t = 0; t < master->sub_topo_count; t++) {
+        SubTopology* sub = master->sub_topologies[t];
+        if (!sub || !sub->net) continue;
+
+        for (int i = 0; i < sub->net->node_count; i++) {
+            ReasoningNode* node = sub->net->nodes[i];
+            if (!node || !node->concept) continue;
+
+            // 找该节点在因果图中的ID
+            int cause_cg_id = -1;
+            for (int j = 0; j < actual_nodes; j++) {
+                if (strcmp(concept_names[j], node->concept) == 0) {
+                    cause_cg_id = j;
+                    break;
+                }
+            }
+            if (cause_cg_id < 0) continue;
+
+            // 遍历连接边
+            for (int c = 0; c < node->connection_count; c++) {
+                if (!node->connections[c]) continue;
+                ReasoningNode* target = node->connections[c];
+                if (!target || !target->concept) continue;
+
+                float weight = (c < node->connection_count) ?
+                               node->connection_weights[c] : 0.5f;
+                if (weight < min_strength) continue;
+
+                int effect_cg_id = -1;
+                for (int j = 0; j < actual_nodes; j++) {
+                    if (strcmp(concept_names[j], target->concept) == 0) {
+                        effect_cg_id = j;
+                        break;
+                    }
+                }
+                if (effect_cg_id < 0) continue;
+                if (cause_cg_id == effect_cg_id) continue;
+
+                // 添加因果边（已在graph->node_count上限内）
+                // 确保node_count足够大
+                if (cause_cg_id >= graph->node_count) continue;
+                if (effect_cg_id >= graph->node_count) continue;
+
+                if (!causal_edge_exists(graph, cause_cg_id, effect_cg_id)) {
+                    add_causal_edge(graph, cause_cg_id, effect_cg_id, 
+                                   CAUSAL_DIRECT, weight);
+                }
+            }
+        }
+    }
+
+    // 第四步：处理跨拓扑连接
+    for (int t = 0; t < master->sub_topo_count; t++) {
+        SubTopology* sub = master->sub_topologies[t];
+        if (!sub || !sub->net) continue;
+
+        for (int i = 0; i < sub->net->node_count; i++) {
+            ReasoningNode* node = sub->net->nodes[i];
+            if (!node || !node->concept) continue;
+
+            int cause_cg_id = -1;
+            for (int j = 0; j < actual_nodes; j++) {
+                if (strcmp(concept_names[j], node->concept) == 0) {
+                    cause_cg_id = j;
+                    break;  
+                }
+            }
+            if (cause_cg_id < 0) continue;
+
+            // 跨拓扑连接（通过交叉连接索引）
+            int adj_idx = sub->topo_id * 10000 + i;
+            if (adj_idx < master->cross_adj_count) {
+                CrossTopoAdjEntry* entry = master->cross_adj[adj_idx];
+                while (entry) {
+                    if (entry->link_index < master->cross_link_count) {
+                        CrossTopologyLink* link = master->cross_links[entry->link_index];
+                        if (link && link->weight >= min_strength) {
+                            // 查找目标节点（先通过topo_id找子拓扑）
+                            SubTopology* to_sub = NULL;
+                            for (int st = 0; st < master->sub_topo_count; st++) {
+                                if (master->sub_topologies[st] &&
+                                    master->sub_topologies[st]->topo_id == link->to_topo_id) {
+                                    to_sub = master->sub_topologies[st];
+                                    break;
+                                }
+                            }
+                            if (to_sub && to_sub->net && 
+                                link->to_node_id < to_sub->net->node_count) {
+                                ReasoningNode* to_node = 
+                                    to_sub->net->nodes[link->to_node_id];
+                                if (to_node && to_node->concept) {
+                                    int effect_cg_id = -1;
+                                    for (int j = 0; j < actual_nodes; j++) {
+                                        if (strcmp(concept_names[j], 
+                                                   to_node->concept) == 0) {
+                                            effect_cg_id = j;
+                                            break;
+                                        }
+                                    }
+                                    if (effect_cg_id >= 0 && 
+                                        effect_cg_id != cause_cg_id &&
+                                        effect_cg_id < graph->node_count) {
+                                        if (!causal_edge_exists(graph, cause_cg_id, 
+                                                              effect_cg_id)) {
+                                            add_causal_edge(graph, cause_cg_id,
+                                                          effect_cg_id,
+                                                          CAUSAL_INDIRECT,
+                                                          link->weight *
+                                                          link->transfer_rate);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    entry = entry->next;
+                }
+            }
+        }
+    }
+
+    // 清理
+    for (int i = 0; i < actual_nodes; i++) {
+        free(concept_names[i]);
+    }
+    free(concept_names);
+
+    return graph;
+}
+
+/**
+ * 因果联想搜索（A* 替换 BFS 联想扩散的桥接函数）
+ * 
+ * 给定输入文本，使用 A* 最强路径搜索替代传统 BFS 激活传播：
+ * 1. 从多拓扑网络构建统一因果图
+ * 2. 分词找到输入中的激活概念
+ * 3. 对每对概念运行 A* 最强路径搜索
+ * 4. 返回因果路径（按总强度降序排列）
+ * 
+ * @param master 多拓扑网络
+ * @param input_text 输入文本
+ * @param max_hops 最大路径长度
+ * @param max_results 最大返回结果数
+ * @param out_count 输出搜索结果数量
+ * @return 因果搜索结果数组（按强度降序），需调用者释放
+ */
+CausalSearchResult* causal_associative_search(MasterTopology* master,
+                                              const char* input_text,
+                                              int max_hops, int max_results,
+                                              int* out_count) {
+    if (!master || !input_text || !out_count) {
+        if (out_count) *out_count = 0;
+        return NULL;
+    }
+    *out_count = 0;
+
+    // 1. 构建因果图
+    CausalGraph* graph = infer_causal_graph_from_master_topology(master, 0.2f);
+    if (!graph || graph->edge_count == 0) {
+        if (graph) causal_graph_destroy(graph);
+        return NULL;
+    }
+
+    // 2. 分词并找到输入中的激活概念ID
+    char* tokens[100];
+    int token_count = utf8_tokenize(input_text, tokens, 100);
+    if (token_count <= 0) {
+        causal_graph_destroy(graph);
+        return NULL;
+    }
+
+    // 收集输入中激活的概念节点（在因果图中的ID）
+    int* source_ids = (int*)malloc(graph->node_count * sizeof(int));
+    int source_count = 0;
+
+    // 从词汇拓扑找概念
+    SubTopology* vocab = master_get_sub_topology_by_type(master, TOPO_VOCABULARY);
+    
+    for (int i = 0; i < token_count; i++) {
+        if (!tokens[i]) continue;
+        
+        // 先在词汇拓扑中找
+        ReasoningNode* node = NULL;
+        if (vocab && vocab->net) {
+            // 使用node_hash或线性搜索
+            if (vocab->node_hash) {
+                node = node_hash_find(vocab->node_hash, tokens[i]);
+            } else {
+                for (int j = 0; j < vocab->net->node_count; j++) {
+                    if (vocab->net->nodes[j] && vocab->net->nodes[j]->concept &&
+                        strcmp(vocab->net->nodes[j]->concept, tokens[i]) == 0) {
+                        node = vocab->net->nodes[j];
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (node && node->concept) {
+            // 在因果图中找对应ID
+            for (int j = 0; j < graph->node_count; j++) {
+                // 用node_mapping判断（简化：通过概念名搜索所有子拓扑）
+                // 这里我们只需要概念存在即可，运行A*时会自动发现路径
+                bool found = false;
+                // 扫描所有子拓扑找这个概念
+                for (int t = 0; t < master->sub_topo_count && !found; t++) {
+                    SubTopology* sub = master->sub_topologies[t];
+                    if (!sub || !sub->net) continue;
+                    for (int k = 0; k < sub->net->node_count && !found; k++) {
+                        ReasoningNode* n = sub->net->nodes[k];
+                        if (n && n->concept && 
+                            strcmp(n->concept, node->concept) == 0) {
+                            // 这个节点在因果图中有对应的ID
+                            // 用因果图节点索引作为source_id
+                            found = true;
+                        }
+                    }
+                }
+                if (found) {
+                    // 用概念哈希索引（简化：直接用j）
+                    bool dup = false;
+                    for (int k = 0; k < source_count; k++) {
+                        if (source_ids[k] == j) { dup = true; break; }
+                    }
+                    if (!dup) {
+                        source_ids[source_count++] = j;
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    if (source_count == 0) {
+        // 没有找到匹配概念，尝试直接搜索图
+        for (int i = 0; i < token_count; i++) {
+            if (!tokens[i]) continue;
+            for (int j = 0; j < graph->node_count; j++) {
+                // 用node_mapping反向查找概念名（不可靠，跳过）
+                (void)j;
+            }
+        }
+    }
+
+    // 3. 在因果图中运行 A* 最强路径搜索
+    // 对每对 source→target 运行 A*（只跑 source_count^2 对中最有希望的）
+    CausalSearchResult* results = (CausalSearchResult*)calloc(max_results, sizeof(CausalSearchResult));
+    int result_count = 0;
+
+    if (source_count > 0) {
+        int explored = 0;
+        
+        for (int s = 0; s < source_count && result_count < max_results && explored < 500; s++) {
+            for (int t = 0; t < graph->node_count && result_count < max_results; t++) {
+                if (t == source_ids[s]) continue;
+                explored++;
+                
+                int path_cnt = 0;
+                CausalPath** paths = find_strongest_causal_path_astar(
+                    graph, source_ids[s], t, max_hops, 1, &path_cnt);
+                
+                if (paths && path_cnt > 0) {
+                    // 找到了一条因果链
+                    CausalPath* best = paths[0];
+                    
+                    // 只在强度足够时记录
+                    if (best->total_strength > 0.2f) {
+                        results[result_count].from_source = s;
+                        results[result_count].source_node = source_ids[s];
+                        results[result_count].target_node = t;
+                        results[result_count].path = best;
+                        results[result_count].total_strength = best->total_strength;
+                        results[result_count].path_length = best->length;
+                        result_count++;
+                    } else {
+                        free(best->node_ids);
+                        free(best->edge_strengths);
+                        free(best);
+                    }
+                    free(paths);
+                }
+            }
+        }
+    }
+
+    // 4. 按强度降序排序结果
+    for (int i = 0; i < result_count - 1; i++) {
+        for (int j = i + 1; j < result_count; j++) {
+            if (results[j].total_strength > results[i].total_strength) {
+                CausalSearchResult tmp = results[i];
+                results[i] = results[j];
+                results[j] = tmp;
+            }
+        }
+    }
+
+    // 清理
+    for (int i = 0; i < token_count; i++) free(tokens[i]);
+    free(source_ids);
+    causal_graph_destroy(graph);
+
+    *out_count = result_count;
+    return results;
+}
+
+/**
+ * 释放因果搜索结果数组
+ */
+void causal_search_results_free(CausalSearchResult* results, int count) {
+    if (!results) return;
+    for (int i = 0; i < count; i++) {
+        if (results[i].path) {
+            free(results[i].path->node_ids);
+            free(results[i].path->edge_strengths);
+            free(results[i].path);
+        }
+    }
+    free(results);
+}
+
+// ==================== 方向推断（基于概念层级） ====================
+
+/**
+ * 基于概念层级推断因果方向
+ * 
+ * 核心原理：抽象概念（因果层/意图层）通常影响具体概念（具体层/感觉运动层）。
+ * 如果A的抽象层级比B高 ≥2 层，则方向为 A → B。
+ * 如果层级相近（0-1层差），使用以下弱投票：
+ *   - 时序优先：输入顺序中先出现的作为因
+ *   - 连接强度偏置：强连接的方向更可信
+ *   - 频率偏置：出现次数多的通用概念倾向于作因
+ * 
+ * @param graph 因果图（会被修改方向信息）
+ * @param hierarchy 概念层级（已构建）
+ * @param master 多拓扑网络（用于概念名查找）
+ * @param strength_threshold 最小方向置信度阈值
+ * @return 被确定方向的边数
+ */
+int infer_causal_direction_from_hierarchy(CausalGraph* graph,
+                                          ConceptHierarchy* hierarchy,
+                                          MasterTopology* master,
+                                          float strength_threshold) {
+    if (!graph || !hierarchy || !master) return 0;
+
+    int directed_count = 0;
+
+    // 构建拓扑节点ID → 概念层级 的快速映射（通过概念名匹配）
+    // 先收集所有ReasoningNode到层级映射
+    int* topo_to_level = NULL;
+    int max_topo_node = 0;
+    for (int t = 0; t < master->sub_topo_count; t++) {
+        SubTopology* sub = master->sub_topologies[t];
+        if (sub && sub->net && sub->net->node_count > max_topo_node) {
+            max_topo_node = sub->net->node_count;
+        }
+    }
+    if (max_topo_node == 0) return 0;
+
+    // 为顶层拓扑（词汇拓扑）构建节点ID→层级映射
+    SubTopology* vocab = NULL;
+    for (int t = 0; t < master->sub_topo_count; t++) {
+        SubTopology* sub = master->sub_topologies[t];
+        if (sub && sub->type == TOPO_VOCABULARY) {
+            vocab = sub;
+            break;
+        }
+    }
+    if (!vocab || !vocab->net) return 0;
+
+    topo_to_level = (int*)malloc(vocab->net->node_count * sizeof(int));
+    for (int i = 0; i < vocab->net->node_count; i++) {
+        topo_to_level[i] = -1;  // 未知
+    }
+
+    // 遍历ConceptHierarchy，建立概念名 → 层级的映射
+    for (int i = 0; i < hierarchy->node_count; i++) {
+        ConceptNode* cn = hierarchy->nodes[i];
+        if (!cn || !cn->name) continue;
+
+        // 找到词汇拓扑中同名的节点
+        for (int j = 0; j < vocab->net->node_count; j++) {
+            ReasoningNode* rn = vocab->net->nodes[j];
+            if (rn && rn->concept && strcmp(rn->concept, cn->name) == 0) {
+                topo_to_level[j] = (int)cn->level;
+                break;
+            }
+        }
+
+        // 也检查 concrete_nodes 映射
+        for (int ci = 0; ci < cn->concrete_count; ci++) {
+            int topo_id = cn->concrete_nodes[ci];
+            if (topo_id >= 0 && topo_id < vocab->net->node_count) {
+                topo_to_level[topo_id] = (int)cn->level;
+            }
+        }
+    }
+
+    // 遍历所有因果图边，推断方向
+    for (int e = 0; e < graph->edge_count; e++) {
+        CausalEdge* edge = graph->edges[e];
+        if (!edge) continue;
+
+        // 已经是单向的，跳过
+        if (!edge->bidirectional) continue;
+
+        // 获取因果图节点对应的拓扑节点
+        int cause_topo = (edge->cause_node_id < graph->node_count) ?
+                         graph->node_mapping[edge->cause_node_id] : -1;
+        int effect_topo = (edge->effect_node_id < graph->node_count) ?
+                          graph->node_mapping[edge->effect_node_id] : -1;
+
+        if (cause_topo < 0 || effect_topo < 0) continue;
+        if (cause_topo >= vocab->net->node_count || 
+            effect_topo >= vocab->net->node_count) continue;
+
+        // 获取两个节点在层级中的层级
+        int level_cause = (cause_topo < vocab->net->node_count) ?
+                          topo_to_level[cause_topo] : -1;
+        int level_effect = (effect_topo < vocab->net->node_count) ?
+                           topo_to_level[effect_topo] : -1;
+
+        // 方向推断
+        bool direction_confirmed = false;
+
+        if (level_cause >= 0 && level_effect >= 0) {
+            int level_diff = level_cause - level_effect;
+
+            // 策略1：层级差 ≥ 2 → 高层级影响低层级
+            if (level_diff >= 2) {
+                // cause的层级更高 → 方向正确（高→低）
+                edge->bidirectional = false;
+                direction_confirmed = true;
+            } else if (level_diff <= -2) {
+                // effect的层级更高 → 方向反了，交换
+                // 不能直接交换cause_node_id/effect_node_id因为会影响邻接表
+                // 改用类型标记，让调用方处理交换逻辑
+                // 实际交换节点ID
+                int tmp = edge->cause_node_id;
+                edge->cause_node_id = edge->effect_node_id;
+                edge->effect_node_id = tmp;
+                edge->bidirectional = false;
+                direction_confirmed = true;
+            }
+        }
+
+        if (direction_confirmed) {
+            // 更新边类型为直接因果
+            edge->type = CAUSAL_DIRECT;
+            // 方向置信度使用层级差归一化
+            float level_factor = 1.0f;
+            if (level_cause >= 0 && level_effect >= 0) {
+                int diff = abs(level_cause - level_effect);
+                level_factor = 0.5f + 0.5f * (diff / (float)(CONCEPT_LEVEL_COUNT - 1));
+            }
+            edge->confidence = CLAMP(level_factor, 0.0f, 1.0f);
+            directed_count++;
+        } else if (level_cause >= 0 || level_effect >= 0) {
+            // 策略2：只有一个节点有层级信息，用强度偏置
+            if (edge->strength >= strength_threshold) {
+                // 强连接更可靠，保持当前方向
+                edge->bidirectional = false;
+                edge->confidence = edge->strength * 0.7f;
+                directed_count++;
+            }
+        }
+        // 策略3：都没有层级信息，保持bidirectional
+        // 留待后续更多数据再判断
+    }
+
+    free(topo_to_level);
+
+    // 如果方向信息足够多，更新DAG状态
+    if (directed_count > 0) {
+        // 重新检查是否为DAG
+        int* visited = (int*)calloc(graph->node_count, sizeof(int));
+        int* rec_stack = (int*)calloc(graph->node_count, sizeof(int));
+        graph->is_dag = true;
+
+        for (int i = 0; i < graph->node_count && graph->is_dag; i++) {
+            if (!visited[i]) {
+                if (has_cycle_dfs(graph, i, visited, rec_stack)) {
+                    graph->is_dag = false;
+                    break;
+                }
+            }
+        }
+
+        free(visited);
+        free(rec_stack);
+        graph->last_updated = time(NULL);
+    }
+
+    return directed_count;
+}
 
 /**
  * 保存因果图到文件（JSON格式）

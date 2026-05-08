@@ -3,6 +3,7 @@
 
 #include "huarong_topology.h"
 #include "multi_topology.h"
+#include "concept_abstraction.h"
 #include <stdbool.h>
 
 // ==================== 因果图结构 ====================
@@ -705,5 +706,74 @@ int causal_graph_save_to_db(CausalGraph* graph, const char* db_path);
  * @return 因果图，NULL 失败
  */
 CausalGraph* causal_graph_load_from_db(const char* db_path, int node_count);
+
+/**
+ * 因果搜索结果（桥接A*最强路径搜索与联想引擎）
+ */
+typedef struct {
+    int from_source;            // 输入中第几个源概念
+    int source_node;            // 因果图中的源节点ID
+    int target_node;            // 因果图中的目标节点ID
+    CausalPath* path;           // 最强因果路径（所有权归属搜索结果）
+    float total_strength;       // 路径总强度
+    int path_length;            // 路径长度
+} CausalSearchResult;
+
+/**
+ * 从多拓扑网络推断统一因果图
+ */
+CausalGraph* infer_causal_graph_from_master_topology(MasterTopology* master,
+                                                     float min_strength);
+
+/**
+ * 因果联想搜索（A* 替换 BFS 联想扩散的桥接函数）
+ */
+CausalSearchResult* causal_associative_search(MasterTopology* master,
+                                              const char* input_text,
+                                              int max_hops, int max_results,
+                                              int* out_count);
+
+/**
+ * 释放因果搜索结果数组
+ */
+void causal_search_results_free(CausalSearchResult* results, int count);
+
+/**
+ * 使用 A* 查找最强因果路径（最大化 total_strength = 边强度乘积）
+ */
+CausalPath** find_strongest_causal_path_astar(CausalGraph* graph, int source, int target,
+                                              int max_length, int max_paths, int* path_count);
+
+/**
+ * 查找单条最强因果路径
+ */
+CausalPath* find_strongest_causal_path(CausalGraph* graph, int source, int target, int max_length);
+
+/**
+ * 条件路径切除：检查在指定节点被阻塞时，从 source 到 target 是否仍有路径
+ */
+bool conditional_path_reachability(CausalGraph* graph, int source, int target,
+                                   int* blocked_nodes, int blocked_count,
+                                   int max_length);
+
+/**
+ * 条件路径切除的高级查询：阻塞节点集下，返回最强路径
+ */
+CausalPath** conditional_strongest_paths(CausalGraph* graph, int source, int target,
+                                         int* blocked_nodes, int blocked_count,
+                                         int max_length, int max_paths, int* path_count);
+
+/**
+ * 基于概念层级推断因果方向
+ * @param graph 因果图（会被修改方向信息）
+ * @param hierarchy 概念层级（已构建）
+ * @param master 多拓扑网络
+ * @param strength_threshold 最小方向置信度阈值
+ * @return 被确定方向的边数
+ */
+int infer_causal_direction_from_hierarchy(CausalGraph* graph,
+                                          ConceptHierarchy* hierarchy,
+                                          MasterTopology* master,
+                                          float strength_threshold);
 
 #endif // CAUSAL_REASONING_H
