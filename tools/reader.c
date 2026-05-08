@@ -24,9 +24,9 @@
 #include "common.h"
 
 // ===================== 配置 =====================
-#define MAX_VOCAB 5000   // 最大不同字符数
+#define MAX_VOCAB 8000   // 最大不同字符数
 #define MAX_BIGRAM 2000  // 最大双字词数
-#define MAX_CHARS 800000 // 最大文本字符
+#define MAX_CHARS 6000000 // 最大文本字符
 #define MAX_EPOCHS 20
 #define WINDOW 4         // 滑动窗口大小（前后各看几个字）
 #define LR 0.02f
