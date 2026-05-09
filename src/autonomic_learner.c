@@ -156,8 +156,8 @@ void autonomic_request_flush(AutonomicState* state, MasterTopology* master) {
 
         // 持久化拓扑（使用已有的 master_save_state）
         int saved = master_save_state(master, path);
-        if (saved == 0) {
-            printf("[自主学习刷盘] ✓ 已保存到 %s\n", path);
+        if (saved > 0) {
+            printf("[自主学习刷盘] ✓ 已保存到 %s (%d 节点)\n", path, saved);
         } else {
             printf("[自主学习刷盘] × 保存失败\n");
         }

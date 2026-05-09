@@ -32,7 +32,7 @@
 #define AUTONOMIC_BASE_WEIGHT 0.3f
 
 /** 每次推理后未激活边的衰减率 */
-#define AUTONOMIC_DECAY_RATE 0.995f
+#define AUTONOMIC_DECAY_RATE 0.999f
 
 /** 最大连接数上限（防止单个节点连接爆炸） */
 #define AUTONOMIC_MAX_CONNECTIONS 50
