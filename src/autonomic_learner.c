@@ -372,56 +372,7 @@ void autonomic_learn_from_dialog(MasterTopology* master,
         }
     }
 
-    // 竞争衰减：本轮未激活的边
-    if (pairs_boosted > 0) {
-        int decayed = 0;
-        for (int n = 0; n < vocab->net->node_count; n++) {
-            ReasoningNode* node = vocab->net->nodes[n];
-            if (!node || node->connection_count == 0) continue;
-
-            int has_any_activated = 0;
-            for (int a = 0; a < g_activated_count; a++) {
-                if (g_activated[a].node_id == node->node_id && g_activated[a].edge_count > 0) {
-                    has_any_activated = 1;
-                    break;
-                }
-            }
-
-            if (!has_any_activated) {
-                for (int e = 0; e < node->connection_count; e++) {
-                    node->connection_confidences[e] *= AUTONOMIC_DECAY_RATE;
-                    if (node->connection_confidences[e] < 0.05f)
-                        node->connection_confidences[e] = 0.05f;
-                    decayed++;
-                }
-            } else {
-                for (int e = 0; e < node->connection_count; e++) {
-                    int is_activated = 0;
-                    for (int a = 0; a < g_activated_count; a++) {
-                        if (g_activated[a].node_id == node->node_id) {
-                            for (int ae = 0; ae < g_activated[a].edge_count; ae++) {
-                                if (g_activated[a].edge_indices[ae] == e) {
-                                    is_activated = 1;
-                                    break;
-                                }
-                            }
-                            if (is_activated) break;
-                        }
-                    }
-                    if (!is_activated) {
-                        node->connection_confidences[e] *= AUTONOMIC_DECAY_RATE;
-                        if (node->connection_confidences[e] < 0.05f)
-                            node->connection_confidences[e] = 0.05f;
-                        decayed++;
-                    }
-                }
-            }
-        }
-        printf("[自主学习] 激活 %d 对连接, 衰减 %d 条未激活边\n",
-               pairs_boosted, decayed);
-    }
-
-    // 刷盘判断
+    // 刷盘判断：边数增长到一定程度触发保存
     if (state && state->initialized) {
         autonomic_request_flush(state, master);
     }
