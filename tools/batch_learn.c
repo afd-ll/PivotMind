@@ -224,7 +224,7 @@ int main(int argc, char* argv[]) {
     printf("\n[2/4] 读取 QA 数据...\n");
     char** questions = NULL;
     char** answers = NULL;
-    int qa_count = read_qa_json(qa_path, &questions, &answers, 20000);
+    int qa_count = read_qa_json(qa_path, &questions, &answers, 100000);
     if (qa_count <= 0) {
         printf("  × QA 数据为空\n");
         master_topology_destroy(master);
@@ -240,6 +240,10 @@ int main(int argc, char* argv[]) {
     // 初始化自主学习状态
     AutonomicState state;
     autonomic_state_init(&state);
+
+    // 批量喂入时关掉中间刷盘（最后一次性保存），防止每50次更新就写一次2MB+文件
+    state.flush_threshold = 100000000;
+    state.idle_flush_seconds = 86400;  // 空闲也等一天
 
     time_t start_time = time(NULL);
     int total_pairs = 0;
@@ -275,8 +279,28 @@ int main(int argc, char* argv[]) {
     // 4. 保存
     printf("\n[4/4] 保存拓扑状态...\n");
 
-    // 强制刷盘
-    autonomic_request_flush(&state, master);
+    // 一次性保存（关掉了中间刷盘，在这里显式保存以确保完整性）
+    {
+        char path[512];
+        const char* state_path = argc > 1 ? argv[1] : "pivotmind_state.dat";
+        snprintf(path, 511, "%s", state_path);
+
+        FILE* existing = fopen(path, "rb");
+        if (existing) {
+            fclose(existing);
+            char bak[520];
+            snprintf(bak, 519, "%s.bak", path);
+            remove(bak);
+            rename(path, bak);
+        }
+
+        int saved = master_save_state(master, path);
+        if (saved > 0) {
+            printf("  ✓ 已保存 %d 节点到 %s\n", saved, path);
+        } else {
+            printf("  × 保存失败\n");
+        }
+    }
 
     // 统计
     int final_edges = 0;

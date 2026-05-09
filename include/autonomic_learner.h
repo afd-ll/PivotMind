@@ -35,7 +35,7 @@
 #define AUTONOMIC_DECAY_RATE 0.999f
 
 /** 最大连接数上限（防止单个节点连接爆炸） */
-#define AUTONOMIC_MAX_CONNECTIONS 200
+#define AUTONOMIC_MAX_CONNECTIONS 500
 
 // ==================== 并发分片锁 ====================
 

@@ -146,13 +146,23 @@ void autonomic_request_flush(AutonomicState* state, MasterTopology* master) {
 
     if (!should_flush) return;
 
-    // 执行刷盘
+    // 执行刷盘 — 先备份再覆写
     printf("[自主学习刷盘] %d 次更新, 距上次 %lds\n",
            state->pending_updates, (long)(now - state->last_flush_time));
 
     if (master) {
         char path[512];
         snprintf(path, 511, "pivotmind_state.dat");
+
+        // 备份：如果已有状态文件，先重命名，防止刷盘过程中崩了丢数据
+        FILE* existing = fopen(path, "rb");
+        if (existing) {
+            fclose(existing);
+            char bak_path[520];
+            snprintf(bak_path, 519, "%s.bak", path);
+            remove(bak_path);  // 删旧的备份
+            rename(path, bak_path);
+        }
 
         // 持久化拓扑（使用已有的 master_save_state）
         int saved = master_save_state(master, path);
@@ -334,7 +344,7 @@ void autonomic_learn_from_dialog(MasterTopology* master,
             break;
         }
     }
-    if (!vocab || !vocab->net || vocab->net->node_count < 2) return;
+    if (!vocab || !vocab->net) return;
 
     // 提取单字
     char input_chars[MAX_CHARS_PER_TEXT][8];
@@ -346,20 +356,28 @@ void autonomic_learn_from_dialog(MasterTopology* master,
     int response_count = extract_unique_chars(ai_response, response_chars, response_utf8_lens);
     if (input_count == 0 || response_count == 0) return;
 
-    // 查找节点
+    // 查找或创建节点 — 不在拓扑中的汉字自动创建
     ReasoningNode* input_nodes[MAX_CHARS_PER_TEXT];
     ReasoningNode* response_nodes[MAX_CHARS_PER_TEXT];
-    int valid_input = 0, valid_response = 0;
 
     for (int i = 0; i < input_count; i++) {
         input_nodes[i] = find_node_by_concept(vocab, input_chars[i]);
-        if (input_nodes[i]) valid_input++;
+        if (!input_nodes[i]) {
+            input_nodes[i] = huarong_net_add_node(vocab->net, input_chars[i], NULL, 0);
+            if (input_nodes[i] && vocab->node_hash) {
+                node_hash_add(vocab->node_hash, input_nodes[i]);
+            }
+        }
     }
     for (int i = 0; i < response_count; i++) {
         response_nodes[i] = find_node_by_concept(vocab, response_chars[i]);
-        if (response_nodes[i]) valid_response++;
+        if (!response_nodes[i]) {
+            response_nodes[i] = huarong_net_add_node(vocab->net, response_chars[i], NULL, 0);
+            if (response_nodes[i] && vocab->node_hash) {
+                node_hash_add(vocab->node_hash, response_nodes[i]);
+            }
+        }
     }
-    if (valid_input == 0 || valid_response == 0) return;
 
     // 核心1：输入字内部的共现边（词语内部连接）
     // 例如输入"学习" → "学"和"习"同时出现 → 建边
