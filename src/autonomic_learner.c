@@ -361,14 +361,31 @@ void autonomic_learn_from_dialog(MasterTopology* master,
     }
     if (valid_input == 0 || valid_response == 0) return;
 
-    // 核心：每对（输入字，回复字）之间建边/涨置信度
-    int pairs_boosted = 0;
+    // 核心1：输入字内部的共现边（词语内部连接）
+    // 例如输入"学习" → "学"和"习"同时出现 → 建边
+    for (int i = 0; i < input_count; i++) {
+        if (!input_nodes[i]) continue;
+        for (int j = i + 1; j < input_count; j++) {
+            if (!input_nodes[j]) continue;
+            boost_connection(vocab, input_nodes[i], input_nodes[j], state);
+        }
+    }
+
+    // 核心2：回复字内部的共现边
+    for (int i = 0; i < response_count; i++) {
+        if (!response_nodes[i]) continue;
+        for (int j = i + 1; j < response_count; j++) {
+            if (!response_nodes[j]) continue;
+            boost_connection(vocab, response_nodes[i], response_nodes[j], state);
+        }
+    }
+
+    // 核心3：输入字与回复字之间的交叉边（语义关联）
     for (int i = 0; i < input_count; i++) {
         if (!input_nodes[i]) continue;
         for (int j = 0; j < response_count; j++) {
             if (!response_nodes[j]) continue;
             boost_connection(vocab, input_nodes[i], response_nodes[j], state);
-            pairs_boosted++;
         }
     }
 
