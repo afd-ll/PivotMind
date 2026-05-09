@@ -59,14 +59,9 @@ typedef enum {
     TEMPLATE_DEEP = 5          // 深度思考模板
 } TemplateType;
 
-// 拓扑类型到模板类型的映射
+// 导入拓扑类型映射（仅保留用于类型检测）
 static TemplateType topo_type_to_template(TopologyType type) {
     switch (type) {
-        case TOPO_EMOTION:   return TEMPLATE_EMOTION;
-        case TOPO_SEMANTIC:  return TEMPLATE_KNOWLEDGE;
-        case TOPO_CONTEXT:   return TEMPLATE_QUESTION;
-        case TOPO_CULTURE:   return TEMPLATE_CREATIVE;
-        case TOPO_SYNTAX:    return TEMPLATE_DEEP;
         default:             return TEMPLATE_DEFAULT;
     }
 }
@@ -240,122 +235,13 @@ int associate_from_text(AssociativeEngine* engine, const char* text, int max_hop
     return engine->assoc_count;
 }
 
-// 增强的回复生成（支持多种生成策略）
-static void generate_enhanced_response(char* result, int max_len,
-                                       Association* assocs, int assoc_count,
-                                       TemplateType tmpl, float top_activation,
-                                       int dominant_topo) {
-    (void)dominant_topo;  // 未使用参数
-    int pos = 0;
-    int count = (assoc_count < 8) ? assoc_count : 8;
-
-    // 多样性：随机添加前缀
-    static const char* prefixes[] = {
-        "我想", "让我想想", "根据我的理解", "从这个角度看",
-        "或许", "可以说", "总的来说", "简而言之"
-    };
-    int prefix_idx = (int)((assoc_count * 17 + count * 31) % 8);
-    const char* prefix = prefixes[prefix_idx];
-
-    switch (tmpl) {
-        case TEMPLATE_QUESTION:
-            pos = snprintf(result, max_len, "%s，这个问题涉及到", prefix);
-            if (top_activation > 0.7f) {
-                pos += snprintf(result + pos, max_len - pos, "【%s】", assocs[0].concept);
-                if (count > 1) {
-                    pos += snprintf(result + pos, max_len - pos, "与【%s】",
-                                   assocs[1].concept);
-                }
-                pos += snprintf(result + pos, max_len - pos, "之间的深层联系。");
-            } else {
-                for (int i = 0; i < count && pos < max_len - 30; i++) {
-                    if (i > 0) pos += snprintf(result + pos, max_len - pos, "、");
-                    pos += snprintf(result + pos, max_len - pos, "【%s】", assocs[i].concept);
-                }
-                pos += snprintf(result + pos, max_len - pos, "等领域。");
-            }
-            break;
-
-        case TEMPLATE_EMOTION:
-            pos = snprintf(result, max_len, "%s能感受到", prefix);
-            if (top_activation > 0.6f) {
-                pos += snprintf(result + pos, max_len - pos, "【%s】对你很重要",
-                               assocs[0].concept);
-                if (count >= 2) {
-                    pos += snprintf(result + pos, max_len - pos, "，还联想到【%s】",
-                                   assocs[1].concept);
-                }
-                pos += snprintf(result + pos, max_len - pos, "。");
-            } else {
-                pos += snprintf(result + pos, max_len - pos, "关于");
-                for (int i = 0; i < count && pos < max_len - 20; i++) {
-                    if (i > 0) pos += snprintf(result + pos, max_len - pos, "和");
-                    pos += snprintf(result + pos, max_len - pos, "【%s】", assocs[i].concept);
-                }
-                pos += snprintf(result + pos, max_len - pos, "。");
-            }
-            break;
-
-        case TEMPLATE_KNOWLEDGE:
-            pos = snprintf(result, max_len, "%s", prefix);
-            pos += snprintf(result + pos, max_len - pos, "从知识角度，【%s】",
-                           assocs[0].concept);
-            if (count > 1) {
-                pos += snprintf(result + pos, max_len - pos, "与【%s】存在紧密联系",
-                               assocs[1].concept);
-            }
-            pos += snprintf(result + pos, max_len - pos, "，置信度约%.0f%%。",
-                           top_activation * 100);
-            if (count > 2 && pos < max_len - 30) {
-                pos += snprintf(result + pos, max_len - pos, "同时【%s】也值得关注。",
-                               assocs[2].concept);
-            }
-            break;
-
-        case TEMPLATE_CREATIVE:
-            pos = snprintf(result, max_len, "%s产生了有趣的联想：", prefix);
-            for (int i = 0; i < count && pos < max_len - 25; i++) {
-                if (i > 0) pos += snprintf(result + pos, max_len - pos, " -> ");
-                pos += snprintf(result + pos, max_len - pos, "【%s】", assocs[i].concept);
-            }
-            pos += snprintf(result + pos, max_len - pos, "，这是跨领域的思考！");
-            break;
-
-        case TEMPLATE_DEEP:
-            pos = snprintf(result, max_len, "%s进行深度分析：", prefix);
-            if (count >= 3) {
-                pos += snprintf(result + pos, max_len - pos, "【%s】是核心，",
-                               assocs[0].concept);
-                pos += snprintf(result + pos, max_len - pos, "连接了【%s】与【%s】",
-                               assocs[1].concept, assocs[2].concept);
-                pos += snprintf(result + pos, max_len - pos, "，形成推理链。");
-            } else {
-                for (int i = 0; i < count && pos < max_len - 20; i++) {
-                    if (i > 0) pos += snprintf(result + pos, max_len - pos, "，");
-                    pos += snprintf(result + pos, max_len - pos, "【%s】", assocs[i].concept);
-                }
-            }
-            break;
-
-        case TEMPLATE_DEFAULT:
-        default:
-            pos = snprintf(result, max_len, "%s，联想到", prefix);
-            for (int i = 0; i < count && pos < max_len - 20; i++) {
-                if (i > 0) pos += snprintf(result + pos, max_len - pos, "、");
-                pos += snprintf(result + pos, max_len - pos, "【%s】", assocs[i].concept);
-            }
-            pos += snprintf(result + pos, max_len - pos, "。");
-            break;
-    }
-}
-
-// 基于联想结果生成句子（使用增强的模板系统）
+// 基于联想结果生成句子（纯生成式，无模板）
 char* generate_from_associations(AssociativeEngine* engine, int max_len) {
     if (engine->assoc_count == 0) {
-        return strdup("我正在思考...");
+        return strdup("...");
     }
     
-    // 生成缓存键（基于前3个联想词）
+    // 生成缓存键
     char cache_key[256] = "";
     int key_len = 0;
     int count = (engine->assoc_count < 3) ? engine->assoc_count : 3;
@@ -388,53 +274,36 @@ char* generate_from_associations(AssociativeEngine* engine, int max_len) {
     char* result = (char*)malloc(max_len);
     if (!result) return strdup("...");
     result[0] = '\0';
+    int pos = 0;
 
-    // 统计各拓扑类型的激活贡献
-    float topo_activation[10] = {0};
-    int topo_count[10] = {0};
-
-    for (int i = 0; i < engine->assoc_count; i++) {
-        int t = engine->associations[i].topo_type;
-        if (t >= 0 && t < 10) {
-            topo_activation[t] += engine->associations[i].activation;
-            topo_count[t]++;
+    // 纯生成式输出：只输出联想词，按激活度排序
+    // 取激活度最高的 5 个概念
+    int show_count = (engine->assoc_count < 5) ? engine->assoc_count : 5;
+    for (int i = 0; i < show_count && pos < max_len - 10; i++) {
+        if (i > 0) {
+            pos += snprintf(result + pos, max_len - pos, "、");
         }
+        pos += snprintf(result + pos, max_len - pos, "%s",
+                       engine->associations[i].concept);
     }
 
-    // 找出主导拓扑类型（激活贡献最大）
-    int dominant_topo = 0;
-    float max_activation = 0;
-    for (int t = 0; t < 10; t++) {
-        if (topo_activation[t] > max_activation) {
-            max_activation = topo_activation[t];
-            dominant_topo = t;
+    // 存入缓存
+    if (engine->cache_count < 20) {
+        strncpy(engine->cache_keys[engine->cache_count], cache_key, 255);
+        engine->cache_keys[engine->cache_count][255] = '\0';
+        strncpy(engine->cache_values[engine->cache_count], result, 511);
+        engine->cache_values[engine->cache_count][511] = '\0';
+        engine->cache_hits[engine->cache_count] = 0;
+        engine->cache_count++;
+        if (engine->cache_next >= engine->cache_count) {
+            engine->cache_next = 0;
         }
     }
-
-    // 根据主导拓扑选择模板
-    TemplateType tmpl = topo_type_to_template((TopologyType)dominant_topo);
-    float top_activation = engine->associations[0].activation;
-
-    // 使用增强的模板生成
-    generate_enhanced_response(result, max_len,
-                             engine->associations, engine->assoc_count,
-                             tmpl, top_activation, dominant_topo);
-
-    // 存储到缓存
-    int cache_idx = engine->cache_next;
-    snprintf(engine->cache_keys[cache_idx], sizeof(engine->cache_keys[cache_idx]), "%s", cache_key);
-    snprintf(engine->cache_values[cache_idx], sizeof(engine->cache_values[cache_idx]), "%s", result);
-    engine->cache_hits[cache_idx] = 1;
-    engine->cache_next = (engine->cache_next + 1) % 20;
-    if (engine->cache_count < 20) engine->cache_count++;
-    printf("[缓存存储] 键='%s'\n", cache_key);
 
     return result;
 }
 
-// 打印联想路径
 void print_associations(AssociativeEngine* engine) {
-    printf("\n联想路径:\n");
     printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
     
     for (int i = 0; i < engine->assoc_count && i < 20; i++) {

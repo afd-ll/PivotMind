@@ -793,7 +793,7 @@ void dialog_reasoning_destroy(DialogReasoning* reasoning) {
 
 char* dialog_generate(DialogReasoning* reasoning, const char* input,
                      MemorySystem* memory, int max_len, void* sys) {
-    if (!reasoning) return strdup("我需要重新整理一下思路...");
+    if (!reasoning) return strdup("...");
     
     DialogSystem* dsys = (DialogSystem*)sys;
     
@@ -803,12 +803,11 @@ char* dialog_generate(DialogReasoning* reasoning, const char* input,
         snprintf(exact_key, sizeof(exact_key), "response:%s", input);
         MemoryEntry* exact = memory_retrieve(memory, exact_key);
         if (exact && exact->data) {
-            printf("[响应模式] 精确匹配: %s\n", (char*)exact->data);
             return strdup((char*)exact->data);
         }
     }
     
-    // 拓扑驱动生成：认知网络做联想推理
+    // 拓扑驱动生成：联想推理产出的概念
     if (dsys && dsys->master && dsys->master->sub_topo_count > 0) {
         int total_nodes = 0;
         for (int t = 0; t < dsys->master->sub_topo_count; t++) {
@@ -827,173 +826,40 @@ char* dialog_generate(DialogReasoning* reasoning, const char* input,
         }
     }
     
-    char* response = (char*)malloc(max_len);
-    if (!response) return strdup("内存不足...");
+    // 兜底：从推理结果中提取最高激活度的概念
+    if (reasoning->assoc_count > 0) {
+        char* response = (char*)malloc(max_len);
+        if (!response) return strdup("...");
+        response[0] = '\0';
+        int pos = 0;
+        
+        // 按激活值排序
+        for (int i = 0; i < reasoning->assoc_count - 1; i++) {
+            for (int j = i + 1; j < reasoning->assoc_count; j++) {
+                if (reasoning->associations[j].activation > reasoning->associations[i].activation) {
+                    DialogAssociation temp = reasoning->associations[i];
+                    reasoning->associations[i] = reasoning->associations[j];
+                    reasoning->associations[j] = temp;
+                }
+            }
+        }
+        
+        // 输出前 N 个概念
+        int show_count = (reasoning->assoc_count < 5) ? reasoning->assoc_count : 5;
+        for (int i = 0; i < show_count && pos < max_len - 10; i++) {
+            if (i > 0) pos += snprintf(response + pos, max_len - pos, "、");
+            pos += snprintf(response + pos, max_len - pos, "%s",
+                          reasoning->associations[i].concept);
+        }
+        
+        return response;
+    }
+    
+    return strdup("...");
+}
 
-    response[0] = '\0';
-    int pos = 0;
-    
-    // 按拓扑分类收集概念
-    #define MAX_PER_CATEGORY 20
-    char* semantic_concepts[MAX_PER_CATEGORY];
-    char* emotion_concepts[MAX_PER_CATEGORY];
-    char* cultural_concepts[MAX_PER_CATEGORY];
-    char* context_concepts[MAX_PER_CATEGORY];
-    char* other_concepts[MAX_PER_CATEGORY];
-    
-    int semantic_count = 0, emotion_count = 0, cultural_count = 0;
-    int context_count = 0, other_count = 0;
-    
-    float semantic_activation = 0, emotion_activation = 0;
-    float cultural_activation = 0, context_activation = 0;
-    
-    for (int i = 0; i < reasoning->assoc_count; i++) {
-        float act = reasoning->associations[i].activation;
-        char* concept = reasoning->associations[i].concept;
-        
-        if (act < ACTIVATION_THRESHOLD) continue;
-        
-        switch (reasoning->associations[i].topo_type) {
-            case TOPO_SEMANTIC:
-                if (semantic_count < MAX_PER_CATEGORY) {
-                    semantic_concepts[semantic_count++] = concept;
-                    semantic_activation += act;
-                }
-                break;
-            case TOPO_EMOTION:
-                if (emotion_count < MAX_PER_CATEGORY) {
-                    emotion_concepts[emotion_count++] = concept;
-                    emotion_activation += act;
-                }
-                break;
-            case TOPO_CULTURE:
-                if (cultural_count < MAX_PER_CATEGORY) {
-                    cultural_concepts[cultural_count++] = concept;
-                    cultural_activation += act;
-                }
-                break;
-            case TOPO_CONTEXT:
-                if (context_count < MAX_PER_CATEGORY) {
-                    context_concepts[context_count++] = concept;
-                    context_activation += act;
-                }
-                break;
-            default:
-                if (other_count < MAX_PER_CATEGORY) {
-                    other_concepts[other_count++] = concept;
-                }
-        }
-    }
-    
-    // 根据激活情况生成回复
-    
-    // 语义层回复
-    if (semantic_count > 0) {
-        semantic_activation /= semantic_count;
-        pos += snprintf(response + pos, max_len - pos, "关于这个，");
-        
-        int use_count = semantic_count > 3 ? 3 : semantic_count;
-        for (int i = 0; i < use_count; i++) {
-            pos += snprintf(response + pos, max_len - pos, "%s", semantic_concepts[i]);
-            if (i < use_count - 1) {
-                pos += snprintf(response + pos, max_len - pos, "、");
-            }
-        }
-        
-        if (semantic_activation > 0.6f) {
-            pos += snprintf(response + pos, max_len - pos, "是核心相关的概念");
-        } else {
-            pos += snprintf(response + pos, max_len - pos, "这些是相关的概念");
-        }
-    }
-    
-    // 情绪层回复
-    if (emotion_count > 0) {
-        if (pos > 0) {
-            pos += snprintf(response + pos, max_len - pos, "，我能感受到");
-        } else {
-            pos += snprintf(response + pos, max_len - pos, "我能感受到");
-        }
-        
-        int use_count = emotion_count > 2 ? 2 : emotion_count;
-        for (int i = 0; i < use_count; i++) {
-            pos += snprintf(response + pos, max_len - pos, "%s", emotion_concepts[i]);
-            if (i < use_count - 1) {
-                pos += snprintf(response + pos, max_len - pos, "和");
-            }
-        }
-    }
-    
-    // 文化层回复  
-    if (cultural_count > 0) {
-        if (pos > 0) {
-            pos += snprintf(response + pos, max_len - pos, "，从文化角度看");
-        } else {
-            pos += snprintf(response + pos, max_len - pos, "从文化角度看");
-        }
-        
-        int use_count = cultural_count > 2 ? 2 : cultural_count;
-        for (int i = 0; i < use_count; i++) {
-            pos += snprintf(response + pos, max_len - pos, "%s", cultural_concepts[i]);
-            if (i < use_count - 1) {
-                pos += snprintf(response + pos, max_len - pos, "和");
-            }
-        }
-    }
-    
-    // 上下文层回复
-    if (context_count > 0) {
-        if (pos > 0) {
-            pos += snprintf(response + pos, max_len - pos, "，在当前语境下");
-        } else {
-            pos += snprintf(response + pos, max_len - pos, "在当前语境下");
-        }
-        
-        int use_count = context_count > 2 ? 2 : context_count;
-        for (int i = 0; i < use_count; i++) {
-            pos += snprintf(response + pos, max_len - pos, "%s", context_concepts[i]);
-            if (i < use_count - 1) {
-                pos += snprintf(response + pos, max_len - pos, "、");
-            }
-        }
-    }
-    
-    // 其他层回复
-    if (other_count > 0) {
-        if (pos > 0) {
-            pos += snprintf(response + pos, max_len - pos, "，此外还涉及");
-        } else {
-            pos += snprintf(response + pos, max_len - pos, "此外还涉及");
-        }
-        
-        int use_count = other_count > 3 ? 3 : other_count;
-        for (int i = 0; i < use_count; i++) {
-            pos += snprintf(response + pos, max_len - pos, "%s", other_concepts[i]);
-            if (i < use_count - 1) {
-                pos += snprintf(response + pos, max_len - pos, "、");
-            }
-        }
-    }
-    
-    // 先检查是否是概念型知识（数学、规则等）
-    if (concept_is_math_expression(input)) {
-        printf("[概念处理] 检测到数学表达式\n");
-        char* calc_result = concept_calculate(input);
-        
-        if (calc_result) {
-            pos += snprintf(response + pos, max_len - pos, 
-                "计算结果: %s", calc_result);
-            
-            // 学习这个规则到概念拓扑
-            if (sys && ((DialogSystem*)sys)->master) {
-                concept_learn_rule(((DialogSystem*)sys)->master, input, calc_result);
-            }
-            
-            free(calc_result);
-        }
-    }
-    
-    // 临时禁用联网搜索（网络不通）
+// 临时禁用联网搜索（网络不通）
+#if 0
     /*
     // 如果知识不足，自动联网搜索
     if (pos == 0 && reasoning->assoc_count < 3) {
@@ -1059,9 +925,7 @@ char* dialog_generate(DialogReasoning* reasoning, const char* input,
         pos += snprintf(response + pos, max_len - pos, 
             "我正在思考这个问题...");
     }
-    
-    return response;
-}
+#endif
 
 // ==================== 自动学习概念到拓扑网络 ====================
 // 真正的学习应该像人脑一样，通过对话自然发生，而不是人为预先连接神经回路
