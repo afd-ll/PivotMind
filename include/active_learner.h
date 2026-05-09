@@ -54,9 +54,22 @@ void cleanup_forgotten_knowledge(ActiveLearner* learner);
 void learn_from_feedback(ActiveLearner* learner, const char* question,
                         const char* correct_answer, int is_correct);
 
-// 对话中学习
+// 对话中学习（旧接口，保留兼容）
 void learn_from_dialog(ActiveLearner* learner, const char* user_input,
                       const char* ai_response, const char* user_feedback);
+
+/**
+ * 非自主纠偏：用户反馈后的置信度修正
+ * @param learner   主动学习器
+ * @param user_input   用户输入
+ * @param ai_response  AI回复
+ * @param user_feedback  用户反馈（"correct"/"wrong"/"更好的回答:..."）
+ * 
+ * 这层只做一件事：用户说不对时压下置信度
+ * 学习本身由 autonomic_learn_from_dialog() 负责
+ */
+void feedback_correct(ActiveLearner* learner, const char* user_input,
+                     const char* ai_response, const char* user_feedback);
 
 // 统计
 void print_learning_stats(ActiveLearner* learner);

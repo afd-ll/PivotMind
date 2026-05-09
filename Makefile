@@ -46,6 +46,7 @@ ALL_SRC = \
 	src/utf8_tokenizer.c \
 	src/dialog_system.c \
 	src/active_learner.c \
+	src/autonomic_learner.c \
 	src/node_importance.c \
 	src/topology_growth.c \
 	src/catastrophic_forgetting.c \

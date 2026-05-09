@@ -698,7 +698,21 @@ void learn_from_feedback(ActiveLearner* learner, const char* question,
     pthread_mutex_unlock(&learner->mutex);
 }
 
-// ==================== 对话中学习 ====================
+// ==================== 非自主纠偏 ====================
+// 注意：学习本身已移到 autonomic_learn_from_dialog()
+// feedback_correct 只做一件事：用户说不对时压下置信度
+
+void feedback_correct(ActiveLearner* learner, const char* user_input,
+                     const char* ai_response, const char* user_feedback) {
+    // feedback_correct 是 learn_from_dialog 的语义别名
+    // 两者行为一致：都需要显式用户反馈才能操作
+    learn_from_dialog(learner, user_input, ai_response, user_feedback);
+}
+
+// ==================== 对话中学习（旧接口，保留兼容） ====================
+// 注意：此函数必须有 user_feedback 才会执行
+// 没有反馈则直接返回（不做任何事）
+// 真正的自主学习请使用 autonomic_learn_from_dialog()
 
 void learn_from_dialog(ActiveLearner* learner, const char* user_input,
                       const char* ai_response, const char* user_feedback) {

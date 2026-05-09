@@ -25,6 +25,7 @@
 #include "generative_model.h"
 #include "tensor.h"
 #include "common.h"
+#include "autonomic_learner.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1539,8 +1540,9 @@ char* dialog_process(DialogSystem* sys, const char* user_input, DialogReasoning*
             ui_print_thinking_line("学习", "已存入");
         }
         
-        if (sys->learner && user_input && response) {
-            learn_from_dialog(sys->learner, user_input, response, NULL);
+        if (sys->master && user_input && response) {
+            // 自主学习：同时激活→涨置信度（不需要反馈）
+            autonomic_learn_from_dialog(sys->master, user_input, response, NULL);
         }
         if (sys->master && user_input) {
             auto_learn_concepts(sys->master, user_input, sys->str_pool);
