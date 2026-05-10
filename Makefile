@@ -54,6 +54,7 @@ ALL_SRC = \
 	src/concept_abstraction.c \
 	src/causal_reasoning.c \
 	src/cognitive_params.c \
+	src/cognitive_controller.c \
 	src/memory_arena.c \
 	src/ui.c \
 	src/concept_processor.c \

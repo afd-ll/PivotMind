@@ -11,6 +11,7 @@
 #include "causal_reasoning.h"
 #include "active_learner.h"
 #include "cognitive_params.h"
+#include "cognitive_controller.h"
 #include <stdbool.h>
 #include <time.h>
 
@@ -177,6 +178,9 @@ typedef struct {
     float decay_rate;          // 衰减率
     CognitiveState* cognitive_state;  // 认知状态（情感/动机系统）
     float last_knowledge_quality;    // 上一轮知识质量（供CognitiveState使用）
+
+    // 认知调度中心
+    CognitiveController* controller; // 认知调度中心（可选）
 } DialogSystem;
 
 // ==================== API函数 ====================
@@ -250,7 +254,8 @@ DialogInput* dialog_parse_input(const char* text);
 void dialog_input_destroy(DialogInput* input);
 
 // 对话推理
-DialogReasoning* dialog_reason(DialogInput* input, MasterTopology* master);
+DialogReasoning* dialog_reason(DialogInput* input, MasterTopology* master,
+                               const float* intent_weights);
 void dialog_add_association(DialogReasoning* reasoning, const char* concept,
                            float activation, int topo_type, int hop_count,
                            int node_id, int from_node_id);

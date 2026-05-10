@@ -26,6 +26,7 @@
 #include "tensor.h"
 #include "common.h"
 #include "autonomic_learner.h"
+#include "cognitive_controller.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -50,6 +51,7 @@ static const char* get_confidence_level_name(CausalConfidenceLevel level);
 #define MAX_TOKENS 64
 #define MAX_ASSOCIATIONS 100
 #define MAX_RESPONSE_LENGTH 2048
+#undef MAX_PATH_LENGTH
 #define MAX_PATH_LENGTH 10
 #define ACTIVATION_THRESHOLD 0.3f
 #define DECAY_RATE 0.7f
@@ -65,6 +67,7 @@ typedef struct {
     int hop;
     pthread_mutex_t* assoc_mutex;
     volatile int* hop_propagated;
+    const float* intent_weights;  // 认知调度给出的子拓扑偏好
 } DialogTopoTask;
 
 /** Worker：在指定子拓扑内执行一跳传播 */
@@ -108,6 +111,11 @@ static void dialog_topo_worker(void* arg) {
                                   activation_multiplier *
                                   embed_factor *
                                   DECAY_RATE;
+
+            // 认知调度：乘以当前子拓扑的意图权重
+            if (task->intent_weights && sub->type >= 0 && sub->type < 10) {
+                new_activation *= task->intent_weights[sub->type];
+            }
 
             if (new_activation > ACTIVATION_THRESHOLD) {
                 if (new_activation > connected->activation)
@@ -583,7 +591,8 @@ void dialog_input_destroy(DialogInput* input) {
 
 // ==================== 对话推理 ====================
 
-DialogReasoning* dialog_reason(DialogInput* input, MasterTopology* master) {
+DialogReasoning* dialog_reason(DialogInput* input, MasterTopology* master,
+                               const float* intent_weights) {
     if (!input || !master || input->token_count == 0) return NULL;
     
     master_decay_activations(master, 0.5f);
@@ -711,6 +720,7 @@ DialogReasoning* dialog_reason(DialogInput* input, MasterTopology* master) {
             tasks[i].hop = hop;
             tasks[i].assoc_mutex = &assoc_mutex;
             tasks[i].hop_propagated = &hop_propagated;
+            tasks[i].intent_weights = intent_weights;
             th_tasks[i].func = dialog_topo_worker;
             th_tasks[i].arg = &tasks[i];
         }
@@ -1194,6 +1204,14 @@ DialogSystem* dialog_system_create(MasterTopology* master, MemorySystem* memory,
     printf("[对话系统] 因果图: %s\n", causal_graph ? "已连接" : "未连接");
     printf("[对话系统] 主动学习器: %s\n", learner ? "已连接" : "未连接");
 
+    // 创建认知调度中心
+    sys->controller = cognitive_controller_create(master, memory);
+    if (sys->controller) {
+        printf("[对话系统] 认知调度中心: 已就绪\n");
+    } else {
+        printf("[对话系统] 认知调度中心: 创建失败\n");
+    }
+
     return sys;
 }
 
@@ -1215,6 +1233,9 @@ void dialog_system_destroy(DialogSystem* sys) {
     }
     if (sys->cognitive_state) {
         cognitive_state_destroy(sys->cognitive_state);
+    }
+    if (sys->controller) {
+        cognitive_controller_destroy(sys->controller);
     }
     free(sys);
 }
@@ -1332,62 +1353,145 @@ char* dialog_process(DialogSystem* sys, const char* user_input, DialogReasoning*
     DialogInput* input = dialog_parse_input(user_input);
     DialogReasoning* reasoning = NULL;
     
+    // ===== 认知调度：计算意图向量 =====
+    const float* intent_ptr = NULL;
+    if (sys->controller) {
+        cognitive_controller_reset_round(sys->controller);
+        cognitive_controller_set_context(sys->controller, user_input, NULL);
+        compute_intent(sys->controller, NULL);
+        intent_ptr = sys->controller->intent_weights;
+        ui_print_thinking_line("调度", "认知调度已激活");
+    }
+    
     if (input && input->token_count > 0) {
-        reasoning = dialog_reason(input, sys->master);
-        
-        char assoc_info[128] = {0};
-        snprintf(assoc_info, sizeof(assoc_info), "找到 %d 个关联", reasoning->assoc_count);
-        ui_print_thinking_line("联想", assoc_info);
-        
-        // 输出推理链
-        if (reasoning->chain_length > 0) {
-            char chain_info[256] = {0};
-            int pos = 0;
-            int show_count = reasoning->chain_length > 3 ? 3 : reasoning->chain_length;
-            for (int i = 0; i < show_count; i++) {
-                pos += snprintf(chain_info + pos, sizeof(chain_info) - pos, "%s ", 
-                    reasoning->reasoning_chain[i]);
-            }
-            if (reasoning->chain_length > 3) {
-                snprintf(chain_info + pos, sizeof(chain_info) - pos, "...(+%d)", 
-                    reasoning->chain_length - 3);
-            }
-            ui_print_thinking_line("推理链", chain_info);
-        }
-        
-        // 自我验证：检查知识是否足够
-        float knowledge_quality = 0.0f;
-        if (reasoning->assoc_count > 0) {
-            float total_conf = 0.0f;
-            int count = 0;
-            for (int i = 0; i < reasoning->assoc_count && i < 10; i++) {
-                total_conf += reasoning->associations[i].activation;
-                count++;
-            }
-            knowledge_quality = count > 0 ? total_conf / count : 0.0f;
-        }
-        
-        // 自我验证结果用于指导回复生成
-        reasoning->knowledge_quality = knowledge_quality;
-        sys->last_knowledge_quality = knowledge_quality;
-        
-        // 进行自我验证
-        SelfVerificationResult verify = self_verify_knowledge(reasoning, sys->memory);
-        reasoning->is_verified = 1;
-        
-        // 如果置信度低，提示需要学习
-        if (verify.confidence < 0.4f) {
-            ui_print_thinking_line("自检", verify.suggestion);
-        }
-        
-        response = dialog_generate(reasoning, user_input, sys->memory,
-                                MAX_RESPONSE_LENGTH, sys);
-        if (out_reasoning && *out_reasoning == NULL) {
-            *out_reasoning = reasoning;
+        reasoning = dialog_reason(input, sys->master, intent_ptr);
+        if (!reasoning) {
+            response = strdup("推理失败...");
+            dialog_input_destroy(input);
         } else {
-            dialog_reasoning_destroy(reasoning);
+            // ===== 认知调度：retry 循环 =====
+            int done = 0;
+            response = NULL;
+
+            if (reasoning->assoc_count > 0) {
+                char assoc_info[128] = {0};
+                snprintf(assoc_info, sizeof(assoc_info), "找到 %d 个关联", reasoning->assoc_count);
+                ui_print_thinking_line("联想", assoc_info);
+            }
+
+            while (!done) {
+                // --- 自我验证：检查知识是否足够 ---
+                float knowledge_quality = 0.0f;
+                if (reasoning->assoc_count > 0) {
+                    float total_conf = 0.0f;
+                    int count = 0;
+                    for (int i = 0; i < reasoning->assoc_count && i < 10; i++) {
+                        total_conf += reasoning->associations[i].activation;
+                        count++;
+                    }
+                    knowledge_quality = count > 0 ? total_conf / count : 0.0f;
+                }
+                reasoning->knowledge_quality = knowledge_quality;
+                sys->last_knowledge_quality = knowledge_quality;
+
+                SelfVerificationResult verify = self_verify_knowledge(reasoning, sys->memory);
+                reasoning->is_verified = 1;
+                if (verify.confidence < 0.4f) {
+                    ui_print_thinking_line("自检", verify.suggestion);
+                }
+
+                // --- 生成回复 ---
+                if (response) {
+                    free(response);
+                    response = NULL;
+                }
+                response = dialog_generate(reasoning, user_input, sys->memory,
+                                        MAX_RESPONSE_LENGTH, sys);
+
+                // --- 如果没有认知调度器，直接跳出循环 ---
+                if (!sys->controller) {
+                    done = 1;
+                    break;
+                }
+
+                // --- 构建草案用于内感受评估 ---
+                PathResult draft;
+                memset(&draft, 0, sizeof(draft));
+                draft.topo_id = (reasoning->assoc_count > 0)
+                                ? reasoning->associations[0].topo_type : 0;
+                draft.length = (reasoning->assoc_count < MAX_PATH_LENGTH)
+                               ? reasoning->assoc_count : MAX_PATH_LENGTH;
+                draft.act_sum = 0.0f;
+                draft.conf_sum = 0.0f;
+                for (int i = 0; i < draft.length; i++) {
+                    draft.node_ids[i] = reasoning->associations[i].node_id;
+                    draft.act_sum += reasoning->associations[i].activation;
+                }
+                draft.score = (draft.length > 0) ? draft.act_sum / draft.length : 0.0f;
+
+                // --- 内感受评估 ---
+                float satisfaction = evaluate_draft(sys->controller, &draft, draft.length);
+
+                // --- 修正判定 ---
+                RetryStatus retry_status = revise_and_retry(sys->controller, &draft, satisfaction);
+
+                if (retry_status == RETRY_OK) {
+                    done = 1;
+                    break;
+                }
+
+                if (retry_status == RETRY_FAILED) {
+                    if (sys->controller->retry_count >= sys->controller->max_retry) {
+                        ui_print_thinking_line("调度", "已达修正上限，强制输出");
+                    }
+                    done = 1;
+                    break;
+                }
+
+                // --- RETRY_FROM_POOL: 从当前推理结果重排（不重搜） ---
+                if (retry_status == RETRY_FROM_POOL) {
+                    ui_print_thinking_line("调度", "修正: 候选池重排");
+                    // 当前推理结果不变，仅用新意图权重重新生成回复
+                    // （未来接入束搜索候选池后，此处改为池内重选）
+                    continue;
+                }
+
+                // --- RETRY_WITH_SEARCH: 缩域重搜 ---
+                if (retry_status == RETRY_WITH_SEARCH) {
+                    ui_print_thinking_line("调度", "修正: 缩域重搜");
+                    // 释放旧推理，用新意图权重重新搜索
+                    if (response) {
+                        free(response);
+                        response = NULL;
+                    }
+                    dialog_reasoning_destroy(reasoning);
+                    reasoning = dialog_reason(input, sys->master,
+                                             sys->controller->intent_weights);
+                    if (!reasoning) {
+                        response = strdup("重搜失败...");
+                        done = 1;
+                        break;
+                    }
+
+                    // 重新记录关联信息（仅日志，非首次不重打推理链）
+                    if (reasoning->assoc_count > 0) {
+                        char assoc_info[128] = {0};
+                        snprintf(assoc_info, sizeof(assoc_info), "重搜: %d 个关联",
+                                 reasoning->assoc_count);
+                        ui_print_thinking_line("联想", assoc_info);
+                    }
+                    continue;  // 回到循环顶部重新生成
+                }
+            }  // while (!done)
+
+            // 循环结束后处理 lifecycle
+            if (out_reasoning && *out_reasoning == NULL) {
+                *out_reasoning = reasoning;
+            } else {
+                dialog_reasoning_destroy(reasoning);
+            }
+            dialog_input_destroy(input);
         }
-        dialog_input_destroy(input);
     } else {
         response = strdup("我理解了，但暂时不知道如何回答。");
         sys->last_knowledge_quality = 0.0f;
@@ -1464,6 +1568,13 @@ char* dialog_process(DialogSystem* sys, const char* user_input, DialogReasoning*
         interaction.timestamp = time(NULL);
         // 使用 knowledge_quality 作为 outcome 信号
         cognitive_state_update(sys->cognitive_state, &interaction, sys->last_knowledge_quality);
+    }
+
+    // === 认知调度快照（供下轮使用）===
+    if (sys->controller && response) {
+        cognitive_controller_snapshot(sys->controller, sys->last_knowledge_quality);
+        // 存储本轮回复供下轮连贯性计算
+        // （memory系统已存储，调度中心通过memory查询）
     }
 
     ui_print_thinking_end();
