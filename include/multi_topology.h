@@ -233,7 +233,7 @@ void master_visualize_cross_links(MasterTopology* master);
  * 贪心走边路径生成
  *
  * 从起始节点出发，沿边选取最优下一步，生成有序路径。
- * 选择依据：α×边权重 + β×边置信度 + γ×边动机 + δ×目标激活 + ε×目标置信 + ζ×目标效价
+ * 混合评分：加法(边权重+边置信+边动机+目标激活+目标置信) × 乘法(效价调节因子)
  *
  * @param sub 子拓扑
  * @param start_node_id 起始节点ID
