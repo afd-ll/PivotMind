@@ -836,14 +836,13 @@ char* dialog_generate(DialogReasoning* reasoning, const char* input,
         }
     }
     
-    // 兜底：从推理结果中提取最高激活度的概念
+    // 兜底：从推理结果中提取最高激活度的概念 → 走边生成
     if (reasoning->assoc_count > 0) {
-        char* response = (char*)malloc(max_len);
+        char* response = (char*)calloc(max_len, 1);
         if (!response) return strdup("...");
-        response[0] = '\0';
         int pos = 0;
-        
-        // 按激活值排序
+
+        // 按激活值排序（找最佳起点）
         for (int i = 0; i < reasoning->assoc_count - 1; i++) {
             for (int j = i + 1; j < reasoning->assoc_count; j++) {
                 if (reasoning->associations[j].activation > reasoning->associations[i].activation) {
@@ -853,15 +852,74 @@ char* dialog_generate(DialogReasoning* reasoning, const char* input,
                 }
             }
         }
-        
-        // 输出前 N 个概念
-        int show_count = (reasoning->assoc_count < 5) ? reasoning->assoc_count : 5;
-        for (int i = 0; i < show_count && pos < max_len - 10; i++) {
-            if (i > 0) pos += snprintf(response + pos, max_len - pos, "、");
-            pos += snprintf(response + pos, max_len - pos, "%s",
-                          reasoning->associations[i].concept);
+
+        // ===== 走边生成路径 =====
+        // 从最高激活节点出发，沿边走，六维评分选下一步
+        unsigned char* global_visited = NULL;
+        int global_bm_size = 0;
+        int max_path = 20;
+
+        for (int start_i = 0; start_i < reasoning->assoc_count && start_i < 5 && pos < max_len - 10; start_i++) {
+            DialogAssociation* assoc = &reasoning->associations[start_i];
+            if (assoc->activation < 0.1f) continue;
+
+            SubTopology* sub = master_get_sub_topology_by_type(
+                dsys->master, assoc->topo_type);
+            if (!sub || !sub->net || sub->net->node_count <= 0) continue;
+
+            int start_id = assoc->node_id;
+            if (start_id < 0 || start_id >= sub->net->node_count ||
+                !sub->net->nodes[start_id]) continue;
+
+            // 如果已被之前的起点访问过，跳过
+            if (global_visited) {
+                if (start_id < global_bm_size * 8 &&
+                    (global_visited[start_id / 8] & (unsigned char)(1 << (start_id % 8))))
+                    continue;
+            }
+
+            // 贪心走边
+            int path_nodes[32];
+            float path_scores[32];
+            int path_len = topology_walk_greedy(
+                sub, start_id, path_nodes, path_scores,
+                max_path < max_len ? max_path : max_len,
+                global_visited);
+
+            if (path_len <= 1) continue;
+
+            // 分配全局 visited（跨起点共享）
+            if (!global_visited && sub->net->node_count > 0) {
+                global_bm_size = (sub->net->node_count + 7) / 8;
+                global_visited = (unsigned char*)calloc(global_bm_size, 1);
+                if (global_visited) {
+                    for (int s = 0; s < start_i; s++) {
+                        int pid = reasoning->associations[s].node_id;
+                        if (pid >= 0 && pid < sub->net->node_count)
+                            global_visited[pid / 8] |= (unsigned char)(1 << (pid % 8));
+                    }
+                }
+            }
+
+            // 路径转输出（从路径[1]开始，路径[0]是起点本身）
+            for (int p = 1; p < path_len && pos < max_len - 10; p++) {
+                int nid = path_nodes[p];
+                if (nid < 0 || nid >= sub->net->node_count) continue;
+                ReasoningNode* node = sub->net->nodes[nid];
+                if (!node || !node->concept) continue;
+                pos += snprintf(response + pos, max_len - pos, "%s", node->concept);
+            }
+
+            if (pos >= 5) break;
         }
-        
+
+        if (global_visited) free(global_visited);
+
+        // 兜底：走边没走出结果，输出最高激活概念
+        if (pos == 0 && reasoning->assoc_count > 0) {
+            snprintf(response, max_len, "%s", reasoning->associations[0].concept);
+        }
+
         return response;
     }
     

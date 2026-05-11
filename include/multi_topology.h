@@ -228,6 +228,25 @@ void master_get_system_status(MasterTopology* master,
 void master_visualize_topology(MasterTopology* master, int topo_id);
 void master_visualize_cross_links(MasterTopology* master);
 
+// ========== 走边路径生成 ==========
+/**
+ * 贪心走边路径生成
+ *
+ * 从起始节点出发，沿边选取最优下一步，生成有序路径。
+ * 选择依据：α×边权重 + β×边置信度 + γ×边动机 + δ×目标激活 + ε×目标置信 + ζ×目标效价
+ *
+ * @param sub 子拓扑
+ * @param start_node_id 起始节点ID
+ * @param path_out 输出路径节点ID数组（长度≥max_len）
+ * @param scores_out 输出每步综合评分（长度≥max_len），可传NULL
+ * @param max_len 最大路径长度
+ * @param visited 已访问标记位图，可传NULL（内部临时分配）
+ * @return 路径长度，0表示无有效路径
+ */
+int topology_walk_greedy(SubTopology* sub, int start_node_id,
+                         int* path_out, float* scores_out,
+                         int max_len, unsigned char* visited);
+
 // ========== 状态持久化 ==========
 
 int master_save_state(MasterTopology* master, const char* file_path);

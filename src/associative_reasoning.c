@@ -240,26 +240,8 @@ char* generate_from_associations(AssociativeEngine* engine, int max_len) {
     if (engine->assoc_count == 0) {
         return strdup("...");
     }
-    
-    // 生成缓存键
-    char cache_key[256] = "";
-    int key_len = 0;
-    int count = (engine->assoc_count < 3) ? engine->assoc_count : 3;
-    for (int i = 0; i < count; i++) {
-        key_len += snprintf(cache_key + key_len, sizeof(cache_key) - key_len, 
-                          "%s%s", (i > 0 ? ":" : ""), engine->associations[i].concept);
-    }
-    
-    // 查找缓存
-    for (int i = 0; i < engine->cache_count; i++) {
-        if (strcmp(engine->cache_keys[i], cache_key) == 0) {
-            engine->cache_hits[i]++;
-            char* cached_result = strdup(engine->cache_values[i]);
-            return cached_result;
-        }
-    }
 
-    // 按激活值排序
+    // 按激活值排序（找最佳起点）
     for (int i = 0; i < engine->assoc_count - 1; i++) {
         for (int j = i + 1; j < engine->assoc_count; j++) {
             if (engine->associations[j].activation > engine->associations[i].activation) {
@@ -271,33 +253,93 @@ char* generate_from_associations(AssociativeEngine* engine, int max_len) {
     }
 
     // 分配结果缓冲区
-    char* result = (char*)malloc(max_len);
+    char* result = (char*)calloc(max_len, 1);
     if (!result) return strdup("...");
-    result[0] = '\0';
-    int pos = 0;
 
-    // 纯生成式输出：只输出联想词，按激活度排序
-    // 取激活度最高的 5 个概念
-    int show_count = (engine->assoc_count < 5) ? engine->assoc_count : 5;
-    for (int i = 0; i < show_count && pos < max_len - 10; i++) {
-        if (i > 0) {
-            pos += snprintf(result + pos, max_len - pos, "、");
+    // ===== 走边生成路径 =====
+    // 从最高激活节点出发，沿边贪心走到下一个最优节点
+    // 六个维度评分：边(权重+置信+动机) + 节点(激活+置信+效价)
+    int pos = 0;
+    unsigned char* global_visited_bitmap = NULL;  // 跨起点共享
+    int max_path = 20;  // 最多走20步
+
+    for (int start_i = 0; start_i < engine->assoc_count && start_i < 5 && pos < max_len - 10; start_i++) {
+        Association* assoc = &engine->associations[start_i];
+
+        // 跳过激活值太低的起点
+        if (assoc->activation < 0.1f) continue;
+
+        // 在对应子拓扑中查找此概念对应的节点
+        SubTopology* sub = master_get_sub_topology_by_type(
+            engine->topology, assoc->topo_type);
+        if (!sub || !sub->net || !sub->node_hash) continue;
+
+        ReasoningNode* start_node = node_hash_find(sub->node_hash, assoc->concept);
+        if (!start_node) continue;
+
+        int start_id = start_node->node_id;
+        if (start_id < 0 || start_id >= sub->net->node_count) continue;
+
+        // 如果已被之前的起点走过，跳过
+        if (global_visited_bitmap) {
+            int bm_size = (sub->net->node_count + 7) / 8;
+            if (start_id < bm_size * 8) {
+                if (global_visited_bitmap[start_id / 8] & (unsigned char)(1 << (start_id % 8)))
+                    continue;
+            }
         }
-        pos += snprintf(result + pos, max_len - pos, "%s",
-                       engine->associations[i].concept);
+
+        // 贪心走边
+        int path_nodes[32];
+        float path_scores[32];
+        int path_len = topology_walk_greedy(
+            sub, start_id, path_nodes, path_scores,
+            max_path < max_len ? max_path : max_len,
+            global_visited_bitmap);
+
+        if (path_len <= 1) continue;  // 只有起点，无有效路径
+
+        // 收集全局 visited 位图（跨起点重用）
+        if (!global_visited_bitmap && path_len > 1) {
+            int bm_size = (sub->net->node_count + 7) / 8;
+            global_visited_bitmap = (unsigned char*)calloc(bm_size, 1);
+            if (global_visited_bitmap) {
+                // 重走一遍路径，把走过的节点都标记上
+                for (int s = 0; s < start_i; s++) {
+                    Association* prev = &engine->associations[s];
+                    SubTopology* prev_sub = master_get_sub_topology_by_type(
+                        engine->topology, prev->topo_type);
+                    if (prev_sub && prev_sub->node_hash) {
+                        ReasoningNode* pn = node_hash_find(prev_sub->node_hash, prev->concept);
+                        if (pn && pn->node_id >= 0 && pn->node_id < prev_sub->net->node_count) {
+                            global_visited_bitmap[pn->node_id / 8] |=
+                                (unsigned char)(1 << (pn->node_id % 8));
+                        }
+                    }
+                }
+            }
+        }
+
+        // 将路径转换输出
+        // 路径[0]是起点（已在输出中或不需要），从路径[1]开始是走边结果
+        for (int p = 1; p < path_len && pos < max_len - 10; p++) {
+            int nid = path_nodes[p];
+            if (nid < 0 || nid >= sub->net->node_count) continue;
+            ReasoningNode* node = sub->net->nodes[nid];
+            if (!node || !node->concept) continue;
+
+            pos += snprintf(result + pos, max_len - pos, "%s", node->concept);
+        }
+
+        // 如果已经生成了足够长的输出，不再尝试更多起点
+        if (pos >= 5) break;
     }
 
-    // 存入缓存
-    if (engine->cache_count < 20) {
-        strncpy(engine->cache_keys[engine->cache_count], cache_key, 255);
-        engine->cache_keys[engine->cache_count][255] = '\0';
-        strncpy(engine->cache_values[engine->cache_count], result, 511);
-        engine->cache_values[engine->cache_count][511] = '\0';
-        engine->cache_hits[engine->cache_count] = 0;
-        engine->cache_count++;
-        if (engine->cache_next >= engine->cache_count) {
-            engine->cache_next = 0;
-        }
+    if (global_visited_bitmap) free(global_visited_bitmap);
+
+    // 兜底：如果走边没走出任何结果，输出最高激活的概念
+    if (pos == 0 && engine->assoc_count > 0) {
+        snprintf(result, max_len, "%s", engine->associations[0].concept);
     }
 
     return result;

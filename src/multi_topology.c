@@ -967,6 +967,124 @@ char* master_generate_response(MasterTopology* master,
     return result;
 }
 
+// ==================== 走边贪心路径生成 ====================
+
+/**
+ * 六维评分常量
+ *
+ * 边三维：逻辑强度、置信度、动机倾向
+ * 节点三维：激活值、置信度、效价
+ */
+#define EDGE_WALK_W_WEIGHT      0.25f
+#define EDGE_WALK_W_CONF        0.20f
+#define EDGE_WALK_W_BIAS        0.10f
+#define EDGE_WALK_W_ACTIVATION  0.25f
+#define EDGE_WALK_W_NODE_CONF   0.10f
+#define EDGE_WALK_W_VALENCE     0.10f
+
+/** 走边最低得分阈值 — 低于此值停止继续走 */
+#define EDGE_WALK_MIN_SCORE     0.05f
+
+int topology_walk_greedy(SubTopology* sub, int start_node_id,
+                         int* path_out, float* scores_out,
+                         int max_len, unsigned char* visited) {
+    if (!sub || !sub->net || !path_out || max_len <= 0) return 0;
+
+    HuarongTopologyNet* net = sub->net;
+    int node_count = net->node_count;
+    if (node_count <= 0) return 0;
+
+    // visited 位图：每8个节点用1字节标记
+    int bitmap_size = (node_count + 7) / 8;
+    unsigned char* local_visited = NULL;
+    if (!visited) {
+        local_visited = (unsigned char*)calloc(bitmap_size, 1);
+        if (!local_visited) return 0;
+        visited = local_visited;
+    }
+
+    // 有效性检查：起点必须在范围内
+    if (start_node_id < 0 || start_node_id >= node_count ||
+        !net->nodes[start_node_id]) {
+        if (local_visited) free(local_visited);
+        return 0;
+    }
+
+    int path_len = 0;
+    int current_id = start_node_id;
+
+    // 标记起点为已访问并写入路径
+    visited[current_id / 8] |= (unsigned char)(1 << (current_id % 8));
+    path_out[path_len] = current_id;
+    if (scores_out) scores_out[path_len] = 1.0f;
+    path_len++;
+
+    // 贪心走边循环
+    while (path_len < max_len) {
+        ReasoningNode* current = net->nodes[current_id];
+        if (!current || current->connection_count <= 0) break;
+
+        int best_next_id = -1;
+        float best_score = -1.0f;
+
+        for (int i = 0; i < current->connection_count; i++) {
+            ReasoningNode* target = current->connections[i];
+            if (!target) continue;
+            int tid = target->node_id;
+            if (tid < 0 || tid >= node_count) continue;
+
+            // 跳过已访问节点（防循环）
+            if (visited[tid / 8] & (unsigned char)(1 << (tid % 8))) continue;
+
+            // --- 边三维 ---
+            float edge_weight = current->connection_weights[i];
+
+            float edge_conf = 0.0f;
+            if (current->connection_confidences && i < current->connection_count)
+                edge_conf = current->connection_confidences[i];
+            else
+                edge_conf = edge_weight;  // 兜底
+
+            float edge_bias = 0.0f;
+            if (current->connection_motivational_bias && i < current->connection_count)
+                edge_bias = current->connection_motivational_bias[i];
+
+            // --- 目标节点三维 ---
+            float node_act   = target->activation;
+            float node_conf  = target->confidence;
+            // 效价 [-1,1] → 归一化到 [0,1]
+            float node_val   = (target->valence + 1.0f) * 0.5f;
+
+            // 六维合成得分
+            float score =
+                EDGE_WALK_W_WEIGHT     * edge_weight +
+                EDGE_WALK_W_CONF       * edge_conf   +
+                EDGE_WALK_W_BIAS       * edge_bias   +
+                EDGE_WALK_W_ACTIVATION * node_act    +
+                EDGE_WALK_W_NODE_CONF  * node_conf   +
+                EDGE_WALK_W_VALENCE    * node_val;
+
+            if (score > best_score) {
+                best_score = score;
+                best_next_id = tid;
+            }
+        }
+
+        // 无合适的下一步或得分过低
+        if (best_next_id < 0 || best_score < EDGE_WALK_MIN_SCORE) break;
+
+        // 走一步
+        current_id = best_next_id;
+        visited[current_id / 8] |= (unsigned char)(1 << (current_id % 8));
+        path_out[path_len] = current_id;
+        if (scores_out) scores_out[path_len] = best_score;
+        path_len++;
+    }
+
+    if (local_visited) free(local_visited);
+    return path_len;
+}
+
 // ==================== 可视化实现 ====================
 
 void master_visualize_topology(MasterTopology* master, int topo_id) {
