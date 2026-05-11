@@ -180,7 +180,94 @@ reader 的共现建边逻辑直接内化到 `autonomic_learner` 中：
 | 废弃 | `tools/reader.c` | 功能内化到自主层，不再需要独立工具 |
 | 更新 | `Makefile` | 添加新文件编译 |
 | 保留 | `src/memory_system.c` | 不改，作为持久化层 |
+|| 新建 | `src/cognitive_controller.c` | 认知调度中心：意图向量+retry循环+内感受评估 |
+|| 改造 | `src/dialog_system.c` | 集成认知调度、走边路径生成 |
+|| 改造 | `src/associative_reasoning.c` | generate_from_associations 改用走边路径生成 |
+|| 改造 | `src/multi_topology.c` | 新增 topology_walk_greedy 走边核心函数 |
 
----
+## 七、认知调度中心
+
+位于记忆系统和子拓扑之间，每轮对话计算意图向量，指导各子拓扑的搜索方向。
+
+### 流程
+
+```
+用户输入
+    ↓
+compute_intent()
+  └─ 上下文关联度 × context_bias
+     └─ 新颖性因子 × novelty_bias
+        └─ 效价偏好 × valence_bias
+           └─ 连贯性奖励 × coherence_target
+              → 归一化意图向量
+    ↓
+dialog_reason(..., intent_weights)
+  └─ 每个子拓扑 × 对应权重
+    ↓
+do/while(retry 循环):
+  ├─ self_verify_knowledge()
+  ├─ dialog_generate() → response
+  ├─ evaluate_draft()
+  │   30%效价 + 40%连贯性 + 30%激活充足性
+  └─ revise_and_retry()
+       第1次: RETRY_FROM_POOL（候选池重排，不重搜）
+       第2次: RETRY_WITH_SEARCH（缩域重搜）
+       第3次: RETRY_FAILED（强制输出）
+    ↓
+cognitive_controller_snapshot()
+  └─ 保存 prev_intent_weights + prev_satisfaction
+```
+
+### 三级降级策略
+
+| 修正次数 | 策略 | 代价 |
+|----------|------|------|
+| 1 | 候选池重排（重新排序已有路径） | 极低，不触发新推理 |
+| 2 | 缩域重搜（调整意图权重后重新推理） | 中，需要新推理 |
+| 3 | 强制输出（已达上限） | 最低，直接输出已有结果 |
+
+## 八、走边路径生成
+
+### 问题
+
+传统输出逻辑：激活传播 → 排序取 top-N 节点 → 顿号连接
+→ 输出"人、工、智、能、是"，而不是"人工智能是"
+
+网络中有 1.2M+ 条边，每条边编码了节点间的顺序关系和置信度。
+这些边不应该只用于激活传播，也应该用于输出生成。
+
+### 方案
+
+从最高激活节点出发，沿边贪心走到下一个最优节点：
+
+```
+从起点出发:
+  遍历每条出边，计算六维混合评分:
+    base_score = 0.28×边权重 + 0.22×边置信 + 0.11×边动机
+               + 0.28×目标激活 + 0.11×目标置信
+    valence_modifier = 1.0 + 0.6 × 目标效价
+    final_score = base_score × valence_modifier
+  选最高分 → 走一步 → 标记已访问 → 继续
+  直到无下一步或得分<0.05
+```
+
+### 混合评分设计
+
+| 维度 | 类型 | 权重 | 说明 |
+|------|------|------|------|
+| 边逻辑强度 | 加法 | 0.28 | 基础连接强度 |
+| 边置信度 | 加法 | 0.22 | 经过学习积累的置信度 |
+| 边动机倾向 | 加法 | 0.11 | 用户偏好的动机偏置 |
+| 目标节点激活 | 加法 | 0.28 | 当前推理中的激活值 |
+| 目标节点置信 | 加法 | 0.11 | 节点自身稳定度 |
+| 目标节点效价 | 乘法 | 0.6 | 乘法调节因子，-1→砍60%，+1→提升60% |
+
+加法确保每个维度独立贡献，乘法让效价极端值时有一票否决能力。
+
+### 关键函数
+
+- `topology_walk_greedy()` — `src/multi_topology.c`，核心走边算法
+- `generate_from_associations()` — `src/associative_reasoning.c`，联想引擎输出改用走边
+- `dialog_generate()` — `src/dialog_system.c`，兜底输出改用走边
 
 *本文件与 README.md 中的项目状态同步更新。*

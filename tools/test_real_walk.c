@@ -36,12 +36,13 @@ static void test_real_walk(MasterTopology* master, const char* start_concept, in
         for (int i = 0; i < start->connection_count && printed < 5; i++) {
             ReasoningNode* target = start->connections[i];
             if (!target || !target->concept) continue;
-            float score = 0.25f * start->connection_weights[i]
-                        + 0.20f * (start->connection_confidences ? start->connection_confidences[i] : start->connection_weights[i])
-                        + 0.10f * (start->connection_motivational_bias ? start->connection_motivational_bias[i] : 0.0f)
-                        + 0.25f * target->activation
-                        + 0.10f * target->confidence
-                        + 0.10f * (target->valence + 1.0f) * 0.5f;
+            float score = 0.28f * start->connection_weights[i]
+                        + 0.22f * (start->connection_confidences ? start->connection_confidences[i] : start->connection_weights[i])
+                        + 0.11f * (start->connection_motivational_bias ? start->connection_motivational_bias[i] : 0.0f)
+                        + 0.28f * target->activation
+                        + 0.11f * target->confidence;
+            float vmod = 1.0f + 0.6f * target->valence;
+            score *= vmod;
             printf("    → %s (权重=%.3f conf=%.3f 目标激活=%.3f 综合=%.4f)\n",
                    target->concept,
                    start->connection_weights[i],
