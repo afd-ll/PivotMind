@@ -99,6 +99,8 @@ MasterTopology* master_topology_create(int max_sub_topos) {
         return NULL;
     }
 
+    pthread_rwlock_init(&master->rwlock, NULL);
+
     return master;
 }
 
@@ -148,6 +150,8 @@ void master_topology_destroy(MasterTopology* master) {
         thread_pool_destroy(master->thread_pool);
         master->thread_pool = NULL;
     }
+
+    pthread_rwlock_destroy(&master->rwlock);
 
     free(master);
 }

@@ -142,6 +142,8 @@ HuarongTopologyNet* huarong_net_create(int max_nodes, int max_state_history) {
     net->max_state_history = max_state_history;
     net->learning_rate = 0.01f;
     net->is_training = 0;
+
+    pthread_mutex_init(&net->mutex, NULL);
     
     return net;
 }
@@ -160,6 +162,8 @@ void huarong_net_destroy(HuarongTopologyNet* net) {
     if (net->initial_state) huarong_state_destroy(net->initial_state);
     if (net->target_state) huarong_state_destroy(net->target_state);
     
+    pthread_mutex_destroy(&net->mutex);
+    
     free(net);
 }
 
@@ -169,8 +173,11 @@ ReasoningNode* huarong_net_add_node(HuarongTopologyNet* net,
                                    int feature_dim) {
     if (!net || !concept) return NULL;
     
+    pthread_mutex_lock(&net->mutex);
+    
     // 检查是否已达到最大容量
     if (net->node_count >= net->max_nodes || net->nodes == NULL) {
+        pthread_mutex_unlock(&net->mutex);
         return NULL;
     }
     
@@ -180,6 +187,8 @@ ReasoningNode* huarong_net_add_node(HuarongTopologyNet* net,
     if (node) {
         net->nodes[net->node_count++] = node;
     }
+    
+    pthread_mutex_unlock(&net->mutex);
     
     return node;
 }
@@ -192,15 +201,18 @@ int huarong_net_add_connection(HuarongTopologyNet* net,
         return -1;
     }
 
+    pthread_mutex_lock(&net->mutex);
+
     ReasoningNode* from_node = net->nodes[from_node_id];
     ReasoningNode* to_node = net->nodes[to_node_id];
 
-    if (!from_node || !to_node) return -1;
+    if (!from_node || !to_node) { pthread_mutex_unlock(&net->mutex); return -1; }
 
     // 检查连接是否已存在
     for (int i = 0; i < from_node->connection_count; i++) {
         if (from_node->connections[i] == to_node) {
             from_node->connection_weights[i] = weight;
+            pthread_mutex_unlock(&net->mutex);
             return 0;
         }
     }
@@ -222,6 +234,7 @@ int huarong_net_add_connection(HuarongTopologyNet* net,
     from_node->connection_confidences[from_node->connection_count] = 0.5f;
     from_node->connection_count++;
 
+    pthread_mutex_unlock(&net->mutex);
     return 0;
 }
 

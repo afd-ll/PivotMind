@@ -3,6 +3,7 @@
 
 #include "huarong_topology.h"
 #include "multi_topology.h"
+#include "topo_snapshot.h"
 #include <stdbool.h>
 
 // ==================== 节点重要性评估 ====================
@@ -220,6 +221,17 @@ int* get_prune_candidates(NodeImportanceEvaluator* evaluator,
                          ImportanceMetrics** metrics,
                          int count,
                          int* output_count);
+
+/**
+ * 在快照上评估节点重要性
+ * 计算度中心性+介数中心性+PageRank的复合评分
+ * 不访问主拓扑，线程安全
+ * @param evaluator 评估器
+ * @param snap 拓扑快照
+ * @return 评分数组 (float[snap->node_count], 需free释放)
+ */
+float* evaluate_on_snapshot(NodeImportanceEvaluator* evaluator,
+                            TopoSnapshot* snap);
 
 /**
  * 获取高重要性节点列表

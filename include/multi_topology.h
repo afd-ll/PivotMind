@@ -5,6 +5,7 @@
 #include "node_hash.h"
 #include "string_pool.h"
 #include "thread_pool.h"
+#include <pthread.h>
 #include <time.h>
 
 // ==================== 多拓扑嵌套架构 ====================
@@ -124,6 +125,9 @@ typedef struct MasterTopology {
     // ========== 线程池（并行推理引擎核心） ==========
     struct ThreadPool* thread_pool;   // 共享线程池，首次并行时懒创建
     int parallel_mode;                // 0=串行（默认） 1=拓扑级并行 2=节点级并行
+
+    // ========== 线程安全 ==========
+    pthread_rwlock_t rwlock;          // 读写锁：读=快照/推理 写=对话修改
 } MasterTopology;
 
 // ==================== API函数声明 ====================

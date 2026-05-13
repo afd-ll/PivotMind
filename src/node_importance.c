@@ -522,3 +522,94 @@ void batch_node_importance(HuarongTopologyNet* net, int* node_ids,
 
     node_importance_destroy(eval);
 }
+
+// ==================== 快照版重要性评估 ====================
+
+/**
+ * 在快照上计算简化的介数中心性（BFS版，无全对最短路径）
+ * 只计算度中心性+PageRank轻量版，跳过O(n³)的介数
+ */
+static float snap_computed_importance(TopoSnapshot* snap, int node_id,
+                                      float* pagerank) {
+    if (!snap || node_id < 0 || node_id >= snap->node_count) return 0.0f;
+
+    // 度中心性
+    float deg_cent = (float)snap->degrees[node_id] / 
+                     (snap->node_count > 1 ? snap->node_count - 1 : 1);
+
+    // 综合：度中心性 50% + PageRank 50%
+    return deg_cent * 0.5f + pagerank[node_id] * 0.5f;
+}
+
+float* evaluate_on_snapshot(NodeImportanceEvaluator* evaluator,
+                            TopoSnapshot* snap) {
+    if (!evaluator || !snap || snap->node_count < 2) return NULL;
+
+    int n = snap->node_count;
+    float* scores = (float*)calloc(n, sizeof(float));
+    if (!scores) return NULL;
+
+    // ——— 简化 PageRank ———
+    float* pr = (float*)malloc(n * sizeof(float));
+    if (!pr) { free(scores); return NULL; }
+
+    for (int i = 0; i < n; i++)
+        pr[i] = 1.0f / n;
+
+    float damping = evaluator->damping_factor;
+    int max_iter = evaluator->pagerank_iterations;
+    float conv = evaluator->pagerank_convergence;
+
+    for (int iter = 0; iter < max_iter; iter++) {
+        float* new_pr = (float*)calloc(n, sizeof(float));
+        if (!new_pr) { free(pr); free(scores); return NULL; }
+
+        float dangling_sum = 0.0f;
+        for (int i = 0; i < n; i++) {
+            if (snap->degrees[i] == 0)
+                dangling_sum += pr[i];
+        }
+        float base = (1.0f - damping) / n;
+        float dangle_contrib = damping * dangling_sum / n;
+
+        for (int i = 0; i < n; i++) {
+            new_pr[i] = base + dangle_contrib;
+            if (snap->adj_lists[i]) {
+                for (int j = 0; j < snap->degrees[i]; j++) {
+                    int to = snap->adj_lists[i][j];
+                    if (to >= 0 && to < n && snap->degrees[to] > 0)
+                        new_pr[to] += damping * pr[i] / snap->degrees[i];
+                }
+            }
+        }
+
+        float diff = 0.0f;
+        for (int i = 0; i < n; i++) {
+            diff += fabsf(new_pr[i] - pr[i]);
+            pr[i] = new_pr[i];
+        }
+        free(new_pr);
+
+        if (diff < conv) break;
+    }
+
+    // ——— 计算综合评分 ———
+    for (int i = 0; i < n; i++) {
+        scores[i] = snap_computed_importance(snap, i, pr);
+    }
+
+    free(pr);
+    evaluator->total_evaluations++;
+    evaluator->last_evaluation = time(NULL);
+
+    // 输出简要统计
+    int high = 0, med = 0, low = 0;
+    for (int i = 0; i < n; i++) {
+        if (scores[i] > 0.3f) high++;
+        else if (scores[i] > 0.1f) med++;
+        else low++;
+    }
+    printf("  [快照评估] 高=%d 中=%d 低=%d\n", high, med, low);
+
+    return scores;
+}

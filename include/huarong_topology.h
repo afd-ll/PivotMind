@@ -3,6 +3,7 @@
 
 #include "tensor.h"
 #include "cognitive_params.h"
+#include <pthread.h>
 
 // ==================== 华容道拓扑神经网络核心结构 ==================== 
 
@@ -74,6 +75,9 @@ typedef struct HuarongTopologyNet {
     int max_state_history;     // 最大状态历史记录数
     float learning_rate;       // 学习率
     int is_training;           // 是否处于训练模式
+
+    // 线程安全
+    pthread_mutex_t mutex;     // 保护拓扑数据结构
 } HuarongTopologyNet;
 
 // ==================== 核心API函数 ==================== 

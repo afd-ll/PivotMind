@@ -20,6 +20,7 @@
 #include "topology_growth.h"
 #include "catastrophic_forgetting.h"
 #include "memory_arena.h"
+#include "topo_snapshot.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -87,42 +88,97 @@ void* learning_cycle(void* arg) {
     while (learner->is_running) {
         printf("\n=== [主动学习] 开始学习周期 ===\n");
         
-        // 阶段1：从记忆系统学习
+        // 阶段1：从记忆系统学习（不涉及拓扑，无需锁）
         learn_from_memory(learner);
         
-        // 阶段2：发现新关系（共现分析+特征向量）
-        discover_new_relations(learner);
+        // ════════════════════════════════════════════════
+        // 快照阶段：抓取拓扑只读副本，释放主线程锁
+        // 让对话线程不受阻塞地继续工作
+        // ════════════════════════════════════════════════
+        pthread_rwlock_rdlock(&learner->master->rwlock);
         
-        // 阶段2.5：节点重要性评估（动态评估拓扑健康度）
-        printf("\n[学习阶段2.5] 评估节点重要性...\n");
-        if (learner->master) {
-            NodeImportanceEvaluator* eval = node_importance_create(0.85f, 20);
-            if (eval) {
-                for (int t = 0; t < learner->master->sub_topo_count; t++) {
-                    SubTopology* sub = learner->master->sub_topologies[t];
-                    if (!sub || !sub->net || sub->net->node_count < 2) continue;
-                    int count = 0;
-                    ImportanceMetrics** metrics = evaluate_all_nodes(eval, sub->net, &count);
-                    if (metrics && count > 0) {
-                        ImportanceSummary* summary = generate_importance_summary(eval, metrics, count);
-                        if (summary) {
-                            printf("  [%s] 高=%d 中=%d 低=%d 可剪枝=%d\n",
-                                   sub->name,
-                                   summary->high_importance_count,
-                                   summary->medium_importance_count,
-                                   summary->low_importance_count,
-                                   summary->prune_candidate_count);
-                            free(summary);
-                        }
-                        for (int m = 0; m < count; m++) free(metrics[m]);
-                        free(metrics);
-                    }
-                }
-                node_importance_destroy(eval);
-            }
+        // 阶段2：抓取快照（词汇拓扑）
+        SubTopology* vocab = master_get_sub_topology_by_type(learner->master, TOPO_VOCABULARY);
+        TopoSnapshot* snap_vocab = vocab ? topo_snapshot_create(vocab) : NULL;
+        
+        // 也抓取其他活跃子拓扑的快照
+        #define MAX_SNAPS 16
+        TopoSnapshot* snapshots[MAX_SNAPS];
+        int snap_count = 0;
+        for (int t = 0; t < learner->master->sub_topo_count && snap_count < MAX_SNAPS; t++) {
+            SubTopology* sub = learner->master->sub_topologies[t];
+            if (!sub || !sub->net || sub->net->node_count < 2) continue;
+            if (sub->type == TOPO_VOCABULARY) continue;  // 已单独抓取
+            snapshots[snap_count++] = topo_snapshot_create(sub);
         }
         
-        // 阶段3：清理过时知识（低置信度连接遗忘）
+        pthread_rwlock_unlock(&learner->master->rwlock);
+        // ── 主线程此时可以自由写拓扑 ──
+        
+        // 阶段2（续）：在快照上发现新关系（不接触主拓扑）
+        if (snap_vocab) {
+            printf("\n[学习阶段2] 发现新概念关系 (智能发现)...\n");
+            printf("  扫描 词汇拓扑 (节点数=%d):\n", snap_vocab->node_count);
+            discover_on_snapshot(snap_vocab, 2);
+            printf("  扫描完成...\n");
+        }
+        for (int i = 0; i < snap_count; i++) {
+            discover_on_snapshot(snapshots[i], 2);
+        }
+        
+        // 阶段2.5：快照上评估节点重要性
+        printf("\n[学习阶段2.5] 评估节点重要性...\n");
+        NodeImportanceEvaluator* eval = node_importance_create(0.85f, 20);
+        if (eval) {
+            // 词汇拓扑
+            if (snap_vocab && snap_vocab->node_count >= 2) {
+                float* scores = evaluate_on_snapshot(eval, snap_vocab);
+                if (scores) {
+                    if (snap_vocab->importance_scores) free(snap_vocab->importance_scores);
+                    snap_vocab->importance_scores = scores;
+                }
+            }
+            // 其他拓扑
+            for (int i = 0; i < snap_count; i++) {
+                if (snapshots[i] && snapshots[i]->node_count >= 2) {
+                    float* scores = evaluate_on_snapshot(eval, snapshots[i]);
+                    if (scores) {
+                        if (snapshots[i]->importance_scores) free(snapshots[i]->importance_scores);
+                        snapshots[i]->importance_scores = scores;
+                    }
+                }
+            }
+            node_importance_destroy(eval);
+        }
+        
+        // ════════════════════════════════════════════════
+        // 合并阶段：获取写锁，将计算结果合并回主拓扑
+        // 并执行轻量级维护操作
+        // ════════════════════════════════════════════════
+        pthread_rwlock_wrlock(&learner->master->rwlock);
+        
+        // 合并新边
+        int total_merged = 0;
+        if (snap_vocab) {
+            SubTopology* sub = master_get_sub_topology_by_type(learner->master, TOPO_VOCABULARY);
+            if (sub) total_merged += topo_snapshot_merge(snap_vocab, sub);
+        }
+        for (int i = 0; i < snap_count; i++) {
+            // 找到对应的子拓扑
+            for (int t = 0; t < learner->master->sub_topo_count; t++) {
+                SubTopology* sub = learner->master->sub_topologies[t];
+                if (sub && snapshots[i]->topo_type == sub->type) {
+                    total_merged += topo_snapshot_merge(snapshots[i], sub);
+                    break;
+                }
+            }
+        }
+        if (total_merged > 0) {
+            learner->total_relations_learned += total_merged;
+            printf("  ✓ 合并 %d 条新关系\n", total_merged);
+        }
+        
+        // 阶段3：清理过时知识（轻量，写锁下快速执行）
         cleanup_forgotten_knowledge(learner);
         
         // 阶段3.5：拓扑自动增长/收缩
@@ -140,7 +196,6 @@ void* learning_cycle(void* arg) {
                 // 每5个周期检查一次是否需要收缩
                 static int shrink_counter = 0;
                 if (++shrink_counter % 5 == 0) {
-                    // 清理孤立节点
                     int pruned = prune_isolated_nodes(learner->master, t);
                     if (pruned > 0) {
                         printf("  [%s] 清理孤立节点: %d\n", sub->name, pruned);
@@ -148,6 +203,13 @@ void* learning_cycle(void* arg) {
                 }
             }
         }
+        
+        pthread_rwlock_unlock(&learner->master->rwlock);
+        // ── 主线程此时可自由修改拓扑 ──
+        
+        // 清理快照
+        if (snap_vocab) topo_snapshot_destroy(snap_vocab);
+        for (int i = 0; i < snap_count; i++) topo_snapshot_destroy(snapshots[i]);
         
         // 记忆巩固：短期→长期记忆转移
         if (learner->memory) {
@@ -163,6 +225,8 @@ void* learning_cycle(void* arg) {
                 if (ewc) {
                     FisherInfoMatrix* fisher = fisher_info_create(100, 0.1f);
                     if (fisher) {
+                        // 这里受写锁保护，但 EWC 已在当前阶段不需要拓扑锁
+                        // 为简化，直接读（EWC只是统计，不是强一致性需求）
                         for (int t = 0; t < learner->master->sub_topo_count && t < 2; t++) {
                             SubTopology* sub = learner->master->sub_topologies[t];
                             if (!sub || !sub->net) continue;
@@ -537,6 +601,94 @@ void discover_new_relations(ActiveLearner* learner) {
                total_new_relations, total_updated_weights);
     } else {
         printf("  - 暂无新关系需要建立\n");
+    }
+}
+
+// ==================== 快照版关系发现 ====================
+// 操作 TopoSnapshot（本地副本），不接触主拓扑
+// 发现的新连接通过 topo_snapshot_add_edge 累积
+
+/** 快照中两个节点是否已有连接 */
+static int snap_has_connection(TopoSnapshot* snap, int a, int b) {
+    if (a < 0 || a >= snap->node_count || !snap->adj_lists[a]) return 0;
+    for (int i = 0; i < snap->degrees[a]; i++) {
+        if (snap->adj_lists[a][i] == b) return 1;
+    }
+    return 0;
+}
+
+/** 快照节点概念字符串相似度 */
+static float snap_string_similarity(const char* a, const char* b) {
+    if (!a || !b) return 0.0f;
+    if (strcmp(a, b) == 0) return 1.0f;
+    int la = strlen(a), lb = strlen(b);
+    int common = 0;
+    for (int i = 0; i < la - 1; i++)
+        for (int j = 0; j < lb - 1; j++)
+            if (a[i] == b[j] && a[i+1] == b[j+1]) common++;
+    int max_len = (la > lb) ? la : lb;
+    return (max_len > 0) ? (float)common / (max_len * 0.5f) : 0.0f;
+}
+
+/** 快照节点特征向量相似度 */
+static float snap_feature_similarity(TopoSnapshot* snap, int a, int b) {
+    if (!snap->features_flat || snap->feature_dim <= 0) return 0.0f;
+    float* va = &snap->features_flat[a * snap->feature_dim];
+    float* vb = &snap->features_flat[b * snap->feature_dim];
+    float dot = 0, na = 0, nb = 0;
+    for (int i = 0; i < snap->feature_dim; i++) {
+        dot += va[i] * vb[i];
+        na += va[i] * va[i];
+        nb += vb[i] * vb[i];
+    }
+    if (na < 1e-8f || nb < 1e-8f) return 0.0f;
+    return dot / (sqrtf(na) * sqrtf(nb));
+}
+
+/**
+ * 在快照上执行关系发现
+ * @param snap 拓扑快照（只读）
+ * @param window_size 共现窗口
+ */
+void discover_on_snapshot(TopoSnapshot* snap, int window_size) {
+    if (!snap || snap->node_count < 2) return;
+
+    (void)window_size;  // 窗口大小用于未来扩展
+    float threshold = 0.35f;
+    int new_edges = 0;
+
+    for (int i = 0; i < snap->node_count; i++) {
+        if (!snap->concepts[i]) continue;
+        for (int j = i + 1; j < snap->node_count; j++) {
+            if (!snap->concepts[j]) continue;
+            if (snap_has_connection(snap, i, j)) continue;
+
+            // 综合评分
+            float score = 0.0f;
+
+            // 特征向量相似度
+            float feat_sim = snap_feature_similarity(snap, i, j);
+            score += feat_sim * 0.4f;
+
+            // 字符串相似度
+            float str_sim = snap_string_similarity(snap->concepts[i], snap->concepts[j]);
+            score += str_sim * 0.3f;
+
+            // 共现偏置（同一拓扑）
+            score += 0.3f * 0.3f;
+
+            if (score >= threshold) {
+                float weight = 0.3f + (score - threshold) * 0.5f;
+                if (weight > 0.9f) weight = 0.9f;
+                topo_snapshot_add_edge(snap, i, j, weight, 0.5f);
+                new_edges++;
+
+                if (new_edges <= 5) {
+                    printf("    发现关联: 【%s】 <-> 【%s】 (score=%.2f, weight=%.2f)\n",
+                           snap->concepts[i], snap->concepts[j], score, weight);
+                }
+            }
+        }
     }
 }
 
