@@ -58,7 +58,7 @@ ALL_SRC = \
 	src/memory_arena.c \
 	src/ui.c \
 	src/concept_processor.c \
-	src/thread_pool.c
+	src/thread_pool.c \
 	src/topo_snapshot.c
 
 # 静态库

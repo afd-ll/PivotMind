@@ -169,7 +169,6 @@ int topo_snapshot_merge(TopoSnapshot* snap, SubTopology* sub) {
         int from = snap->new_edges[e].from_node_id;
         int to = snap->new_edges[e].to_node_id;
         float w = snap->new_edges[e].weight;
-        float conf = snap->new_edges[e].confidence;
 
         if (from >= net->node_count || to >= net->node_count)
             continue;

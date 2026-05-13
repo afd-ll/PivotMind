@@ -4,6 +4,7 @@
 #include <string.h>
 #include <math.h>
 #include <limits.h>
+#include <stdio.h>
 
 // ==================== 宏定义 ====================
 

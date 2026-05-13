@@ -29,6 +29,9 @@
 #include <unistd.h>
 #include <time.h>
 
+// 前向声明：快照版关系发现（实现在文件后部）
+void discover_on_snapshot(TopoSnapshot* snap, int window_size);
+
 #ifdef _WIN32
 #include <windows.h>
 #endif
@@ -167,7 +170,7 @@ void* learning_cycle(void* arg) {
             // 找到对应的子拓扑
             for (int t = 0; t < learner->master->sub_topo_count; t++) {
                 SubTopology* sub = learner->master->sub_topologies[t];
-                if (sub && snapshots[i]->topo_type == sub->type) {
+                if (sub && snapshots[i]->topo_type == (int)sub->type) {
                     total_merged += topo_snapshot_merge(snapshots[i], sub);
                     break;
                 }
