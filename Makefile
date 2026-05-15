@@ -59,7 +59,9 @@ ALL_SRC = \
 	src/ui.c \
 	src/concept_processor.c \
 	src/thread_pool.c \
-	src/topo_snapshot.c
+	src/topo_snapshot.c \
+	src/feature_io.c \
+	src/cross_edge_io.c
 
 # 静态库
 LIB_OBJ = $(ALL_SRC:.c=.o)

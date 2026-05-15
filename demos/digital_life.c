@@ -23,6 +23,8 @@
 #include "active_learner.h"
 #include "multi_topology.h"
 #include "memory_system.h"
+#include "feature_io.h"
+#include "cross_edge_io.h"
 
 #ifdef _WIN32
 #ifdef _WIN32
@@ -214,67 +216,29 @@ DigitalLifeSystem* digital_life_create() {
     if (access(state_file, F_OK) == 0) {
         int loaded = master_load_state(sys->topology, state_file);
         if (loaded >= 0) {
-            printf("     ✓ 已加载拓扑状态 (%d 节点)\n", loaded);
+            printf("     ✓ 已加载拓扑状态 (%d 节点)\\n", loaded);
         }
     }
-    
-    // 构建跨拓扑连接：将词汇拓扑中的单字与语义拓扑的同名概念连接
+
+    // 加载/初始化特征向量
     {
-        SubTopology* v = master_get_sub_topology_by_type(sys->topology, TOPO_VOCABULARY);
-        SubTopology* s = master_get_sub_topology_by_type(sys->topology, TOPO_SEMANTIC);
-        SubTopology* e = master_get_sub_topology_by_type(sys->topology, TOPO_EMOTION);
-        
-        // 为每个非词汇拓扑构建节点哈希，加速查找
-        if (v && v->net && v->node_hash) {
-            int cross_created = 0;
-            
-            // 语义拓扑：按概念名匹配单词→语义节点
-            if (s && s->net && s->node_hash) {
-                for (int si = 0; si < s->net->node_count; si++) {
-                    ReasoningNode* sn = s->net->nodes[si];
-                    if (!sn || !sn->concept) continue;
-                    // 尝试在词汇拓扑中找到对应词（多字词拆单字匹配）
-                    for (int vi = 0; vi < v->net->node_count; vi++) {
-                        ReasoningNode* vn = v->net->nodes[vi];
-                        if (!vn || !vn->concept) continue;
-                        // 如果语义概念包含该单字 → 建立跨拓扑连接
-                        if (strstr(sn->concept, vn->concept)) {
-                            master_add_cross_link(sys->topology,
-                                                  v->topo_id, vn->node_id,
-                                                  s->topo_id, sn->node_id,
-                                                  0.6f, "概念映射");
-                            cross_created++;
-                            if (cross_created >= 5000) break;
-                        }
-                    }
-                    if (cross_created >= 5000) break;
-                }
-            }
-            
-            // 情绪拓扑：节点名匹配词汇单字
-            if (e && e->net && e->node_hash) {
-                for (int ei = 0; ei < e->net->node_count; ei++) {
-                    ReasoningNode* en = e->net->nodes[ei];
-                    if (!en || !en->concept) continue;
-                    for (int vi = 0; vi < v->net->node_count; vi++) {
-                        ReasoningNode* vn = v->net->nodes[vi];
-                        if (!vn || !vn->concept) continue;
-                        if (strstr(en->concept, vn->concept)) {
-                            master_add_cross_link(sys->topology,
-                                                  v->topo_id, vn->node_id,
-                                                  e->topo_id, en->node_id,
-                                                  0.5f, "情绪关联");
-                            cross_created++;
-                            if (cross_created >= 5000) break;
-                        }
-                    }
-                    if (cross_created >= 5000) break;
-                }
-            }
-            
-            if (cross_created > 0) {
-                printf("     ✓ 已创建 %d 条跨拓扑连接\n", cross_created);
-            }
+        int feat_loaded = load_features(sys->topology, "features.bin");
+        if (feat_loaded > 0) {
+            printf("     ✓ 已加载特征向量 (%d 节点)\\n", feat_loaded);
+        } else {
+            int initted = init_random_features(sys->topology);
+            printf("     ✓ 已初始化特征向量 (%d 节点)\\n", initted);
+        }
+    }
+
+    // 加载/重建跨拓扑连接
+    {
+        int cross_loaded = load_cross_edges(sys->topology, "cross_edges.bin");
+        if (cross_loaded > 0) {
+            printf("     ✓ 已加载跨拓扑连接 (%d 条)\\n", cross_loaded);
+        } else {
+            int rebuilt = rebuild_cross_connections(sys->topology);
+            printf("     ✓ 已重建跨拓扑连接 (%d 条)\\n", rebuilt);
         }
     }
     
@@ -313,7 +277,19 @@ void digital_life_destroy(DigitalLifeSystem* sys) {
         const char* state_file = "pivotmind_state.dat";
         int saved = master_save_state(sys->topology, state_file);
         if (saved >= 0) {
-            printf("  ✓ 已保存拓扑状态 (%d 节点)\n", saved);
+            printf("  ✓ 已保存拓扑状态 (%d 节点)\\n", saved);
+        }
+        
+        // 保存特征向量
+        int feat_saved = save_features(sys->topology, "features.bin");
+        if (feat_saved > 0) {
+            printf("  ✓ 已保存特征向量 (%d 节点)\\n", feat_saved);
+        }
+        
+        // 保存跨拓扑连接
+        int cross_saved = save_cross_edges(sys->topology, "cross_edges.bin");
+        if (cross_saved > 0) {
+            printf("  ✓ 已保存跨拓扑连接 (%d 条)\\n", cross_saved);
         }
     }
     

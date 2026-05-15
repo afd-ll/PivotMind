@@ -1193,6 +1193,10 @@ int topology_walk_cross(MasterTopology* master,
     int cur_topo = start_topo_id;
     int cur_node = start_node_id;
 
+    // 语义上下文：跨拓扑累积特征向量均值
+    float context_features[NODE_FEATURE_DIM] = {0};
+    int context_count = 0;
+
     if (cur_topo >= 0 && cur_topo < visited_count && visited_bitmaps[cur_topo]) {
         SubTopology* sub = master_get_sub_topology(master, cur_topo);
         if (sub && sub->net && cur_node < sub->net->node_count) {
@@ -1202,6 +1206,18 @@ int topology_walk_cross(MasterTopology* master,
     path_topos_out[path_len] = cur_topo;
     path_nodes_out[path_len] = cur_node;
     if (scores_out) scores_out[path_len] = 1.0f;
+    // 更新语义上下文
+    {
+        ReasoningNode* start_node = NULL;
+        SubTopology* start_sub = master_get_sub_topology(master, cur_topo);
+        if (start_sub && start_sub->net && cur_node < start_sub->net->node_count)
+            start_node = start_sub->net->nodes[cur_node];
+        if (start_node && start_node->features) {
+            for (int d = 0; d < NODE_FEATURE_DIM; d++)
+                context_features[d] += start_node->features[d];
+            context_count++;
+        }
+    }
     path_len++;
 
     while (path_len < max_len) {
@@ -1240,12 +1256,22 @@ int topology_walk_cross(MasterTopology* master,
             float node_conf = target->confidence;
             float raw_val = target->valence;
 
+            // --- 语义得分 ---
+            float semantic_score = 0.0f;
+            if (target->features && context_count > 0) {
+                float mean_features[NODE_FEATURE_DIM];
+                for (int d = 0; d < NODE_FEATURE_DIM; d++)
+                    mean_features[d] = context_features[d] / context_count;
+                semantic_score = cosine_similarity(target->features, mean_features, NODE_FEATURE_DIM);
+            }
+
             float base_score =
                 EDGE_WALK_W_WEIGHT     * edge_weight +
                 EDGE_WALK_W_CONF       * edge_conf   +
                 EDGE_WALK_W_BIAS       * edge_bias   +
                 EDGE_WALK_W_ACTIVATION * node_act    +
-                EDGE_WALK_W_NODE_CONF  * node_conf;
+                EDGE_WALK_W_NODE_CONF  * node_conf   +
+                EDGE_WALK_W_SEMANTIC   * (semantic_score + 1.0f) * 0.5f;
 
             float valence_mod = 1.0f + EDGE_WALK_VALENCE_COEFF * raw_val;
             float score = base_score * valence_mod;
@@ -1292,12 +1318,22 @@ int topology_walk_cross(MasterTopology* master,
                         float node_conf = tgt_node ? tgt_node->confidence : 0.0f;
                         float raw_val = tgt_node ? tgt_node->valence : 0.0f;
 
+                        // --- 跨拓扑语义得分 ---
+                        float semantic_score = 0.0f;
+                        if (tgt_node && tgt_node->features && context_count > 0) {
+                            float mean_features[NODE_FEATURE_DIM];
+                            for (int d = 0; d < NODE_FEATURE_DIM; d++)
+                                mean_features[d] = context_features[d] / context_count;
+                            semantic_score = cosine_similarity(tgt_node->features, mean_features, NODE_FEATURE_DIM);
+                        }
+
                         float base_score =
                             EDGE_WALK_W_WEIGHT     * cross_weight +
                             EDGE_WALK_W_CONF       * cross_weight +
                             EDGE_WALK_W_BIAS       * 0.0f +
                             EDGE_WALK_W_ACTIVATION * node_act    +
-                            EDGE_WALK_W_NODE_CONF  * node_conf;
+                            EDGE_WALK_W_NODE_CONF  * node_conf +
+                            EDGE_WALK_W_SEMANTIC   * (semantic_score + 1.0f) * 0.5f;
 
                         float valence_mod = 1.0f + EDGE_WALK_VALENCE_COEFF * raw_val;
                         float score = base_score * valence_mod;
@@ -1332,6 +1368,18 @@ int topology_walk_cross(MasterTopology* master,
         path_topos_out[path_len] = cur_topo;
         path_nodes_out[path_len] = cur_node;
         if (scores_out) scores_out[path_len] = best_score;
+        // 更新语义上下文
+        {
+            ReasoningNode* stepped_node = NULL;
+            SubTopology* step_sub = master_get_sub_topology(master, cur_topo);
+            if (step_sub && step_sub->net && cur_node < step_sub->net->node_count)
+                stepped_node = step_sub->net->nodes[cur_node];
+            if (stepped_node && stepped_node->features) {
+                for (int d = 0; d < NODE_FEATURE_DIM; d++)
+                    context_features[d] += stepped_node->features[d];
+                context_count++;
+            }
+        }
         path_len++;
     }
 
