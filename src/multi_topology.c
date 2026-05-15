@@ -1615,8 +1615,10 @@ int master_save_state(MasterTopology* master, const char* file_path) {
             fwrite(&node->activation, sizeof(float), 1, fp);
             
             // [v2] 写连接数 + 连接数据 (target_node_id, weight, bias, confidence)
-            fwrite(&node->connection_count, sizeof(int), 1, fp);
-            for (int c = 0; c < node->connection_count; c++) {
+            int safe_conn_count = node->connection_count;
+            if (!node->connections) safe_conn_count = 0;
+            fwrite(&safe_conn_count, sizeof(int), 1, fp);
+            for (int c = 0; c < safe_conn_count; c++) {
                 if (node->connections[c]) {
                     int target_id = node->connections[c]->node_id;
                     fwrite(&target_id, sizeof(int), 1, fp);
@@ -1624,9 +1626,12 @@ int master_save_state(MasterTopology* master, const char* file_path) {
                     int target_id = -1;
                     fwrite(&target_id, sizeof(int), 1, fp);
                 }
-                fwrite(&node->connection_weights[c], sizeof(float), 1, fp);
-                fwrite(&node->connection_motivational_bias[c], sizeof(float), 1, fp);
-                fwrite(&node->connection_confidences[c], sizeof(float), 1, fp);
+                float w = node->connection_weights ? node->connection_weights[c] : 0.0f;
+                float b = node->connection_motivational_bias ? node->connection_motivational_bias[c] : 0.0f;
+                float c2 = node->connection_confidences ? node->connection_confidences[c] : 0.0f;
+                fwrite(&w, sizeof(float), 1, fp);
+                fwrite(&b, sizeof(float), 1, fp);
+                fwrite(&c2, sizeof(float), 1, fp);
             }
             
             saved_nodes++;

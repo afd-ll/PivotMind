@@ -187,7 +187,16 @@ int main(int argc, char* argv[]) {
     fclose(test);
     int loaded = master_load_state(master, state_path);
     if (loaded <= 0) {
-        printf("  × 加载失败，状态文件可能格式不兼容\n");
+        printf("  × 加载失败，状态文件可能格式不兼容 (返回=%d)\\n", loaded);
+        printf("  子拓扑数量=%d\\n", master->sub_topo_count);
+        for (int t = 0; t < master->sub_topo_count; t++) {
+            SubTopology* st = master->sub_topologies[t];
+            printf("    [%d] type=%d name=%s net=%p nodes=%d\\n",
+                   t, st ? (int)st->type : -1,
+                   st ? st->name : "NULL",
+                   st ? (void*)st->net : NULL,
+                   st && st->net ? st->net->node_count : -1);
+        }
         master_topology_destroy(master);
         return 1;
     }
@@ -199,6 +208,7 @@ int main(int argc, char* argv[]) {
     for (int t = 0; t < master->sub_topo_count; t++) {
         SubTopology* sub = master->sub_topologies[t];
         if (!sub || !sub->net) continue;
+        printf("  topo %d: %s has %d nodes\n", t, sub->name, sub->net->node_count);
         for (int n = 0; n < sub->net->node_count; n++) {
             ReasoningNode* node = sub->net->nodes[n];
             if (node && !node->features) {
