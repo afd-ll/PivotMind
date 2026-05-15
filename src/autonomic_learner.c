@@ -407,6 +407,69 @@ void autonomic_learn_from_dialog(MasterTopology* master,
         }
     }
 
+    // 核心4：跨拓扑传播 — 将激活传播到语义/概念/情绪拓扑
+    // 对于输入和回复中的每个字，在目标拓扑中找到或创建同名节点
+    // 并在目标拓扑内部建边，让多拓扑"长肉"
+    {
+        // 需要处理的拓扑类型列表（除了词汇拓扑）
+        const TopologyType target_types[] = {
+            TOPO_SEMANTIC, TOPO_CONCEPT, TOPO_EMOTION
+        };
+        const int num_targets = 3;
+
+        for (int tgt_i = 0; tgt_i < num_targets; tgt_i++) {
+            SubTopology* tgt = NULL;
+            for (int t = 0; t < master->sub_topo_count; t++) {
+                if (master->sub_topologies[t] &&
+                    master->sub_topologies[t]->type == target_types[tgt_i]) {
+                    tgt = master->sub_topologies[t];
+                    break;
+                }
+            }
+            if (!tgt || !tgt->net) continue;
+
+            // 在目标拓扑中查找或创建节点
+            ReasoningNode* tgt_input[MAX_CHARS_PER_TEXT];
+            ReasoningNode* tgt_response[MAX_CHARS_PER_TEXT];
+
+            for (int i = 0; i < input_count; i++) {
+                tgt_input[i] = find_node_by_concept(tgt, input_chars[i]);
+                if (!tgt_input[i]) {
+                    tgt_input[i] = huarong_net_add_node(tgt->net, input_chars[i], NULL, 0);
+                }
+            }
+            for (int i = 0; i < response_count; i++) {
+                tgt_response[i] = find_node_by_concept(tgt, response_chars[i]);
+                if (!tgt_response[i]) {
+                    tgt_response[i] = huarong_net_add_node(tgt->net, response_chars[i], NULL, 0);
+                }
+            }
+
+            // 在目标拓扑内部建边（输入内+回复内+输入↔回复）
+            for (int i = 0; i < input_count; i++) {
+                if (!tgt_input[i]) continue;
+                for (int j = i + 1; j < input_count; j++) {
+                    if (!tgt_input[j]) continue;
+                    boost_connection(tgt, tgt_input[i], tgt_input[j], state);
+                }
+            }
+            for (int i = 0; i < response_count; i++) {
+                if (!tgt_response[i]) continue;
+                for (int j = i + 1; j < response_count; j++) {
+                    if (!tgt_response[j]) continue;
+                    boost_connection(tgt, tgt_response[i], tgt_response[j], state);
+                }
+            }
+            for (int i = 0; i < input_count; i++) {
+                if (!tgt_input[i]) continue;
+                for (int j = 0; j < response_count; j++) {
+                    if (!tgt_response[j]) continue;
+                    boost_connection(tgt, tgt_input[i], tgt_response[j], state);
+                }
+            }
+        }
+    }
+
     // 刷盘判断：边数增长到一定程度触发保存
     if (state && state->initialized) {
         autonomic_request_flush(state, master);

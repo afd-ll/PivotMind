@@ -987,12 +987,13 @@ char* master_generate_response(MasterTopology* master,
  *      0.0 → modifier = 1.0 （中性）
  *     +1.0 → modifier = 1.6 （强偏好）
  */
-#define EDGE_WALK_W_WEIGHT      0.28f   // 边逻辑强度
-#define EDGE_WALK_W_CONF        0.22f   // 边置信度
-#define EDGE_WALK_W_BIAS        0.11f   // 边动机倾向
-#define EDGE_WALK_W_ACTIVATION  0.28f   // 目标节点激活值
-#define EDGE_WALK_W_NODE_CONF   0.11f   // 目标节点置信度
+#define EDGE_WALK_W_WEIGHT      0.27f   // 边逻辑强度
+#define EDGE_WALK_W_CONF        0.20f   // 边置信度
+#define EDGE_WALK_W_BIAS        0.10f   // 边动机倾向
+#define EDGE_WALK_W_ACTIVATION  0.23f   // 目标节点激活值
+#define EDGE_WALK_W_NODE_CONF   0.10f   // 目标节点置信度
 // 效维已改为乘法因子，见 VALENCE_COEFF
+#define EDGE_WALK_W_SEMANTIC    0.10f   // 语义得分（余弦相似度）
 
 /** 效价乘法系数（0=无影响，越大效价否决力越强） */
 #define EDGE_WALK_VALENCE_COEFF 0.6f
@@ -1028,10 +1029,21 @@ int topology_walk_greedy(SubTopology* sub, int start_node_id,
     int path_len = 0;
     int current_id = start_node_id;
 
+    // 语义上下文：累积已走过节点的特征向量均值
+    float context_features[NODE_FEATURE_DIM] = {0};
+    int context_count = 0;
+
     // 标记起点为已访问并写入路径
     visited[current_id / 8] |= (unsigned char)(1 << (current_id % 8));
     path_out[path_len] = current_id;
     if (scores_out) scores_out[path_len] = 1.0f;
+    // 更新上下文
+    ReasoningNode* start_node_ptr = net->nodes[current_id];
+    if (start_node_ptr && start_node_ptr->features) {
+        for (int d = 0; d < NODE_FEATURE_DIM; d++)
+            context_features[d] += start_node_ptr->features[d];
+        context_count++;
+    }
     path_len++;
 
     // 贪心走边循环
@@ -1069,14 +1081,24 @@ int topology_walk_greedy(SubTopology* sub, int start_node_id,
             float node_conf  = target->confidence;
             float raw_val    = target->valence;  // 原始效价 [-1, 1]，保留符号
 
+            // --- 语义得分（第7维） ---
+            float semantic_score = 0.0f;
+            if (target->features && context_count > 0) {
+                float mean_features[NODE_FEATURE_DIM];
+                for (int d = 0; d < NODE_FEATURE_DIM; d++)
+                    mean_features[d] = context_features[d] / context_count;
+                semantic_score = cosine_similarity(target->features, mean_features, NODE_FEATURE_DIM);
+            }
+
             // --- 混合评分 ---
-            // 加法部分：边三维 + 节点二维（不含效价）
+            // 加法部分：边三维 + 节点二维 + 语义一维（不含效价）
             float base_score =
                 EDGE_WALK_W_WEIGHT     * edge_weight +
                 EDGE_WALK_W_CONF       * edge_conf   +
                 EDGE_WALK_W_BIAS       * edge_bias   +
                 EDGE_WALK_W_ACTIVATION * node_act    +
-                EDGE_WALK_W_NODE_CONF  * node_conf;
+                EDGE_WALK_W_NODE_CONF  * node_conf   +
+                EDGE_WALK_W_SEMANTIC   * (semantic_score + 1.0f) * 0.5f;  // 语义得分映射到 [0,1]
 
             // 乘法部分：效价作为调节因子
             float valence_mod = 1.0f + EDGE_WALK_VALENCE_COEFF * raw_val;
@@ -1097,6 +1119,13 @@ int topology_walk_greedy(SubTopology* sub, int start_node_id,
         visited[current_id / 8] |= (unsigned char)(1 << (current_id % 8));
         path_out[path_len] = current_id;
         if (scores_out) scores_out[path_len] = best_score;
+        // 更新语义上下文
+        ReasoningNode* stepped_node = net->nodes[current_id];
+        if (stepped_node && stepped_node->features) {
+            for (int d = 0; d < NODE_FEATURE_DIM; d++)
+                context_features[d] += stepped_node->features[d];
+            context_count++;
+        }
         path_len++;
     }
 

@@ -188,8 +188,10 @@ int main(int argc, char* argv[]) {
     printf("[1/4] 加载拓扑...\n");
     MasterTopology* master = master_topology_create(10);
 
-    // 创建所需的子拓扑
+    // 创建所需的子拓扑（与 build_cross_links 保持一致）
     master_add_sub_topology(master, TOPO_VOCABULARY, "词汇拓扑", 8000, 10);
+    master_add_sub_topology(master, TOPO_SEMANTIC, "语义拓扑", 6000, 9);
+    master_add_sub_topology(master, TOPO_EMOTION, "情绪拓扑", 2000, 8);
     master_add_sub_topology(master, TOPO_CONCEPT, "概念拓扑", 8000, 9);
 
     // 尝试加载已有状态
