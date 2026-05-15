@@ -234,9 +234,10 @@ int associate_from_text(AssociativeEngine* engine, const char* text, int max_hop
 
     return engine->assoc_count;
 }
-
 // 基于联想结果生成句子（纯生成式，无模板）
-char* generate_from_associations(AssociativeEngine* engine, int max_len) {
+// 使用跨拓扑走边 + 防回声，input_text 为 NULL 时回退到旧版单拓扑走边
+char* generate_from_associations(AssociativeEngine* engine, int max_len,
+                                 const char* input_text) {
     if (engine->assoc_count == 0) {
         return strdup("...");
     }
@@ -255,21 +256,44 @@ char* generate_from_associations(AssociativeEngine* engine, int max_len) {
     // 分配结果缓冲区
     char* result = (char*)calloc(max_len, 1);
     if (!result) return strdup("...");
-
-    // ===== 走边生成路径 =====
-    // 从最高激活节点出发，沿边贪心走到下一个最优节点
-    // 六个维度评分：边(权重+置信+动机) + 节点(激活+置信+效价)
     int pos = 0;
-    unsigned char* global_visited_bitmap = NULL;  // 跨起点共享
-    int max_path = 20;  // 最多走20步
+
+    // 构造 anti-echo 字符集（输入中的每个字）
+    char avoid_chars[256] = {0};
+    if (input_text) {
+        int ac = 0;
+        for (const char* p = input_text; *p && ac < 250; ) {
+            int len = 1;
+            if ((unsigned char)*p >= 0xC0 && (unsigned char)*p < 0xE0) len = 2;
+            else if ((unsigned char)*p >= 0xE0 && (unsigned char)*p < 0xF0) len = 3;
+            else if ((unsigned char)*p >= 0xF0) len = 4;
+            // 跳过空白和标点
+            if (len == 1 && (*p == ' ' || *p == '\t' || *p == '?')) {
+                p++; continue;
+            }
+            // 只添加中文字符（多字节字符）
+            if (len > 1) {
+                for (int b = 0; b < len && ac < 250; b++) {
+                    avoid_chars[ac++] = *p++;
+                }
+            } else {
+                p++;
+            }
+        }
+        avoid_chars[ac] = '\0';
+    }
+
+    // ===== 跨拓扑走边生成路径 =====
+    // 从 top-N 个最高激活联想出发，允许跨拓扑跳跃 + 防回声
+    // 如果没有任何跨拓扑连接，退化为本拓扑走边（不加防回声）
+    int has_cross_links = (engine->topology->cross_link_count > 0);
+    int used_starts = 0;
 
     for (int start_i = 0; start_i < engine->assoc_count && start_i < 5 && pos < max_len - 10; start_i++) {
         Association* assoc = &engine->associations[start_i];
-
-        // 跳过激活值太低的起点
         if (assoc->activation < 0.1f) continue;
 
-        // 在对应子拓扑中查找此概念对应的节点
+        // 找到此拓扑类型对应的子拓扑
         SubTopology* sub = master_get_sub_topology_by_type(
             engine->topology, assoc->topo_type);
         if (!sub || !sub->net || !sub->node_hash) continue;
@@ -277,67 +301,58 @@ char* generate_from_associations(AssociativeEngine* engine, int max_len) {
         ReasoningNode* start_node = node_hash_find(sub->node_hash, assoc->concept);
         if (!start_node) continue;
 
-        int start_id = start_node->node_id;
-        if (start_id < 0 || start_id >= sub->net->node_count) continue;
+        int start_topo_id = sub->topo_id;
+        int start_node_id = start_node->node_id;
+        if (start_node_id < 0 || start_node_id >= sub->net->node_count) continue;
 
-        // 如果已被之前的起点走过，跳过
-        if (global_visited_bitmap) {
-            int bm_size = (sub->net->node_count + 7) / 8;
-            if (start_id < bm_size * 8) {
-                if (global_visited_bitmap[start_id / 8] & (unsigned char)(1 << (start_id % 8)))
-                    continue;
+        if (has_cross_links) {
+            // 跨拓扑走边（支持跨拓扑跳跃 + 防回声）
+            int path_topos[32], path_nodes[32];
+            float path_scores[32];
+            int path_len = topology_walk_cross(
+                engine->topology,
+                start_topo_id, start_node_id,
+                path_topos, path_nodes, path_scores,
+                20,  // max_len
+                NULL,  // visited_bitmaps（内部分配）
+                (input_text && strlen(avoid_chars) > 0) ? avoid_chars : NULL,
+                NULL);  // topo_act
+
+            if (path_len <= 1) continue;
+
+            for (int p = 1; p < path_len && pos < max_len - 10; p++) {
+                int tid = path_topos[p];
+                int nid = path_nodes[p];
+                if (tid < 0 || tid >= engine->topology->sub_topo_count) continue;
+                SubTopology* t_sub = master_get_sub_topology(engine->topology, tid);
+                if (!t_sub || !t_sub->net || nid < 0 || nid >= t_sub->net->node_count) continue;
+                ReasoningNode* node = t_sub->net->nodes[nid];
+                if (!node || !node->concept) continue;
+                pos += snprintf(result + pos, max_len - pos, "%s", node->concept);
+            }
+        } else {
+            // 无跨拓扑连接：退化为本拓扑贪心走边（不加防回声，避免过滤掉所有可选节点）
+            int path_nodes[32];
+            float path_scores[32];
+            int path_len = topology_walk_greedy(
+                sub, start_node_id, path_nodes, path_scores,
+                20 < max_len ? 20 : max_len,
+                NULL);
+            if (path_len <= 1) continue;
+            for (int p = 1; p < path_len && pos < max_len - 10; p++) {
+                int nid = path_nodes[p];
+                if (nid < 0 || nid >= sub->net->node_count) continue;
+                ReasoningNode* node = sub->net->nodes[nid];
+                if (!node || !node->concept) continue;
+                pos += snprintf(result + pos, max_len - pos, "%s", node->concept);
             }
         }
 
-        // 贪心走边
-        int path_nodes[32];
-        float path_scores[32];
-        int path_len = topology_walk_greedy(
-            sub, start_id, path_nodes, path_scores,
-            max_path < max_len ? max_path : max_len,
-            global_visited_bitmap);
-
-        if (path_len <= 1) continue;  // 只有起点，无有效路径
-
-        // 收集全局 visited 位图（跨起点重用）
-        if (!global_visited_bitmap && path_len > 1) {
-            int bm_size = (sub->net->node_count + 7) / 8;
-            global_visited_bitmap = (unsigned char*)calloc(bm_size, 1);
-            if (global_visited_bitmap) {
-                // 重走一遍路径，把走过的节点都标记上
-                for (int s = 0; s < start_i; s++) {
-                    Association* prev = &engine->associations[s];
-                    SubTopology* prev_sub = master_get_sub_topology_by_type(
-                        engine->topology, prev->topo_type);
-                    if (prev_sub && prev_sub->node_hash) {
-                        ReasoningNode* pn = node_hash_find(prev_sub->node_hash, prev->concept);
-                        if (pn && pn->node_id >= 0 && pn->node_id < prev_sub->net->node_count) {
-                            global_visited_bitmap[pn->node_id / 8] |=
-                                (unsigned char)(1 << (pn->node_id % 8));
-                        }
-                    }
-                }
-            }
-        }
-
-        // 将路径转换输出
-        // 路径[0]是起点（已在输出中或不需要），从路径[1]开始是走边结果
-        for (int p = 1; p < path_len && pos < max_len - 10; p++) {
-            int nid = path_nodes[p];
-            if (nid < 0 || nid >= sub->net->node_count) continue;
-            ReasoningNode* node = sub->net->nodes[nid];
-            if (!node || !node->concept) continue;
-
-            pos += snprintf(result + pos, max_len - pos, "%s", node->concept);
-        }
-
-        // 如果已经生成了足够长的输出，不再尝试更多起点
         if (pos >= 5) break;
+        used_starts++;
     }
 
-    if (global_visited_bitmap) free(global_visited_bitmap);
-
-    // 兜底：如果走边没走出任何结果，输出最高激活的概念
+    // 兜底：跨拓扑走边没走出结果
     if (pos == 0 && engine->assoc_count > 0) {
         snprintf(result, max_len, "%s", engine->associations[0].concept);
     }

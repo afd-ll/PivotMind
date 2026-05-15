@@ -938,7 +938,7 @@ char* master_generate_response(MasterTopology* master,
         
         if (assoc_count > 0) {
             // 基于联想生成回复
-            char* assoc_response = generate_from_associations(assoc_engine, max_output_len);
+            char* assoc_response = generate_from_associations(assoc_engine, max_output_len, input_text);
             if (assoc_response && strlen(assoc_response) > 0) {
                 // 先复制回复内容，再释放引擎（避免assoc_response指向引擎内部内存）
                 char* safe_response = strdup(assoc_response);
@@ -1101,6 +1101,217 @@ int topology_walk_greedy(SubTopology* sub, int start_node_id,
     }
 
     if (local_visited) free(local_visited);
+    return path_len;
+}
+
+// ==================== 跨拓扑走边路径生成 ====================
+
+/**
+ * 检查一个字符是否在 avoid_chars 中（用于防回声）
+ */
+static int char_in_set(const char* ch, const char* set) {
+    if (!ch || !set) return 0;
+    while (*set) {
+        if ((unsigned char)ch[0] == (unsigned char)set[0]) {
+            int len = 1;
+            if ((ch[0] & 0xE0) == 0xC0) len = 2;
+            else if ((ch[0] & 0xF0) == 0xE0) len = 3;
+            else if ((ch[0] & 0xF8) == 0xF0) len = 4;
+            int match = 1;
+            for (int b = 0; b < len; b++) {
+                if ((unsigned char)ch[b] != (unsigned char)set[b]) { match = 0; break; }
+            }
+            if (match) return 1;
+        }
+        set++;
+        while ((unsigned char)*set >= 0x80 && (unsigned char)*set < 0xC0) set++;
+    }
+    return 0;
+}
+
+int topology_walk_cross(MasterTopology* master,
+                        int start_topo_id, int start_node_id,
+                        int* path_topos_out, int* path_nodes_out,
+                        float* scores_out,
+                        int max_len,
+                        unsigned char** visited_bitmaps,
+                        const char* avoid_chars,
+                        const float* topo_act) {
+    if (!master || !path_topos_out || !path_nodes_out || max_len <= 0) return 0;
+    if (start_topo_id < 0 || start_topo_id >= master->sub_topo_count) return 0;
+
+    SubTopology* start_sub = master_get_sub_topology(master, start_topo_id);
+    if (!start_sub || !start_sub->net) return 0;
+    if (start_node_id < 0 || start_node_id >= start_sub->net->node_count) return 0;
+    if (!start_sub->net->nodes[start_node_id]) return 0;
+
+    int visited_count = master->sub_topo_count;
+    unsigned char** local_bitmaps = NULL;
+    if (!visited_bitmaps) {
+        local_bitmaps = (unsigned char**)calloc(visited_count, sizeof(unsigned char*));
+        if (!local_bitmaps) return 0;
+        for (int t = 0; t < visited_count; t++) {
+            SubTopology* sub = master_get_sub_topology(master, t);
+            if (sub && sub->net && sub->net->node_count > 0) {
+                int bm_size = (sub->net->node_count + 7) / 8;
+                local_bitmaps[t] = (unsigned char*)calloc(bm_size, 1);
+            }
+        }
+        visited_bitmaps = local_bitmaps;
+    }
+
+    int path_len = 0;
+    int cur_topo = start_topo_id;
+    int cur_node = start_node_id;
+
+    if (cur_topo >= 0 && cur_topo < visited_count && visited_bitmaps[cur_topo]) {
+        SubTopology* sub = master_get_sub_topology(master, cur_topo);
+        if (sub && sub->net && cur_node < sub->net->node_count) {
+            visited_bitmaps[cur_topo][cur_node / 8] |= (unsigned char)(1 << (cur_node % 8));
+        }
+    }
+    path_topos_out[path_len] = cur_topo;
+    path_nodes_out[path_len] = cur_node;
+    if (scores_out) scores_out[path_len] = 1.0f;
+    path_len++;
+
+    while (path_len < max_len) {
+        SubTopology* cur_sub = master_get_sub_topology(master, cur_topo);
+        if (!cur_sub || !cur_sub->net) break;
+        if (cur_node < 0 || cur_node >= cur_sub->net->node_count) break;
+        ReasoningNode* cur_ra = cur_sub->net->nodes[cur_node];
+        if (!cur_ra) break;
+
+        int best_topo = -1, best_node = -1;
+        float best_score = -1.0f;
+
+        // --- 评估本拓扑内的连接 ---
+        for (int i = 0; i < cur_ra->connection_count; i++) {
+            ReasoningNode* target = cur_ra->connections[i];
+            if (!target) continue;
+            int tid = target->node_id;
+            if (tid < 0 || tid >= cur_sub->net->node_count) continue;
+
+            int bm_sz = (cur_sub->net->node_count + 7) / 8;
+            if (tid >= bm_sz * 8) continue;
+            if (visited_bitmaps[cur_topo] &&
+                (visited_bitmaps[cur_topo][tid / 8] & (unsigned char)(1 << (tid % 8))))
+                continue;
+
+            if (avoid_chars && target->concept && char_in_set(target->concept, avoid_chars))
+                continue;
+
+            float edge_weight = (cur_ra->connection_weights && i < cur_ra->connection_count)
+                                ? cur_ra->connection_weights[i] : 0.0f;
+            float edge_conf = (cur_ra->connection_confidences && i < cur_ra->connection_count)
+                              ? cur_ra->connection_confidences[i] : edge_weight;
+            float edge_bias = (cur_ra->connection_motivational_bias && i < cur_ra->connection_count)
+                              ? cur_ra->connection_motivational_bias[i] : 0.0f;
+            float node_act = target->activation;
+            float node_conf = target->confidence;
+            float raw_val = target->valence;
+
+            float base_score =
+                EDGE_WALK_W_WEIGHT     * edge_weight +
+                EDGE_WALK_W_CONF       * edge_conf   +
+                EDGE_WALK_W_BIAS       * edge_bias   +
+                EDGE_WALK_W_ACTIVATION * node_act    +
+                EDGE_WALK_W_NODE_CONF  * node_conf;
+
+            float valence_mod = 1.0f + EDGE_WALK_VALENCE_COEFF * raw_val;
+            float score = base_score * valence_mod;
+
+            if (score > best_score) {
+                best_score = score;
+                best_topo = cur_topo;
+                best_node = tid;
+            }
+        }
+
+        // --- 评估跨拓扑连接 ---
+        int adj_idx = cur_topo * 10000 + cur_node;
+        if (adj_idx < master->cross_adj_count && master->cross_adj[adj_idx]) {
+            CrossTopoAdjEntry* entry = master->cross_adj[adj_idx];
+            while (entry) {
+                CrossTopologyLink* link = (entry->link_index < master->cross_link_count)
+                                          ? master->cross_links[entry->link_index] : NULL;
+                if (link) {
+                    int to_topo = link->to_topo_id;
+                    int to_node = link->to_node_id;
+
+                    SubTopology* tgt_sub = master_get_sub_topology(master, to_topo);
+                    if (tgt_sub && tgt_sub->net && to_node < tgt_sub->net->node_count) {
+                        if (visited_bitmaps[to_topo]) {
+                            int bm_sz = (tgt_sub->net->node_count + 7) / 8;
+                            if (to_node < bm_sz * 8 &&
+                                (visited_bitmaps[to_topo][to_node / 8] &
+                                 (unsigned char)(1 << (to_node % 8)))) {
+                                entry = entry->next;
+                                continue;
+                            }
+                        }
+
+                        ReasoningNode* tgt_node = tgt_sub->net->nodes[to_node];
+                        if (avoid_chars && tgt_node && tgt_node->concept &&
+                            char_in_set(tgt_node->concept, avoid_chars)) {
+                            entry = entry->next;
+                            continue;
+                        }
+
+                        float cross_weight = link->weight * link->transfer_rate;
+                        float node_act = tgt_node ? tgt_node->activation : 0.0f;
+                        float node_conf = tgt_node ? tgt_node->confidence : 0.0f;
+                        float raw_val = tgt_node ? tgt_node->valence : 0.0f;
+
+                        float base_score =
+                            EDGE_WALK_W_WEIGHT     * cross_weight +
+                            EDGE_WALK_W_CONF       * cross_weight +
+                            EDGE_WALK_W_BIAS       * 0.0f +
+                            EDGE_WALK_W_ACTIVATION * node_act    +
+                            EDGE_WALK_W_NODE_CONF  * node_conf;
+
+                        float valence_mod = 1.0f + EDGE_WALK_VALENCE_COEFF * raw_val;
+                        float score = base_score * valence_mod;
+
+                        if (topo_act && to_topo < master->sub_topo_count) {
+                            score += topo_act[to_topo] * 0.1f;
+                        }
+
+                        if (score > best_score) {
+                            best_score = score;
+                            best_topo = to_topo;
+                            best_node = to_node;
+                        }
+                    }
+                }
+                entry = entry->next;
+            }
+        }
+
+        if (best_topo < 0 || best_node < 0 || best_score < EDGE_WALK_MIN_SCORE) break;
+
+        cur_topo = best_topo;
+        cur_node = best_node;
+
+        if (cur_topo >= 0 && cur_topo < visited_count && visited_bitmaps[cur_topo]) {
+            SubTopology* sub = master_get_sub_topology(master, cur_topo);
+            if (sub && sub->net && cur_node < sub->net->node_count) {
+                visited_bitmaps[cur_topo][cur_node / 8] |= (unsigned char)(1 << (cur_node % 8));
+            }
+        }
+
+        path_topos_out[path_len] = cur_topo;
+        path_nodes_out[path_len] = cur_node;
+        if (scores_out) scores_out[path_len] = best_score;
+        path_len++;
+    }
+
+    if (local_bitmaps) {
+        for (int t = 0; t < visited_count; t++) {
+            if (local_bitmaps[t]) free(local_bitmaps[t]);
+        }
+        free(local_bitmaps);
+    }
     return path_len;
 }
 

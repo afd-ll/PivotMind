@@ -175,7 +175,8 @@ int main(int argc, char* argv[]) {
     const char* qa_path = argc > 2 ? argv[2] : "data/hermes_knowledge_base.json";
     int epochs = argc > 3 ? atoi(argv[3]) : 1;
     if (epochs < 1) epochs = 1;
-    if (epochs > 100) epochs = 100;
+    // 原先有硬编码上限 100，已移除以支持大规模训练
+    // if (epochs > 100) epochs = 100;
 
     setbuf(stdout, NULL);
 

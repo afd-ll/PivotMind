@@ -20,7 +20,7 @@ void assoc_engine_free(AssociativeEngine* engine);
 int associate_from_text(AssociativeEngine* engine, const char* text, int max_hops);
 
 // 基于联想生成内容
-char* generate_from_associations(AssociativeEngine* engine, int max_len);
+char* generate_from_associations(AssociativeEngine* engine, int max_len, const char* input_text);
 
 // 打印联想路径
 void print_associations(AssociativeEngine* engine);

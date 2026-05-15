@@ -251,6 +251,35 @@ int topology_walk_greedy(SubTopology* sub, int start_node_id,
                          int* path_out, float* scores_out,
                          int max_len, unsigned char* visited);
 
+/**
+ * 跨拓扑走边路径生成
+ *
+ * 从起始节点出发，每一步评估 BOTH 本拓扑内连接 AND 跨拓扑连接，
+ * 允许路径在拓扑之间自然跳转。
+ * 混合评分与 topology_walk_greedy 保持一致，跨拓扑跳跃使用 link weight × transfer_rate
+ * 作为"边权重"替代，其余四维（目标激活+目标置信+效价+边置信）从目标节点获取。
+ *
+ * @param master 主拓扑（包含所有子拓扑和跨拓扑连接）
+ * @param start_topo_id 起始拓扑ID
+ * @param start_node_id 起始节点ID
+ * @param path_topos_out 输出路径的拓扑ID数组（长度≥max_len）
+ * @param path_nodes_out 输出路径的节点ID数组（长度≥max_len）
+ * @param scores_out 输出每步综合评分（长度≥max_len），可传NULL
+ * @param max_len 最大路径长度
+ * @param visited_bitmaps 已访问位图数组 per topology (master->sub_topo_count 个)
+ * @param avoid_chars 可传 NULL；非空时路径中跳过包含这些字符的节点（防回声）
+ * @param topo_act 可传 NULL；非空时每步额外奖励该拓扑累加的激活值
+ * @return 路径长度（包括起点），0表示无有效路径
+ */
+int topology_walk_cross(MasterTopology* master,
+                        int start_topo_id, int start_node_id,
+                        int* path_topos_out, int* path_nodes_out,
+                        float* scores_out,
+                        int max_len,
+                        unsigned char** visited_bitmaps,
+                        const char* avoid_chars,
+                        const float* topo_act);
+
 // ========== 状态持久化 ==========
 
 int master_save_state(MasterTopology* master, const char* file_path);

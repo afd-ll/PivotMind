@@ -218,6 +218,66 @@ DigitalLifeSystem* digital_life_create() {
         }
     }
     
+    // 构建跨拓扑连接：将词汇拓扑中的单字与语义拓扑的同名概念连接
+    {
+        SubTopology* v = master_get_sub_topology_by_type(sys->topology, TOPO_VOCABULARY);
+        SubTopology* s = master_get_sub_topology_by_type(sys->topology, TOPO_SEMANTIC);
+        SubTopology* e = master_get_sub_topology_by_type(sys->topology, TOPO_EMOTION);
+        
+        // 为每个非词汇拓扑构建节点哈希，加速查找
+        if (v && v->net && v->node_hash) {
+            int cross_created = 0;
+            
+            // 语义拓扑：按概念名匹配单词→语义节点
+            if (s && s->net && s->node_hash) {
+                for (int si = 0; si < s->net->node_count; si++) {
+                    ReasoningNode* sn = s->net->nodes[si];
+                    if (!sn || !sn->concept) continue;
+                    // 尝试在词汇拓扑中找到对应词（多字词拆单字匹配）
+                    for (int vi = 0; vi < v->net->node_count; vi++) {
+                        ReasoningNode* vn = v->net->nodes[vi];
+                        if (!vn || !vn->concept) continue;
+                        // 如果语义概念包含该单字 → 建立跨拓扑连接
+                        if (strstr(sn->concept, vn->concept)) {
+                            master_add_cross_link(sys->topology,
+                                                  v->topo_id, vn->node_id,
+                                                  s->topo_id, sn->node_id,
+                                                  0.6f, "概念映射");
+                            cross_created++;
+                            if (cross_created >= 5000) break;
+                        }
+                    }
+                    if (cross_created >= 5000) break;
+                }
+            }
+            
+            // 情绪拓扑：节点名匹配词汇单字
+            if (e && e->net && e->node_hash) {
+                for (int ei = 0; ei < e->net->node_count; ei++) {
+                    ReasoningNode* en = e->net->nodes[ei];
+                    if (!en || !en->concept) continue;
+                    for (int vi = 0; vi < v->net->node_count; vi++) {
+                        ReasoningNode* vn = v->net->nodes[vi];
+                        if (!vn || !vn->concept) continue;
+                        if (strstr(en->concept, vn->concept)) {
+                            master_add_cross_link(sys->topology,
+                                                  v->topo_id, vn->node_id,
+                                                  e->topo_id, en->node_id,
+                                                  0.5f, "情绪关联");
+                            cross_created++;
+                            if (cross_created >= 5000) break;
+                        }
+                    }
+                    if (cross_created >= 5000) break;
+                }
+            }
+            
+            if (cross_created > 0) {
+                printf("     ✓ 已创建 %d 条跨拓扑连接\n", cross_created);
+            }
+        }
+    }
+    
     // 加载记忆种子
     const char* mem_file = "memory_seed.dat";
     memory_load_seed(sys->memory, mem_file);
