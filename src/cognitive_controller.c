@@ -531,3 +531,318 @@ void cognitive_controller_snapshot(CognitiveController* cc, float satisfaction) 
     memcpy(cc->prev_intent_weights, cc->intent_weights, sizeof(float) * MAX_SUBTOPOS);
     cc->prev_satisfaction = satisfaction;
 }
+
+// ==================== 路径观察与概念涌现 ====================
+
+// 获取子拓扑中的节点
+static ReasoningNode* cc_get_node(SubTopology* sub, int node_id) {
+    if (!sub || !sub->net) return NULL;
+    if (node_id < 0 || node_id >= sub->net->node_count) return NULL;
+    return sub->net->nodes[node_id];
+}
+
+// 获取节点概念名
+static const char* cc_node_name(SubTopology* sub, int node_id) {
+    ReasoningNode* n = cc_get_node(sub, node_id);
+    return n ? n->concept : NULL;
+}
+
+// 拼接多字符概念名
+static char* cc_join_names(SubTopology* sub, const int* ids, int len) {
+    char buf[256] = {0};
+    int pos = 0;
+    for (int i = 0; i < len && pos < 250; i++) {
+        const char* name = cc_node_name(sub, ids[i]);
+        if (name) {
+            int nlen = strlen(name);
+            if (pos + nlen < 250) {
+                memcpy(buf + pos, name, nlen);
+                pos += nlen;
+            }
+        }
+    }
+    return strdup(buf);
+}
+
+// 计算序列内部平均边强度
+static float cc_avg_edge_strength(SubTopology* sub, const int* ids, int len) {
+    if (len < 2) return 0.0f;
+    float total = 0.0f;
+    int count = 0;
+    for (int i = 0; i < len - 1; i++) {
+        ReasoningNode* from = cc_get_node(sub, ids[i]);
+        if (!from) continue;
+        int to_id = ids[i + 1];
+        for (int c = 0; c < from->connection_count; c++) {
+            ReasoningNode* t = from->connections[c];
+            if (t && t->node_id == to_id) {
+                total += from->connection_weights[c];
+                count++;
+                break;
+            }
+        }
+    }
+    return count > 0 ? total / count : 0.0f;
+}
+
+void cognitive_controller_observe_path(CognitiveController* cc,
+                                        int topo_type,
+                                        const int* node_ids,
+                                        int path_len) {
+    if (!cc || !node_ids || path_len < 2) return;
+    if (path_len > CC_PATH_MAX_LEN) path_len = CC_PATH_MAX_LEN;
+
+    int cur = cc->path_buf_cursor;
+    memcpy(cc->path_buf_nodes[cur], node_ids, path_len * sizeof(int));
+    cc->path_buf_lens[cur] = path_len;
+    cc->path_buf_topo[cur] = topo_type;
+
+    cc->path_buf_cursor = (cur + 1) % CC_PATH_BUF_SIZE;
+    if (cc->path_buf_count < CC_PATH_BUF_SIZE) cc->path_buf_count++;
+
+    // 周期扫描触发器
+    cc->scan_counter++;
+    if (cc->scan_counter >= 50) {
+        cc->scan_counter = 0;
+        cognitive_controller_scan_patterns(cc);
+    }
+}
+
+// 创建复合节点（概念拓扑中）
+static int cc_create_composite(CognitiveController* cc,
+                                const int* node_ids, int len,
+                                int topo_type) {
+    if (!cc || !cc->master || len < 2) return -1;
+
+    SubTopology* vocab = master_get_sub_topology_by_type(cc->master, (TopologyType)topo_type);
+    SubTopology* concept = master_get_sub_topology_by_type(cc->master, TOPO_CONCEPT);
+    if (!vocab || !concept || !concept->net) return -1;
+
+    // 拼接名称
+    char* comp_name = cc_join_names(vocab, node_ids, len);
+    if (!comp_name) return -1;
+
+    // 查重
+    if (concept->net && concept->node_hash) {
+        if (node_hash_find(concept->node_hash, comp_name)) {
+            ReasoningNode* existing = node_hash_find(concept->node_hash, comp_name);
+            if (existing) { free(comp_name); return existing->node_id; }
+        }
+    }
+
+    // 创建复合节点
+    ReasoningNode* composite = huarong_net_add_node(
+        concept->net, comp_name, NULL, 0);
+    free(comp_name);
+    if (!composite) return -1;
+    composite->confidence = 1.0f;
+    composite->activation = 0.5f;
+
+    // 找词汇拓扑和概念拓扑的对应ID
+    int vocab_topo_id = -1;
+    for (int t = 0; t < cc->master->sub_topo_count; t++) {
+        if (cc->master->sub_topologies[t] &&
+            cc->master->sub_topologies[t]->type == TOPO_VOCABULARY) {
+            vocab_topo_id = t;
+            break;
+        }
+    }
+    int concept_topo_id = -1;
+    for (int t = 0; t < cc->master->sub_topo_count; t++) {
+        if (cc->master->sub_topologies[t] &&
+            cc->master->sub_topologies[t]->type == TOPO_CONCEPT) {
+            concept_topo_id = t;
+            break;
+        }
+    }
+
+    if (vocab_topo_id >= 0 && concept_topo_id >= 0) {
+        // 从第一个字符 → 复合节点
+        master_add_cross_link(cc->master,
+            vocab_topo_id, node_ids[0],
+            concept_topo_id, composite->node_id,
+            0.8f, "composes");
+
+        // 从复合节点 → 继承最后一个字的最强出边
+        ReasoningNode* last = cc_get_node(vocab, node_ids[len - 1]);
+        if (last) {
+            for (int c = 0; c < last->connection_count && c < 10; c++) {
+                ReasoningNode* target = last->connections[c];
+                if (!target) continue;
+                float w = last->connection_weights[c];
+                if (w > 0.3f) {
+                    master_add_cross_link(cc->master,
+                        concept_topo_id, composite->node_id,
+                        vocab_topo_id, target->node_id,
+                        w * (cc->composite_boost > 0 ? cc->composite_boost : 1.1f),
+                        "continues");
+                }
+            }
+        }
+    }
+
+    printf("[认知调度·概念涌现] 创建复合节点 '%s'(ID=%d, %d字)\n",
+           composite->concept, composite->node_id, len);
+    return composite->node_id;
+}
+
+int cognitive_controller_scan_patterns(CognitiveController* cc) {
+    if (!cc || cc->path_buf_count < 5) return 0;
+    if (!cc->patterns) {
+        cc->pattern_capacity = 256;
+        cc->patterns = (typeof(cc->patterns))
+            calloc(cc->pattern_capacity, sizeof(*cc->patterns));
+    }
+
+    if (cc->min_pattern_freq <= 0) cc->min_pattern_freq = 8;
+    if (cc->min_edge_strength <= 0) cc->min_edge_strength = 0.4f;
+
+    int created = 0;
+
+    // 扫描 2-gram
+    for (int b = 0; b < cc->path_buf_count; b++) {
+        int len = cc->path_buf_lens[b];
+        int topo = cc->path_buf_topo[b];
+        int* nodes = cc->path_buf_nodes[b];
+
+        for (int s = 0; s < len - 1; s++) {
+            int from = nodes[s], to = nodes[s + 1];
+            if (from < 0 || to < 0) continue;
+
+            // 在已有模式中找
+            int found = -1;
+            for (int p = 0; p < cc->pattern_count; p++) {
+                if (cc->patterns[p].length == 2 &&
+                    cc->patterns[p].node_ids[0] == from &&
+                    cc->patterns[p].node_ids[1] == to) {
+                    found = p;
+                    break;
+                }
+            }
+
+            if (found < 0) {
+                // 新增模式
+                if (cc->pattern_count >= cc->pattern_capacity) {
+                    cc->pattern_capacity *= 2;
+                    cc->patterns = (typeof(cc->patterns))
+                        realloc(cc->patterns, cc->pattern_capacity * sizeof(*cc->patterns));
+                    memset(&cc->patterns[cc->pattern_count], 0,
+                           (cc->pattern_capacity - cc->pattern_count) * sizeof(*cc->patterns));
+                }
+                found = cc->pattern_count++;
+                cc->patterns[found].node_ids = (int*)malloc(4 * sizeof(int));
+                cc->patterns[found].node_ids[0] = from;
+                cc->patterns[found].node_ids[1] = to;
+                cc->patterns[found].length = 2;
+                cc->patterns[found].count = 0;
+                cc->patterns[found].composite_id = -1;
+            }
+
+            // 如果是词汇拓扑的路径才统计
+            SubTopology* sub = master_get_sub_topology_by_type(cc->master, (TopologyType)topo);
+            if (sub && sub->type == TOPO_VOCABULARY) {
+                cc->patterns[found].count++;
+            }
+        }
+    }
+
+    // 检查哪些 2-gram 达到阈值
+    SubTopology* vocab = master_get_sub_topology_by_type(cc->master, TOPO_VOCABULARY);
+    if (!vocab) return 0;
+
+    for (int p = 0; p < cc->pattern_count; p++) {
+        if (cc->patterns[p].length != 2) continue;
+        if (cc->patterns[p].composite_id >= 0) continue;
+        if (cc->patterns[p].count < cc->min_pattern_freq) continue;
+
+        float edge_str = cc_avg_edge_strength(
+            vocab, cc->patterns[p].node_ids, 2);
+        if (edge_str < cc->min_edge_strength) continue;
+
+        cc->patterns[p].avg_edge_strength = edge_str;
+        cc->patterns[p].composite_id = cc_create_composite(
+            cc, cc->patterns[p].node_ids, 2, TOPO_VOCABULARY);
+        if (cc->patterns[p].composite_id >= 0) created++;
+
+        // 检查 3-gram 扩展
+        for (int b = 0; b < cc->path_buf_count; b++) {
+            int len = cc->path_buf_lens[b];
+            int* nodes = cc->path_buf_nodes[b];
+            for (int s = 0; s < len - 2; s++) {
+                if (nodes[s] == cc->patterns[p].node_ids[0] &&
+                    nodes[s+1] == cc->patterns[p].node_ids[1]) {
+                    // 找到第三个字的候选
+                    int third = nodes[s+2];
+                    int seq3[3] = {cc->patterns[p].node_ids[0],
+                                   cc->patterns[p].node_ids[1], third};
+
+                    // 检查是否已有此 3-gram
+                    int found3 = -1;
+                    for (int q = 0; q < cc->pattern_count; q++) {
+                        if (cc->patterns[q].length != 3) continue;
+                        if (cc->patterns[q].node_ids[0] == seq3[0] &&
+                            cc->patterns[q].node_ids[1] == seq3[1] &&
+                            cc->patterns[q].node_ids[2] == seq3[2]) {
+                            found3 = q;
+                            break;
+                        }
+                    }
+
+                    if (found3 < 0) {
+                        if (cc->pattern_count >= cc->pattern_capacity) {
+                            cc->pattern_capacity *= 2;
+                            cc->patterns = (typeof(cc->patterns))
+                                realloc(cc->patterns, cc->pattern_capacity * sizeof(*cc->patterns));
+                            memset(&cc->patterns[cc->pattern_count], 0,
+                                   (cc->pattern_capacity - cc->pattern_count) * sizeof(*cc->patterns));
+                        }
+                        int q = cc->pattern_count++;
+                        cc->patterns[q].node_ids = (int*)malloc(4 * sizeof(int));
+                        cc->patterns[q].node_ids[0] = seq3[0];
+                        cc->patterns[q].node_ids[1] = seq3[1];
+                        cc->patterns[q].node_ids[2] = seq3[2];
+                        cc->patterns[q].length = 3;
+                        cc->patterns[q].count = 0;
+                        cc->patterns[q].composite_id = -1;
+                    }
+
+                    // 统计频率
+                    int idx = found3 < 0 ? cc->pattern_count - 1 : found3;
+                    cc->patterns[idx].count++;
+                }
+            }
+        }
+    }
+
+    if (created > 0) {
+        printf("[认知调度·概念涌现] 本轮创建 %d 个复合节点 (共 %d 模式)\n",
+               created, cc->pattern_count);
+    }
+
+    // 清理路径缓冲（滚动刷新）
+    if (cc->path_buf_count >= CC_PATH_BUF_SIZE) {
+        // 只保留最近的一半
+        int keep = CC_PATH_BUF_SIZE / 2;
+        int start = (cc->path_buf_cursor - keep + CC_PATH_BUF_SIZE) % CC_PATH_BUF_SIZE;
+        for (int i = 0; i < keep; i++) {
+            int src = (start + i) % CC_PATH_BUF_SIZE;
+            memcpy(cc->path_buf_nodes[i], cc->path_buf_nodes[src],
+                   CC_PATH_MAX_LEN * sizeof(int));
+            cc->path_buf_lens[i] = cc->path_buf_lens[src];
+            cc->path_buf_topo[i] = cc->path_buf_topo[src];
+        }
+        cc->path_buf_count = keep;
+        cc->path_buf_cursor = keep % CC_PATH_BUF_SIZE;
+    }
+
+    return created;
+}
+
+int cognitive_controller_pattern_count(CognitiveController* cc) {
+    if (!cc) return 0;
+    int count = 0;
+    for (int i = 0; i < cc->pattern_count; i++) {
+        if (cc->patterns[i].composite_id >= 0) count++;
+    }
+    return count;
+}

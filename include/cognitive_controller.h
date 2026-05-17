@@ -30,6 +30,12 @@
 /** 最大修正次数 */
 #define MAX_RETRY 3
 
+/** 路径缓冲大小（环形） */
+#define CC_PATH_BUF_SIZE 500
+
+/** 单条路径最大步数 */
+#define CC_PATH_MAX_LEN 32
+
 /** 修正状态返回值 */
 typedef enum {
     RETRY_OK          = 0,   // 通过，无需修正
@@ -90,6 +96,31 @@ typedef struct {
     MemorySystem*   memory;
     const char*     current_input;     // 当前用户输入（仅引用，不拥有）
     const char*     last_response;     // 上一轮回复（仅引用，不拥有）
+
+    // ========== 7. 路径观察与概念涌现 ==========
+    // 环形缓冲区
+    int path_buf_nodes[CC_PATH_BUF_SIZE][CC_PATH_MAX_LEN];  // 节点ID序列
+    int path_buf_lens[CC_PATH_BUF_SIZE];                     // 每条路径长度
+    int path_buf_topo[CC_PATH_BUF_SIZE];                     // 拓扑类型
+    int path_buf_count;                                      // 当前条目数
+    int path_buf_cursor;                                     // 环形写入位置
+
+    // 检测到的模式
+    struct {
+        int* node_ids;               // 序列节点ID
+        int length;
+        int count;                   // 出现次数
+        float avg_edge_strength;     // 平均边强度
+        int composite_id;            // 复合节点ID (-1=未创建)
+    }* patterns;
+    int pattern_count;
+    int pattern_capacity;
+
+    // 配置
+    int scan_counter;                // 累计计数器（每50步扫描）
+    int min_pattern_freq;            // 最低频率才创建复合节点
+    float min_edge_strength;         // 最低边强度
+    float composite_boost;           // 复合节点权重提升系数
 
 } CognitiveController;
 
@@ -189,5 +220,26 @@ void cognitive_controller_set_context(CognitiveController* cc,
  * 获取子拓扑名称（用于调试日志）
  */
 const char* cognitive_controller_topo_name(int topo_type);
+
+// ==================== 路径观察与概念涌现 ====================
+
+/**
+ * 观察生成的走边路径 — 喂入缓冲供模式分析
+ */
+void cognitive_controller_observe_path(CognitiveController* cc,
+                                        int topo_type,
+                                        const int* node_ids,
+                                        int path_len);
+
+/**
+ * 扫描路径模式 — 检测高频共现序列，自动创建复合节点
+ * 返回本次新创建的复合节点数
+ */
+int cognitive_controller_scan_patterns(CognitiveController* cc);
+
+/**
+ * 获取统计信息
+ */
+int cognitive_controller_pattern_count(CognitiveController* cc);
 
 #endif // COGNITIVE_CONTROLLER_H

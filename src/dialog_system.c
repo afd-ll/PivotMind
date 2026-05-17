@@ -910,6 +910,13 @@ char* dialog_generate(DialogReasoning* reasoning, const char* input,
                 pos += snprintf(response + pos, max_len - pos, "%s", node->concept);
             }
 
+            // 喂走边路径到认知调度中心
+            if (dsys->controller) {
+                cognitive_controller_observe_path(
+                    dsys->controller,
+                    assoc->topo_type, path_nodes, path_len);
+            }
+
             if (pos >= 5) break;
         }
 
