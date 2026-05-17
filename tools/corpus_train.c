@@ -32,7 +32,7 @@
 #include "cross_edge_io.h"
 
 #define MAX_CHARS 4096
-#define MAX_QA 100000
+#define MAX_QA 200000
 #define MAX_LINE 65536
 #define CORPUS_DIR "~/本地书库"
 #define QA_PATH "data/hermes_knowledge_base.json"
@@ -412,9 +412,9 @@ int main(int argc, char* argv[]) {
 
     // 4. 处理书库（相邻字符共现 → 语序学习）
     printf("\n[3/5] 处理书库语料...\n");
-    time_t t_start = time(NULL);
+    time_t t0 = time(NULL);
     int book_edges = process_corpus_dir(master, vocab_sub, CORPUS_DIR);
-    double book_elapsed = difftime(time(NULL), t_start);
+    double book_elapsed = difftime(time(NULL), t0);
     printf("  书库完成: %d 条边, 耗时 %.0f 秒\n\n", book_edges, book_elapsed);
 
     // 5. 处理 Hermes QA 数据（对话关联学习）
@@ -468,7 +468,7 @@ int main(int argc, char* argv[]) {
     printf("║  耗时:    %-6.0f 秒                    ║\n", book_elapsed);
     printf("╚══════════════════════════════════════════╝\n");
 
-    double total_elapsed = difftime(time(NULL), t_start);
+    double total_elapsed = difftime(time(NULL), t0);
     printf("\n总耗时: %.0f 秒\n", total_elapsed);
 
     master_topology_destroy(master);
