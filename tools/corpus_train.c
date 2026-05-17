@@ -32,7 +32,7 @@
 #include "cross_edge_io.h"
 
 #define MAX_CHARS 4096
-#define MAX_QA 200000
+#define MAX_QA 500000
 #define MAX_LINE 65536
 #define CORPUS_DIR "~/本地书库"
 #define QA_PATH "data/hermes_knowledge_base.json"
