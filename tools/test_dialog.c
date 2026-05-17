@@ -1,13 +1,14 @@
 /**
- * @file test_dialog.c  (v2)
- * @brief 对话测试工具 — 加载状态 + Hebbian 语义训练 + 重建边 + 测试对话
+ * @file test_dialog.c  (v3)
+ * @brief 对话测试工具 — 加载状态 + QA共现建边 + 测试对话
  *
- * 用法: ./build/bin/test_dialog [state_file] [input_text] [hebbian_epochs]
- *       默认: pivotmind_state.dat "你好" 0 (不跑 Hebbian)
- *       跑 Hebbian: ./build/bin/test_dialog pivotmind_state.dat "你好" 50
+ * 用法: ./build/bin/test_dialog [state_file] [input_text] [epochs]
+ *       默认: pivotmind_state.dat "你好" 1 (跑1轮共现建边)
+ *       跑共现建边: ./build/bin/test_dialog pivotmind_state.dat "你好" 50
  *
- * Hebbian 训练直接内联在工具里，不依赖独立的 hebbian_pretrain 工具。
- * 训练后自动基于特征相似度重建拓扑边并保存 v3 状态文件。
+ * 基于 QA 数据的字符共现关系直接建边。
+ * 与 Hebbian 特征训练不同——共现建边直接创建拓扑连接（边），不修改特征向量。
+ * QA 对中问题字→回答字 建立有向边，多次共现累积权重。
  */
 
 #include <stdio.h>
@@ -24,7 +25,6 @@
 
 #define MAX_CHARS 256
 #define MAX_QA 100000
-#define HEBBIAN_LR 0.01f
 
 // ==================== JSON 解析 ====================
 
@@ -146,22 +146,22 @@ static int extract_chars(const char* text, char out[MAX_CHARS][8]) {
     return count;
 }
 
-// ==================== Hebbian 语义预训练 ====================
+// ==================== QA 共现建边 ====================
 
-static void run_hebbian(MasterTopology* master, const char* qa_path, int epochs) {
-    printf("\n[He 2/4] 读取 QA 数据...\n");
+static void build_edges_from_qa(MasterTopology* master, const char* qa_path, int epochs) {
+    printf("\n[QE 2/4] 读取 QA 数据...\n");
     char** questions = NULL;
     char** answers = NULL;
     int qa_count = read_qa_json(qa_path, &questions, &answers, MAX_QA);
     printf("  %d 条 QA 对\n", qa_count);
     if (qa_count == 0) return;
 
-    printf("[He 3/4] Hebbian 语义预训练 (%d epoch)...\n", epochs);
+    printf("[QE 3/4] 基于共现建边 (%d epoch)...\n", epochs);
     time_t start = time(NULL);
-    int total_pairs = 0;
+    int total_edges = 0;
 
     for (int ep = 0; ep < epochs; ep++) {
-        int updates = 0;
+        int upd = 0;
         for (int i = 0; i < qa_count; i++) {
             char input_chars[MAX_CHARS][8];
             char reply_chars[MAX_CHARS][8];
@@ -169,79 +169,65 @@ static void run_hebbian(MasterTopology* master, const char* qa_path, int epochs)
             int rc = extract_chars(answers[i], reply_chars);
             if (ic == 0 || rc == 0) continue;
 
+            // 预查找所有节点（避免在热循环内重复 hash_lookup）
+            ReasoningNode* in_nodes[MAX_CHARS];
+            ReasoningNode* out_nodes[MAX_CHARS];
+            SubTopology* vocab_sub = NULL;
+
+            for (int t = 0; t < master->sub_topo_count; t++) {
+                SubTopology* st = master->sub_topologies[t];
+                if (st && st->type == TOPO_VOCABULARY) { vocab_sub = st; break; }
+            }
+            if (!vocab_sub || !vocab_sub->net) continue;
+
+            for (int ci = 0; ci < ic; ci++)
+                in_nodes[ci] = node_hash_find(vocab_sub->node_hash, input_chars[ci]);
+            for (int rj = 0; rj < rc; rj++)
+                out_nodes[rj] = node_hash_find(vocab_sub->node_hash, reply_chars[rj]);
+
             for (int ci = 0; ci < ic; ci++) {
+                if (!in_nodes[ci]) continue;
                 for (int rj = 0; rj < rc; rj++) {
-                    ReasoningNode* n1 = NULL;
-                    ReasoningNode* n2 = NULL;
-                    SubTopology* vocab_sub = NULL;
-                    for (int t = 0; t < master->sub_topo_count && (!n1 || !n2); t++) {
-                        SubTopology* st = master->sub_topologies[t];
-                        if (!st || !st->net || !st->node_hash) continue;
-                        if (!n1) n1 = node_hash_find(st->node_hash, input_chars[ci]);
-                        if (!n2) n2 = node_hash_find(st->node_hash, reply_chars[rj]);
-                        if (st->type == TOPO_VOCABULARY) vocab_sub = st;
-                    }
-
-                    if (n1 && n2 && n1->features && n2->features && n1 != n2 && vocab_sub && vocab_sub->net) {
-                        float lr = HEBBIAN_LR;
-                        for (int d = 0; d < NODE_FEATURE_DIM; d++) {
-                            float diff = n1->features[d] - n2->features[d];
-                            n2->features[d] += lr * diff;
+                    if (!out_nodes[rj] || in_nodes[ci] == out_nodes[rj]) continue;
+                    int from_id = in_nodes[ci]->node_id;
+                    int to_id = out_nodes[rj]->node_id;
+                    // 先查是否已有边，有则累加权重，无则新建
+                    int found = 0;
+                    for (int e = 0; e < in_nodes[ci]->connection_count; e++) {
+                        if (in_nodes[ci]->connections[e] == out_nodes[rj]) {
+                            in_nodes[ci]->connection_weights[e] += 0.3f;
+                            if (in_nodes[ci]->connection_weights[e] > 5.0f)
+                                in_nodes[ci]->connection_weights[e] = 5.0f;
+                            found = 1;
+                            break;
                         }
-
-                        for (int neg_try = 0; neg_try < 3; neg_try++) {
-                            int neg_idx = rand() % vocab_sub->net->node_count;
-                            ReasoningNode* neg = vocab_sub->net->nodes[neg_idx];
-                            if (neg && neg->features && neg != n1 && neg != n2) {
-                                float neg_lr = -HEBBIAN_LR * 0.2f;
-                                for (int d = 0; d < NODE_FEATURE_DIM; d++) {
-                                    float diff = n2->features[d] - neg->features[d];
-                                    n2->features[d] -= neg_lr * diff;
-                                    neg->features[d] += neg_lr * diff;
-                                }
-                                break;
-                            }
-                        }
-                        updates++;
                     }
+                    if (!found) {
+                        huarong_net_add_connection(vocab_sub->net, from_id, to_id, 0.8f);
+                    }
+                    // 反向边同理
+                    found = 0;
+                    for (int e = 0; e < out_nodes[rj]->connection_count; e++) {
+                        if (out_nodes[rj]->connections[e] == in_nodes[ci]) {
+                            out_nodes[rj]->connection_weights[e] += 0.2f;
+                            if (out_nodes[rj]->connection_weights[e] > 5.0f)
+                                out_nodes[rj]->connection_weights[e] = 5.0f;
+                            found = 1;
+                            break;
+                        }
+                    }
+                    if (!found) {
+                        huarong_net_add_connection(vocab_sub->net, to_id, from_id, 0.6f);
+                    }
+                    upd++;
                 }
             }
         }
-        total_pairs += updates;
+        total_edges += upd;
     }
 
     double elapsed = difftime(time(NULL), start);
-    printf("  ✓ 完成: %d 次 Hebbian 更新, 耗时 %.0f 秒\n", total_pairs, elapsed);
-
-    printf("\n[He 4/4] 语义聚类统计...\n");
-    for (int t = 0; t < master->sub_topo_count; t++) {
-        SubTopology* sub = master->sub_topologies[t];
-        if (!sub || !sub->net || sub->type != TOPO_VOCABULARY) continue;
-        const char* test_words[] = {"天", "学", "开", "大", "我", "好", NULL};
-        for (int tw = 0; test_words[tw]; tw++) {
-            ReasoningNode* src = node_hash_find(sub->node_hash, test_words[tw]);
-            if (!src || !src->features) continue;
-            typedef struct { float sim; const char* name; } SimItem;
-            SimItem top5[5] = {{0, NULL}};
-            for (int nid = 0; nid < sub->net->node_count; nid++) {
-                ReasoningNode* cand = sub->net->nodes[nid];
-                if (!cand || !cand->features || cand == src || !cand->concept) continue;
-                float sim = cosine_similarity(src->features, cand->features, NODE_FEATURE_DIM);
-                for (int r = 0; r < 5; r++) {
-                    if (sim > top5[r].sim) {
-                        for (int s = 4; s > r; s--) top5[s] = top5[s-1];
-                        top5[r].sim = sim;
-                        top5[r].name = cand->concept;
-                        break;
-                    }
-                }
-            }
-            printf("  「%s」最近邻:", test_words[tw]);
-            for (int r = 0; r < 5 && top5[r].name; r++)
-                printf(" %s(%.3f)", top5[r].name, top5[r].sim);
-            printf("\n");
-        }
-    }
+    printf("  ✓ 完成: %d 条边 (共现法), 耗时 %.0f 秒\n", total_edges, elapsed);
 
     for (int i = 0; i < qa_count; i++) free(questions[i]);
     for (int i = 0; i < qa_count; i++) free(answers[i]);
@@ -253,7 +239,7 @@ static void run_hebbian(MasterTopology* master, const char* qa_path, int epochs)
 int main(int argc, char* argv[]) {
     const char* state_file = argc > 1 ? argv[1] : "pivotmind_state.dat";
     const char* input_text = argc > 2 ? argv[2] : "你好";
-    int hebbian_epochs = argc > 3 ? atoi(argv[3]) : 0;
+    int epochs = argc > 3 ? atoi(argv[3]) : 1;
     int max_output = 50;
 
     // 初始化随机数
@@ -315,19 +301,12 @@ int main(int argc, char* argv[]) {
         save_cross_edges(master, "cross_edges.bin");
     }
 
-    // 4.5 基于特征相似度重建拓扑内部边
-    printf("[4.5/5] 重建拓扑内部边...\n");
-    int rebuilt_edges = master_rebuild_edges_by_similarity(master, 0.35f, 8);
-    printf("     ✓ 已重建 %d 条内部边\n", rebuilt_edges);
+    // 4.5 跳过特征相似度建边（不产生语义边），直接由 QA 共现或旧状态提供边
 
-    // [可选] Hebbian 语义预训练
-    if (hebbian_epochs > 0) {
+    // [可选] QA 共现建边
+    if (epochs > 0) {
         const char* qa_path = "data/hermes_knowledge_base.json";
-        run_hebbian(master, qa_path, hebbian_epochs);
-        // Hebbian 后重新建边（特征向量变了）
-        printf("[He 5/4] Hebbian 后重连...\n");
-        int after_hebbian = master_rebuild_edges_by_similarity(master, 0.35f, 8);
-        printf("     ✓ 重建 %d 条内部边\n", after_hebbian);
+        build_edges_from_qa(master, qa_path, epochs);
     }
 
     // 保存特征向量 + 跨连接

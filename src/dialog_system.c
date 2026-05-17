@@ -1242,10 +1242,8 @@ DialogSystem* dialog_system_create(MasterTopology* master, MemorySystem* memory,
     sys->learner = learner;
     sys->concept_hierarchy = concept_hierarchy_create(500);
     sys->str_pool = string_pool_create(500);
-    // 创建轻量级Seq2Seq神经模型: vocab=200, emb=32, hidden=64, max_seq=20
+    // 创建生成词汇表
     sys->gen_vocab = gen_vocab_create(200);
-    sys->seq2seq = seq2seq_create(200, 32, 64, 20);
-    printf("[对话系统] 神经模型: %s\n", sys->seq2seq ? "已就绪" : "创建失败");
     sys->session_id = time(NULL);
     sys->turn_count = 0;
     sys->max_hop_count = 3;
@@ -1282,9 +1280,6 @@ void dialog_system_destroy(DialogSystem* sys) {
     }
     if (sys->str_pool) {
         string_pool_destroy((StringPool*)sys->str_pool);
-    }
-    if (sys->seq2seq) {
-        seq2seq_destroy((Seq2SeqModel*)sys->seq2seq);
     }
     if (sys->gen_vocab) {
         gen_vocab_destroy((GenVocabulary*)sys->gen_vocab);

@@ -1606,7 +1606,8 @@ int master_rebuild_edges_by_similarity(MasterTopology* master, float threshold, 
                 ReasoningNode* tgt = net->nodes[m];
                 if (!tgt || !tgt->features || tgt->feature_dim != src->feature_dim) continue;
                 float sim = cosine_similarity(src->features, tgt->features, src->feature_dim);
-                if (sim < threshold) continue;
+                if (isnan(sim) || isinf(sim)) sim = 0.0f;
+                if (sim <= 0.0f || sim < threshold) continue;
 
                 // 插入到 top-N 的合适位置
                 if (top_count < max_t) {

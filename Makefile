@@ -28,8 +28,6 @@ ALL_SRC = \
 	src/vocab.c \
 	src/pretrain.c \
 	src/generative_model.c \
-	src/seq2seq_train.c \
-	src/sequence_generation.c \
 	src/model_io.c \
 	src/error.c \
 	src/attention.c \
@@ -83,8 +81,8 @@ endef
 $(eval $(call binary_rule,digital_life,demos/digital_life.c))
 $(eval $(call binary_rule,seed_builder,tools/seed_builder.c))
 $(eval $(call binary_rule,debug_seed,tools/debug_seed.c))
-$(eval $(call binary_rule,seq2seq_trainer,tools/seq2seq_trainer.c))
 $(eval $(call binary_rule,test_dialog,tools/test_dialog.c))
+$(eval $(call binary_rule,corpus_train,tools/corpus_train.c))
 
 # ========== 构建目标 ==========
 

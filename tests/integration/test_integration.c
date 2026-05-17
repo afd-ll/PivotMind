@@ -491,77 +491,6 @@ void test_end_to_end_workflow() {
     TEST_END();
 }
 
-// ========== Test: Seq2Seq Simple Flow ==========
-
-void test_seq2seq_simple_flow() {
-    TEST_START("Simple Seq2Seq flow");
-
-    // This test simulates a simple sequence-to-sequence scenario
-    // Using RNN-like structure with manual sequence processing
-
-    // Step 1: Create encoder (simple linear layer)
-    Model* encoder = model_create();
-    Layer* enc_layer = layer_create_linear(2, 3, true);
-    model_add_layer(encoder, enc_layer);
-
-    // Step 2: Create decoder (simple linear layer)
-    Model* decoder = model_create();
-    Layer* dec_layer = layer_create_linear(3, 2, true);
-    model_add_layer(decoder, dec_layer);
-
-    // Step 3: Create sequence data
-    int seq_length = 4;
-    Tensor** sequence = (Tensor**)malloc(seq_length * sizeof(Tensor*));
-
-    for (int i = 0; i < seq_length; i++) {
-        size_t shape[] = {1, 2};
-        sequence[i] = tensor_create(DT_FLOAT32, 2, shape);
-        float* data = (float*)sequence[i]->data;
-        data[0] = (float)(i + 1);
-        data[1] = (float)((i + 1) * 2);
-    }
-
-    // Step 4: Encode sequence (simple averaging)
-    size_t hidden_shape[] = {1, 3};
-    Tensor* hidden_state = tensor_create(DT_FLOAT32, 2, hidden_shape);
-    float* hidden_data = (float*)hidden_state->data;
-    memset(hidden_data, 0, 3 * sizeof(float));
-
-    for (int i = 0; i < seq_length; i++) {
-        Tensor* encoded = model_forward(encoder, sequence[i]);
-        float* enc_data = (float*)encoded->data;
-        for (int j = 0; j < 3; j++) {
-            hidden_data[j] += enc_data[j] / seq_length;
-        }
-        tensor_destroy(encoded);
-    }
-
-    // Step 5: Decode sequence
-    Tensor** output_sequence = (Tensor**)malloc(seq_length * sizeof(Tensor*));
-
-    for (int i = 0; i < seq_length; i++) {
-        Tensor* decoded = model_forward(decoder, hidden_state);
-        output_sequence[i] = decoded;
-    }
-
-    // Step 6: Verify output
-    ASSERT_NOT_NULL(output_sequence[0], "Decoder output should not be NULL");
-    ASSERT_EQUAL(output_sequence[0]->shape[1], 2, "Output feature size should be 2");
-
-    // Cleanup
-    for (int i = 0; i < seq_length; i++) {
-        tensor_destroy(sequence[i]);
-        tensor_destroy(output_sequence[i]);
-    }
-    free(sequence);
-    free(output_sequence);
-    tensor_destroy(hidden_state);
-    model_destroy(encoder);
-    model_destroy(decoder);
-
-    TEST_END();
-}
-
 // ========== Test: Model Checkpoint Save/Load ==========
 
 void test_checkpoint_save_load() {
@@ -775,8 +704,6 @@ int main() {
     test_model_save_load();
     test_checkpoint_save_load();
 
-    printf("\n=== Specialized Flow Tests ===\n");
-    test_seq2seq_simple_flow();
 
     printf("\n=== Metrics Integration Tests ===\n");
     test_metrics_integration();

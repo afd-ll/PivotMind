@@ -166,7 +166,7 @@ typedef struct {
     ActiveLearner* learner;    // 主动学习器（可选）
     void* concept_hierarchy;   // 概念层次结构（ConceptHierarchy*）
     void* str_pool;            // 字符串池（StringPool*）
-    void* seq2seq;             // Seq2Seq神经模型（Seq2SeqModel*）
+    void* _placeholder;        // 保留对齐
     void* gen_vocab;           // 生成词汇表（GenVocabulary*）
     
     long session_id;           // 会话ID
