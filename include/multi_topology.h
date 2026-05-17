@@ -285,4 +285,19 @@ int topology_walk_cross(MasterTopology* master,
 int master_save_state(MasterTopology* master, const char* file_path);
 int master_load_state(MasterTopology* master, const char* file_path);
 
+// ========== 边重建 ==========
+
+/**
+ * 基于特征向量余弦相似度重建拓扑内部边
+ *
+ * 遍历所有节点，对每个节点找 top-N 语义最近邻并建边。
+ * 仅对 features 非空的节点生效。
+ *
+ * @param master 主拓扑
+ * @param threshold 余弦相似度阈值，低于此值不建边 (默认建议 0.35)
+ * @param max_connections 每个节点最大连接数 (默认建议 8)
+ * @return 创建的边总数
+ */
+int master_rebuild_edges_by_similarity(MasterTopology* master, float threshold, int max_connections);
+
 #endif // MULTI_TOPOLOGY_H

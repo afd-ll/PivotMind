@@ -1,13 +1,13 @@
 /**
  * @file test_dialog.c  (v2)
- * @brief 对话测试工具 — 加载状态 + Hebbian 语义训练 + 测试对话
+ * @brief 对话测试工具 — 加载状态 + Hebbian 语义训练 + 重建边 + 测试对话
  *
  * 用法: ./build/bin/test_dialog [state_file] [input_text] [hebbian_epochs]
  *       默认: pivotmind_state.dat "你好" 0 (不跑 Hebbian)
  *       跑 Hebbian: ./build/bin/test_dialog pivotmind_state.dat "你好" 50
  *
  * Hebbian 训练直接内联在工具里，不依赖独立的 hebbian_pretrain 工具。
- * 训练后的特征向量保存到 features.bin + cross_edges.bin。
+ * 训练后自动基于特征相似度重建拓扑边并保存 v3 状态文件。
  */
 
 #include <stdio.h>
@@ -78,61 +78,75 @@ static int read_qa_json(const char* path, char*** out_q, char*** out_a, int max)
     char** answers = (char**)calloc(max, sizeof(char*));
     int count = 0;
 
+    // 格式: [[q1, a1], [q2, a2], ...]  或  {"data": [[q1, a1], ...]}
+    // 跳过外层包裹，找到第一个 [
     const char* p = data;
     p = skip_ws(p);
-    if (*p == '[') p++;
-    while (*p && count < max) {
+    if (*p == '{') {
+        // 跳过 {"data": 或类似外层对象
+        while (*p && *p != '[') p++;
+    }
+    p = skip_ws(p);
+    if (*p == '[') {
+        p++; // skip outer [
         p = skip_ws(p);
-        if (*p == '[') p++;
-        p = skip_ws(p);
-        char* q = parse_json_string(&p);
-        p = skip_ws(p);
-        if (*p == ',') p++;
-        p = skip_ws(p);
-        char* a = parse_json_string(&p);
-        p = skip_ws(p);
-        if (*p == ']') p++;
-        p = skip_ws(p);
-        if (*p == ',') p++;
-        if (q && a && strlen(q) > 0 && strlen(a) > 0) {
-            questions[count] = q;
-            answers[count] = a;
-            count++;
-        } else {
-            free(q); free(a);
+
+        while (*p && count < max) {
+            if (*p != '[') break;  // 不是内层数组
+            p++; // skip inner [
+            p = skip_ws(p);
+
+            char* q = parse_json_string(&p);
+            p = skip_ws(p);
+            if (*p == ',') p++;
+            p = skip_ws(p);
+            char* a = parse_json_string(&p);
+            p = skip_ws(p);
+            if (*p == ']') p++; // skip inner ]
+
+            if (q && a) {
+                questions[count] = q;
+                answers[count] = a;
+                count++;
+            } else {
+                if (q) free(q);
+                if (a) free(a);
+            }
+
+            p = skip_ws(p);
+            if (*p == ',') p++;
+            p = skip_ws(p);
         }
     }
+
     free(data);
     *out_q = questions;
     *out_a = answers;
     return count;
 }
 
-// ==================== 单字提取 ====================
+// ==================== 汉字提取 ====================
 
-static int extract_chars(const char* text, char chars[MAX_CHARS][8]) {
+static int extract_chars(const char* text, char out[MAX_CHARS][8]) {
     int count = 0;
-    for (const char* p = text; *p && count < MAX_CHARS; ) {
+    const char* p = text;
+    while (*p && count < MAX_CHARS) {
         int len = 1;
-        if (((unsigned char)*p & 0xE0) == 0xC0) len = 2;
-        else if (((unsigned char)*p & 0xF0) == 0xE0) len = 3;
-        else if (((unsigned char)*p & 0xF8) == 0xF0) len = 4;
-        if (len == 3) {
-            int dup = 0;
-            for (int i = 0; i < count; i++)
-                if (memcmp(chars[i], p, 3) == 0) { dup = 1; break; }
-            if (!dup) {
-                memcpy(chars[count], p, 3);
-                chars[count][3] = '\0';
-                count++;
-            }
+        unsigned char c = (unsigned char)*p;
+        if (c >= 0xF0) len = 4;
+        else if (c >= 0xE0) len = 3;
+        else if (c >= 0xC0) len = 2;
+        if (len > 1) {
+            strncpy(out[count], p, len);
+            out[count][len] = '\0';
+            count++;
         }
         p += len;
     }
     return count;
 }
 
-// ==================== Hebbian 训练 ====================
+// ==================== Hebbian 语义预训练 ====================
 
 static void run_hebbian(MasterTopology* master, const char* qa_path, int epochs) {
     printf("\n[He 2/4] 读取 QA 数据...\n");
@@ -169,14 +183,12 @@ static void run_hebbian(MasterTopology* master, const char* qa_path, int epochs)
                     }
 
                     if (n1 && n2 && n1->features && n2->features && n1 != n2 && vocab_sub && vocab_sub->net) {
-                        // 正样本：只把回复字往输入字拉（不对称更新防止坍缩）
                         float lr = HEBBIAN_LR;
                         for (int d = 0; d < NODE_FEATURE_DIM; d++) {
                             float diff = n1->features[d] - n2->features[d];
                             n2->features[d] += lr * diff;
                         }
 
-                        // 负采样：随机选3个节点，把回复字推离它们
                         for (int neg_try = 0; neg_try < 3; neg_try++) {
                             int neg_idx = rand() % vocab_sub->net->node_count;
                             ReasoningNode* neg = vocab_sub->net->nodes[neg_idx];
@@ -201,7 +213,6 @@ static void run_hebbian(MasterTopology* master, const char* qa_path, int epochs)
     double elapsed = difftime(time(NULL), start);
     printf("  ✓ 完成: %d 次 Hebbian 更新, 耗时 %.0f 秒\n", total_pairs, elapsed);
 
-    // 输出语义聚类
     printf("\n[He 4/4] 语义聚类统计...\n");
     for (int t = 0; t < master->sub_topo_count; t++) {
         SubTopology* sub = master->sub_topologies[t];
@@ -249,12 +260,12 @@ int main(int argc, char* argv[]) {
     init_random();
 
     printf("╔══════════════════════════════════════════╗\n");
-    printf("║      玄枢 对话测试工具 v2              ║\n");
+    printf("║      玄枢 对话测试工具 v3              ║\n");
     printf("╚══════════════════════════════════════════╝\n\n");
 
     // 1. 创建主拓扑
     printf("[1/5] 创建多拓扑认知网络...\n");
-    MasterTopology* master = master_topology_create(9);
+    MasterTopology* master = master_topology_create(12);
     if (!master) { printf("错误: 无法创建主拓扑\n"); return 1; }
 
     master_add_sub_topology(master, TOPO_VOCABULARY, "词汇拓扑", 6000, 10);
@@ -304,14 +315,27 @@ int main(int argc, char* argv[]) {
         save_cross_edges(master, "cross_edges.bin");
     }
 
+    // 4.5 基于特征相似度重建拓扑内部边
+    printf("[4.5/5] 重建拓扑内部边...\n");
+    int rebuilt_edges = master_rebuild_edges_by_similarity(master, 0.35f, 8);
+    printf("     ✓ 已重建 %d 条内部边\n", rebuilt_edges);
+
     // [可选] Hebbian 语义预训练
     if (hebbian_epochs > 0) {
         const char* qa_path = "data/hermes_knowledge_base.json";
         run_hebbian(master, qa_path, hebbian_epochs);
+        // Hebbian 后重新建边（特征向量变了）
+        printf("[He 5/4] Hebbian 后重连...\n");
+        int after_hebbian = master_rebuild_edges_by_similarity(master, 0.35f, 8);
+        printf("     ✓ 重建 %d 条内部边\n", after_hebbian);
     }
 
     // 保存特征向量 + 跨连接
     save_features(master, "features.bin");
+
+    // 保存状态文件（v3 格式，含边数据）
+    master_save_state(master, "pivotmind_state.dat");
+    printf("     ✓ 已保存 v3 状态文件\n");
 
     // 5. 生成回复
     printf("\n[5/5] 生成回复...\n\n");
@@ -328,16 +352,18 @@ int main(int argc, char* argv[]) {
 
     // 统计
     int total_edges = 0;
+    int total_nodes = 0;
     for (int t = 0; t < master->sub_topo_count; t++) {
         SubTopology* sub = master->sub_topologies[t];
         if (!sub || !sub->net) continue;
+        total_nodes += sub->net->node_count;
         for (int n = 0; n < sub->net->node_count; n++) {
             ReasoningNode* node = sub->net->nodes[n];
             if (node) total_edges += node->connection_count;
         }
     }
-    printf("统计: 9857 节点, %d 内部边, %d 跨连接\n",
-           total_edges / 2, master->cross_link_count);
+    printf("统计: %d 节点, %d 内部边, %d 跨连接\n",
+           total_nodes, total_edges / 2, master->cross_link_count);
 
     master_topology_destroy(master);
     printf("\n✓ 测试完成\n");

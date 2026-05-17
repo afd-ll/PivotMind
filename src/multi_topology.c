@@ -1573,9 +1573,74 @@ int master_batch_train(MasterTopology* master, const char* train_file_path) {
     return added_count;
 }
 
-// ==================== 状态持久化功能 (v2 format: 含拓扑ID+连接数据) ====================
+// ==================== 特征相似度边重建 ====================
 
-#define STATE_FORMAT_VERSION 2
+int master_rebuild_edges_by_similarity(MasterTopology* master, float threshold, int max_connections) {
+    if (!master) return -1;
+    if (threshold <= 0.0f) threshold = 0.35f;
+    if (max_connections <= 0) max_connections = 8;
+
+    int total_edges = 0;
+
+    for (int t = 0; t < master->sub_topo_count; t++) {
+        SubTopology* sub = master->sub_topologies[t];
+        if (!sub || !sub->net || !sub->node_hash) continue;
+
+        HuarongTopologyNet* net = sub->net;
+        if (net->node_count < 2) continue;
+
+        // 用 top-N 选择（保持一个固定大小的数组，只在有新高分时插入）
+        typedef struct { int idx; float sim; } SimEntry;
+
+        for (int n = 0; n < net->node_count; n++) {
+            ReasoningNode* src = net->nodes[n];
+            if (!src || !src->features || src->feature_dim <= 0) continue;
+
+            // top-N 候选（初始化为低分）
+            SimEntry top[64];
+            int top_count = 0;
+            int max_t = max_connections > 64 ? 64 : max_connections;
+
+            for (int m = 0; m < net->node_count; m++) {
+                if (m == n) continue;
+                ReasoningNode* tgt = net->nodes[m];
+                if (!tgt || !tgt->features || tgt->feature_dim != src->feature_dim) continue;
+                float sim = cosine_similarity(src->features, tgt->features, src->feature_dim);
+                if (sim < threshold) continue;
+
+                // 插入到 top-N 的合适位置
+                if (top_count < max_t) {
+                    top[top_count].idx = m;
+                    top[top_count].sim = sim;
+                    top_count++;
+                } else {
+                    // 替换最低分
+                    int min_idx = 0;
+                    for (int k = 1; k < top_count; k++) {
+                        if (top[k].sim < top[min_idx].sim) min_idx = k;
+                    }
+                    if (sim > top[min_idx].sim) {
+                        top[min_idx].idx = m;
+                        top[min_idx].sim = sim;
+                    }
+                }
+            }
+
+            // 建边
+            for (int p = 0; p < top_count; p++) {
+                int ret = huarong_net_add_connection(net, n, top[p].idx, top[p].sim);
+                if (ret == 0) total_edges++;
+            }
+        }
+    }
+
+    printf("[边重建] 基于特征相似度重建 %d 条边\n", total_edges);
+    return total_edges;
+}
+
+// ==================== 状态持久化功能 (v3 format: 含拓扑ID+连接数据+概念名) ====================
+
+#define STATE_FORMAT_VERSION 3
 
 int master_save_state(MasterTopology* master, const char* file_path) {
     if (!master || !file_path) return -1;
@@ -1614,17 +1679,18 @@ int master_save_state(MasterTopology* master, const char* file_path) {
             // 激活值
             fwrite(&node->activation, sizeof(float), 1, fp);
             
-            // [v2] 写连接数 + 连接数据 (target_node_id, weight, bias, confidence)
+            // [v3] 写连接数 + 连接数据 (target_concept_len, target_concept, weight, bias, confidence)
             int safe_conn_count = node->connection_count;
             if (!node->connections) safe_conn_count = 0;
             fwrite(&safe_conn_count, sizeof(int), 1, fp);
             for (int c = 0; c < safe_conn_count; c++) {
-                if (node->connections[c]) {
-                    int target_id = node->connections[c]->node_id;
-                    fwrite(&target_id, sizeof(int), 1, fp);
+                if (node->connections[c] && node->connections[c]->concept) {
+                    int tgt_len = strlen(node->connections[c]->concept) + 1;
+                    fwrite(&tgt_len, sizeof(int), 1, fp);
+                    fwrite(node->connections[c]->concept, 1, tgt_len, fp);
                 } else {
-                    int target_id = -1;
-                    fwrite(&target_id, sizeof(int), 1, fp);
+                    int tgt_len = 0;
+                    fwrite(&tgt_len, sizeof(int), 1, fp);
                 }
                 float w = node->connection_weights ? node->connection_weights[c] : 0.0f;
                 float b = node->connection_motivational_bias ? node->connection_motivational_bias[c] : 0.0f;
@@ -1675,9 +1741,9 @@ int master_load_state(MasterTopology* master, const char* file_path) {
         fclose(fp);
         return -1;
     }
-    // v1格式: 没有版本头，读到的其实是node_id，回退重读
-    if (fmt_ver != STATE_FORMAT_VERSION) {
-        // 旧格式: 文件开头就是节点数据，回退
+    // fmt_ver ∈ {2,3} = 带版本头的格式化文件
+    // fmt_ver 为其他值 = v1 格式（文件头就是节点数据，回退重读）
+    if (fmt_ver != 2 && fmt_ver != 3) {
         fseek(fp, 0, SEEK_SET);
         fmt_ver = 1;
     }
@@ -1739,16 +1805,60 @@ int master_load_state(MasterTopology* master, const char* file_path) {
             node = huarong_net_add_node(target_topo->net, concept, NULL, 0);
             if (node) {
                 node_hash_add(target_topo->node_hash, node);
-                auto_connect_new_node(master, target_topo, node);
+                // v3: 跳过自动连接—边数据随后从文件中恢复
+                // v2/v1: 自动连接（因为没有边数据可恢复）
+                if (fmt_ver < 3) {
+                    auto_connect_new_node(master, target_topo, node);
+                }
             }
         }
         if (node) {
             node->activation = activation;
-            // 不覆盖 node_id：huarong_net_add_node 已分配正确的数组下标
         }
-        
-        // [v2] 读取并丢弃连接数据（重建由主动学习器完成）
-        if (fmt_ver >= 2) {
+
+        // 连接数据处理
+        if (fmt_ver >= 3) {
+            // [v3] 按概念名恢复连接
+            for (int c = 0; c < conn_count && conn_count > 0 && conn_count < 10000; c++) {
+                int tgt_concept_len;
+                if (fread(&tgt_concept_len, sizeof(int), 1, fp) != 1) break;
+                if (tgt_concept_len > 0 && tgt_concept_len <= 4096) {
+                    char tgt_concept[4096];
+                    if (fread(tgt_concept, 1, tgt_concept_len, fp) != (size_t)tgt_concept_len) break;
+                    tgt_concept[tgt_concept_len - 1] = '\0';
+
+                    float conn_w, conn_b, conn_c;
+                    if (fread(&conn_w, sizeof(float), 1, fp) != 1) break;
+                    if (fread(&conn_b, sizeof(float), 1, fp) != 1) break;
+                    if (fread(&conn_c, sizeof(float), 1, fp) != 1) break;
+
+                    if (node && target_topo->net) {
+                        ReasoningNode* tgt = node_hash_find(target_topo->node_hash, tgt_concept);
+                        if (tgt && tgt != node) {
+                            int ret = huarong_net_add_connection(target_topo->net,
+                                node->node_id, tgt->node_id, conn_w);
+                            if (ret == 0) {
+                                // 覆盖默认的 bias/confidence 为保存的值
+                                int idx = node->connection_count - 1;
+                                if (idx >= 0) {
+                                    if (node->connection_motivational_bias)
+                                        node->connection_motivational_bias[idx] = conn_b;
+                                    if (node->connection_confidences)
+                                        node->connection_confidences[idx] = conn_c;
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    // tgt_concept_len == 0: 空连接，跳过 weight/bias/confidence
+                    float skip_w, skip_b, skip_c;
+                    if (fread(&skip_w, sizeof(float), 1, fp) != 1) break;
+                    if (fread(&skip_b, sizeof(float), 1, fp) != 1) break;
+                    if (fread(&skip_c, sizeof(float), 1, fp) != 1) break;
+                }
+            }
+        } else if (fmt_ver >= 2) {
+            // [v2] 读取并丢弃连接数据（目标用 node_id 存储，加载后无效）
             for (int c = 0; c < conn_count && conn_count > 0 && conn_count < 10000; c++) {
                 int skip_id; float skip_w, skip_b, skip_c;
                 if (fread(&skip_id, sizeof(int), 1, fp) != 1) break;

@@ -84,6 +84,7 @@ $(eval $(call binary_rule,digital_life,demos/digital_life.c))
 $(eval $(call binary_rule,seed_builder,tools/seed_builder.c))
 $(eval $(call binary_rule,debug_seed,tools/debug_seed.c))
 $(eval $(call binary_rule,seq2seq_trainer,tools/seq2seq_trainer.c))
+$(eval $(call binary_rule,test_dialog,tools/test_dialog.c))
 
 # ========== 构建目标 ==========
 
