@@ -66,7 +66,7 @@ LIB_OBJ = $(ALL_SRC:.c=.o)
 LIB_NAME = libpivotmind.a
 
 # ========== 通用编译规则 ==========
-BUILD_BIN = $(BUILD_DIR)/digital_life $(BUILD_DIR)/seed_builder $(BUILD_DIR)/debug_seed
+BUILD_BIN = $(BUILD_DIR)/digital_life $(BUILD_DIR)/seed_builder $(BUILD_DIR)/debug_seed $(BUILD_DIR)/batch_learn
 
 # 单个.c -> .o
 %.o: %.c
@@ -83,6 +83,7 @@ $(eval $(call binary_rule,seed_builder,tools/seed_builder.c))
 $(eval $(call binary_rule,debug_seed,tools/debug_seed.c))
 $(eval $(call binary_rule,test_dialog,tools/test_dialog.c))
 $(eval $(call binary_rule,corpus_train,tools/corpus_train.c))
+$(eval $(call binary_rule,batch_learn,tools/batch_learn.c))
 
 # ========== 构建目标 ==========
 
