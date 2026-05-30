@@ -123,6 +123,26 @@ static void drift_cognitive_state(BackgroundClock* clock) {
     state->emotion_pain     = state->emotion_pain     * keep + BASELINE_STATE.emotion_pain     * pull;
     state->emotion_security = state->emotion_security * keep + BASELINE_STATE.emotion_security * pull;
 
+    // 回路8: 节点级valence反馈到全局情绪
+    // 从情绪拓扑采样节点valence，将其平均值的10%混入全局valence漂移
+    {
+        SubTopology* emo = NULL;
+        for (int t = 0; t < clock->master->sub_topo_count; t++) {
+            SubTopology* s = clock->master->sub_topologies[t];
+            if (s && s->type == TOPO_EMOTION) { emo = s; break; }
+        }
+        if (emo && emo->net && emo->net->node_count > 0) {
+            float sample_sum = 0.0f;
+            int sample_n = emo->net->node_count < 20 ? emo->net->node_count : 20;
+            for (int i = 0; i < sample_n; i++) {
+                int idx = rand() % emo->net->node_count;
+                ReasoningNode* n = emo->net->nodes[idx];
+                if (n) sample_sum += n->valence;
+            }
+            float topo_val = sample_sum / sample_n;
+            state->valence = state->valence * 0.9f + topo_val * 0.1f;
+        }
+    }
     // Valence — 向中性 0 缓慢回归
     state->valence *= 0.998f;
     if (fabsf(state->valence) < 0.001f) {

@@ -283,6 +283,10 @@ static void boost_connection_weighted(SubTopology* topo, ReasoningNode* a, Reaso
     }
 
     float base_weight = AUTONOMIC_BASE_WEIGHT * weight_mult;
+    // 回路6: 被走边频繁选中的节点对，赫布学习时给更大boost
+    float sel_boost = 1.0f + 0.1f * ((a->selection_count + b->selection_count) * 0.5f) / 10.0f;
+    if (sel_boost > 1.5f) sel_boost = 1.5f;
+    base_weight *= sel_boost;
     if (base_weight > 0.9f) base_weight = 0.9f;
 
     int existing_a_to_b = -1;
@@ -607,6 +611,12 @@ void autonomic_decay_all(MasterTopology* master) {
                 sum_conf += node->connection_confidences[e];
             float avg_conf = sum_conf / node->connection_count;
 
+            // ═══ 回路5: Fisher信息代理（selection_count + confidence 保护重要边）═══
+            float node_importance = (node->selection_count > 0)
+                ? 1.0f / (1.0f + 0.05f * node->selection_count)  // 越重要衰减越慢
+                : 1.0f;
+            float eff_decay = 1.0f - (1.0f - AUTONOMIC_DECAY_RATE) * node_importance;
+
             // 三档差异化衰减
             for (int e = 0; e < node->connection_count; e++) {
                 float conf = node->connection_confidences[e];
@@ -614,15 +624,15 @@ void autonomic_decay_all(MasterTopology* master) {
 
                 if (conf > avg_conf * 1.5f && conf > 0.5f) {
                     // 明显高于同节点其他边：高置信"赢家"，几乎不衰减
-                    rate = 0.9995f;
+                    rate = 1.0f - (1.0f - 0.9995f) * node_importance;
                     preserved++;
                 } else if (conf < avg_conf * 0.5f && conf < 0.3f) {
                     // 明显低于同节点其他边：低置信"输家"，加速衰减
                     rate = 0.85f;
                     competition_decayed++;
                 } else {
-                    // 中间区域：标准衰减
-                    rate = AUTONOMIC_DECAY_RATE;
+                    // 中间区域：标准衰减（含重要性保护）
+                    rate = 1.0f - (1.0f - AUTONOMIC_DECAY_RATE) * node_importance;
                 }
 
                 node->connection_confidences[e] = conf * rate;

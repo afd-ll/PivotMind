@@ -1367,6 +1367,11 @@ int topology_walk_greedy(SubTopology* sub, int start_node_id,
             // --- 目标节点 ---
             float node_act   = target->activation;
             float node_conf  = target->confidence;
+            // 回路3b: 混入cognitive_confidence三维综合置信度
+            if (target->cognitive_confidence) {
+                cognitive_confidence_compute(target->cognitive_confidence);
+                node_conf = node_conf * 0.6f + target->cognitive_confidence->combined * 0.4f;
+            }
             float raw_val    = target->valence;  // 原始效价 [-1, 1]，保留符号
 
             // --- 语义得分（第7维）---
@@ -1858,6 +1863,11 @@ int topology_walk_beam(SubTopology* sub, int start_node_id,
 
                 float node_act  = target->activation;
                 float node_conf = target->confidence;
+                // 回路3b: 混入cognitive_confidence三维综合置信度
+                if (target->cognitive_confidence) {
+                    cognitive_confidence_compute(target->cognitive_confidence);
+                    node_conf = node_conf * 0.6f + target->cognitive_confidence->combined * 0.4f;
+                }
 
                 float semantic_score = 0.0f;
                 if (target->features && has_mean)
@@ -2159,6 +2169,11 @@ int topology_walk_cross(MasterTopology* master,
                               ? cur_ra->connection_motivational_bias[i] : 0.0f;
             float node_act = target->activation;
             float node_conf = target->confidence;
+            // 回路3b: 混入cognitive_confidence三维综合置信度
+            if (target->cognitive_confidence) {
+                cognitive_confidence_compute(target->cognitive_confidence);
+                node_conf = node_conf * 0.6f + target->cognitive_confidence->combined * 0.4f;
+            }
             float raw_val = target->valence;
 
             // --- 语义得分（第7维）---
@@ -2233,6 +2248,10 @@ int topology_walk_cross(MasterTopology* master,
                         float cross_weight = link->weight * link->transfer_rate;
                         float node_act = tgt_node ? tgt_node->activation : 0.0f;
                         float node_conf = tgt_node ? tgt_node->confidence : 0.0f;
+                        if (tgt_node && tgt_node->cognitive_confidence) {
+                            cognitive_confidence_compute(tgt_node->cognitive_confidence);
+                            node_conf = node_conf * 0.6f + tgt_node->cognitive_confidence->combined * 0.4f;
+                        }
                         float raw_val = tgt_node ? tgt_node->valence : 0.0f;
 
                         // --- 语义得分（第7维） ---
