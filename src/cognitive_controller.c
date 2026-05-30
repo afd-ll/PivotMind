@@ -21,7 +21,7 @@ static void intent_base_load(CognitiveController* cc);
 static const char* TOPO_NAMES[] = {
     "词汇", "语义", "情绪", "语法",
     "上下文", "领域", "语用", "文化",
-    "概念", "主拓扑"
+    "概念", "主拓扑", "模板拓扑", "预留"
 };
 
 const char* cognitive_controller_topo_name(int topo_type) {
