@@ -111,11 +111,7 @@ HuarongTopologyNet* huarong_net_create(int max_nodes) {
     net->learning_rate = 0.01f;
     net->is_training = 0;
 
-    pthread_mutexattr_t attr;
-    pthread_mutexattr_init(&attr);
-    pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
-    pthread_mutex_init(&net->mutex, &attr);
-    pthread_mutexattr_destroy(&attr);
+    pthread_mutex_init(&net->mutex, NULL);
     
     return net;
 }
