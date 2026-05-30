@@ -624,6 +624,7 @@ void autonomic_decay_all(MasterTopology* master) {
         SubTopology* sub = master->sub_topologies[t];
         if (!sub || !sub->net) continue;
 
+        pthread_mutex_lock(&sub->net->mutex);
         for (int n = 0; n < sub->net->node_count; n++) {
             ReasoningNode* node = sub->net->nodes[n];
             if (!node || node->connection_count < 2) {
@@ -675,6 +676,7 @@ void autonomic_decay_all(MasterTopology* master) {
                 total_decayed++;
             }
         }
+        pthread_mutex_unlock(&sub->net->mutex);
     }
     printf("[自主学习] 全局衰减: %d 条 (竞争加速: %d, 保留: %d)\n",
            total_decayed, competition_decayed, preserved);
@@ -800,6 +802,7 @@ int autonomic_get_edge_stats(MasterTopology* master,
         SubTopology* sub = master->sub_topologies[t];
         if (!sub || !sub->net) continue;
 
+        pthread_mutex_lock(&sub->net->mutex);
         for (int n = 0; n < sub->net->node_count; n++) {
             ReasoningNode* node = sub->net->nodes[n];
             if (!node) continue;
