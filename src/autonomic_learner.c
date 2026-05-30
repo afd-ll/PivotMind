@@ -273,6 +273,11 @@ static int extract_ordered_chars(const char* text, char chars[MAX_CHARS_PER_TEXT
 
 // ==================== 在拓扑中查找节点 ====================
 
+// ==================== 全局学习锁 ====================
+// 串行化 autonomic_learn_from_dialog 调用, 避免 OpenMP 线程并发修改边数组
+// 粗粒度锁, 学习阶段 CPU 开销本身不大, 锁竞争可忽略
+static pthread_mutex_t g_learn_lock = PTHREAD_MUTEX_INITIALIZER;
+
 // ==================== 建边并涨置信度 ====================
 
 static void boost_connection_weighted(SubTopology* topo, ReasoningNode* a, ReasoningNode* b,
@@ -389,6 +394,9 @@ void autonomic_learn_from_dialog(MasterTopology* master,
                                  MemorySystem* memory) {
     if (!master || !user_input || !ai_response) return;
     if (strlen(user_input) == 0 || strlen(ai_response) == 0) return;
+
+    // 全局锁串行化学习调用, 避免 OpenMP 线程并发修改边数组
+    pthread_mutex_lock(&g_learn_lock);
 
     reset_activation_record();
 
@@ -636,10 +644,14 @@ void autonomic_learn_from_dialog(MasterTopology* master,
     if (state && state->initialized) {
         autonomic_request_flush(state, master);
     }
+
+    pthread_mutex_unlock(&g_learn_lock);
 }
 
 void autonomic_decay_all(MasterTopology* master) {
     if (!master) return;
+
+    pthread_mutex_lock(&g_learn_lock);
 
     int total_decayed = 0;
     int competition_decayed = 0;
@@ -703,6 +715,8 @@ void autonomic_decay_all(MasterTopology* master) {
     }
     printf("[自主学习] 全局衰减: %d 条 (竞争加速: %d, 保留: %d)\n",
            total_decayed, competition_decayed, preserved);
+
+    pthread_mutex_unlock(&g_learn_lock);
 }
 
 // ==================== 批量文本学习（替代 reader 工具） ====================
