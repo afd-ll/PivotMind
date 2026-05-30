@@ -279,16 +279,10 @@ static void boost_connection_weighted(SubTopology* topo, ReasoningNode* a, Reaso
                                       AutonomicState* state, float weight_mult) {
     if (!a || !b || a == b) return;
 
-    // 并发安全: 获取 net->mutex 保护边数组的读写
-    // huarong_net_add_connection 内部也持此锁(递归锁),不会死锁
-    pthread_mutex_t* mtx = (topo && topo->net) ? &topo->net->mutex : NULL;
-    if (mtx) pthread_mutex_lock(mtx);
+    HuarongTopologyNet* net = (topo && topo->net) ? topo->net : NULL;
 
     if (a->connection_count >= AUTONOMIC_MAX_CONNECTIONS ||
-        b->connection_count >= AUTONOMIC_MAX_CONNECTIONS) {
-        if (mtx) pthread_mutex_unlock(mtx);
-        return;
-    }
+        b->connection_count >= AUTONOMIC_MAX_CONNECTIONS) return;
 
     float base_weight = AUTONOMIC_BASE_WEIGHT * weight_mult;
     // 回路6: 被走边频繁选中的节点对，赫布学习时给更大boost
@@ -314,14 +308,13 @@ static void boost_connection_weighted(SubTopology* topo, ReasoningNode* a, Reaso
     }
 
     if (existing_a_to_b >= 0) {
-        // 已有连接 → 涨置信度（已在mtx保护下）
-        float old_confidence = a->connection_confidences[existing_a_to_b];
-        float delta = AUTONOMIC_LEARNING_RATE * (1.0f - old_confidence);
-        a->connection_confidences[existing_a_to_b] = old_confidence + delta;
-        a->connection_weights[existing_a_to_b] += AUTONOMIC_LEARNING_RATE * 0.5f * weight_mult;
-        if (a->connection_weights[existing_a_to_b] > 0.9f)
-            a->connection_weights[existing_a_to_b] = 0.9f;
-
+        float dc = AUTONOMIC_LEARNING_RATE * (1.0f - a->connection_confidences[existing_a_to_b]);
+        float dw = AUTONOMIC_LEARNING_RATE * 0.5f * weight_mult;
+        if (net) pthread_mutex_lock(&net->mutex);
+        a->connection_confidences[existing_a_to_b] += dc;
+        a->connection_weights[existing_a_to_b] += dw;
+        if (a->connection_weights[existing_a_to_b] > 0.9f) a->connection_weights[existing_a_to_b] = 0.9f;
+        if (net) pthread_mutex_unlock(&net->mutex);
         record_connection_activated(a, b);
     } else {
         // 新建连接（使用加权基础权重）
@@ -346,12 +339,13 @@ static void boost_connection_weighted(SubTopology* topo, ReasoningNode* a, Reaso
     }
 
     if (existing_b_to_a >= 0) {
-        float old_confidence = b->connection_confidences[existing_b_to_a];
-        float delta = AUTONOMIC_LEARNING_RATE * (1.0f - old_confidence);
-        b->connection_confidences[existing_b_to_a] = old_confidence + delta;
-        b->connection_weights[existing_b_to_a] += AUTONOMIC_LEARNING_RATE * 0.5f * weight_mult;
-        if (b->connection_weights[existing_b_to_a] > 0.9f)
-            b->connection_weights[existing_b_to_a] = 0.9f;
+        float dc = AUTONOMIC_LEARNING_RATE * (1.0f - b->connection_confidences[existing_b_to_a]);
+        float dw = AUTONOMIC_LEARNING_RATE * 0.5f * weight_mult;
+        if (net) pthread_mutex_lock(&net->mutex);
+        b->connection_confidences[existing_b_to_a] += dc;
+        b->connection_weights[existing_b_to_a] += dw;
+        if (b->connection_weights[existing_b_to_a] > 0.9f) b->connection_weights[existing_b_to_a] = 0.9f;
+        if (net) pthread_mutex_unlock(&net->mutex);
     } else {
         if (topo && topo->net) {
             huarong_net_add_connection(topo->net,
@@ -366,7 +360,6 @@ static void boost_connection_weighted(SubTopology* topo, ReasoningNode* a, Reaso
         }
     }
 
-    if (mtx) pthread_mutex_unlock(mtx);
 
     // 刷新状态累加器
     if (state && state->initialized) {
