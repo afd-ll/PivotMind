@@ -469,31 +469,22 @@ void autonomic_learn_from_dialog(MasterTopology* master,
         }
     }
 
-    // 核心3：输入字与回复字之间的交叉边（语义关联，无字序信息，权重=1.0）
-    for (int i = 0; i < input_count; i++) {
-        if (!input_nodes[i]) continue;
-        for (int j = 0; j < response_count; j++) {
-            if (!response_nodes[j]) continue;
-            boost_connection_weighted(vocab, input_nodes[i], response_nodes[j], state, 1.0f);
-        }
-    }
-
-    // ═══ 回路7+9: 因果图 + 记忆系统 → 额外赫布boost ═══
+    // 核心3 + 回路7+9: 输入↔回复交叉边（含因果图+LTM boost）
+    // 先计算每对的因果/LTM增强因子，一次性调用 boost_connection_weighted 避免双重计数
     {
         CausalGraph* cg = (CausalGraph*)causal_graph;
         int causal_boosted = 0;
         int ltm_boosted = 0;
 
-        for (int i = 0; i < input_count && (cg || memory); i++) {
+        for (int i = 0; i < input_count; i++) {
             if (!input_nodes[i]) continue;
-            for (int j = 0; j < response_count && (cg || memory); j++) {
+            for (int j = 0; j < response_count; j++) {
                 if (!response_nodes[j]) continue;
 
-                float extra_boost = 1.0f;
+                float wm = 1.0f;
 
-                // 回路7: 因果图 — 如果存在因果边，增强赫布权重
+                // 回路7: 因果图boost
                 if (cg && cg->edge_count > 0) {
-                    // 按概念名查找因果节点
                     int cg_cause = -1, cg_effect = -1;
                     for (int k = 0; k < cg->node_count; k++) {
                         if (cg_cause < 0 && cg->node_mapping[k] == input_nodes[i]->node_id)
@@ -505,35 +496,27 @@ void autonomic_learn_from_dialog(MasterTopology* master,
                     if (cg_cause >= 0 && cg_effect >= 0) {
                         CausalEdge* ce = get_causal_edge(cg, cg_cause, cg_effect);
                         if (ce && ce->strength > 0.3f) {
-                            extra_boost *= 1.0f + ce->strength * 0.5f;
+                            wm *= 1.0f + ce->strength * 0.5f;
                             causal_boosted++;
                         }
                     }
                 }
 
-                // 回路9: 记忆系统 — LTM中的重要概念获得更高权重
+                // 回路9: 记忆系统boost
                 if (memory && input_nodes[i]->concept && response_nodes[j]->concept) {
                     char key[512];
                     int found = 0;
                     snprintf(key, sizeof(key), "concept:%s", input_nodes[i]->concept);
                     MemoryEntry* me = memory_retrieve(memory, key);
-                    if (me && me->importance > 0.5f) {
-                        extra_boost *= 1.0f + me->importance * 0.3f;
-                        found = 1;
-                    }
+                    if (me && me->importance > 0.5f) { wm *= 1.0f + me->importance * 0.3f; found = 1; }
                     snprintf(key, sizeof(key), "concept:%s", response_nodes[j]->concept);
                     me = memory_retrieve(memory, key);
-                    if (me && me->importance > 0.5f) {
-                        extra_boost *= 1.0f + me->importance * 0.3f;
-                        found = 1;
-                    }
+                    if (me && me->importance > 0.5f) { wm *= 1.0f + me->importance * 0.3f; found = 1; }
                     if (found) ltm_boosted++;
                 }
 
-                if (extra_boost > 1.01f && extra_boost < 2.0f) {
-                    boost_connection_weighted(vocab, input_nodes[i], response_nodes[j],
-                                              state, extra_boost);
-                }
+                boost_connection_weighted(vocab, input_nodes[i], response_nodes[j],
+                                          state, wm);
             }
         }
 
