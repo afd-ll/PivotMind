@@ -27,6 +27,8 @@
 #include "utf8_tokenizer.h"
 #include "node_hash.h"
 #include "cross_edge_io.h"
+#include "causal_reasoning.h"
+#include "memory_system.h"
 #include "feature_learn.h"
 #include "topology_growth.h"
 #include "feature_io.h"
@@ -374,7 +376,9 @@ static void boost_connection_weighted(SubTopology* topo, ReasoningNode* a, Reaso
 void autonomic_learn_from_dialog(MasterTopology* master,
                                  const char* user_input,
                                  const char* ai_response,
-                                 AutonomicState* state) {
+                                 AutonomicState* state,
+                                 void* causal_graph,
+                                 MemorySystem* memory) {
     if (!master || !user_input || !ai_response) return;
     if (strlen(user_input) == 0 || strlen(ai_response) == 0) return;
 
@@ -472,6 +476,70 @@ void autonomic_learn_from_dialog(MasterTopology* master,
             if (!response_nodes[j]) continue;
             boost_connection_weighted(vocab, input_nodes[i], response_nodes[j], state, 1.0f);
         }
+    }
+
+    // ═══ 回路7+9: 因果图 + 记忆系统 → 额外赫布boost ═══
+    {
+        CausalGraph* cg = (CausalGraph*)causal_graph;
+        int causal_boosted = 0;
+        int ltm_boosted = 0;
+
+        for (int i = 0; i < input_count && (cg || memory); i++) {
+            if (!input_nodes[i]) continue;
+            for (int j = 0; j < response_count && (cg || memory); j++) {
+                if (!response_nodes[j]) continue;
+
+                float extra_boost = 1.0f;
+
+                // 回路7: 因果图 — 如果存在因果边，增强赫布权重
+                if (cg && cg->edge_count > 0) {
+                    // 按概念名查找因果节点
+                    int cg_cause = -1, cg_effect = -1;
+                    for (int k = 0; k < cg->node_count; k++) {
+                        if (cg_cause < 0 && cg->node_mapping[k] == input_nodes[i]->node_id)
+                            cg_cause = k;
+                        if (cg_effect < 0 && cg->node_mapping[k] == response_nodes[j]->node_id)
+                            cg_effect = k;
+                        if (cg_cause >= 0 && cg_effect >= 0) break;
+                    }
+                    if (cg_cause >= 0 && cg_effect >= 0) {
+                        CausalEdge* ce = get_causal_edge(cg, cg_cause, cg_effect);
+                        if (ce && ce->strength > 0.3f) {
+                            extra_boost *= 1.0f + ce->strength * 0.5f;
+                            causal_boosted++;
+                        }
+                    }
+                }
+
+                // 回路9: 记忆系统 — LTM中的重要概念获得更高权重
+                if (memory && input_nodes[i]->concept && response_nodes[j]->concept) {
+                    char key[512];
+                    int found = 0;
+                    snprintf(key, sizeof(key), "concept:%s", input_nodes[i]->concept);
+                    MemoryEntry* me = memory_retrieve(memory, key);
+                    if (me && me->importance > 0.5f) {
+                        extra_boost *= 1.0f + me->importance * 0.3f;
+                        found = 1;
+                    }
+                    snprintf(key, sizeof(key), "concept:%s", response_nodes[j]->concept);
+                    me = memory_retrieve(memory, key);
+                    if (me && me->importance > 0.5f) {
+                        extra_boost *= 1.0f + me->importance * 0.3f;
+                        found = 1;
+                    }
+                    if (found) ltm_boosted++;
+                }
+
+                if (extra_boost > 1.01f && extra_boost < 2.0f) {
+                    boost_connection_weighted(vocab, input_nodes[i], response_nodes[j],
+                                              state, extra_boost);
+                }
+            }
+        }
+
+        if (causal_boosted > 0 || ltm_boosted > 0)
+            printf("[回路7+9] 因果boost: %d对 | LTM boost: %d对\n",
+                   causal_boosted, ltm_boosted);
     }
 
     // 核心4：跨拓扑传播 — 使用已缓存的拓扑指针
@@ -740,7 +808,7 @@ int autonomic_learn_from_text(MasterTopology* master,
         memcpy(buf_b, sentence_starts[i + 1], len_b);
         buf_b[len_b] = '\0';
 
-        autonomic_learn_from_dialog(master, buf_a, buf_b, state);
+        autonomic_learn_from_dialog(master, buf_a, buf_b, state, NULL, NULL);
         pairs++;
 
         // 每100对打印进度
@@ -818,7 +886,7 @@ int main() {
 
     // 模拟对话
     printf("\n--- 对话: 输入=学习, 回复=机器 ---\n");
-    autonomic_learn_from_dialog(master, "学习", "机器", &state);
+    autonomic_learn_from_dialog(master, "学习", "机器", &state, NULL, NULL);
 
     int total_edges = 0;
     float avg_conf = 0;
@@ -841,7 +909,7 @@ int main() {
 
     // 第二次对话（加强）
     printf("\n--- 对话2: 输入=学习, 回复=机器 ---\n");
-    autonomic_learn_from_dialog(master, "学习", "机器", &state);
+    autonomic_learn_from_dialog(master, "学习", "机器", &state, NULL, NULL);
 
     autonomic_get_edge_stats(master, &total_edges, &avg_conf);
     printf("\n统计: 总边数=%d, 平均置信度=%.3f\n", total_edges, avg_conf);

@@ -1471,7 +1471,9 @@ char* dialog_process(DialogSystem* sys, const char* user_input, DialogReasoning*
         
         if (sys->master && user_input && response) {
             // 自主学习：同时激活→涨置信度（不需要反馈）
-            autonomic_learn_from_dialog(sys->master, user_input, response, NULL);
+            autonomic_learn_from_dialog(sys->master, user_input, response, NULL,
+                                     sys->controller ? sys->controller->causal_graph : NULL,
+                                     sys->controller ? sys->controller->memory : NULL);
             // BPTT 在线学习：RNN 反向传播（与拓扑学习互补）
             if (sys->bptt) {
                 float loss = bptt_learn_from_dialog(sys->bptt, user_input, response);

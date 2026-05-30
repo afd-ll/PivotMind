@@ -140,7 +140,9 @@ void autonomic_request_flush(AutonomicState* state, MasterTopology* master);
 void autonomic_learn_from_dialog(MasterTopology* master,
                                  const char* user_input,
                                  const char* ai_response,
-                                 AutonomicState* state);
+                                 AutonomicState* state,
+                                 void* causal_graph,
+                                 MemorySystem* memory);
 
 /**
  * 对拓扑中所有节点执行竞争衰减

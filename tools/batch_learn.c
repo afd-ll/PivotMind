@@ -395,7 +395,8 @@ int main(int argc, char* argv[]) {
             autonomic_learn_from_dialog(master,
                                         questions[i],
                                         answers[i],
-                                        &state);
+                                        &state,
+                                        NULL, NULL);
 
             // 原子计数，用于进度追踪
             int done;
