@@ -5,6 +5,9 @@
 #include "huarong_topology.h"
 #include <pthread.h>
 
+/* 前向声明 (避免循环依赖) */
+typedef struct MemorySystem MemorySystem;
+
 /**
  * @file autonomic_learner.h
  * @brief 自主学习层 — 运行时同时激活→边置信度自动涨落
