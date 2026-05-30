@@ -677,10 +677,11 @@ int template_decay_inactive_links(MasterTopology* master,
 int template_auto_build(MasterTopology* master, int min_entries, int max_templates) {
     if (!master) return 0;
 
-    /* 幂等: 模板拓扑已有节点则跳过 */
+    /* 增量构建: 模板拓扑用 confidence 自然生灭，不再一次性幂等 */
     SubTopology* tpl = master_get_sub_topology_by_type(master, TOPO_TEMPLATE);
     if (!tpl || !tpl->net) return 0;
-    if (tpl->net->node_count > 0) return 0;
+    /* 移除幂等守卫: 允许模板节点随频率表增长而增量更新 */
+    /* 旧 guard: if (tpl->net->node_count > 0) return 0; */
 
     /* 数据充足性检查 */
     if (!master->freq_table || master->freq_table->entry_count < min_entries) return 0;

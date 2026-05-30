@@ -706,6 +706,56 @@ float evaluate_draft(CognitiveController* cc,
            activation_score, coherence_score, drive_score, contradict_penalty,
            satisfaction, cc->satisfaction_threshold);
 
+    // ═══ 回路1: 效价回流（多巴胺标记）═══
+    // 满意度回写到路径节点的valence，满意→正标记，不满意→负标记
+    // 下次走边时自然倾向正标记多的方向
+    {
+        float val_delta = (satisfaction - 0.5f) * 0.05f;  // ±0.025 max per eval
+        SubTopology* val_sub = NULL;
+        if (cc->master && draft->topo_id >= 0 && draft->topo_id < cc->master->sub_topo_count)
+            val_sub = cc->master->sub_topologies[draft->topo_id];
+        if (val_sub && val_sub->net) {
+            for (int vi = 0; vi < draft->length; vi++) {
+                int nid = draft->node_ids[vi];
+                if (nid >= 0 && nid < val_sub->net->node_count) {
+                    ReasoningNode* vn = val_sub->net->nodes[nid];
+                    if (vn) {
+                        vn->valence += val_delta;
+                        if (vn->valence > 1.0f) vn->valence = 1.0f;
+                        if (vn->valence < -1.0f) vn->valence = -1.0f;
+                    }
+                }
+            }
+        }
+    }
+
+    // ═══ 回路3: cognitive_confidence EMA更新 ═══
+    // 三维置信度: predictive_accuracy, user_satisfaction, novelty_bonus
+    // 每次评估后用satisfaction做指数移动平均更新
+    {
+        SubTopology* cf_sub = NULL;
+        if (cc->master && draft->topo_id >= 0 && draft->topo_id < cc->master->sub_topo_count)
+            cf_sub = cc->master->sub_topologies[draft->topo_id];
+        if (cf_sub && cf_sub->net) {
+            for (int ci = 0; ci < draft->length; ci++) {
+                int nid = draft->node_ids[ci];
+                if (nid >= 0 && nid < cf_sub->net->node_count) {
+                    ReasoningNode* cn = cf_sub->net->nodes[nid];
+                    if (cn && cn->cognitive_confidence) {
+                        // EMA: 90%保留旧值 + 10%吸收新值
+                        float new_predictive = (satisfaction >= cc->satisfaction_threshold) ? 0.9f : 0.3f;
+                        float new_satisfaction = satisfaction;
+                        float new_novelty = (cn->selection_count < 5) ? 0.8f : 0.4f;
+                        cognitive_confidence_update(cn->cognitive_confidence,
+                            cn->cognitive_confidence->predictive_accuracy * 0.9f + new_predictive * 0.1f,
+                            cn->cognitive_confidence->user_satisfaction * 0.9f + new_satisfaction * 0.1f,
+                            cn->cognitive_confidence->novelty_bonus      * 0.9f + new_novelty      * 0.1f);
+                    }
+                }
+            }
+        }
+    }
+
     return satisfaction;
 }
 

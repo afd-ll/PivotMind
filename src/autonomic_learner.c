@@ -471,6 +471,9 @@ void autonomic_learn_from_dialog(MasterTopology* master,
     }
 
     // 核心4：跨拓扑传播 — 使用已缓存的拓扑指针
+    // ═══ 回路2: 激活竞争决定学习权 ═══
+    // 只有本轮激活值 >= 阈值的拓扑才参与赫布学习
+    // 低激活拓扑不做建边——让拓扑自己通过竞争决定哪些经验值得记录
     {
         SubTopology* targets[] = { semantic, concept_t, emotion };
         const int num_targets = 3;
@@ -478,6 +481,12 @@ void autonomic_learn_from_dialog(MasterTopology* master,
         for (int tgt_i = 0; tgt_i < num_targets; tgt_i++) {
             SubTopology* tgt = targets[tgt_i];
             if (!tgt || !tgt->net) continue;
+
+            // 激活竞争门控: recent_activation < 0.15 → 跳过学习
+            if (tgt->recent_activation < 0.15f) {
+                // 本轮该拓扑激活不足，仅做激活传播不建新边
+                continue;
+            }
 
             // 在目标拓扑中查找或创建节点
             ReasoningNode* tgt_input[MAX_CHARS_PER_TEXT];
