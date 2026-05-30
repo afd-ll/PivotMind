@@ -1,0 +1,292 @@
+/**
+ * @file cognitive_controller.h
+ * @brief 认知调度中心 — 位于记忆系统和子拓扑之间
+ *
+ * 核心职责：
+ * 1. 根据记忆状态计算意图向量（intent_weights）
+ * 2. 调度各子拓扑的搜索偏好
+ * 3. 评估生成草案的内感受评分
+ * 4. 负反馈修正：不满意就调整再试
+ */
+
+#ifndef COGNITIVE_CONTROLLER_H
+#define COGNITIVE_CONTROLLER_H
+
+#include "multi_topology.h"
+#include "memory_system.h"
+#include <stdbool.h>
+
+// ==================== 常量 ====================
+
+/** 子拓扑数量上限（匹配 TopologyType 枚举 0-10，预留 1 个扩展位） */
+#define MAX_SUBTOPOS 12
+
+/** 束搜索候选路径池大小 */
+#define PATH_POOL_SIZE 10
+
+/** 路径最大长度 */
+#define MAX_PATH_LENGTH 32
+
+/** 语义意图类型（值域匹配 dialog_system.h 的 IntentType 枚举）
+ *  UNKNOWN=0 QUERY=1 EXPLAIN=2 COMPARE=3 DEFINE=4
+ *  HOWTO=5 CHAT=6 LEARN=7 TEST=8 FEEDBACK=9
+ */
+
+/** 最大修正次数 */
+#define MAX_RETRY 3
+
+/** 路径缓冲大小（环形） */
+#define CC_PATH_BUF_SIZE 500
+
+/** 单条路径最大步数 */
+#define CC_PATH_MAX_LEN 32
+
+/** 修正状态返回值 */
+typedef enum {
+    RETRY_OK          = 0,   // 通过，无需修正
+    RETRY_FROM_POOL   = 1,   // 从候选池重排（不重搜）
+    RETRY_WITH_SEARCH = 2,   // 缩域重搜（需重新 dialog_reasoning_create）
+    RETRY_FAILED      = -1   // 已达上限或无解，强制输出
+} RetryStatus;
+
+// ==================== 路径结构 ====================
+
+/**
+ * 单条路径：节点序列 + 综合评分
+ */
+typedef struct {
+    int node_ids[MAX_PATH_LENGTH];     // 节点ID序列
+    int topo_id;                       // 所属子拓扑ID
+    int length;                        // 实际长度
+    float score;                       // 综合评分
+    float act_sum;                     // 累计激活值
+    float conf_sum;                    // 累计置信度
+} PathResult;
+
+// ==================== 认知调度中心 ====================
+
+/**
+ * 认知调度中心结构体
+ *
+ * 运行在主循环中，位于记忆系统和子拓扑之间。
+ * 每次对话回合，根据当前记忆状态计算意图向量，
+ * 指导各子拓扑的搜索方向，并对产出草案进行内感受评估。
+ */
+typedef struct {
+    // ========== 1. 意图向量 ==========
+    float intent_weights[MAX_SUBTOPOS];  // 喂给每个子拓扑的偏好系数
+
+    // ========== 2. 调度策略偏置 ==========
+    float context_bias;      // 上下文记忆给出的偏向强度 (0.0-1.0)
+    float novelty_bias;      // 短时记忆给出的求新强度 (0.0-1.0)
+    float valence_bias;      // 效价(用户反馈)的整体调节强度 (0.0-1.0)
+    float coherence_target;  // 语义连贯性目标 (0.0-1.0)
+
+    // ========== 3. 负反馈调节状态 ==========
+    float satisfaction_threshold;  // 多高的内感受评分才算通过 (0.0-1.0)
+    int   max_retry;               // 最多修正几次
+    float correction_strength;     // 每次修正的力度 (0.0-1.0)
+    int   retry_count;             // 当前回合己修正次数
+
+    // ========== 4. 上次决策的快照 ==========
+    float prev_intent_weights[MAX_SUBTOPOS];  // 上一轮意图向量
+    float prev_satisfaction;                   // 上一轮满意度
+
+    // ========== 5. 候选路径池（用于不重搜修正） ==========
+    PathResult path_pool[MAX_SUBTOPOS][PATH_POOL_SIZE];  // 每个子拓扑的候选池
+    int pool_counts[MAX_SUBTOPOS];                        // 各池当前大小
+
+    // ========== 6. 外部分量（由主流程注入） ==========
+    MasterTopology* master;
+    MemorySystem*   memory;
+    void*           causal_graph;      // CausalGraph*（用于因果一致性检验）
+    void*           concept_hierarchy; // ConceptHierarchy*（用于自矛盾检测）
+    const char*     current_input;     // 当前用户输入（仅引用，不拥有）
+    const char*     last_response;     // 上一轮回复（仅引用，不拥有）
+    int             intent_type;       // 当前语义意图类型 (INTENT_CHAT/QUERY/...)
+
+    // ========== 7. 路径观察与概念涌现 ==========
+    // 环形缓冲区
+    int path_buf_nodes[CC_PATH_BUF_SIZE][CC_PATH_MAX_LEN];  // 节点ID序列
+    int path_buf_lens[CC_PATH_BUF_SIZE];                     // 每条路径长度
+    int path_buf_topo[CC_PATH_BUF_SIZE];                     // 拓扑类型
+    int path_buf_count;                                      // 当前条目数
+    int path_buf_cursor;                                     // 环形写入位置
+
+    // 检测到的模式
+    struct {
+        int* node_ids;               // 序列节点ID
+        int length;
+        int count;                   // 出现次数
+        float avg_edge_strength;     // 平均边强度
+        int composite_id;            // 复合节点ID (-1=未创建)
+    }* patterns;
+    int pattern_count;
+    int pattern_capacity;
+
+    // 配置
+    int scan_counter;                // 累计计数器（每50步扫描）
+    int min_pattern_freq;            // 最低频率才创建复合节点
+    float min_edge_strength;         // 最低边强度
+    float composite_boost;           // 复合节点权重提升系数
+
+    // ========== 8. 在线学习 ==========
+    float learned_base[MAX_SUBTOPOS];    // 意图基准在线学习因子 (1.0=未调整)
+
+} CognitiveController;
+
+// ==================== API函数 ====================
+
+/**
+ * 创建认知调度中心
+ */
+CognitiveController* cognitive_controller_create(MasterTopology* master,
+                                                  MemorySystem* memory);
+
+/**
+ * 销毁认知调度中心
+ */
+void cognitive_controller_destroy(CognitiveController* cc);
+
+/**
+ * 计算上下文激活度 —— 估算各子拓扑与当前输入的关联度
+ *
+ * 在词汇/语义/情绪拓扑中匹配输入 token，
+ * 返回各子拓扑的活跃节点比例作为上下文激活度。
+ *
+ * @param cc        认知调度中心（需已设置 current_input）
+ * @param ctx_activations 输出数组 [MAX_SUBTOPOS]，调用者分配
+ */
+void calc_context_activations(CognitiveController* cc, float* ctx_activations);
+
+/**
+ * 计算意图向量 —— 调度中心的核心
+ *
+ * 根据当前记忆状态和历史快照，为每个子拓扑计算偏好权重。
+ * 权重 = 上下文相关性 × 新颖性 × 效价偏好 × 连贯性要求
+ *
+ * @param cc        认知调度中心
+ * @param ctx_activations 各个子拓扑的当前上下文激活度（可为NULL，退化到无上下文模式）
+ */
+void compute_intent(CognitiveController* cc, const float* ctx_activations);
+
+/**
+ * 内感受评估 —— 检查生成的草案是否满意
+ *
+ * 使用情绪子拓扑和语义子拓扑评估草案质量。
+ *
+ * @param cc        认知调度中心
+ * @param draft     当前生成的草案路径
+ * @param draft_len 草案长度
+ * @return 满意度评分 (0.0-1.0)
+ */
+float evaluate_draft(CognitiveController* cc,
+                     const PathResult* draft,
+                     int draft_len);
+
+/**
+ * 因果路径评分 —— 用于在走边阶段筛选候选路径（中游约束）
+ *
+ * 与 evaluate_draft 分离：因果属于"探索约束"，内感受属于"效价检验"。
+ */
+float causal_path_score(CognitiveController* cc,
+                        SubTopology* sub,
+                        const int* node_ids,
+                        int path_len);
+
+/**
+ * 计算修正向量 —— 不满意时生成修正方向
+ *
+ * @param cc        认知调度中心
+ * @param draft     当前草案
+ * @param satisfaction 满意度评分
+ * @param correction   输出修正向量（长度 MAX_SUBTOPOS）
+ */
+void compute_correction_vector(CognitiveController* cc,
+                               const PathResult* draft,
+                               float satisfaction,
+                               float* correction);
+
+/**
+ * 负反馈修正 —— 不满意时调整意图权重并重新调度
+ *
+ * @param cc        认知调度中心
+ * @param draft     当前草案
+ * @param satisfaction 满意度评分
+ * @return RetryStatus: RETRY_OK/FROM_POOL/WITH_SEARCH/FAILED
+ */
+RetryStatus revise_and_retry(CognitiveController* cc,
+                             const PathResult* draft,
+                             float satisfaction);
+
+/**
+ * 保存路径到候选池（用于第1次修正不重搜）
+ */
+void pool_save_path(CognitiveController* cc, int topo_idx,
+                    const PathResult* path);
+
+/**
+ * 从候选池中按新权重选出最佳路径
+ */
+int pool_select_best(CognitiveController* cc, int topo_idx,
+                     PathResult* out);
+
+/**
+ * 重置修正状态（每轮对话开始前调用）
+ */
+void cognitive_controller_reset_round(CognitiveController* cc);
+
+/**
+ * 保存本轮决策快照（供下轮使用）
+ */
+void cognitive_controller_snapshot(CognitiveController* cc, float satisfaction);
+
+/**
+ * 设置当前用户输入和上一轮回复
+ */
+void cognitive_controller_set_context(CognitiveController* cc,
+                                      const char* input,
+                                      const char* last_response);
+
+/**
+ * 设置语义意图类型（由 dialog_system 的 semantic_understanding_create 注入）
+ */
+void cognitive_controller_set_intent(CognitiveController* cc, int intent_type);
+
+/**
+ * 意图基准在线学习：本轮推理中活跃的拓扑，其基准权重提高
+ * @param cc 认知调度器
+ * @param used_topos 本轮实际使用的拓扑ID数组
+ * @param topo_count 拓扑数量
+ * @param feedback 反馈强度（0.0-1.0，1.0=完全满意）
+ */
+void intent_base_learn(CognitiveController* cc, const int* used_topos,
+                       int topo_count, float feedback);
+
+/**
+ * 获取子拓扑名称（用于调试日志）
+ */
+const char* cognitive_controller_topo_name(int topo_type);
+
+// ==================== 路径观察与概念涌现 ====================
+
+/**
+ * 观察生成的走边路径 — 喂入缓冲供模式分析
+ */
+void cognitive_controller_observe_path(CognitiveController* cc,
+                                        int topo_type,
+                                        const int* node_ids,
+                                        int path_len);
+
+/**
+ * 扫描路径模式 — 检测高频共现序列，自动创建复合节点
+ * 返回本次新创建的复合节点数
+ */
+int cognitive_controller_scan_patterns(CognitiveController* cc);
+
+/**
+ * 获取统计信息
+ */
+int cognitive_controller_pattern_count(CognitiveController* cc);
+
+#endif // COGNITIVE_CONTROLLER_H

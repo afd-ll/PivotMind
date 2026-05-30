@@ -1,0 +1,127 @@
+   1: # C语言AI框架 Makefile �?PivotMind
+   2: #
+   3: # 增量编译: 每个 .c 独立编译�?.o，二进制仅链接所需 .o
+   4: # 改一个源文件 �?只重新编译该文件 �?重新链接相关二进�?
+   5: # 自动依赖追踪: -MD -MP 生成 .d 文件，头文件变化时自动重编译
+   6: 
+   7: # 编译�?
+   8: CC = gcc
+   9: CFLAGS = -Wall -Wextra -O2 -Iinclude -I. -Ilibs -std=gnu99 -fopenmp -pthread -MD -MP -D_USE_MATH_DEFINES
+  10: LDFLAGS = -lm
+  11: DEBUG_CFLAGS = -Wall -Wextra -g -O0 -Iinclude -I. -Ilibs -std=gnu99 -fopenmp -pthread -MD -MP -DDEBUG
+  12: 
+  13: # 输出目录
+  14: BUILD_DIR = build/bin
+  15: OBJ_DIR = build/obj
+  16: DEP_DIR = build/dep
+  17: $(shell mkdir -p $(BUILD_DIR) $(OBJ_DIR) $(DEP_DIR))
+  18: 
+  19: # 源文件（通配自动发现�?
+  20: CORE_SRC = $(wildcard src/*.c)
+  21: TOOL_SRC = $(wildcard tools/*.c demos/*.c)
+  22: 
+  23: # 所�?.o 文件（映射到 obj/ 目录�?
+  24: CORE_OBJ = $(patsubst src/%.c, $(OBJ_DIR)/%.o, $(CORE_SRC))
+  25: TOOL_OBJ = $(patsubst tools/%.c, $(OBJ_DIR)/%.o, $(filter tools/%.c, $(TOOL_SRC)))
+  26: TOOL_OBJ += $(patsubst demos/%.c, $(OBJ_DIR)/%.o, $(filter demos/%.c, $(TOOL_SRC)))
+  27: 
+  28: # 依赖文件
+  29: CORE_DEP = $(patsubst src/%.c, $(DEP_DIR)/%.d, $(CORE_SRC))
+  30: TOOL_DEP = $(patsubst tools/%.c, $(DEP_DIR)/%.d, $(filter tools/%.c, $(TOOL_SRC)))
+  31: TOOL_DEP += $(patsubst demos/%.c, $(DEP_DIR)/%.d, $(filter demos/%.c, $(TOOL_SRC)))
+  32: 
+  33: # 包含自动生成的依赖文�?
+  34: -include $(CORE_DEP) $(TOOL_DEP)
+  35: 
+  36: # 静态库
+  37: LIB_NAME = libpivotmind.a
+  38: 
+  39: # ========== 编译规则 ==========
+  40: 
+  41: # 核心�?.c �?.o（依赖文件写�?dep/ 目录�?
+  42: $(OBJ_DIR)/%.o: src/%.c
+  43: 	$(CC) $(CFLAGS) -MF $(DEP_DIR)/$*.d -c $< -o $@
+  44: 
+  45: # 工具 .c �?.o
+  46: $(OBJ_DIR)/%.o: tools/%.c
+  47: 	$(CC) $(CFLAGS) -MF $(DEP_DIR)/$*.d -c $< -o $@
+  48: 
+  49: # 演示 .c �?.o
+  50: $(OBJ_DIR)/%.o: demos/%.c
+  51: 	$(CC) $(CFLAGS) -MF $(DEP_DIR)/$*.d -c $< -o $@
+  52: 
+  53: # 静态库
+  54: $(LIB_NAME): $(CORE_OBJ)
+  55: 	ar rcs $@ $(CORE_OBJ)
+  56: 
+  57: # ========== 二进�?==========
+  58: 
+  59: $(BUILD_DIR)/digital_life: $(OBJ_DIR)/digital_life.o $(LIB_NAME)
+  60: 	$(CC) $(CFLAGS) -o $@ $(OBJ_DIR)/digital_life.o -L. -lpivotmind $(LDFLAGS)
+  61: 
+  62: $(BUILD_DIR)/seed_builder: $(OBJ_DIR)/seed_builder.o $(LIB_NAME)
+  63: 	$(CC) $(CFLAGS) -o $@ $(OBJ_DIR)/seed_builder.o -L. -lpivotmind $(LDFLAGS)
+  64: 
+  65: $(BUILD_DIR)/debug_seed: $(OBJ_DIR)/debug_seed.o $(LIB_NAME)
+  66: 	$(CC) $(CFLAGS) -o $@ $(OBJ_DIR)/debug_seed.o -L. -lpivotmind $(LDFLAGS)
+  67: 
+  68: $(BUILD_DIR)/test_dialog: $(OBJ_DIR)/test_dialog.o $(LIB_NAME)
+  69: 	$(CC) $(CFLAGS) -o $@ $(OBJ_DIR)/test_dialog.o -L. -lpivotmind $(LDFLAGS)
+  70: 
+  71: $(BUILD_DIR)/corpus_train: $(OBJ_DIR)/corpus_train.o $(LIB_NAME)
+  72: 	$(CC) $(CFLAGS) -o $@ $(OBJ_DIR)/corpus_train.o -L. -lpivotmind $(LDFLAGS)
+  73: 
+  74: $(BUILD_DIR)/batch_learn: $(OBJ_DIR)/batch_learn.o $(LIB_NAME)
+  75: 	$(CC) $(CFLAGS) -o $@ $(OBJ_DIR)/batch_learn.o -L. -lpivotmind $(LDFLAGS)
+  76: 
+  77: # 低内存版（禁掉周期性跨拓扑重建，适合 Zero 2W �?512MB 以下设备�?
+  78: $(BUILD_DIR)/batch_learn_lowmem: $(OBJ_DIR)/batch_learn.o $(LIB_NAME)
+  79: 	$(CC) $(CFLAGS) -DLOW_MEM -o $@ $(OBJ_DIR)/batch_learn.o -L. -lpivotmind $(LDFLAGS)
+  80: 
+  81: # ========== 构建目标 ==========
+  82: 
+  83: # 默认 (跳过 clean)
+  84: all: $(LIB_NAME) seed-builder debug-seed digital-life
+  85: 
+  86: # Linux 一键构建全�?
+  87: linux: clean
+  88: 	$(MAKE) all
+  89: 
+  90: # Debug 构建
+  91: debug:
+  92: 	$(MAKE) clean
+  93: 	$(MAKE) CFLAGS="$(DEBUG_CFLAGS)" all
+  94: 
+  95: # 各个可执行文�?
+  96: digital-life: $(BUILD_DIR)/digital_life
+  97: seed-builder: $(BUILD_DIR)/seed_builder
+  98: debug-seed: $(BUILD_DIR)/debug_seed
+  99: test-dialog: $(BUILD_DIR)/test_dialog
+ 100: corpus-train: $(BUILD_DIR)/corpus_train
+ 101: batch-learn: $(BUILD_DIR)/batch_learn
+ 102: batch-learn-lowmem: $(BUILD_DIR)/batch_learn_lowmem
+ 103: 
+ 104: # 运行
+ 105: run: $(BUILD_DIR)/digital_life
+ 106: 	./$(BUILD_DIR)/digital_life
+ 107: 
+ 108: # 清理
+ 109: clean:
+ 110: 	rm -rf build
+ 111: 	rm -f $(LIB_NAME)
+ 112: 	rm -f *.exe
+ 113: 
+ 114: # 安装
+ 115: install:
+ 116: 	mkdir -p /usr/local/include/pivotmind
+ 117: 	cp include/*.h /usr/local/include/pivotmind/
+ 118: 	cp $(LIB_NAME) /usr/local/lib/
+ 119: 
+ 120: # 测试
+ 121: test:
+ 122: 	@echo "Running tests..."
+ 123: 	$(CC) $(CFLAGS) -o $(BUILD_DIR)/test_runner tests/test_runner.c -L. -lpivotmind $(LDFLAGS)
+ 124: 	./$(BUILD_DIR)/test_runner
+ 125: 
+ 126: .PHONY: all linux debug digital-life seed-builder debug-seed test-dialog corpus-train batch-learn batch-learn-lowmem run clean install test
+ 127: 

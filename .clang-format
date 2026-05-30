@@ -1,0 +1,17 @@
+BasedOnStyle: GNU
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ColumnLimit: 100
+BreakBeforeBraces: Allman
+AllowShortFunctionsOnASingleLine: None
+AllowShortIfStatementsOnASingleLine: false
+AllowShortLoopsOnASingleLine: false
+PointerAlignment: Right
+AlignConsecutiveAssignments: false
+AlignConsecutiveDeclarations: false
+SpaceAfterCStyleCast: true
+MaxEmptyLinesToKeep: 1
+SortIncludes: true
+IncludeBlocks: Preserve
+IndentCaseLabels: true

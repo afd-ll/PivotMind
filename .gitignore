@@ -1,0 +1,12 @@
+build/
+*.o
+*.a
+*.dat
+*.bin
+*.bak*
+*.codewhale
+*.hebbian_bak
+logs/
+__pycache__/
+*.pyc
+data/
