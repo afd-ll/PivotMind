@@ -292,70 +292,52 @@ static void boost_connection_weighted(SubTopology* topo, ReasoningNode* a, Reaso
     if (base_weight > 0.9f) base_weight = 0.9f;
 
     int existing_a_to_b = -1;
-    for (int i = 0; i < a->connection_count; i++) {
-        if (a->connections[i] == b) {
-            existing_a_to_b = i;
-            break;
-        }
-    }
-
     int existing_b_to_a = -1;
-    for (int i = 0; i < b->connection_count; i++) {
-        if (b->connections[i] == a) {
-            existing_b_to_a = i;
-            break;
-        }
+    if (net) pthread_mutex_lock(&net->mutex);
+    for (int i = 0; i < a->connection_count; i++) {
+        if (a->connections[i] == b) { existing_a_to_b = i; break; }
     }
-
     if (existing_a_to_b >= 0) {
         float dc = AUTONOMIC_LEARNING_RATE * (1.0f - a->connection_confidences[existing_a_to_b]);
         float dw = AUTONOMIC_LEARNING_RATE * 0.5f * weight_mult;
-        if (net) pthread_mutex_lock(&net->mutex);
         a->connection_confidences[existing_a_to_b] += dc;
         a->connection_weights[existing_a_to_b] += dw;
         if (a->connection_weights[existing_a_to_b] > 0.9f) a->connection_weights[existing_a_to_b] = 0.9f;
-        if (net) pthread_mutex_unlock(&net->mutex);
-        record_connection_activated(a, b);
-    } else {
-        // 新建连接（使用加权基础权重）
-        if (topo && topo->net) {
-            int ret = huarong_net_add_connection(topo->net,
-                                                  a->node_id, b->node_id,
-                                                  base_weight);
-            if (ret == 0) {
-                for (int i = 0; i < a->connection_count; i++) {
-                    if (a->connections[i] == b) {
-                        a->connection_confidences[i] = AUTONOMIC_INITIAL_CONFIDENCE;
-                        record_connection_activated(a, b);
-                        // Hebbian 特征更新: 新建边时拉近特征向量
-                        if (a->features && b->features && a->feature_dim == b->feature_dim) {
-                            hebbian_update(a->features, b->features, a->feature_dim, 0.02f);
-                        }
-                        break;
-                    }
+    }
+    for (int i = 0; i < b->connection_count; i++) {
+        if (b->connections[i] == a) { existing_b_to_a = i; break; }
+    }
+    if (existing_b_to_a >= 0) {
+        float dc = AUTONOMIC_LEARNING_RATE * (1.0f - b->connection_confidences[existing_b_to_a]);
+        float dw = AUTONOMIC_LEARNING_RATE * 0.5f * weight_mult;
+        b->connection_confidences[existing_b_to_a] += dc;
+        b->connection_weights[existing_b_to_a] += dw;
+        if (b->connection_weights[existing_b_to_a] > 0.9f) b->connection_weights[existing_b_to_a] = 0.9f;
+    }
+    if (net) pthread_mutex_unlock(&net->mutex);
+    if (existing_a_to_b >= 0) record_connection_activated(a, b);
+
+    // ── 新建边：不持锁调 add_connection（内部锁扩容）──
+    if (existing_a_to_b < 0 && net) {
+        int ret = huarong_net_add_connection(net, a->node_id, b->node_id, base_weight);
+        if (ret == 0) {
+            for (int i = 0; i < a->connection_count; i++) {
+                if (a->connections[i] == b) {
+                    a->connection_confidences[i] = AUTONOMIC_INITIAL_CONFIDENCE;
+                    record_connection_activated(a, b);
+                    if (a->features && b->features && a->feature_dim == b->feature_dim)
+                        hebbian_update(a->features, b->features, a->feature_dim, 0.02f);
+                    break;
                 }
             }
         }
     }
-
-    if (existing_b_to_a >= 0) {
-        float dc = AUTONOMIC_LEARNING_RATE * (1.0f - b->connection_confidences[existing_b_to_a]);
-        float dw = AUTONOMIC_LEARNING_RATE * 0.5f * weight_mult;
-        if (net) pthread_mutex_lock(&net->mutex);
-        b->connection_confidences[existing_b_to_a] += dc;
-        b->connection_weights[existing_b_to_a] += dw;
-        if (b->connection_weights[existing_b_to_a] > 0.9f) b->connection_weights[existing_b_to_a] = 0.9f;
-        if (net) pthread_mutex_unlock(&net->mutex);
-    } else {
-        if (topo && topo->net) {
-            huarong_net_add_connection(topo->net,
-                                       b->node_id, a->node_id,
-                                       base_weight);
-            for (int i = 0; i < b->connection_count; i++) {
-                if (b->connections[i] == a) {
-                    b->connection_confidences[i] = AUTONOMIC_INITIAL_CONFIDENCE;
-                    break;
-                }
+    if (existing_b_to_a < 0 && net) {
+        huarong_net_add_connection(net, b->node_id, a->node_id, base_weight);
+        for (int i = 0; i < b->connection_count; i++) {
+            if (b->connections[i] == a) {
+                b->connection_confidences[i] = AUTONOMIC_INITIAL_CONFIDENCE;
+                break;
             }
         }
     }
