@@ -30,6 +30,7 @@
 #include "common.h"
 #include "feature_io.h"
 #include "cross_edge_io.h"
+#include "autonomic_learner.h"
 
 #define MAX_CHARS 4096
 #define MAX_QA 500000
@@ -366,6 +367,12 @@ static int process_qa_data(MasterTopology* master, SubTopology* vocab_sub,
             printf("  epoch %d/%d: +%d 边\n", ep + 1, epochs, upd);
             fflush(stdout);
         }
+
+        // Epoch 间竞争衰减 — 防止边权重/置信度只涨不跌
+        if (epochs > 1) {
+            printf("  epoch %d/%d 竞争衰减...\n", ep + 1, epochs);
+            autonomic_decay_all(master);
+        }
     }
 
     printf("  ✓ QA 建边完成: %d 条边\n", total_edges);
@@ -396,7 +403,7 @@ int main(int argc, char* argv[]) {
     MasterTopology* master = master_topology_create(12);
     if (!master) { printf("错误: 无法创建主拓扑\n"); return 1; }
 
-    master_add_sub_topology(master, TOPO_VOCABULARY, "词汇拓扑", 12000, 10);
+    master_add_sub_topology(master, TOPO_VOCABULARY, "词汇拓扑", 30000, 10);
     master_add_sub_topology(master, TOPO_SEMANTIC, "语义拓扑", 4000, 9);
     master_add_sub_topology(master, TOPO_EMOTION, "情绪拓扑", 1000, 8);
     master_add_sub_topology(master, TOPO_SYNTAX, "语法拓扑", 1000, 7);

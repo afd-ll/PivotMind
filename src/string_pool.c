@@ -93,16 +93,18 @@ const char* string_pool_intern(StringPool* pool, const char* str) {
                                                 new_capacity * sizeof(unsigned int));
         
         if (!new_strings || !new_refs || !new_hashes) {
-            return NULL; // 扩容失败
+            /* 部分 realloc 成功的内存必须释放 */
+            free(new_strings); free(new_refs); free(new_hashes);
+            return NULL;
         }
         
+        int old_cap = pool->capacity;
         pool->strings = new_strings;
         pool->ref_counts = new_refs;
         pool->hash_values = new_hashes;
         pool->capacity = new_capacity;
         
-        printf("[字符串池] 扩容: %d -> %d\n", 
-               pool->capacity / 2, new_capacity);
+        printf("[字符串池] 扩容: %d -> %d\n", old_cap, new_capacity);
     }
     
     // 复制字符串

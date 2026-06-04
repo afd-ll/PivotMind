@@ -206,9 +206,6 @@ static void collect_topo_health(MasterTopology* master,
         SubTopology* sub = master->sub_topologies[t];
         if (!sub || !sub->net) continue;
 
-        // 保护读取连接数组不被并发写线程（boost_connection_weighted 等）损坏
-        pthread_mutex_lock(&sub->net->mutex);
-
         const char* name = sub->name ? sub->name : "未知";
         int te = 0;
 
@@ -240,7 +237,6 @@ static void collect_topo_health(MasterTopology* master,
         if (topo_names && t_count < 20) topo_names[t_count] = name;
         if (topo_edges) topo_edges[t_count] = te;
         t_count++;
-        pthread_mutex_unlock(&sub->net->mutex);
     }
 
     if (topo_count) *topo_count = t_count;
@@ -285,17 +281,17 @@ int main(int argc, char* argv[]) {
     MasterTopology* master = master_topology_create(11);
 
     // 创建所需的子拓扑（与 build_cross_links 保持一致）
-    master_add_sub_topology(master, TOPO_VOCABULARY, "词汇拓扑", 30000, 10);
-    master_add_sub_topology(master, TOPO_SEMANTIC, "语义拓扑", 12000, 9);
-    master_add_sub_topology(master, TOPO_EMOTION, "情绪拓扑", 4000, 8);
-    master_add_sub_topology(master, TOPO_SYNTAX, "语法拓扑", 1000, 7);
-    master_add_sub_topology(master, TOPO_CONTEXT, "上下文拓扑", 1000, 6);
-    master_add_sub_topology(master, TOPO_DOMAIN, "领域拓扑", 1000, 5);
-    master_add_sub_topology(master, TOPO_PRAGMA, "语用拓扑", 1000, 4);
-    master_add_sub_topology(master, TOPO_CULTURE, "文化拓扑", 1000, 3);
-    master_add_sub_topology(master, TOPO_CONCEPT, "概念拓扑", 12000, 9);
+    master_add_sub_topology(master, TOPO_VOCABULARY, "词汇拓扑", 8000, 10);
+    master_add_sub_topology(master, TOPO_SEMANTIC, "语义拓扑", 6000, 9);
+    master_add_sub_topology(master, TOPO_EMOTION, "情绪拓扑", 2000, 8);
+    master_add_sub_topology(master, TOPO_SYNTAX, "语法拓扑", 500, 7);
+    master_add_sub_topology(master, TOPO_CONTEXT, "上下文拓扑", 500, 6);
+    master_add_sub_topology(master, TOPO_DOMAIN, "领域拓扑", 500, 5);
+    master_add_sub_topology(master, TOPO_PRAGMA, "语用拓扑", 500, 4);
+    master_add_sub_topology(master, TOPO_CULTURE, "文化拓扑", 500, 3);
+    master_add_sub_topology(master, TOPO_CONCEPT, "概念拓扑", 8000, 9);
     master_add_sub_topology(master, TOPO_MASTER, "主拓扑", 100, 0);   /* 占位：保证 TOPO_TEMPLATE 获得正确的 topo_id=10 */
-    master_add_sub_topology(master, TOPO_TEMPLATE, "模板拓扑", 4000, 8);
+    master_add_sub_topology(master, TOPO_TEMPLATE, "模板拓扑", 2000, 8);
 
     // 尝试加载已有状态
     int loaded = 0;
@@ -377,12 +373,9 @@ int main(int argc, char* argv[]) {
     AutonomicState state;
     autonomic_state_init(&state);
 
-    // 异步刷盘：后台线程定期保存检查点，主线程不阻塞
-    // 阈值设 500 万次更新保存一次（约 8 次/epoch，对 292k QA / 20 线程）
-    state.flush_threshold = 5000000;
-    state.idle_flush_seconds = 60;     // 若持续无更新，1 分钟内保存
-    state.last_flush_time = time(NULL);
-    autonomic_start_async_flush(&state, master);
+    // 批量喂入时关掉中间刷盘（最后一次性保存），防止每50次更新就写一次2MB+文件
+    state.flush_threshold = 100000000;
+    state.idle_flush_seconds = 86400;  // 空闲也等一天
 
     time_t start_time = time(NULL);
     int total_pairs = 0;
@@ -402,14 +395,7 @@ int main(int argc, char* argv[]) {
             autonomic_learn_from_dialog(master,
                                         questions[i],
                                         answers[i],
-                                        &state,
-                                        NULL, NULL);
-
-            // 每 2000 条写 stderr 追踪（crash 定位用）
-            if (i % 2000 == 0) {
-                fprintf(stderr, "T%d:QA:%d\n", omp_get_thread_num(), i);
-                fflush(stderr);
-            }
+                                        &state, NULL, NULL);
 
             // 原子计数，用于进度追踪
             int done;
@@ -457,12 +443,6 @@ int main(int argc, char* argv[]) {
         int added = master->cross_link_count - before;
         if (added > 0)
             printf("  → 跨拓扑重建: 新增 %d 条连接 (共 %d)\n", added, master->cross_link_count);
-
-        // Epoch 间竞争衰减 — 防止置信度只涨不跌导致边饱和
-        if (epochs > 1) {
-            printf("  → Epoch %d/%d 竞争衰减...\n", ep + 1, epochs);
-            autonomic_decay_all(master);
-        }
 
         epoch_pairs = omp_processed;
         total_pairs += epoch_pairs;
@@ -586,7 +566,6 @@ int main(int argc, char* argv[]) {
     printf("╚═══════════════════════════════════════════╝\n");
 
     // 清理
-    autonomic_stop_async_flush(&state);
     autonomic_state_destroy(&state);
     for (int i = 0; i < qa_count; i++) {
         free(questions[i]);

@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <stdint.h>
 #include <time.h>
 
 // ==================== 因果规则数据结构（统一声明）====================
@@ -37,6 +38,10 @@ static unsigned int hash_key(const char* key, int table_size) {
 // 哈希槽位状态常量
 #define HASH_EMPTY     -1
 #define HASH_TOMBSTONE -2
+
+/* 前向声明 */
+static void rebuild_stm_hash(ShortTermMemory* mem);
+static void rebuild_ltm_hash(LongTermMemory* mem);
 
 static int _stm_hash_lookup(ShortTermMemory* stm, const char* key) {
     if (!stm || !key) return -1;
@@ -163,6 +168,11 @@ MemoryEntry* create_memory_entry(const char* key, void* data, size_t data_size,
     entry->decay_factor = 0.95f;
 
     entry->data = malloc(data_size);
+    if (!entry->data) {
+        free(entry->key);
+        free(entry);
+        return NULL;
+    }
     if (data) {
         memcpy(entry->data, data, data_size);
     } else {
@@ -218,6 +228,7 @@ int stm_store(ShortTermMemory* stm, const char* key, void* data,
         // 更新现有条目
         free(stm->entries[exist_idx]->data);
         stm->entries[exist_idx]->data = malloc(data_size);
+        if (!stm->entries[exist_idx]->data) return -1;
         memcpy(stm->entries[exist_idx]->data, data, data_size);
         stm->entries[exist_idx]->data_size = data_size;
         stm->entries[exist_idx]->importance = importance;
@@ -303,15 +314,40 @@ void ltm_destroy(LongTermMemory* ltm) {
 
 int ltm_store(LongTermMemory* ltm, const char* key, void* data,
               size_t data_size, MemoryType type, float importance) {
-    if (!ltm || !key || !data || ltm->size >= ltm->max_entries) return -1;
+    if (!ltm || !key || !data) return -1;
 
     int exist_idx = _ltm_hash_lookup(ltm, key);
     if (exist_idx >= 0) {
         free(ltm->entries[exist_idx]->data);
         ltm->entries[exist_idx]->data = malloc(data_size);
+        if (!ltm->entries[exist_idx]->data) return -1;
         memcpy(ltm->entries[exist_idx]->data, data, data_size);
         ltm->entries[exist_idx]->importance = importance;
         return 0;
+    }
+
+    /* LTM满时驱逐重要性最低的条目 */
+    if (ltm->size >= ltm->max_entries) {
+        int worst_idx = 0;
+        float worst_imp = ltm->entries[0] ? ltm->entries[0]->importance : 1.0f;
+        for (int i = 1; i < ltm->size; i++) {
+            MemoryEntry* e = ltm->entries[i];
+            if (e && e->importance < worst_imp) {
+                worst_imp = e->importance; worst_idx = i;
+            }
+        }
+        /* 驱逐并复用该槽位 */
+        MemoryEntry* victim = ltm->entries[worst_idx];
+        if (victim) {
+            _ltm_hash_remove(ltm, victim->key);
+            destroy_memory_entry(victim);
+        }
+        /* 压缩数组填补空缺 */
+        for (int j = worst_idx; j < ltm->size - 1; j++)
+            ltm->entries[j] = ltm->entries[j + 1];
+        ltm->size--;
+        /* 重建哈希（索引已移位） */
+        rebuild_ltm_hash(ltm);
     }
 
     // 添加新条目
@@ -447,6 +483,28 @@ MemoryEntry* memory_retrieve(MemorySystem* memory, const char* key) {
 
 // ==================== 记忆巩固实现 ====================
 
+/* 数组压缩后重建 STM 哈希表 */
+static void rebuild_stm_hash(ShortTermMemory* mem) {
+    if (!mem || !mem->hash_table) return;
+    memset(mem->hash_table, 0, mem->capacity * sizeof(MemHashEntry));
+    for (int i = 0; i < mem->size; i++) {
+        MemoryEntry* e = mem->entries[i];
+        if (!e || !e->key) continue;
+        _stm_hash_insert(mem, e->key, i);
+    }
+}
+
+/* 数组压缩后重建 LTM 哈希表 */
+static void rebuild_ltm_hash(LongTermMemory* mem) {
+    if (!mem || !mem->hash_table) return;
+    memset(mem->hash_table, 0, mem->max_entries * sizeof(MemHashEntry));
+    for (int i = 0; i < mem->size; i++) {
+        MemoryEntry* e = mem->entries[i];
+        if (!e || !e->key) continue;
+        _ltm_hash_insert(mem, e->key, i);
+    }
+}
+
 void memory_consolidate(MemorySystem* memory) {
     if (!memory) return;
 
@@ -482,6 +540,8 @@ void memory_consolidate(MemorySystem* memory) {
         memory->context_memory->entries[i] = NULL;
     }
     memory->context_memory->size = write_idx;
+    /* 重建哈希表：数组压缩后索引已变化 */
+    rebuild_stm_hash(memory->context_memory);
 
     // 检查短期记忆，提升到永久记忆
     write_idx = 0;
@@ -506,6 +566,8 @@ void memory_consolidate(MemorySystem* memory) {
         memory->short_term->entries[i] = NULL;
     }
     memory->short_term->size = write_idx;
+    /* 重建哈希表：数组压缩后索引已变化 */
+    rebuild_stm_hash(memory->short_term);
 
     memory->last_consolidation = current_time;
     printf("记忆巩固完成\n");
@@ -532,6 +594,7 @@ void memory_update_confidence(MemorySystem* memory, const char* key, float new_c
                 memory->context_memory->entries[j] = memory->context_memory->entries[j + 1];
             }
             memory->context_memory->size--;
+            rebuild_stm_hash(memory->context_memory);  /* 压缩后重建哈希 */
 
             printf("记忆升级：'%s' 从上下文记忆升级到短期记忆\n", key);
         }
@@ -553,6 +616,7 @@ void memory_update_confidence(MemorySystem* memory, const char* key, float new_c
                 memory->short_term->entries[j] = memory->short_term->entries[j + 1];
             }
             memory->short_term->size--;
+            rebuild_stm_hash(memory->short_term);  /* 压缩后重建哈希 */
 
             printf("记忆升级：'%s' 从短期记忆升级到永久记忆\n", key);
         } else if (new_confidence < memory->confidence_threshold_1) {
@@ -626,10 +690,10 @@ void memory_set_batch_save(MemorySystem* memory, int enabled, int threshold, int
     memory->save_interval = (interval_seconds > 0) ? interval_seconds : 60;
     memory->last_save_time = time(NULL);
 
-    printf("[批量保存] %s (阈值=%d次, 间隔=%ld秒)\n",
+    printf("[批量保存] %s (阈值=%d次, 间隔=%lld秒)\n",
            enabled ? "已启用" : "已禁用",
            memory->batch_threshold,
-           memory->save_interval);
+           (long long)memory->save_interval);
 }
 
 int memory_flush_pending(MemorySystem* memory) {
@@ -898,19 +962,28 @@ int memory_save_seed(MemorySystem* memory, const char* filepath) {
         if (!entry || !entry->key) continue;
         
         int key_len = strlen(entry->key) + 1;
-        fwrite(&key_len, sizeof(int), 1, fp);
-        fwrite(entry->key, 1, key_len, fp);
-        fwrite(&entry->data_size, sizeof(size_t), 1, fp);
-        fwrite(entry->data, 1, entry->data_size, fp);
+        /* size_t 在不同平台大小不同（32位=4, 64位=8），种子文件不跨平台 */
+        uint32_t data_sz = (uint32_t)entry->data_size;
+#define WRITE_OR_FAIL(ptr, sz, n) do { if (fwrite(ptr, sz, n, fp) != (size_t)(n)) goto write_err; } while(0)
+        WRITE_OR_FAIL(&key_len, sizeof(int), 1);
+        WRITE_OR_FAIL(entry->key, 1, key_len);
+        WRITE_OR_FAIL(&data_sz, sizeof(uint32_t), 1);
+        WRITE_OR_FAIL(entry->data, 1, data_sz);
         int type = (int)entry->type;
-        fwrite(&type, sizeof(int), 1, fp);
-        fwrite(&entry->importance, sizeof(float), 1, fp);
+        WRITE_OR_FAIL(&type, sizeof(int), 1);
+        WRITE_OR_FAIL(&entry->importance, sizeof(float), 1);
+#undef WRITE_OR_FAIL
         count++;
     }
     
     fclose(fp);
     printf("[记忆种子] 已保存 %d 条到 %s\n", count, filepath);
     return count;
+
+write_err:
+    fclose(fp);
+    fprintf(stderr, "[记忆种子] 写入失败，文件可能损坏\n");
+    return -1;
 }
 
 int memory_load_seed(MemorySystem* memory, const char* filepath) {
@@ -926,14 +999,19 @@ int memory_load_seed(MemorySystem* memory, const char* filepath) {
         if (key_len <= 0 || key_len > 10000) break;
         
         char* key = (char*)malloc(key_len);
+        if (!key) break;
         if (fread(key, 1, key_len, fp) != (size_t)key_len) { free(key); break; }
         key[key_len - 1] = '\0';
         
         size_t data_size;
-        if (fread(&data_size, sizeof(size_t), 1, fp) != 1) { free(key); break; }
+        /* 读取 uint32_t 以兼容跨平台保存的种子文件 */
+        uint32_t data_sz32;
+        if (fread(&data_sz32, sizeof(uint32_t), 1, fp) != 1) { free(key); break; }
+        data_size = (size_t)data_sz32;
         if (data_size <= 0 || data_size > 100000) { free(key); break; }
         
         void* data = malloc(data_size);
+        if (!data) { free(key); break; }
         if (fread(data, 1, data_size, fp) != data_size) { free(key); free(data); break; }
         
         int type;

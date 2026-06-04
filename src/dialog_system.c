@@ -1233,6 +1233,12 @@ char* dialog_process(DialogSystem* sys, const char* user_input, DialogReasoning*
         char* calc_result = concept_calculate(user_input);
         if (calc_result) {
             response = malloc(256);
+            if (!response) {
+                free(calc_result);
+                semantic_understanding_destroy(sem);
+                ui_print_thinking_end();
+                return strdup("系统错误：内存不足");
+            }
             snprintf(response, 256, "计算结果是: %s", calc_result);
             ui_print_thinking_line("计算", calc_result);
             free(calc_result);
@@ -1591,6 +1597,21 @@ void dialog_test(MasterTopology* master, MemorySystem* memory, CausalGraph* caus
 // ==================== 因果推理联动 ====================
 
 /**
+ * 安全追加字符串到缓冲区，自动防溢出
+ * @return 返回实际追加的字节数，缓冲区满返回 0
+ */
+static size_t safe_str_append(char* buf, size_t bufsz, const char* src) {
+    size_t dlen = strlen(buf);
+    if (dlen + 1 >= bufsz) return 0;  /* 缓冲区已满 */
+    size_t remain = bufsz - dlen - 1;
+    size_t slen = strlen(src);
+    size_t copy = (slen < remain) ? slen : remain;
+    memcpy(buf + dlen, src, copy);
+    buf[dlen + copy] = '\0';
+    return copy;
+}
+
+/**
  * 基于语义理解执行因果推理
  * @param sem 语义理解结果
  * @param graph 因果图
@@ -1601,7 +1622,10 @@ char* causal_reason_from_semantic(SemanticUnderstanding* sem, CausalGraph* graph
                                    MemorySystem* memory) {
     if (!sem || !sem->causal_query) return NULL;
 
-    char* response = (char*)malloc(4096);
+    #define RESP_SIZE 4096
+    #define PATH_DESC_SIZE 512
+    char* response = (char*)malloc(RESP_SIZE);
+    if (!response) return NULL;
     response[0] = '\0';
 
     const char* cause_concept = (sem->key_concept_count >= 1) ? sem->key_concepts[0] : "未知";
@@ -1620,35 +1644,34 @@ char* causal_reason_from_semantic(SemanticUnderstanding* sem, CausalGraph* graph
                                                        MAX_PATH_LENGTH, 5, &path_count);
 
             if (path_count > 0) {
-                snprintf(response, 1024, "根据因果分析，「%s」→「%s」存在 %d 条因果路径：\n\n",
+                snprintf(response, RESP_SIZE, "根据因果分析，「%s」→「%s」存在 %d 条因果路径：\n\n",
                         cause_concept, effect_concept, path_count);
 
                 for (int i = 0; i < path_count && i < 3; i++) {
                     CausalPath* path = paths[i];
-                    char path_desc[512];
+                    char path_desc[PATH_DESC_SIZE];
 
                     // 描述路径（用概念名称）
                     if (path->length >= 2) {
-                        snprintf(path_desc, sizeof(path_desc),
+                        snprintf(path_desc, PATH_DESC_SIZE,
                                 "  路径%d: %s", i + 1, cause_concept);
                     } else {
-                        snprintf(path_desc, sizeof(path_desc),
+                        snprintf(path_desc, PATH_DESC_SIZE,
                                 "  路径%d: %s → %s", i + 1, cause_concept, effect_concept);
                     }
 
                     for (int j = 1; j < path->length - 1 && j < 5; j++) {
-                        // 简化：只显示中间节点数量
-                        strcat(path_desc, " → ... → ");
+                        safe_str_append(path_desc, PATH_DESC_SIZE, " → ... → ");
                     }
                     if (path->length > 2) {
-                        strcat(path_desc, effect_concept);
+                        safe_str_append(path_desc, PATH_DESC_SIZE, effect_concept);
                     }
 
                     char strength_info[128];
                     snprintf(strength_info, sizeof(strength_info),
                             " (因果强度: %.2f)\n", path->total_strength);
-                    strcat(path_desc, strength_info);
-                    strcat(response, path_desc);
+                    safe_str_append(path_desc, PATH_DESC_SIZE, strength_info);
+                    safe_str_append(response, RESP_SIZE, path_desc);
 
                     // 释放路径
                     free(path->node_ids);
@@ -1660,7 +1683,7 @@ char* causal_reason_from_semantic(SemanticUnderstanding* sem, CausalGraph* graph
                 // 没有找到直接路径，检查是否有单条直接边
                 CausalEdge* direct_edge = get_causal_edge(graph, cause_id, effect_id);
                 if (direct_edge) {
-                    snprintf(response, 4096,
+                    snprintf(response, RESP_SIZE,
                             "根据因果分析，存在直接的因果关系：\n\n"
                             "  %s → %s (因果强度: %.2f, 置信度: %.2f)\n\n"
                             "解释: %s 会直接影响 %s。\n",
@@ -1668,22 +1691,22 @@ char* causal_reason_from_semantic(SemanticUnderstanding* sem, CausalGraph* graph
                             direct_edge->strength, direct_edge->confidence,
                             cause_concept, effect_concept);
                 } else {
-                    strcat(response, "我没有找到从 ");
-                    strcat(response, cause_concept);
-                    strcat(response, " 到 ");
-                    strcat(response, effect_concept);
-                    strcat(response, " 的明确因果路径。\n");
+                    safe_str_append(response, RESP_SIZE, "我没有找到从 ");
+                    safe_str_append(response, RESP_SIZE, cause_concept);
+                    safe_str_append(response, RESP_SIZE, " 到 ");
+                    safe_str_append(response, RESP_SIZE, effect_concept);
+                    safe_str_append(response, RESP_SIZE, " 的明确因果路径。\n");
                 }
             }
         } else {
             // 节点ID无效，尝试使用因果图搜索相关边
-            snprintf(response, 1024,
+            snprintf(response, RESP_SIZE,
                     "我正在分析「%s」和「%s」之间的因果关系...\n\n",
                     cause_concept, effect_concept);
 
             // 查找所有从原因节点出发的边
             if (cause_id >= 0 && graph->outgoing_count && graph->outgoing_count[cause_id] > 0) {
-                strcat(response, "从该原因出发的因果链条：\n");
+                safe_str_append(response, RESP_SIZE, "从该原因出发的因果链条：\n");
                 for (int i = 0; i < graph->outgoing_count[cause_id] && i < 3; i++) {
                     int target = graph->outgoing[cause_id][i];
                     CausalEdge* edge = get_causal_edge(graph, cause_id, target);
@@ -1692,7 +1715,7 @@ char* causal_reason_from_semantic(SemanticUnderstanding* sem, CausalGraph* graph
                         snprintf(chain_desc, sizeof(chain_desc),
                                 "  - %s → [节点%d] (强度: %.2f)\n",
                                 cause_concept, target, edge->strength);
-                        strcat(response, chain_desc);
+                        safe_str_append(response, RESP_SIZE, chain_desc);
                     }
                 }
             }
@@ -1717,17 +1740,19 @@ char* causal_reason_from_semantic(SemanticUnderstanding* sem, CausalGraph* graph
                     strength, rule_conf.observation_count,
                     compute_causal_confidence(&rule_conf),
                     get_confidence_level_name(get_confidence_level(compute_causal_confidence(&rule_conf))));
-            strcat(response, rule_info);
+            safe_str_append(response, RESP_SIZE, rule_info);
         }
     }
 
     // 如果没有找到任何因果信息
     if (strlen(response) == 0 || strstr(response, "没有找到") != NULL) {
-        strcat(response, "\n我还没有学习到这条因果知识。\n");
-        strcat(response, "如果你知道它们之间的关系，请告诉我：\n");
-        strcat(response, "例如：「因为 A 所以 B」或「A 会导致 B」\n");
+        safe_str_append(response, RESP_SIZE, "\n我还没有学习到这条因果知识。\n");
+        safe_str_append(response, RESP_SIZE, "如果你知道它们之间的关系，请告诉我：\n");
+        safe_str_append(response, RESP_SIZE, "例如：「因为 A 所以 B」或「A 会导致 B」\n");
     }
 
+    #undef RESP_SIZE
+    #undef PATH_DESC_SIZE
     return response;
 }
 
@@ -1755,20 +1780,26 @@ char* process_causal_query(SemanticUnderstanding* sem, CausalGraph* graph,
     if (!causal_result) return NULL;
 
     // 构建完整回复
-    char* full_response = (char*)malloc(4096);
+    #define FRESP_SIZE 4096
+    char* full_response = (char*)malloc(FRESP_SIZE);
+    if (!full_response) {
+        free(causal_result);
+        return NULL;
+    }
     full_response[0] = '\0';
 
     // 添加解释前缀
     if (sem->key_concept_count >= 2) {
-        snprintf(full_response, 256, "关于「%s → %s」的因果关系：\n\n",
+        snprintf(full_response, FRESP_SIZE, "关于「%s → %s」的因果关系：\n\n",
                 sem->key_concepts[0], sem->key_concepts[1]);
     }
 
-    strcat(full_response, causal_result);
+    safe_str_append(full_response, FRESP_SIZE, causal_result);
     free(causal_result);
 
     // 添加建议学习
-    strcat(full_response, "\n如果想让我学习更多因果知识，请告诉我具体的关系。");
+    safe_str_append(full_response, FRESP_SIZE, "\n如果想让我学习更多因果知识，请告诉我具体的关系。");
+    #undef FRESP_SIZE
 
     return full_response;
 }

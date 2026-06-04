@@ -10,3 +10,7 @@ logs/
 __pycache__/
 *.pyc
 data/
+*.log
+*.err
+--help
+-data

@@ -158,10 +158,14 @@ ThreadPool* thread_pool_create_with_size(int num_threads) {
 void thread_pool_destroy(ThreadPool* pool) {
     if (!pool) return;
 
-    // 通知所有 worker 退出
+    /* 标记正在销毁，防止新 batch 提交 */
     pthread_mutex_lock(&pool->mutex);
     pool->shutdown = 1;
     pthread_cond_broadcast(&pool->cv_batch);
+    /* 等待进行中的 batch 完成 */
+    while (pool->running) {
+        pthread_cond_wait(&pool->cv_done, &pool->mutex);
+    }
     pthread_mutex_unlock(&pool->mutex);
 
     // 等待所有 worker

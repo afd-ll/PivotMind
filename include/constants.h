@@ -40,6 +40,7 @@
 #define PM_AUTONOMIC_MAX_CONN        8000 // 自主学习单节点最大连接数
 #define PM_AUTONOMIC_SHARD           16   // 边更新分片数
 #define PM_ACTIVATED_PAIRS           4096 // 每轮最大激活节点对
+#define PM_PRUNE_BATCH_SIZE         500  // 剪枝每批处理节点数（减少持锁时间）
 #define PM_AUTONOMIC_FLUSH_THRESHOLD 50   // 自主学习刷盘阈值（累积更新次数）
 #define PM_AUTONOMIC_IDLE_FLUSH_SECS 30   // 自主学习空闲刷盘超时（秒）
 #define PM_ACTIVE_LEARNER_INTERVAL   300  // 主动学习器循环间隔（秒）

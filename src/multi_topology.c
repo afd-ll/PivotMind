@@ -297,6 +297,10 @@ int master_add_cross_link(MasterTopology* master,
                          const char* relation) {
     if (!master || !relation) return -1;
     
+    pthread_rwlock_wrlock(&master->rwlock);
+    
+    int result = -1;
+    
     // 动态扩容
     if (master->cross_link_count >= master->cross_link_capacity) {
         int new_capacity = master->cross_link_capacity * 2;
@@ -304,14 +308,14 @@ int master_add_cross_link(MasterTopology* master,
             master->cross_links,
             new_capacity * sizeof(CrossTopologyLink*)
         );
-        if (!new_links) return -1;
+        if (!new_links) goto unlock;
         master->cross_links = new_links;
         master->cross_link_capacity = new_capacity;
     }
     
     // 创建跨拓扑连接
     CrossTopologyLink* link = (CrossTopologyLink*)malloc(sizeof(CrossTopologyLink));
-    if (!link) return -1;
+    if (!link) goto unlock;
     
     link->link_id = master->cross_link_count;
     link->from_topo_id = from_topo_id;
@@ -359,7 +363,11 @@ int master_add_cross_link(MasterTopology* master,
     //        to_topo ? to_topo->name : "?", to_node_id,
     //        relation, weight);
     
-    return link->link_id;
+    result = link->link_id;
+
+unlock:
+    pthread_rwlock_unlock(&master->rwlock);
+    return result;
 }
 
 /**
@@ -370,8 +378,12 @@ int cross_link_exists(MasterTopology* master,
                       int from_topo, int from_node,
                       int to_topo, int to_node) {
     if (!master || from_topo < 0 || to_topo < 0) return 0;
+    
+    pthread_rwlock_rdlock(&master->rwlock);
+    
+    int exists = 0;
     int idx = from_topo * MAX_NODES_PER_TOPO + from_node;
-    if (idx >= master->cross_adj_count) return 0;
+    if (idx >= master->cross_adj_count) goto unlock;
     CrossTopoAdjEntry* entry = master->cross_adj[idx];
     while (entry) {
         if (entry->link_index < master->cross_link_count) {
@@ -380,16 +392,21 @@ int cross_link_exists(MasterTopology* master,
                 l->from_node_id == from_node &&
                 l->to_topo_id == to_topo &&
                 l->to_node_id == to_node) {
-                return 1;
+                exists = 1;
+                goto unlock;
             }
         }
         entry = entry->next;
     }
-    return 0;
+unlock:
+    pthread_rwlock_unlock(&master->rwlock);
+    return exists;
 }
 
 void master_clear_cross_links(MasterTopology* master) {
     if (!master) return;
+
+    pthread_rwlock_wrlock(&master->rwlock);
 
     // 释放所有 CrossTopologyLink 对象
     for (int i = 0; i < master->cross_link_count; i++) {
@@ -411,10 +428,15 @@ void master_clear_cross_links(MasterTopology* master) {
     }
 
     master->cross_link_count = 0;
+
+    pthread_rwlock_unlock(&master->rwlock);
 }
 
 int master_prune_cross_links(MasterTopology* master, float min_weight, int min_use_count) {
     if (!master || !master->cross_links) return 0;
+    
+    pthread_rwlock_wrlock(&master->rwlock);
+    
     int pruned = 0;
 
     for (int i = 0; i < master->cross_link_count; i++) {
@@ -427,6 +449,8 @@ int master_prune_cross_links(MasterTopology* master, float min_weight, int min_u
         }
     }
 
+    pthread_rwlock_unlock(&master->rwlock);
+    
     if (pruned > 0)
         printf("[跨拓扑剪枝] 移除 %d 条低质量跨拓扑连接 (min_weight=%.3f, min_use=%d)\n",
                pruned, min_weight, min_use_count);
@@ -855,6 +879,14 @@ void master_consolidate_confidence(MasterTopology* master, float boost_factor) {
     }
 }
 
+/* 边置信度→支持分 阶梯评分（复用） */
+static float edge_conf_to_support(float edge_conf) {
+    if (edge_conf > 0.7f)      return 1.0f;
+    else if (edge_conf > 0.3f) return 0.5f;
+    else if (edge_conf > 0.0f) return -0.3f;
+    return 0.0f;
+}
+
 void knowledge_self_verify(MasterTopology* master, int topo_id, int node_id) {
     if (!master) return;
     if (topo_id < 0 || topo_id >= master->sub_topo_count) return;
@@ -871,17 +903,7 @@ void knowledge_self_verify(MasterTopology* master, int topo_id, int node_id) {
     
     for (int i = 0; i < node->connection_count; i++) {
         if (!node->connections[i]) continue;
-        
-        float edge_conf = node->connection_confidences[i];
-        
-        if (edge_conf > 0.7f) {
-            support_score += 1.0f;
-        } else if (edge_conf > 0.3f) {
-            support_score += 0.5f;
-        } else if (edge_conf > 0.0f) {
-            support_score -= 0.3f;
-        }
-        
+        support_score += edge_conf_to_support(node->connection_confidences[i]);
         connection_count++;
     }
     
@@ -926,17 +948,7 @@ void batch_self_verify(MasterTopology* master) {
             
             for (int i = 0; i < node->connection_count; i++) {
                 if (!node->connections[i]) continue;
-                
-                float edge_conf = node->connection_confidences[i];
-                
-                if (edge_conf > 0.7f) {
-                    support_score += 1.0f;
-                } else if (edge_conf > 0.3f) {
-                    support_score += 0.5f;
-                } else if (edge_conf > 0.0f) {
-                    support_score -= 0.3f;
-                }
-                
+                support_score += edge_conf_to_support(node->connection_confidences[i]);
                 connection_count++;
             }
             
@@ -1244,6 +1256,20 @@ char* master_generate_response(MasterTopology* master,
 /** 路径回溯权重 — 候选节点与已走路径中其他节点的连接强度 */
 #define EDGE_WALK_W_PATH_CTX    0.10f   // 路径回溯得分（原0.15→0.10：语义权重已提升，降低冗余）
 
+/** 走边基础加法得分 — 所有走边算法的共享评分核 */
+static inline float walk_base_score(
+    float edge_weight, float edge_conf, float edge_bias,
+    float node_act, float node_conf, float semantic_score,
+    float semantic_weight)
+{
+    return EDGE_WALK_W_WEIGHT     * edge_weight +
+           EDGE_WALK_W_CONF       * edge_conf   +
+           EDGE_WALK_W_BIAS       * edge_bias   +
+           EDGE_WALK_W_ACTIVATION * node_act    +
+           EDGE_WALK_W_NODE_CONF  * node_conf   +
+           semantic_weight * (semantic_score + 1.0f) * 0.5f;
+}
+
 /** 走边最低得分阈值 — 低于此值停止继续走 */
 #define EDGE_WALK_MIN_SCORE     0.05f
 
@@ -1433,14 +1459,11 @@ int topology_walk_greedy(SubTopology* sub, int start_node_id,
                 ? concept_cross_score / sqrtf((float)concept_hit_count) : 0.0f;
 
             // --- 混合评分 ---
-            float base_score =
-                EDGE_WALK_W_WEIGHT     * edge_weight +
-                EDGE_WALK_W_CONF       * edge_conf   +
-                EDGE_WALK_W_BIAS       * edge_bias   +
-                EDGE_WALK_W_ACTIVATION * node_act    +
-                EDGE_WALK_W_NODE_CONF  * node_conf   +
-                (EDGE_WALK_W_SEMANTIC + (context_count > 5 ? 0.10f : 0.0f)) *
-                (semantic_score + 1.0f) * 0.5f +
+            float semantic_weight = EDGE_WALK_W_SEMANTIC + (context_count > 5 ? 0.10f : 0.0f);
+            float base_score = walk_base_score(
+                edge_weight, edge_conf, edge_bias, node_act, node_conf,
+                semantic_score, semantic_weight);
+            base_score +=
                 // 路径回溯：词汇 0.6 + 语义 0.4 + 模板 0.4 + 概念 0.3
                 EDGE_WALK_W_PATH_CTX * path_ctx_norm * 0.6f +
                 EDGE_WALK_W_PATH_CTX * semantic_cross_norm * 0.4f +
@@ -1873,14 +1896,10 @@ int topology_walk_beam(SubTopology* sub, int start_node_id,
                 if (target->features && has_mean)
                     semantic_score = cosine_similarity(target->features, mean_features, NODE_FEATURE_DIM);
 
-                float base_score =
-                    EDGE_WALK_W_WEIGHT     * edge_weight +
-                    EDGE_WALK_W_CONF       * edge_conf   +
-                    EDGE_WALK_W_BIAS       * edge_bias   +
-                    EDGE_WALK_W_ACTIVATION * node_act    +
-                    EDGE_WALK_W_NODE_CONF  * node_conf   +
-                    (EDGE_WALK_W_SEMANTIC + (beam->context_count > 5 ? 0.10f : 0.0f)) *
-                    (semantic_score + 1.0f) * 0.5f;
+                float base_score = walk_base_score(
+                    edge_weight, edge_conf, edge_bias, node_act, node_conf,
+                    semantic_score,
+                    EDGE_WALK_W_SEMANTIC + (beam->context_count > 5 ? 0.10f : 0.0f));
 
                 float valence_match = 1.0f - fabsf(beam->context_valence - target->valence) * 0.5f;
                 float valence_mod = 0.5f + 0.5f * valence_match;
@@ -2182,14 +2201,10 @@ int topology_walk_cross(MasterTopology* master,
                 semantic_score = cosine_similarity(target->features, mean_features, NODE_FEATURE_DIM);
             }
 
-            float base_score =
-                EDGE_WALK_W_WEIGHT     * edge_weight +
-                EDGE_WALK_W_CONF       * edge_conf   +
-                EDGE_WALK_W_BIAS       * edge_bias   +
-                EDGE_WALK_W_ACTIVATION * node_act    +
-                EDGE_WALK_W_NODE_CONF  * node_conf   +
-                (EDGE_WALK_W_SEMANTIC + (context_count > 5 ? 0.10f : 0.0f)) *
-                (semantic_score + 1.0f) * 0.5f;
+            float base_score = walk_base_score(
+                edge_weight, edge_conf, edge_bias, node_act, node_conf,
+                semantic_score,
+                EDGE_WALK_W_SEMANTIC + (context_count > 5 ? 0.10f : 0.0f));
 
             float valence_mod = 1.0f + EDGE_WALK_VALENCE_COEFF * raw_val;
             // 意图权重乘数：当前拓扑的 topo_act
@@ -2260,13 +2275,9 @@ int topology_walk_cross(MasterTopology* master,
                             semantic_score = cosine_similarity(tgt_node->features, mean_features, NODE_FEATURE_DIM);
                         }
 
-                        float base_score =
-                            EDGE_WALK_W_WEIGHT     * cross_weight +
-                            EDGE_WALK_W_CONF       * cross_weight +
-                            EDGE_WALK_W_BIAS       * 0.0f +
-                            EDGE_WALK_W_ACTIVATION * node_act    +
-                            EDGE_WALK_W_NODE_CONF  * node_conf +
-                            EDGE_WALK_W_SEMANTIC   * (semantic_score + 1.0f) * 0.5f;
+                        float base_score = walk_base_score(
+                            cross_weight, cross_weight, 0.0f, node_act, node_conf,
+                            semantic_score, EDGE_WALK_W_SEMANTIC);
 
                         float valence_mod = 1.0f + EDGE_WALK_VALENCE_COEFF * raw_val;
                         // 意图权重乘数：目标拓扑的 topo_act

@@ -29,10 +29,14 @@ void ui_clear_screen(void) {
 }
 
 void ui_print_header(void) {
+    printf("╔══════════════════════════════════════════════╗\n");
+    printf("║       玄枢 PivotMind - 认知引擎             ║\n");
+    printf("╚══════════════════════════════════════════════╝\n");
 }
 
 void ui_print_prompt(void) {
     printf("\n> ");
+    fflush(stdout);
 }
 
 void ui_print_user_input(const char* input) {
@@ -40,12 +44,20 @@ void ui_print_user_input(const char* input) {
 }
 
 void ui_print_thinking_start(void) {
+    printf("  [思考中");
+    fflush(stdout);
 }
 
 void ui_print_thinking_end(void) {
+    printf("]\n");
+    fflush(stdout);
 }
 
-void ui_print_thinking_line(const char* /*category*/, const char* /*content*/) {
+void ui_print_thinking_line(const char* category, const char* content) {
+    if (category && content) {
+        printf(".");
+        fflush(stdout);
+    }
 }
 
 void ui_print_ai_response(const char* response) {

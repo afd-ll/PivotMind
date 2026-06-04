@@ -94,6 +94,11 @@ int node_hash_add(NodeHashTable* hash, ReasoningNode* node) {
     hash->buckets[idx] = new_entry;
     hash->node_count++;
     
+    /* 自动 rehash: 负载因子超过 0.75 时扩容到 2x */
+    if (hash->node_count > hash->bucket_count * 3 / 4) {
+        node_hash_reserve(hash, hash->node_count * 2);
+    }
+    
     return 0;
 }
 

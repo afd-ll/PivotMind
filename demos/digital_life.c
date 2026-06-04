@@ -244,7 +244,7 @@ DigitalLifeSystem* digital_life_create() {
     if (access(state_file, F_OK) == 0) {
         int loaded = master_load_state(sys->topology, state_file);
         if (loaded >= 0) {
-            printf("     ✓ 已加载拓扑状态 (%d 节点)\\n", loaded);
+            printf("     ✓ 已加载拓扑状态 (%d 节点)\n", loaded);
         }
     }
 
@@ -252,10 +252,10 @@ DigitalLifeSystem* digital_life_create() {
     {
         int feat_loaded = load_features(sys->topology, "features.bin");
         if (feat_loaded > 0) {
-            printf("     ✓ 已加载特征向量 (%d 节点)\\n", feat_loaded);
+            printf("     ✓ 已加载特征向量 (%d 节点)\n", feat_loaded);
         } else {
             int initted = init_random_features(sys->topology);
-            printf("     ✓ 已初始化特征向量 (%d 节点)\\n", initted);
+            printf("     ✓ 已初始化特征向量 (%d 节点)\n", initted);
         }
     }
 
@@ -268,7 +268,7 @@ DigitalLifeSystem* digital_life_create() {
             if (ps) {
                 int migrated = feature_transfer_pretrained(sys->topology, ps);
                 if (migrated > 0) {
-                    printf("     ✓ 预训练嵌入迁移完成\\n");
+                    printf("     ✓ 预训练嵌入迁移完成\n");
                 }
                 pretrain_state_destroy(ps);
             }
@@ -280,10 +280,10 @@ DigitalLifeSystem* digital_life_create() {
     {
         int cross_loaded = load_cross_edges(sys->topology, "cross_edges.bin");
         if (cross_loaded > 0) {
-            printf("     ✓ 已加载跨拓扑连接 (%d 条)\\n", cross_loaded);
+            printf("     ✓ 已加载跨拓扑连接 (%d 条)\n", cross_loaded);
         } else {
             int rebuilt = rebuild_cross_connections(sys->topology);
-            printf("     ✓ 已重建跨拓扑连接 (%d 条)\\n", rebuilt);
+            printf("     ✓ 已重建跨拓扑连接 (%d 条)\n", rebuilt);
         }
     }
     
@@ -363,19 +363,19 @@ void digital_life_destroy(DigitalLifeSystem* sys) {
         const char* state_file = "pivotmind_state.dat";
         int saved = master_save_state(sys->topology, state_file);
         if (saved >= 0) {
-            printf("  ✓ 已保存拓扑状态 (%d 节点)\\n", saved);
+            printf("  ✓ 已保存拓扑状态 (%d 节点)\n", saved);
         }
         
         // 保存特征向量
         int feat_saved = save_features(sys->topology, "features.bin");
         if (feat_saved > 0) {
-            printf("  ✓ 已保存特征向量 (%d 节点)\\n", feat_saved);
+            printf("  ✓ 已保存特征向量 (%d 节点)\n", feat_saved);
         }
         
         // 保存跨拓扑连接
         int cross_saved = save_cross_edges(sys->topology, "cross_edges.bin");
         if (cross_saved > 0) {
-            printf("  ✓ 已保存跨拓扑连接 (%d 条)\\n", cross_saved);
+            printf("  ✓ 已保存跨拓扑连接 (%d 条)\n", cross_saved);
         }
     }
     

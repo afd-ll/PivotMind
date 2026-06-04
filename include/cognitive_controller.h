@@ -63,6 +63,39 @@ typedef struct {
     float conf_sum;                    // 累计置信度
 } PathResult;
 
+// ==================== 词性标注系统 ====================
+
+/** POS 标签枚举 */
+typedef enum {
+    POS_UNKNOWN = 0,  // 未知
+    POS_NOUN    = 1,  // 名词
+    POS_VERB    = 2,  // 动词
+    POS_ADJ     = 3,  // 形容词
+    POS_ADV     = 4,  // 副词
+    POS_PRON    = 5,  // 代词
+    POS_PREP    = 6,  // 介词
+    POS_CONJ    = 7,  // 连词
+    POS_NUM     = 8,  // 数词/量词
+    POS_PARTICLE= 9,  // 助词
+    POS_INTERJ  = 10, // 叹词
+    POS_COUNT   = 11
+} POSTag;
+
+/** POS 模式观测缓冲区大小 */
+#define POS_OBS_BUF_SIZE 2048
+
+/** 最大 POS 模式数 */
+#define MAX_POS_PATTERNS 128
+
+/** POS 句式模式（自动发现） */
+typedef struct {
+    POSTag pos_seq[8];       // POS 序列
+    int length;              // 序列长度
+    int count;               // 观测次数
+    int syntax_node_id;      // 在句式拓扑中的节点ID（-1=未创建）
+    float avg_freq;          // 平均频率归一化值
+} POSPattern;
+
 // ==================== 认知调度中心 ====================
 
 /**
@@ -129,6 +162,20 @@ typedef struct {
     int min_pattern_freq;            // 最低频率才创建复合节点
     float min_edge_strength;         // 最低边强度
     float composite_boost;           // 复合节点权重提升系数
+
+    // ========== 9. POS 模式发现与句式自动扩展 ==========
+    POSTag pos_obs_buf[POS_OBS_BUF_SIZE][16];  // 环形缓冲：POS 序列
+    int    pos_obs_lens[POS_OBS_BUF_SIZE];      // 每条序列长度
+    int    pos_obs_cursor;                       // 环形写入位置
+    int    pos_obs_count;                        // 已写入总数（含回绕）
+
+    POSPattern pos_patterns[MAX_POS_PATTERNS];   // 自动发现的句式模式
+    int        pos_pattern_count;                 // 当前模式数
+
+    // Scaffold 生成状态
+    POSTag scaffold_seq[8];         // 当前选中的句式骨架 POS 序列
+    int    scaffold_len;             // 骨架长度
+    int    scaffold_active;          // 是否启用 scaffold 引导
 
     // ========== 8. 在线学习 ==========
     float learned_base[MAX_SUBTOPOS];    // 意图基准在线学习因子 (1.0=未调整)
@@ -288,5 +335,59 @@ int cognitive_controller_scan_patterns(CognitiveController* cc);
  * 获取统计信息
  */
 int cognitive_controller_pattern_count(CognitiveController* cc);
+
+/**
+ * 启发式中文字符/词词性标注
+ * 基于硬编码的常用字词性字典 + 规则推断
+ */
+POSTag pos_tag_chinese(const char* word);
+const char* pos_tag_name(POSTag tag);
+
+/**
+ * 初始化句式拓扑（TOPO_SYNTAX）
+ * 创建常见汉语句式模式节点（SVO/SV/SOV/SVOC 等），
+ * 并建立 POS 序列到句式节点的跨拓扑连接
+ */
+int cc_init_sentence_topology(CognitiveController* cc);
+
+/**
+ * POS 序列兼容性检查 — 判断候选词性是否能续接当前句式上下文
+ */
+float cc_pos_compatibility(CognitiveController* cc,
+                            const POSTag* pos_sequence, int seq_len,
+                            POSTag candidate_pos);
+
+/**
+ * 观测 POS 序列 — 训练时从回答文本中提取 POS 序列并记录
+ */
+void cc_observe_pos_sequence(CognitiveController* cc,
+                              const POSTag* seq, int len);
+
+/**
+ * 扫描 POS 模式 — 从观测缓冲中发现高频 POS n-gram
+ */
+int cc_scan_pos_patterns(CognitiveController* cc);
+
+/**
+ * 选择句式模板 — 为当前输入选择最佳句式骨架
+ */
+int cc_select_sentence_pattern(CognitiveController* cc, const char* input);
+
+/**
+ * 句式 scaffold 评分 — 在生成步中检查候选 POS 是否匹配当前位置
+ */
+float cc_scaffold_bonus(CognitiveController* cc, int position,
+                         POSTag candidate_pos);
+
+/**
+ * 获取选中的句式模板 POS 序列（用于调试）
+ */
+int cc_get_selected_pattern(CognitiveController* cc, POSTag* seq_out);
+
+/**
+ * 获取所有已知句式模式（用于外部统计）
+ */
+int cc_get_all_patterns(CognitiveController* cc,
+                         POSPattern* patterns_out, int max_count);
 
 #endif // COGNITIVE_CONTROLLER_H

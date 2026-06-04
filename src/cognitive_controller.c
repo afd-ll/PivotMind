@@ -1221,3 +1221,432 @@ int cognitive_controller_pattern_count(CognitiveController* cc) {
     }
     return count;
 }
+
+// ==================== 词性标注 (from pm) ====================
+
+static POSTag chinese_pos_lookup(const char* word) {
+    if (!word || !word[0]) return POS_UNKNOWN;
+
+    const char* c = word;
+
+    // 代词
+    if (strcmp(c, "我") == 0 || strcmp(c, "你") == 0 || strcmp(c, "他") == 0 ||
+        strcmp(c, "她") == 0 || strcmp(c, "它") == 0 || strcmp(c, "我们") == 0 ||
+        strcmp(c, "你们") == 0 || strcmp(c, "他们") == 0 || strcmp(c, "她们") == 0 ||
+        strcmp(c, "自己") == 0 || strcmp(c, "谁") == 0 || strcmp(c, "什么") == 0 ||
+        strcmp(c, "这") == 0 || strcmp(c, "那") == 0 || strcmp(c, "哪") == 0 ||
+        strcmp(c, "怎么") == 0 || strcmp(c, "这样") == 0 || strcmp(c, "那样") == 0)
+        return POS_PRON;
+    if (strcmp(c, "的") == 0 || strcmp(c, "了") == 0 || strcmp(c, "着") == 0 ||
+        strcmp(c, "过") == 0 || strcmp(c, "地") == 0 || strcmp(c, "得") == 0 ||
+        strcmp(c, "吗") == 0 || strcmp(c, "呢") == 0 || strcmp(c, "吧") == 0 ||
+        strcmp(c, "啊") == 0 || strcmp(c, "嘛") == 0 || strcmp(c, "呀") == 0 ||
+        strcmp(c, "所") == 0 || strcmp(c, "被") == 0 || strcmp(c, "把") == 0 ||
+        strcmp(c, "将") == 0 || strcmp(c, "之") == 0)
+        return POS_PARTICLE;
+    if (strcmp(c, "和") == 0 || strcmp(c, "与") == 0 || strcmp(c, "或") == 0 ||
+        strcmp(c, "而") == 0 || strcmp(c, "且") == 0 || strcmp(c, "但") == 0 ||
+        strcmp(c, "却") == 0 || strcmp(c, "并") == 0 || strcmp(c, "也") == 0 ||
+        strcmp(c, "又") == 0 || strcmp(c, "还") == 0 || strcmp(c, "就") == 0 ||
+        strcmp(c, "才") == 0 || strcmp(c, "则") == 0 || strcmp(c, "虽然") == 0 ||
+        strcmp(c, "但是") == 0 || strcmp(c, "因为") == 0 || strcmp(c, "所以") == 0 ||
+        strcmp(c, "如果") == 0 || strcmp(c, "即使") == 0 || strcmp(c, "只要") == 0)
+        return POS_CONJ;
+    if (strcmp(c, "在") == 0 || strcmp(c, "从") == 0 || strcmp(c, "到") == 0 ||
+        strcmp(c, "对") == 0 || strcmp(c, "向") == 0 || strcmp(c, "往") == 0 ||
+        strcmp(c, "比") == 0 || strcmp(c, "给") == 0 || strcmp(c, "让") == 0 ||
+        strcmp(c, "用") == 0 || strcmp(c, "以") == 0 || strcmp(c, "为") == 0 ||
+        strcmp(c, "于") == 0 || strcmp(c, "关于") == 0 || strcmp(c, "按照") == 0 ||
+        strcmp(c, "根据") == 0 || strcmp(c, "通过") == 0 || strcmp(c, "为了") == 0)
+        return POS_PREP;
+    if (strcmp(c, "很") == 0 || strcmp(c, "太") == 0 || strcmp(c, "最") == 0 ||
+        strcmp(c, "更") == 0 || strcmp(c, "非常") == 0 || strcmp(c, "都") == 0 ||
+        strcmp(c, "只") == 0 || strcmp(c, "再") == 0 || strcmp(c, "已经") == 0 ||
+        strcmp(c, "正在") == 0 || strcmp(c, "一直") == 0 || strcmp(c, "可能") == 0 ||
+        strcmp(c, "不") == 0 || strcmp(c, "没") == 0 || strcmp(c, "没有") == 0 ||
+        strcmp(c, "会") == 0 || strcmp(c, "能") == 0 || strcmp(c, "可以") == 0 ||
+        strcmp(c, "要") == 0 || strcmp(c, "应该") == 0 || strcmp(c, "一定") == 0)
+        return POS_ADV;
+    if (strcmp(c, "一") == 0 || strcmp(c, "二") == 0 || strcmp(c, "三") == 0 ||
+        strcmp(c, "四") == 0 || strcmp(c, "五") == 0 || strcmp(c, "六") == 0 ||
+        strcmp(c, "七") == 0 || strcmp(c, "八") == 0 || strcmp(c, "九") == 0 ||
+        strcmp(c, "十") == 0 || strcmp(c, "百") == 0 || strcmp(c, "千") == 0 ||
+        strcmp(c, "万") == 0 || strcmp(c, "个") == 0 || strcmp(c, "只") == 0 ||
+        strcmp(c, "条") == 0 || strcmp(c, "本") == 0 || strcmp(c, "次") == 0 ||
+        strcmp(c, "遍") == 0 || strcmp(c, "趟") == 0 || strcmp(c, "回") == 0 ||
+        strcmp(c, "些") == 0 || strcmp(c, "多") == 0 || strcmp(c, "少") == 0 ||
+        strcmp(c, "两") == 0 || strcmp(c, "几") == 0 || strcmp(c, "各") == 0 ||
+        strcmp(c, "每") == 0 || strcmp(c, "全") == 0 || strcmp(c, "所有") == 0)
+        return POS_NUM;
+    if (strcmp(c, "哦") == 0 || strcmp(c, "嗯") == 0 || strcmp(c, "唉") == 0 ||
+        strcmp(c, "喂") == 0 || strcmp(c, "嗨") == 0 || strcmp(c, "哇") == 0 ||
+        strcmp(c, "哈哈") == 0 || strcmp(c, "嘿嘿") == 0 || strcmp(c, "哼") == 0)
+        return POS_INTERJ;
+    if (strcmp(c, "好") == 0 || strcmp(c, "坏") == 0 || strcmp(c, "大") == 0 ||
+        strcmp(c, "小") == 0 || strcmp(c, "新") == 0 || strcmp(c, "旧") == 0 ||
+        strcmp(c, "高") == 0 || strcmp(c, "低") == 0 || strcmp(c, "快") == 0 ||
+        strcmp(c, "慢") == 0 || strcmp(c, "长") == 0 || strcmp(c, "短") == 0 ||
+        strcmp(c, "多") == 0 || strcmp(c, "少") == 0 || strcmp(c, "冷") == 0 ||
+        strcmp(c, "热") == 0 || strcmp(c, "难") == 0 || strcmp(c, "易") == 0 ||
+        strcmp(c, "重") == 0 || strcmp(c, "轻") == 0 || strcmp(c, "深") == 0 ||
+        strcmp(c, "浅") == 0 || strcmp(c, "美") == 0 || strcmp(c, "真") == 0 ||
+        strcmp(c, "假") == 0 || strcmp(c, "对") == 0 || strcmp(c, "错") == 0)
+        return POS_ADJ;
+    if (strcmp(c, "是") == 0 || strcmp(c, "有") == 0 || strcmp(c, "说") == 0 ||
+        strcmp(c, "看") == 0 || strcmp(c, "做") == 0 || strcmp(c, "来") == 0 ||
+        strcmp(c, "去") == 0 || strcmp(c, "上") == 0 || strcmp(c, "下") == 0 ||
+        strcmp(c, "进") == 0 || strcmp(c, "出") == 0 || strcmp(c, "吃") == 0 ||
+        strcmp(c, "喝") == 0 || strcmp(c, "走") == 0 || strcmp(c, "跑") == 0 ||
+        strcmp(c, "写") == 0 || strcmp(c, "读") == 0 || strcmp(c, "学") == 0 ||
+        strcmp(c, "教") == 0 || strcmp(c, "买") == 0 || strcmp(c, "卖") == 0 ||
+        strcmp(c, "开") == 0 || strcmp(c, "关") == 0 || strcmp(c, "打") == 0 ||
+        strcmp(c, "听") == 0 || strcmp(c, "想") == 0 || strcmp(c, "知") == 0 ||
+        strcmp(c, "问") == 0 || strcmp(c, "答") == 0 || strcmp(c, "给") == 0 ||
+        strcmp(c, "拿") == 0 || strcmp(c, "放") == 0 || strcmp(c, "用") == 0 ||
+        strcmp(c, "找") == 0 || strcmp(c, "见") == 0 || strcmp(c, "叫") == 0 ||
+        strcmp(c, "让") == 0 || strcmp(c, "使") == 0 || strcmp(c, "帮") == 0 ||
+        strcmp(c, "爱") == 0 || strcmp(c, "恨") == 0 || strcmp(c, "喜") == 0 ||
+        strcmp(c, "谢") == 0 || strcmp(c, "送") == 0 || strcmp(c, "回") == 0 ||
+        strcmp(c, "带") == 0 || strcmp(c, "变") == 0 || strcmp(c, "成") == 0 ||
+        strcmp(c, "算") == 0 || strcmp(c, "试") == 0 || strcmp(c, "练") == 0 ||
+        strcmp(c, "记") == 0 || strcmp(c, "忘") == 0 || strcmp(c, "理") == 0 ||
+        strcmp(c, "解") == 0 || strcmp(c, "判断") == 0 || strcmp(c, "思考") == 0 ||
+        strcmp(c, "表示") == 0 || strcmp(c, "发生") == 0 || strcmp(c, "存在") == 0 ||
+        strcmp(c, "产生") == 0 || strcmp(c, "包括") == 0 || strcmp(c, "需要") == 0 ||
+        strcmp(c, "可能") == 0 || strcmp(c, "可以") == 0 || strcmp(c, "应该") == 0)
+        return POS_VERB;
+
+    int len = strlen(c);
+    if (len >= 2) {
+        const char* noun_suffixes[] = {"子","头","者","员","家","机","器",
+                                        "学","法","性","化","体","部","品",
+                                        "物","人","生","日","月","年","天",
+                                        "地","水","火","风","山","海","树",
+                                        "花","鸟","鱼","虫","心","手","眼",
+                                        NULL};
+        for (int si = 0; noun_suffixes[si]; si++) {
+            int slen = strlen(noun_suffixes[si]);
+            if (len >= slen && strcmp(c + len - slen, noun_suffixes[si]) == 0)
+                return POS_NOUN;
+        }
+    }
+    return POS_UNKNOWN;
+}
+
+const char* pos_tag_name(POSTag tag) {
+    static const char* names[] = {
+        "UNK", "NOUN", "VERB", "ADJ", "ADV",
+        "PRON", "PREP", "CONJ", "NUM", "PART", "INTJ"
+    };
+    if (tag >= 0 && tag < POS_COUNT) return names[tag];
+    return "???";
+}
+
+POSTag pos_tag_chinese(const char* word) {
+    return chinese_pos_lookup(word);
+}
+
+// ==================== 句式拓扑 ====================
+
+typedef struct {
+    const char* name;
+    POSTag pos_seq[8];
+    int seq_len;
+    float weight;
+} SentencePattern;
+
+static const SentencePattern CN_PATTERNS[] = {
+    {"SVO",    {POS_NOUN, POS_VERB, POS_NOUN},              3, 1.0f},
+    {"SV",     {POS_NOUN, POS_VERB},                        2, 0.9f},
+    {"SOV",    {POS_NOUN, POS_NOUN, POS_VERB},              3, 0.7f},
+    {"SVOC",   {POS_NOUN, POS_VERB, POS_NOUN, POS_NOUN},    4, 0.6f},
+    {"SVA",    {POS_NOUN, POS_VERB, POS_ADJ},               3, 0.8f},
+    {"ASV",    {POS_ADV, POS_NOUN, POS_VERB},               3, 0.7f},
+    {"VO",     {POS_VERB, POS_NOUN},                        2, 0.9f},
+    {"SVOO",   {POS_NOUN, POS_VERB, POS_NOUN, POS_NOUN},    4, 0.5f},
+    {"SVAdv",  {POS_NOUN, POS_ADV, POS_VERB},               3, 0.8f},
+    {"VPART",  {POS_VERB, POS_PARTICLE},                    2, 0.6f},
+    {"NPART",  {POS_NOUN, POS_PARTICLE},                    2, 0.7f},
+    {"ADJN",   {POS_ADJ, POS_PARTICLE, POS_NOUN},           3, 0.7f},
+    {"PREPN",  {POS_PREP, POS_NOUN},                        2, 0.8f},
+    {"VNUM",   {POS_VERB, POS_NUM},                         2, 0.6f},
+    {"CONJS",  {POS_CONJ, POS_NOUN, POS_VERB},              3, 0.5f},
+    {NULL,     {POS_UNKNOWN}, 0, 0.0f}
+};
+
+int cc_init_sentence_topology(CognitiveController* cc) {
+    if (!cc || !cc->master) return -1;
+    SubTopology* syntax = master_get_sub_topology_by_type(cc->master, TOPO_SYNTAX);
+    if (!syntax) {
+        int topo_id = master_add_sub_topology(cc->master, TOPO_SYNTAX,
+                                              "句式拓扑", 128, 5);
+        if (topo_id < 0) { printf("[句式拓扑] 创建失败\n"); return -1; }
+        syntax = master_get_sub_topology(cc->master, topo_id);
+        if (!syntax) return -1;
+    }
+    if (syntax->net && syntax->net->node_count > 0) {
+        printf("[句式拓扑] 已存在 %d 个句式节点\n", syntax->net->node_count);
+        return 0;
+    }
+    int created = 0;
+    for (int i = 0; CN_PATTERNS[i].name; i++) {
+        const SentencePattern* sp = &CN_PATTERNS[i];
+        ReasoningNode* node = huarong_net_find_or_create_node(
+            syntax->net, sp->name, NULL, 0, syntax->node_hash);
+        if (!node) continue;
+        node->confidence = sp->weight;
+        node->activation = 0.5f;
+        created++;
+    }
+    printf("[句式拓扑] 初始化完成: %d 个句式节点\n", created);
+    return created;
+}
+
+float cc_pos_compatibility(CognitiveController* cc,
+                            const POSTag* pos_sequence, int seq_len,
+                            POSTag candidate_pos) {
+    if (!cc || !pos_sequence) return 1.0f;
+    if (seq_len < 0) seq_len = 0;
+
+    int total_patterns = 0;
+    int compatible = 0;
+    POSTag check_seq[8];
+    int check_len = seq_len + 1;
+    if (check_len > 7) check_len = 7;
+    for (int i = 0; i < seq_len && i < 6; i++)
+        check_seq[i] = pos_sequence[i];
+    check_seq[seq_len] = candidate_pos;
+
+    for (int p = 0; CN_PATTERNS[p].name; p++) {
+        const SentencePattern* sp = &CN_PATTERNS[p];
+        if (sp->seq_len < check_len) continue;
+        total_patterns++;
+        int match = 1;
+        for (int k = 0; k < check_len; k++) {
+            if (check_seq[k] != sp->pos_seq[k]) { match = 0; break; }
+        }
+        if (match) compatible++;
+    }
+    for (int p = 0; p < cc->pos_pattern_count; p++) {
+        POSPattern* pp = &cc->pos_patterns[p];
+        if (pp->length < check_len || pp->count < 3) continue;
+        int match = 1;
+        for (int k = 0; k < check_len; k++) {
+            if (check_seq[k] != pp->pos_seq[k]) { match = 0; break; }
+        }
+        if (match) { total_patterns++; compatible++; }
+    }
+    if (total_patterns == 0) return 1.0f;
+    return (float)compatible / (float)total_patterns;
+}
+
+void cc_observe_pos_sequence(CognitiveController* cc,
+                              const POSTag* seq, int len) {
+    if (!cc || !seq || len <= 1 || len > 16) return;
+    int idx = cc->pos_obs_cursor;
+    for (int i = 0; i < len && i < 16; i++)
+        cc->pos_obs_buf[idx][i] = seq[i];
+    cc->pos_obs_lens[idx] = len;
+    cc->pos_obs_cursor = (idx + 1) % POS_OBS_BUF_SIZE;
+    if (cc->pos_obs_count < POS_OBS_BUF_SIZE)
+        cc->pos_obs_count++;
+}
+
+int cc_scan_pos_patterns(CognitiveController* cc) {
+    if (!cc || cc->pos_obs_count <= 0) return 0;
+
+    #define MAX_TEMP_PATTERNS 256
+    typedef struct {
+        POSTag seq[8]; int len; int count;
+    } TempPattern;
+    TempPattern temp[MAX_TEMP_PATTERNS];
+    int temp_count = 0;
+
+    int total = cc->pos_obs_count < POS_OBS_BUF_SIZE
+                ? cc->pos_obs_count : POS_OBS_BUF_SIZE;
+    int min_freq = cc->min_pattern_freq > 2 ? cc->min_pattern_freq : 3;
+
+    for (int i = 0; i < total; i++) {
+        int slen = cc->pos_obs_lens[i];
+        if (slen < 2) continue;
+        for (int ngram = 2; ngram <= 4 && ngram <= slen; ngram++) {
+            for (int start = 0; start <= slen - ngram; start++) {
+                int has_unk = 0;
+                for (int k = 0; k < ngram; k++) {
+                    if (cc->pos_obs_buf[i][start + k] == POS_UNKNOWN) { has_unk = 1; break; }
+                }
+                if (has_unk) continue;
+                int found = -1;
+                for (int t = 0; t < temp_count; t++) {
+                    if (temp[t].len != ngram) continue;
+                    int match = 1;
+                    for (int k = 0; k < ngram; k++) {
+                        if (temp[t].seq[k] != cc->pos_obs_buf[i][start + k]) { match = 0; break; }
+                    }
+                    if (match) { found = t; break; }
+                }
+                if (found >= 0) { temp[found].count++; }
+                else if (temp_count < MAX_TEMP_PATTERNS) {
+                    for (int k = 0; k < ngram; k++)
+                        temp[temp_count].seq[k] = cc->pos_obs_buf[i][start + k];
+                    temp[temp_count].len = ngram; temp[temp_count].count = 1; temp_count++;
+                }
+            }
+        }
+    }
+
+    SubTopology* syntax = NULL;
+    if (cc->master) {
+        for (int t = 0; t < cc->master->sub_topo_count; t++) {
+            SubTopology* st = cc->master->sub_topologies[t];
+            if (st && st->type == TOPO_SYNTAX) { syntax = st; break; }
+        }
+    }
+    if (!syntax || !syntax->net) {
+        printf("[POS模式] 句式拓扑未就绪，跳过模式创建\n");
+        return 0;
+    }
+
+    int created = 0, updated = 0;
+    for (int t = 0; t < temp_count; t++) {
+        if (temp[t].count < min_freq) continue;
+        char name[64] = "P:"; int np = 2;
+        for (int k = 0; k < temp[t].len && np < 60; k++) {
+            const char* tag = pos_tag_name(temp[t].seq[k]);
+            int tl = strlen(tag);
+            if (np + tl + 1 < 60) {
+                if (k > 0) name[np++] = '-';
+                memcpy(name + np, tag, tl); np += tl;
+            }
+        }
+        name[np] = '\0';
+
+        int existing_idx = -1;
+        for (int p = 0; p < cc->pos_pattern_count; p++) {
+            if (cc->pos_patterns[p].length != temp[t].len) continue;
+            int match = 1;
+            for (int k = 0; k < temp[t].len; k++) {
+                if (cc->pos_patterns[p].pos_seq[k] != temp[t].seq[k]) { match = 0; break; }
+            }
+            if (match) { existing_idx = p; break; }
+        }
+        if (existing_idx >= 0) {
+            cc->pos_patterns[existing_idx].count += temp[t].count;
+            cc->pos_patterns[existing_idx].avg_freq =
+                (float)cc->pos_patterns[existing_idx].count / (float)total;
+            updated++;
+        } else if (cc->pos_pattern_count < MAX_POS_PATTERNS) {
+            POSPattern* pp = &cc->pos_patterns[cc->pos_pattern_count];
+            memcpy(pp->pos_seq, temp[t].seq, temp[t].len * sizeof(POSTag));
+            pp->length = temp[t].len; pp->count = temp[t].count;
+            pp->avg_freq = (float)temp[t].count / (float)total;
+            ReasoningNode* node = huarong_net_find_or_create_node(
+                syntax->net, name, NULL, 0, syntax->node_hash);
+            if (node) {
+                node->confidence = 0.3f + 0.7f * pp->avg_freq;
+                node->activation = 0.5f;
+                pp->syntax_node_id = node->node_id;
+                created++;
+            } else { pp->syntax_node_id = -1; }
+            cc->pos_pattern_count++;
+        }
+    }
+    if (created > 0 || updated > 0) {
+        printf("[POS模式] 扫描 %d 条观测 → %d 个新模式 + %d 个更新 (总 %d 模式, min=%d)\n",
+               total, created, updated, cc->pos_pattern_count, min_freq);
+    }
+    return created;
+}
+
+static float pos_seq_overlap(const POSTag* a, int alen,
+                              const POSTag* b, int blen) {
+    if (alen <= 0 || blen <= 0) return 0.0f;
+    int match = 0;
+    int min_len = alen < blen ? alen : blen;
+    for (int i = 0; i < min_len; i++) {
+        if (a[i] == b[i]) match++;
+    }
+    return (float)match / (float)min_len;
+}
+
+int cc_select_sentence_pattern(CognitiveController* cc, const char* input) {
+    if (!cc || !input || !input[0]) { cc->scaffold_active = 0; return -1; }
+
+    POSTag input_pos[32];
+    int input_pos_len = 0;
+    const char* p = input;
+    while (*p && input_pos_len < 32) {
+        char ch[8] = {0}; int clen = 0;
+        unsigned char c = (unsigned char)*p;
+        if (c < 0x80) { ch[0] = *p; clen = 1; }
+        else if ((c & 0xE0) == 0xC0) { memcpy(ch, p, 2); clen = 2; }
+        else if ((c & 0xF0) == 0xE0) { memcpy(ch, p, 3); clen = 3; }
+        else if ((c & 0xF8) == 0xF0) { memcpy(ch, p, 4); clen = 4; }
+        else { p++; continue; }
+        ch[clen] = '\0';
+        POSTag tag = pos_tag_chinese(ch);
+        if (tag != POS_UNKNOWN) input_pos[input_pos_len++] = tag;
+        p += clen;
+    }
+    if (input_pos_len < 1) { cc->scaffold_active = 0; return -1; }
+
+    int best_idx = -1;
+    float best_score = 0.0f;
+    for (int i = 0; CN_PATTERNS[i].name; i++) {
+        const SentencePattern* sp = &CN_PATTERNS[i];
+        if (sp->seq_len < 2) continue;
+        float overlap = pos_seq_overlap(input_pos, input_pos_len, sp->pos_seq, sp->seq_len);
+        float score = overlap * 0.7f + sp->weight * 0.3f;
+        if (score > best_score) { best_score = score; best_idx = i; }
+    }
+    for (int i = 0; i < cc->pos_pattern_count; i++) {
+        POSPattern* pp = &cc->pos_patterns[i];
+        if (pp->length < 2) continue;
+        float overlap = pos_seq_overlap(input_pos, input_pos_len, pp->pos_seq, pp->length);
+        float score = overlap * 0.6f + pp->avg_freq * 0.4f;
+        if (score > best_score) { best_score = score; best_idx = 1000 + i; }
+    }
+    if (best_idx < 0 || best_score < 0.15f) {
+        cc->scaffold_active = 0; cc->scaffold_len = 0; return -1;
+    }
+    if (best_idx >= 1000) {
+        POSPattern* pp = &cc->pos_patterns[best_idx - 1000];
+        memcpy(cc->scaffold_seq, pp->pos_seq, pp->length * sizeof(POSTag));
+        cc->scaffold_len = pp->length;
+    } else {
+        memcpy(cc->scaffold_seq, CN_PATTERNS[best_idx].pos_seq,
+               CN_PATTERNS[best_idx].seq_len * sizeof(POSTag));
+        cc->scaffold_len = CN_PATTERNS[best_idx].seq_len;
+    }
+    cc->scaffold_active = 1;
+    return best_idx;
+}
+
+float cc_scaffold_bonus(CognitiveController* cc, int position, POSTag candidate_pos) {
+    if (!cc || !cc->scaffold_active || cc->scaffold_len <= 0) return 0.0f;
+    if (candidate_pos == POS_UNKNOWN) return 0.0f;
+    if (position < 0 || position >= cc->scaffold_len) return 0.0f;
+
+    POSTag expected = cc->scaffold_seq[position];
+    if (candidate_pos == expected) return 0.25f;
+    if (expected == POS_NOUN && candidate_pos == POS_PRON) return 0.10f;
+    if (expected == POS_PRON && candidate_pos == POS_NOUN) return 0.10f;
+    if (expected == POS_ADJ  && candidate_pos == POS_ADV)  return 0.08f;
+    if (expected == POS_ADV  && candidate_pos == POS_ADJ)  return 0.08f;
+    if (expected == POS_VERB && candidate_pos == POS_ADJ)  return 0.05f;
+    return -0.15f;
+}
+
+int cc_get_selected_pattern(CognitiveController* cc, POSTag* seq_out) {
+    if (!cc || !seq_out || !cc->scaffold_active) return 0;
+    memcpy(seq_out, cc->scaffold_seq, cc->scaffold_len * sizeof(POSTag));
+    return cc->scaffold_len;
+}
+
+int cc_get_all_patterns(CognitiveController* cc,
+                         POSPattern* patterns_out, int max_count) {
+    if (!cc || !patterns_out || max_count <= 0) return 0;
+    int n = cc->pos_pattern_count < max_count ? cc->pos_pattern_count : max_count;
+    memcpy(patterns_out, cc->pos_patterns, n * sizeof(POSPattern));
+    return n;
+}

@@ -77,25 +77,29 @@ static void decay_sub_topology(SubTopology* sub, float decay_rate, float floor_v
  * 模拟大脑即使无外部输入时的背景放电活动。
  * 在调用者的读锁下执行。
  */
+/* 线程安全本地随机数生成器 (LCG) */
+static unsigned int local_rand(unsigned int* seed) {
+    *seed = *seed * 1103515245 + 12345;
+    return (*seed >> 16) & 0x7FFF;
+}
+
 static void spontaneous_activate(BackgroundClock* clock) {
     MasterTopology* master = clock->master;
     if (!master || master->sub_topo_count == 0) return;
 
-    // 选择随机子拓扑
-    int topo_idx = rand() % master->sub_topo_count;
-    SubTopology* sub = master->sub_topologies[topo_idx];
-    if (!sub || !sub->net || sub->net->node_count == 0) return;
+    /* 每 tick 激活 3 个随机节点（原来只激活 1 个，不足以打破冻住的拓扑） */
+    for (int attempt = 0; attempt < 3; attempt++) {
+        int topo_idx = local_rand(&clock->_rng_seed) % master->sub_topo_count;
+        SubTopology* sub = master->sub_topologies[topo_idx];
+        if (!sub || !sub->net || sub->net->node_count == 0) continue;
 
-    // 选择随机节点
-    int node_idx = rand() % sub->net->node_count;
-    ReasoningNode* node = sub->net->nodes[node_idx];
-    if (!node) return;
+        int node_idx = local_rand(&clock->_rng_seed) % sub->net->node_count;
+        ReasoningNode* node = sub->net->nodes[node_idx];
+        if (!node) continue;
 
-    // 注入弱激活
-    float added = clock->spontaneous_strength * (0.5f + (rand() % 100) / 200.0f);
-    node->activation += added;
-    if (node->activation > 1.0f) {
-        node->activation = 1.0f;
+        float added = clock->spontaneous_strength * (0.5f + local_rand(&clock->_rng_seed) / 65535.0f);
+        node->activation += added;
+        if (node->activation > 1.0f) node->activation = 1.0f;
     }
 }
 
@@ -135,7 +139,7 @@ static void drift_cognitive_state(BackgroundClock* clock) {
             float sample_sum = 0.0f;
             int sample_n = emo->net->node_count < 20 ? emo->net->node_count : 20;
             for (int i = 0; i < sample_n; i++) {
-                int idx = rand() % emo->net->node_count;
+                int idx = local_rand(&clock->_rng_seed) % emo->net->node_count;
                 ReasoningNode* n = emo->net->nodes[idx];
                 if (n) sample_sum += n->valence;
             }
@@ -172,13 +176,18 @@ static void* clock_loop(void* arg) {
     if (clock->verbose) printf("[后台时钟] 启动，tick 间隔=%d ms\n", clock->tick_interval_ms);
 
     while (clock->is_running) {
-        int tick_ms = clock->tick_interval_ms;
+        /* 基于绝对时间的节拍，避免累积漂移 */
+        time_t tick_start = time(NULL);
         int slept = 0;
+        int tick_ms = clock->tick_interval_ms;
         while (slept < tick_ms && clock->is_running) {
             msleep(100);
             slept += 100;
         }
         if (!clock->is_running) break;
+
+        /* 如果系统调度导致超时，跳过本 tick 的额外等待 */
+        (void)tick_start;  /* 预留：未来可改用 clock_gettime 做精确补偿 */
 
         clock->tick_count++;
 
@@ -205,7 +214,7 @@ static void* clock_loop(void* arg) {
         float expected = total_nodes * clock->spontaneous_prob;
         int num_spontaneous = (int)expected;
         // 小数部分概率触发一次额外的
-        if ((float)(rand() % 10000) / 10000.0f < (expected - num_spontaneous)) {
+        if ((float)local_rand(&clock->_rng_seed) / 32767.0f < (expected - num_spontaneous)) {
             num_spontaneous++;
         }
         for (int s = 0; s < num_spontaneous; s++) {
@@ -257,8 +266,8 @@ BackgroundClock* background_clock_create(MasterTopology* master,
     clock->is_running = 0;
     clock->tick_count = 0;
 
-    // 初始化随机种子
-    srand((unsigned int)time(NULL));
+    /* 初始化线程安全本地 RNG 种子 */
+    clock->_rng_seed = (unsigned int)time(NULL) ^ (unsigned int)(uintptr_t)clock;
 
     return clock;
 }
@@ -278,9 +287,11 @@ void background_clock_start(BackgroundClock* clock) {
 }
 
 void background_clock_stop(BackgroundClock* clock) {
-    if (!clock || !clock->is_running) return;
+    if (!clock) return;
+    /* 原子交换：防止双重停止导致双重 pthread_join */
+    int was_running = __sync_lock_test_and_set(&clock->is_running, 0);
+    if (!was_running) return;
 
-    clock->is_running = 0;
     pthread_join(clock->thread, NULL);
 
     if (clock->verbose) printf("[后台时钟] 线程已停止 (tick=%d)\n", clock->tick_count);

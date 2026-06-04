@@ -34,8 +34,8 @@ typedef struct MemorySystem MemorySystem;
 /** 基础连接权重（新边） */
 #define AUTONOMIC_BASE_WEIGHT 0.3f
 
-/** 每次推理后未激活边的衰减率 */
-#define AUTONOMIC_DECAY_RATE 0.999f
+/** 每次衰减调用的基础衰减率（0.95=每轮5%；中档边×importance调制，输家×0.85，赢家×0.9995） */
+#define AUTONOMIC_DECAY_RATE 0.95f
 
 /** 最大连接数上限（防止单个节点连接爆炸） */
 #define AUTONOMIC_MAX_CONNECTIONS PM_AUTONOMIC_MAX_CONN
@@ -89,6 +89,7 @@ typedef struct {
     pthread_cond_t flush_cond;             // 刷盘条件变量
     volatile int flush_requested;          // 刷盘请求标志
     volatile int flush_running;            // 刷盘线程运行中
+    volatile int shutdown;                 // 刷盘线程关闭标志
     MasterTopology* flush_master;          // 刷盘时使用的 master 指针
     pthread_mutex_t flush_lock;            // 保留：兼容旧引用
 
@@ -118,8 +119,24 @@ void autonomic_state_destroy(AutonomicState* state);
 /**
  * 请求刷盘（触发刷盘判断）
  * 检查是否满足刷盘条件，满足则保存拓扑状态
+ * 如果异步刷盘线程已启动，则发信号给后台线程立即返回；
+ * 否则同步执行刷盘。
  */
 void autonomic_request_flush(AutonomicState* state, MasterTopology* master);
+
+/**
+ * 启动异步刷盘后台线程
+ * 调用后 autonomic_request_flush 不再同步阻塞，改为信号通知后台线程
+ * @param state  已初始化的 AutonomicState
+ * @param master 主拓扑指针（线程需访问）
+ * @return 1=成功, 0=失败
+ */
+int autonomic_start_async_flush(AutonomicState* state, MasterTopology* master);
+
+/**
+ * 停止异步刷盘后台线程（阻塞等待线程结束）
+ */
+void autonomic_stop_async_flush(AutonomicState* state);
 
 // ==================== 核心 API ====================
 

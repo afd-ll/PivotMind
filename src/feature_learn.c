@@ -23,6 +23,10 @@
 int feature_learn_graph_smooth(HuarongTopologyNet* net, int iterations) {
     if (!net || net->node_count <= 0 || iterations <= 0) return -1;
 
+    // 保护 features / connection_weights / connection_confidences 读写
+    // 与 boost_connection_weighted / hebbian_update 的并发访问
+    pthread_mutex_lock(&net->mutex);
+
     int total_nodes = net->node_count;
     int dim = NODE_FEATURE_DIM;
 
@@ -34,7 +38,10 @@ int feature_learn_graph_smooth(HuarongTopologyNet* net, int iterations) {
             break;
         }
     }
-    if (!has_features) return -1;
+    if (!has_features) {
+        pthread_mutex_unlock(&net->mutex);
+        return -1;
+    }
 
     // 临时缓冲区：new_features[total_nodes * dim] + weight_sums[total_nodes]
     float* new_features = (float*)calloc(total_nodes * dim, sizeof(float));
@@ -42,6 +49,7 @@ int feature_learn_graph_smooth(HuarongTopologyNet* net, int iterations) {
     if (!new_features || !weight_sums) {
         free(new_features);
         free(weight_sums);
+        pthread_mutex_unlock(&net->mutex);
         return -1;
     }
 
@@ -99,6 +107,7 @@ int feature_learn_graph_smooth(HuarongTopologyNet* net, int iterations) {
         if (updated == 0 && iter == 0) {
             free(new_features);
             free(weight_sums);
+            pthread_mutex_unlock(&net->mutex);
             return -1;
         }
     }
@@ -106,6 +115,7 @@ int feature_learn_graph_smooth(HuarongTopologyNet* net, int iterations) {
     free(new_features);
     free(weight_sums);
 
+    pthread_mutex_unlock(&net->mutex);
     printf("[特征学习] 图平滑完成 (%d 节点, %d 轮)\n", total_nodes, iterations);
     return 0;
 }

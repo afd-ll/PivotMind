@@ -32,6 +32,7 @@
 #include "feature_learn.h"
 #include "topology_growth.h"
 #include "feature_io.h"
+#include "cognitive_controller.h"  /* POSTag / pos_tag_chinese for syntax topology */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -120,6 +121,8 @@ void autonomic_state_init(AutonomicState* state) {
         state->shards[i].pending_count = 0;
     }
     pthread_mutex_init(&state->flush_lock, NULL);
+    pthread_mutex_init(&state->flush_mutex, NULL);
+    pthread_cond_init(&state->flush_cond, NULL);
     state->flush_threshold = PM_AUTONOMIC_FLUSH_THRESHOLD;
     state->idle_flush_seconds = PM_AUTONOMIC_IDLE_FLUSH_SECS;
     state->max_pending_edges = 500;
@@ -129,41 +132,30 @@ void autonomic_state_init(AutonomicState* state) {
 
 void autonomic_state_destroy(AutonomicState* state) {
     if (!state) return;
+    // 安全停止：如果异步线程还在运行，先停掉
+    if (state->flush_master && !state->shutdown) {
+        state->shutdown = 1;
+        pthread_mutex_lock(&state->flush_mutex);
+        pthread_cond_signal(&state->flush_cond);
+        pthread_mutex_unlock(&state->flush_mutex);
+        pthread_join(state->flush_thread, NULL);
+    }
     for (int i = 0; i < AUTONOMIC_SHARD_COUNT; i++) {
         pthread_mutex_destroy(&state->shards[i].lock);
     }
     pthread_mutex_destroy(&state->flush_lock);
+    pthread_mutex_destroy(&state->flush_mutex);
+    pthread_cond_destroy(&state->flush_cond);
     memset(state, 0, sizeof(AutonomicState));
 }
 
-void autonomic_request_flush(AutonomicState* state, MasterTopology* master) {
-    if (!state || !state->initialized) return;
+// ==================== 刷盘工作函数（提取公共逻辑） ====================
 
-    time_t now = time(NULL);
-    int should_flush = 0;
-
-    // 条件1：累积更新 ≥ 阈值
-    if (state->pending_updates >= state->flush_threshold) {
-        should_flush = 1;
-    }
-
-    // 条件2：距离上次刷盘超过空闲刷盘时间
-    if (!should_flush && (now - state->last_flush_time) >= state->idle_flush_seconds) {
-        should_flush = 1;
-    }
-
-    if (!should_flush) return;
-
-    // 拿锁后二次检查（double-check）：别的线程可能刚刷完盘
-    pthread_mutex_lock(&state->flush_lock);
-
-    if (state->pending_updates < state->flush_threshold &&
-        (now - state->last_flush_time) < state->idle_flush_seconds) {
-        pthread_mutex_unlock(&state->flush_lock);
-        return;
-    }
-
-    // 执行刷盘 — 先备份再覆写（锁内，单线程安全）
+/**
+ * 执行刷盘的具体工作：剪枝、特征学习、特征吸引、保存
+ * 调用方已持有 flush_lock，保证单线程执行
+ */
+static void do_flush_work(AutonomicState* state, MasterTopology* master, time_t now) {
     printf("[自主学习刷盘] %d 次更新, 距上次 %lds\n",
            state->pending_updates, (long)(now - state->last_flush_time));
 
@@ -217,11 +209,11 @@ void autonomic_request_flush(AutonomicState* state, MasterTopology* master) {
             fclose(existing);
             char bak_path[520];
             snprintf(bak_path, 519, "%s.bak", path);
-            remove(bak_path);  // 删旧的备份
+            remove(bak_path);
             rename(path, bak_path);
         }
 
-        // 持久化拓扑（使用已有的 master_save_state）
+        // 持久化拓扑
         int saved = master_save_state(master, path);
         if (saved > 0) {
             printf("[自主学习刷盘] ✓ 已保存到 %s (%d 节点)\n", path, saved);
@@ -236,9 +228,144 @@ void autonomic_request_flush(AutonomicState* state, MasterTopology* master) {
         }
     }
 
-    // 重置计数（锁内，防止其他线程看到过时的 pending_updates）
+    // 重置计数
     state->pending_updates = 0;
     state->last_flush_time = now;
+}
+
+// ==================== 异步刷盘后台线程 ====================
+
+/**
+ * 异步刷盘线程主函数
+ * 等待条件变量信号（flush_requested 或 shutdown 或超时），
+ * 收到信号后执行 do_flush_work，调用方不等待。
+ */
+static void* flush_thread_worker(void* arg) {
+    AutonomicState* state = (AutonomicState*)arg;
+    if (!state) return NULL;
+
+    struct timespec ts;
+    MasterTopology* master = state->flush_master;
+
+    while (1) {
+        pthread_mutex_lock(&state->flush_mutex);
+
+        // 等待信号：被 flush_requested 唤醒 或 每秒超时检查空闲条件
+        while (!state->flush_requested && !state->shutdown) {
+            ts.tv_sec = time(NULL) + 1;
+            ts.tv_nsec = 0;
+            pthread_cond_timedwait(&state->flush_cond, &state->flush_mutex, &ts);
+
+            // 周期性检查空闲刷盘条件
+            if (!state->flush_requested && !state->shutdown && state->initialized) {
+                time_t now = time(NULL);
+                if (state->pending_updates > 0 &&
+                    (now - state->last_flush_time) >= state->idle_flush_seconds) {
+                    state->flush_requested = 1;
+                }
+            }
+        }
+
+        if (state->shutdown) {
+            pthread_mutex_unlock(&state->flush_mutex);
+            break;
+        }
+
+        state->flush_requested = 0;
+        state->flush_running = 1;
+        pthread_mutex_unlock(&state->flush_mutex);
+
+        // 执行刷盘（flush_lock 防止并发，不持 topology 锁，学习线程可运行）
+        pthread_mutex_lock(&state->flush_lock);
+        if (master && state->initialized && !state->shutdown) {
+            do_flush_work(state, master, time(NULL));
+        }
+        pthread_mutex_unlock(&state->flush_lock);
+
+        // 在 flush_mutex 保护下重置 running，确保主线程路径可靠读取
+        pthread_mutex_lock(&state->flush_mutex);
+        state->flush_running = 0;
+        pthread_mutex_unlock(&state->flush_mutex);
+    }
+
+    return NULL;
+}
+
+int autonomic_start_async_flush(AutonomicState* state, MasterTopology* master) {
+    if (!state || !state->initialized || !master) return 0;
+
+    state->flush_master = master;
+    state->shutdown = 0;
+    state->flush_requested = 0;
+    state->flush_running = 0;
+
+    int ret = pthread_create(&state->flush_thread, NULL, flush_thread_worker, state);
+    if (ret != 0) {
+        fprintf(stderr, "[异步刷盘] 创建线程失败: %d\n", ret);
+        return 0;
+    }
+
+    printf("[异步刷盘] 后台线程已启动\n");
+    return 1;
+}
+
+void autonomic_stop_async_flush(AutonomicState* state) {
+    if (!state || !state->initialized) return;
+
+    state->shutdown = 1;
+    pthread_mutex_lock(&state->flush_mutex);
+    pthread_cond_signal(&state->flush_cond);
+    pthread_mutex_unlock(&state->flush_mutex);
+
+    pthread_join(state->flush_thread, NULL);
+    printf("[异步刷盘] 后台线程已停止\n");
+}
+
+// ==================== 同步/异步刷盘入口 ====================
+
+void autonomic_request_flush(AutonomicState* state, MasterTopology* master) {
+    if (!state || !state->initialized) return;
+
+    time_t now = time(NULL);
+    int should_flush = 0;
+
+    // 条件1：累积更新 ≥ 阈值
+    if (state->pending_updates >= state->flush_threshold) {
+        should_flush = 1;
+    }
+
+    // 条件2：距离上次刷盘超过空闲刷盘时间
+    if (!should_flush && (now - state->last_flush_time) >= state->idle_flush_seconds) {
+        should_flush = 1;
+    }
+
+    if (!should_flush) return;
+
+    // ========== 异步路径：发信号给后台线程，立刻返回 ==========
+    if (state->flush_master && !state->shutdown && !state->flush_running) {
+        pthread_mutex_lock(&state->flush_mutex);
+        // double-check under mutex
+        if (!state->flush_running && !state->shutdown) {
+            state->flush_requested = 1;
+            pthread_cond_signal(&state->flush_cond);
+            pthread_mutex_unlock(&state->flush_mutex);
+            return;
+        }
+        pthread_mutex_unlock(&state->flush_mutex);
+        // 如果正在刷盘，本次跳过（不重复排入）
+        return;
+    }
+
+    // ========== 同步路径（无异步线程时回退） ==========
+    pthread_mutex_lock(&state->flush_lock);
+
+    if (state->pending_updates < state->flush_threshold &&
+        (now - state->last_flush_time) < state->idle_flush_seconds) {
+        pthread_mutex_unlock(&state->flush_lock);
+        return;
+    }
+
+    do_flush_work(state, master, now);
 
     pthread_mutex_unlock(&state->flush_lock);
 }
@@ -314,8 +441,8 @@ static void boost_connection_weighted(SubTopology* topo, ReasoningNode* a, Reaso
         b->connection_weights[existing_b_to_a] += dw;
         if (b->connection_weights[existing_b_to_a] > 0.9f) b->connection_weights[existing_b_to_a] = 0.9f;
     }
-    if (net) pthread_mutex_unlock(&net->mutex);
     if (existing_a_to_b >= 0) record_connection_activated(a, b);
+    if (net) pthread_mutex_unlock(&net->mutex);
 
     // ── 新建边：不持锁调 add_connection（内部锁扩容）──
     if (existing_a_to_b < 0 && net) {
@@ -372,6 +499,11 @@ void autonomic_learn_from_dialog(MasterTopology* master,
     SubTopology* semantic = NULL;
     SubTopology* concept_t = NULL;
     SubTopology* emotion = NULL;
+    SubTopology* syntax = NULL;
+    SubTopology* context = NULL;
+    SubTopology* domain = NULL;
+    SubTopology* pragma = NULL;
+    SubTopology* culture = NULL;
     for (int t = 0; t < master->sub_topo_count; t++) {
         SubTopology* sub = master->sub_topologies[t];
         if (!sub) continue;
@@ -380,10 +512,41 @@ void autonomic_learn_from_dialog(MasterTopology* master,
             case TOPO_SEMANTIC:   semantic = sub; break;
             case TOPO_CONCEPT:    concept_t = sub; break;
             case TOPO_EMOTION:    emotion = sub; break;
+            case TOPO_SYNTAX:     syntax = sub; break;
+            case TOPO_CONTEXT:    context = sub; break;
+            case TOPO_DOMAIN:     domain = sub; break;
+            case TOPO_PRAGMA:     pragma = sub; break;
+            case TOPO_CULTURE:    culture = sub; break;
             default: break;
         }
     }
     if (!vocab || !vocab->net) return;
+
+    /* 种子节点：为空拓扑注入初始数据（仅首次运行） */
+    {
+        SubTopology* seeds[] = { syntax, context, domain, pragma, culture };
+        const char* seed_names[] = {
+            /* syntax: 基础POS标签 */
+            "NOUN\0VERB\0ADJ\0ADV\0PRON\0PREP\0CONJ\0NUM\0PART\0INTJ",
+            /* context: 上下文类型 */
+            "Q&A\0CHAT\0EXPLAIN\0HOWTO\0GREET",
+            /* domain: 领域标签 */
+            "TECH\0LIFE\0SCIENCE\0HISTORY\0GEOGRAPHY",
+            /* pragma: 语用功能 */
+            "ASK\0TELL\0REQUEST\0SUGGEST\0GREET",
+            /* culture: 文化元素 */
+            "CN_CULTURE\0FESTIVAL\0CUSTOM\0LANGUAGE\0HISTORY"
+        };
+        for (int si = 0; si < 5; si++) {
+            SubTopology* st = seeds[si];
+            if (!st || !st->net || st->net->node_count > 0) continue;
+            const char* names = seed_names[si];
+            while (*names) {
+                huarong_net_find_or_create_node(st->net, names, NULL, 0, st->node_hash);
+                names += strlen(names) + 1;
+            }
+        }
+    }
 
     // 提取单字
     char input_chars[MAX_CHARS_PER_TEXT][8];
@@ -513,28 +676,32 @@ void autonomic_learn_from_dialog(MasterTopology* master,
     // 只有本轮激活值 >= 阈值的拓扑才参与赫布学习
     // 低激活拓扑不做建边——让拓扑自己通过竞争决定哪些经验值得记录
     {
-        SubTopology* targets[] = { semantic, concept_t, emotion };
-        const int num_targets = 3;
+        SubTopology* targets[] = { semantic, concept_t, emotion, syntax, context, domain, pragma, culture };
+        const int num_targets = 8;
 
         for (int tgt_i = 0; tgt_i < num_targets; tgt_i++) {
             SubTopology* tgt = targets[tgt_i];
             if (!tgt || !tgt->net) continue;
 
-            // 激活竞争门控: recent_activation < 0.15 → 跳过学习
-            if (tgt->recent_activation < 0.15f) {
-                // 本轮该拓扑激活不足，仅做激活传播不建新边
-                continue;
-            }
+            // 激活竞争学习率: 低激活拓扑用衰减学习率而非完全跳过
+            float lr_scale = (tgt->recent_activation < 0.05f) ? 0.1f :
+                             (tgt->recent_activation < 0.15f) ? tgt->recent_activation * 2.0f : 1.0f;
+
+            int is_syntax = (tgt->type == TOPO_SYNTAX);
 
             // 在目标拓扑中查找或创建节点
             ReasoningNode* tgt_input[MAX_CHARS_PER_TEXT];
             ReasoningNode* tgt_response[MAX_CHARS_PER_TEXT];
 
             for (int i = 0; i < input_count; i++) {
-                tgt_input[i] = huarong_net_find_or_create_node(tgt->net, input_chars[i], NULL, 0, tgt->node_hash);
+                const char* name = input_chars[i];
+                if (is_syntax) name = pos_tag_name(pos_tag_chinese(name));
+                tgt_input[i] = huarong_net_find_or_create_node(tgt->net, name, NULL, 0, tgt->node_hash);
             }
             for (int i = 0; i < response_count; i++) {
-                tgt_response[i] = huarong_net_find_or_create_node(tgt->net, response_chars[i], NULL, 0, tgt->node_hash);
+                const char* name = response_chars[i];
+                if (is_syntax) name = pos_tag_name(pos_tag_chinese(name));
+                tgt_response[i] = huarong_net_find_or_create_node(tgt->net, name, NULL, 0, tgt->node_hash);
             }
 
             // 在目标拓扑内部建边（字序编码 + 输入↔回复）
@@ -545,7 +712,7 @@ void autonomic_learn_from_dialog(MasterTopology* master,
                     int dist = j - i;
                     float wmult = (dist == 1) ? 1.5f : (1.5f / dist);
                     if (wmult < 0.3f) wmult = 0.3f;
-                    boost_connection_weighted(tgt, tgt_input[i], tgt_input[j], state, wmult);
+                    boost_connection_weighted(tgt, tgt_input[i], tgt_input[j], state, wmult * lr_scale);
                 }
             }
             for (int i = 0; i < response_count; i++) {
@@ -555,14 +722,14 @@ void autonomic_learn_from_dialog(MasterTopology* master,
                     int dist = j - i;
                     float wmult = (dist == 1) ? 1.5f : (1.5f / dist);
                     if (wmult < 0.3f) wmult = 0.3f;
-                    boost_connection_weighted(tgt, tgt_response[i], tgt_response[j], state, wmult);
+                    boost_connection_weighted(tgt, tgt_response[i], tgt_response[j], state, wmult * lr_scale);
                 }
             }
             for (int i = 0; i < input_count; i++) {
                 if (!tgt_input[i]) continue;
                 for (int j = 0; j < response_count; j++) {
                     if (!tgt_response[j]) continue;
-                    boost_connection_weighted(tgt, tgt_input[i], tgt_response[j], state, 1.0f);
+                    boost_connection_weighted(tgt, tgt_input[i], tgt_response[j], state, lr_scale);
                 }
             }
         }
@@ -812,6 +979,7 @@ int autonomic_get_edge_stats(MasterTopology* master,
                 sum_confidence += node->connection_confidences[e];
             }
         }
+        pthread_mutex_unlock(&sub->net->mutex);
     }
 
     if (out_total_edges) *out_total_edges = total_edges;

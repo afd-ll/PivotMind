@@ -1,5 +1,6 @@
 #include "cross_edge_io.h"
 #include "huarong_topology.h"
+#include "node_hash.h"
 #include "common.h"
 #include <stdint.h>
 #include <stdio.h>
@@ -19,10 +20,13 @@ int save_cross_edges(MasterTopology* master, const char* filepath) {
     if (!fp) return -1;
 
     uint32_t magic = CROSS_EDGE_FILE_MAGIC;
-    uint32_t m = (uint32_t)count;
+    /* 先写魔术数，count 后续补写（因为 NULL link 会被跳过） */
 
-    fwrite(&magic, sizeof(uint32_t), 1, fp);
-    fwrite(&m, sizeof(uint32_t), 1, fp);
+    if (fwrite(&magic, sizeof(uint32_t), 1, fp) != 1) { fclose(fp); remove(tmp_path); return -1; }
+    /* 预留 count 位置 */
+    long count_pos = ftell(fp);
+    uint32_t placeholder = 0;
+    if (fwrite(&placeholder, sizeof(uint32_t), 1, fp) != 1) { fclose(fp); remove(tmp_path); return -1; }
 
     int written = 0;
     for (int i = 0; i < count; i++) {
@@ -36,14 +40,19 @@ int save_cross_edges(MasterTopology* master, const char* filepath) {
         float    weight    = link->weight;
         uint32_t use_cnt   = (uint32_t)link->use_count;
 
-        fwrite(&from_topo, sizeof(uint32_t), 1, fp);
-        fwrite(&from_node, sizeof(uint32_t), 1, fp);
-        fwrite(&to_topo,   sizeof(uint32_t), 1, fp);
-        fwrite(&to_node,   sizeof(uint32_t), 1, fp);
-        fwrite(&weight,    sizeof(float),    1, fp);
-        fwrite(&use_cnt,   sizeof(uint32_t), 1, fp);
+        if (fwrite(&from_topo, sizeof(uint32_t), 1, fp) != 1) goto write_fail;
+        if (fwrite(&from_node, sizeof(uint32_t), 1, fp) != 1) goto write_fail;
+        if (fwrite(&to_topo,   sizeof(uint32_t), 1, fp) != 1) goto write_fail;
+        if (fwrite(&to_node,   sizeof(uint32_t), 1, fp) != 1) goto write_fail;
+        if (fwrite(&weight,    sizeof(float),    1, fp) != 1) goto write_fail;
+        if (fwrite(&use_cnt,   sizeof(uint32_t), 1, fp) != 1) goto write_fail;
         written++;
     }
+
+    /* 回写实际的记录数 */
+    fseek(fp, count_pos, SEEK_SET);
+    uint32_t actual = (uint32_t)written;
+    fwrite(&actual, sizeof(uint32_t), 1, fp);
 
     fclose(fp);
 
@@ -53,6 +62,11 @@ int save_cross_edges(MasterTopology* master, const char* filepath) {
     }
 
     return written;
+
+write_fail:
+    fclose(fp);
+    remove(tmp_path);
+    return -1;
 }
 
 int load_cross_edges(MasterTopology* master, const char* filepath) {
@@ -147,27 +161,46 @@ static int link_topos_by_name(MasterTopology* master,
         ReasoningNode* fn = from_sub->net->nodes[fi];
         if (!fn || !fn->concept) continue;
 
-        // exact concept name lookup in target topology
-        for (int ti = 0; ti < to_sub->net->node_count && created < limit; ti++) {
-            ReasoningNode* tn = to_sub->net->nodes[ti];
-            if (!tn || !tn->concept) continue;
-            if (fi == ti && from_sub->type == to_sub->type) continue; // skip same-tool internal links
+        /* use hash table for O(1) lookup instead of O(n) inner loop */
+        if (to_sub->node_hash) {
+            ReasoningNode* tn = node_hash_find(to_sub->node_hash, fn->concept);
+            if (tn && tn->node_id >= 0) {
+                if (fi == tn->node_id && from_sub->type == to_sub->type) continue;
 
-            if (strcmp(fn->concept, tn->concept) == 0) {
-                // source -> target
                 int ret = master_add_cross_link(master,
                     from_sub->topo_id, fn->node_id,
                     to_sub->topo_id, tn->node_id,
                     weight, relation);
                 if (ret >= 0) created++;
 
-                // target -> source (bidirectional)
                 if (bidirectional) {
                     if (master_add_cross_link(master,
                         to_sub->topo_id, tn->node_id,
                         from_sub->topo_id, fn->node_id,
                         weight * 0.8f, relation) >= 0) {
                         created++;
+                    }
+                }
+            }
+        } else {
+            /* fallback: linear scan (shouldn't happen if hash is properly initialized) */
+            for (int ti = 0; ti < to_sub->net->node_count && created < limit; ti++) {
+                ReasoningNode* tn = to_sub->net->nodes[ti];
+                if (!tn || !tn->concept) continue;
+                if (fi == ti && from_sub->type == to_sub->type) continue;
+                if (strcmp(fn->concept, tn->concept) == 0) {
+                    int ret = master_add_cross_link(master,
+                        from_sub->topo_id, fn->node_id,
+                        to_sub->topo_id, tn->node_id,
+                        weight, relation);
+                    if (ret >= 0) created++;
+                    if (bidirectional) {
+                        if (master_add_cross_link(master,
+                            to_sub->topo_id, tn->node_id,
+                            from_sub->topo_id, fn->node_id,
+                            weight * 0.8f, relation) >= 0) {
+                            created++;
+                        }
                     }
                 }
             }

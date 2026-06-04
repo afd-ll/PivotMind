@@ -871,6 +871,25 @@ CausalPath** find_all_causal_paths(CausalGraph* graph, int source,
 
 // ==================== A* 搜索实现 ====================
 
+/** A* 路径创建（三处 A* 实现共享） */
+static CausalPath* astar_create_path(CausalGraph* graph, AStarNode* node) {
+    CausalPath* path = (CausalPath*)malloc(sizeof(CausalPath));
+    if (!path) return NULL;
+    path->node_ids = node->path;  // 所有权转移
+    path->length = node->path_len;
+    path->total_strength = node->total_strength;
+    path->edge_strengths = (float*)malloc((node->path_len - 1) * sizeof(float));
+    path->is_direct = (node->path_len == 2);
+    path->has_confounder = false;
+    if (path->edge_strengths) {
+        for (int i = 0; i < node->path_len - 1; i++) {
+            CausalEdge* edge = get_causal_edge(graph, node->path[i], node->path[i + 1]);
+            path->edge_strengths[i] = edge ? edge->strength : 0.5f;
+        }
+    }
+    return path;
+}
+
 /**
  * 使用 A* 算法查找因果路径（启发式搜索优先探索最有希望的路径）
  * 与 find_all_causal_paths 不同，A* 使用启发式搜索优先探索最有希望的路径
@@ -928,22 +947,9 @@ CausalPath** find_causal_paths_astar(CausalGraph* graph, int source, int target,
         
         // 检查是否到达目标
         if (current.node_id == target && current.path_len > 1) {
-            CausalPath* path = (CausalPath*)malloc(sizeof(CausalPath));
-            path->node_ids = current.path;  // 路径所有权转移
-            path->length = current.path_len;
-            path->total_strength = current.total_strength;
-            path->edge_strengths = (float*)malloc((current.path_len - 1) * sizeof(float));
-            path->is_direct = (current.path_len == 2);
-            path->has_confounder = false;
-            
-            // 计算各边强度
-            for (int i = 0; i < current.path_len - 1; i++) {
-                CausalEdge* edge = get_causal_edge(graph, current.path[i], current.path[i + 1]);
-                path->edge_strengths[i] = edge ? edge->strength : 0.5f;
-            }
-            
-            paths[found_count++] = path;
-            continue;  // 不再扩展这条路径
+            CausalPath* path = astar_create_path(graph, &current);
+            if (path) paths[found_count++] = path;
+            continue;
         }
         
         // 达到最大长度，不再扩展
@@ -1857,22 +1863,9 @@ CausalPath** find_strongest_causal_path_astar(CausalGraph* graph, int source, in
             continue;
         }
         
-        // 到达目标 → 记录路径
         if (current.node_id == target && current.path_len > 1) {
-            CausalPath* path = (CausalPath*)malloc(sizeof(CausalPath));
-            path->node_ids = current.path;  // 转移所有权
-            path->length = current.path_len;
-            path->total_strength = current.total_strength;
-            path->edge_strengths = (float*)malloc((current.path_len - 1) * sizeof(float));
-            path->is_direct = (current.path_len == 2);
-            path->has_confounder = false;
-            
-            for (int i = 0; i < current.path_len - 1; i++) {
-                CausalEdge* edge = get_causal_edge(graph, current.path[i], current.path[i + 1]);
-                path->edge_strengths[i] = edge ? edge->strength : 0.5f;
-            }
-            
-            paths[found_count++] = path;
+            CausalPath* path = astar_create_path(graph, &current);
+            if (path) paths[found_count++] = path;
             continue;
         }
         
@@ -2134,20 +2127,8 @@ CausalPath** conditional_strongest_paths(CausalGraph* graph, int source, int tar
         }
         
         if (current.node_id == target && current.path_len > 1) {
-            CausalPath* path = (CausalPath*)malloc(sizeof(CausalPath));
-            path->node_ids = current.path;
-            path->length = current.path_len;
-            path->total_strength = current.total_strength;
-            path->edge_strengths = (float*)malloc((current.path_len - 1) * sizeof(float));
-            path->is_direct = (current.path_len == 2);
-            path->has_confounder = false;
-            
-            for (int i = 0; i < current.path_len - 1; i++) {
-                CausalEdge* edge = get_causal_edge(graph, current.path[i], current.path[i + 1]);
-                path->edge_strengths[i] = edge ? edge->strength : 0.5f;
-            }
-            
-            paths[found_count++] = path;
+            CausalPath* path = astar_create_path(graph, &current);
+            if (path) paths[found_count++] = path;
             continue;
         }
         

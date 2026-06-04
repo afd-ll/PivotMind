@@ -822,6 +822,8 @@ int remove_cross_topology_link(MasterTopology* master,
                               int to_topo_id, int to_node_id) {
     if (!master) return -1;
 
+    pthread_rwlock_wrlock(&master->rwlock);
+
     // 查找跨拓扑链接
     for (int i = 0; i < master->cross_link_count; i++) {
         CrossTopologyLink* link = master->cross_links[i];
@@ -837,10 +839,12 @@ int remove_cross_topology_link(MasterTopology* master,
                 master->cross_links[j] = master->cross_links[j + 1];
             }
             master->cross_link_count--;
+            pthread_rwlock_unlock(&master->rwlock);
             return 0;
         }
     }
 
+    pthread_rwlock_unlock(&master->rwlock);
     return -1;  // 未找到
 }
 

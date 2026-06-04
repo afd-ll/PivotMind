@@ -52,6 +52,7 @@ typedef struct BackgroundClock {
     int   consolidate_every_n_ticks; // 每 N 个 tick 做一次记忆巩固（默认 10）
 
     int   verbose;                   // 是否打印后台日志（0=静默 1=详细）
+    unsigned int _rng_seed;          // 线程安全本地 RNG 种子
 } BackgroundClock;
 
 // ==================== API 函数 ====================
