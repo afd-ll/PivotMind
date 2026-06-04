@@ -17,7 +17,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <math.h>\n#include <stdint.h>
+#include <math.h>
+#include <stdint.h>
 #include <time.h>
 
 #ifdef _WIN32
