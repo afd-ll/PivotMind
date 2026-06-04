@@ -4,6 +4,7 @@
 #include "associative_reasoning.h"
 #include "utf8_tokenizer.h"
 #include "cognitive_params.h"
+#include "cognitive_controller.h"
 #include "common.h"
 #include "thread_pool.h"
 #include "path_encoding.h"
@@ -1273,6 +1274,128 @@ static inline float walk_base_score(
 /** 走边最低得分阈值 — 低于此值停止继续走 */
 #define EDGE_WALK_MIN_SCORE     0.05f
 
+/* ================================================================
+ *  节点 POS 标签查询 — 通过跨拓扑连接查词汇节点的词性
+ * ================================================================ */
+
+int master_get_node_pos_tag(MasterTopology* master,
+                             int vocab_topo_id, int node_id) {
+    if (!master || node_id < 0) return POS_UNKNOWN;
+    if (!master->cross_adj || master->cross_adj_count <= 0) return POS_UNKNOWN;
+
+    SubTopology* syntax = master_get_sub_topology_by_type(master, TOPO_SYNTAX);
+    if (!syntax) return POS_UNKNOWN;
+
+    int adj_idx = vocab_topo_id * MAX_NODES_PER_TOPO + node_id;
+    if (adj_idx >= master->cross_adj_count) return POS_UNKNOWN;
+
+    /* 遍历跨拓扑连接：找 vocab_node → syntax_node */
+    CrossTopoAdjEntry* entry = master->cross_adj[adj_idx];
+    while (entry) {
+        if (entry->link_index < master->cross_link_count) {
+            CrossTopologyLink* link = master->cross_links[entry->link_index];
+            if (link && link->to_topo_id == TOPO_SYNTAX) {
+                int syn_id = link->to_node_id;
+                if (syn_id >= 0 && syn_id < syntax->net->node_count) {
+                    ReasoningNode* sn = syntax->net->nodes[syn_id];
+                    if (sn && sn->concept) {
+                        /* 语法节点概念就是 POS 标签名，如 "名词" */
+                        const char* name = sn->concept;
+                        if (strstr(name, "名词")) return POS_NOUN;
+                        if (strstr(name, "动词")) return POS_VERB;
+                        if (strstr(name, "形容词")) return POS_ADJ;
+                        if (strstr(name, "副词")) return POS_ADV;
+                        if (strstr(name, "代词")) return POS_PRON;
+                        if (strstr(name, "介词")) return POS_PREP;
+                        if (strstr(name, "连词")) return POS_CONJ;
+                        if (strstr(name, "数词")||strstr(name, "量词")) return POS_NUM;
+                        if (strstr(name, "助词")) return POS_PARTICLE;
+                        if (strstr(name, "叹词")) return POS_INTERJ;
+                    }
+                }
+            }
+        }
+        entry = entry->next;
+    }
+    return POS_UNKNOWN;
+}
+
+/* ================================================================
+ *  语法句式模板匹配 — 按 POS 序列查找匹配的模板节点
+ *
+ *  与基于节点 ID 的旧版不同，语法模板通过 POS 标签匹配。
+ *  模板节点存储 tpl_pos_seq[0..len-1] 个 POSTag 槽位。
+ *
+ *  返回：匹配的模板节点 ID 或 -1
+ * ================================================================ */
+
+int master_find_template_for_pair_nolock(MasterTopology* master,
+                                          int vocab_topo_id,
+                                          int node_a, int node_b) {
+    (void)vocab_topo_id;
+    if (!master || !master->use_template_voting) return -1;
+    if (node_a < 0 || node_b < 0) return -1;
+
+    POSTag pos_a = (POSTag)master_get_node_pos_tag(master, 0, node_a);
+    POSTag pos_b = (POSTag)master_get_node_pos_tag(master, 0, node_b);
+    if (pos_a == POS_UNKNOWN && pos_b == POS_UNKNOWN) return -1;
+
+    /* 扫描模板拓扑节点：匹配 POS 序列 */
+    SubTopology* tpl = master_get_sub_topology_by_type(master, TOPO_TEMPLATE);
+    if (!tpl || !tpl->net) return -1;
+
+    int best_tpl = -1;
+    float best_conf = 0.0f;
+    for (int i = 0; i < tpl->net->node_count; i++) {
+        ReasoningNode* tn = tpl->net->nodes[i];
+        if (!tn || tn->tpl_pos_len < 2) continue;
+
+        /* 匹配前两个 POS 槽位 */
+        if (tn->tpl_pos_seq[0] == (int)pos_a && tn->tpl_pos_seq[1] == (int)pos_b) {
+            if (tn->confidence > best_conf) {
+                best_conf = tn->confidence;
+                best_tpl = tn->node_id;
+            }
+        }
+    }
+    return best_tpl;
+}
+
+int master_find_template_for_pair(MasterTopology* master,
+                                   int vocab_topo_id,
+                                   int node_a, int node_b) {
+    if (!master || !master->use_template_voting) return -1;
+    if (node_a < 0 || node_b < 0) return -1;
+    pthread_rwlock_rdlock(&master->rwlock);
+    int tpl_id = master_find_template_for_pair_nolock(master, vocab_topo_id, node_a, node_b);
+    pthread_rwlock_unlock(&master->rwlock);
+    return tpl_id;
+}
+
+/** 获取模板节点的槽位间连接词 */
+const char* template_get_connector(MasterTopology* master, int tpl_node_id, int slot) {
+    if (!master || tpl_node_id < 0 || slot < 0 || slot >= 3) return "";
+    SubTopology* tpl = master_get_sub_topology_by_type(master, TOPO_TEMPLATE);
+    if (!tpl || !tpl->net || tpl_node_id >= tpl->net->node_count) return "";
+    ReasoningNode* tn = tpl->net->nodes[tpl_node_id];
+    if (!tn || strlen(tn->tpl_connectors[slot]) == 0) return "";
+    return tn->tpl_connectors[slot];
+}
+
+/* 内置 POS 对 → 连接词映射（用于自动填充模板连接词） */
+const char* pos_connector_map(int a, int b) {
+    if (a == POS_ADJ  && b == POS_NOUN) return "的";   /* 美丽的+的+花朵 */
+    if (a == POS_NOUN && b == POS_NOUN) return "的";   /* 中国+的+首都 */
+    if (a == POS_ADV  && b == POS_VERB) return "地";   /* 慢慢+地+走 */
+    if (a == POS_VERB && b == POS_NOUN) return "";     /* 吃苹果 (动宾) */
+    if (a == POS_NOUN && b == POS_VERB) return "";     /* 我吃 (主谓) */
+    if (a == POS_NOUN && b == POS_ADJ)  return "是";   /* 苹果+是+红的 */
+    if (a == POS_VERB && b == POS_ADV)  return "得";   /* 跑+得+快 */
+    if (a == POS_VERB && b == POS_VERB) return "和";   /* 唱歌和跳舞 */
+    if (a == POS_NUM  && b == POS_NOUN) return "个";   /* 三+个+苹果 */
+    return "";  /* 默认无连接词 */
+}
+
 int topology_walk_greedy(SubTopology* sub, int start_node_id,
                          int* path_out, float* scores_out,
                          int max_len, unsigned char* visited,
@@ -1519,6 +1642,15 @@ int topology_walk_greedy(SubTopology* sub, int start_node_id,
                             }
                         }
                     }
+                }
+            }
+
+            // --- 模板锚点对奖励 (P1) ---
+            if (master && master->use_template_voting) {
+                int tpl_id = master_find_template_for_pair_nolock(
+                    master, sub->topo_id, current_id, tid);
+                if (tpl_id >= 0) {
+                    score += 0.15f;
                 }
             }
 
@@ -1920,6 +2052,16 @@ int topology_walk_beam(SubTopology* sub, int start_node_id,
                                 }
                             }
                         }
+                    }
+                }
+
+                // --- 模板锚点对奖励 (P1) ---
+                if (master && master->use_template_voting && beam->len >= 1) {
+                    int prev_id = beam->nodes[beam->len - 1];
+                    int tpl_id = master_find_template_for_pair_nolock(
+                        master, sub->topo_id, prev_id, tid);
+                    if (tpl_id >= 0) {
+                        score += 0.15f;
                     }
                 }
 

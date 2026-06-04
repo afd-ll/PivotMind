@@ -6,6 +6,7 @@
 #include "template_builder.h"
 #include "string_pool.h"
 #include "common.h"
+#include "cognitive_controller.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -435,6 +436,14 @@ int template_build_nodes(
         int tpl_node_id = tpl_node->node_id;
         cl->template_node_id = tpl_node_id;
 
+        /* 存储模板锚点元数据 — POS 序列格式 */
+        tpl_node->tpl_pos_len = 3;  /* 三元组模板 */
+        /* 从锚点节点获取 POS 标签（通过跨拓扑→语法拓扑） */
+        tpl_node->tpl_pos_seq[0] = master_get_node_pos_tag(master, vocab->topo_id, na_id);
+        tpl_node->tpl_pos_seq[1] = master_get_node_pos_tag(master, vocab->topo_id, nb_id);
+        tpl_node->tpl_pos_seq[2] = master_get_node_pos_tag(master, vocab->topo_id, nc_id);
+        memset(tpl_node->tpl_connectors, 0, sizeof(tpl_node->tpl_connectors));
+
         /* 建立跨拓扑连接: anchor nodes → template node */
         master_add_cross_link(master, vocab->topo_id, na_id,
                               tpl->topo_id, tpl_node_id, 0.8f, "anchor_a");
@@ -730,6 +739,120 @@ int template_auto_build(MasterTopology* master, int min_entries, int max_templat
     template_free_groups(grps, gc);
     free(res);
 
+    return built;
+}
+
+/* ================================================================
+ *  语法句式模板构建 — 从 POSPattern 生成主谓宾/定中等句式模板
+ *
+ *  与频率表路径完全不同：不分析 co-occurrence，而是直接利用
+ *  cognitive_controller 自动发现的 POS 句式模式。
+ *
+ *  每个模板节点编码：
+ *    - pos_seq[0..len-1]: POSTag 序列 (如 [N,V,N] = 主谓宾)
+ *    - connectors[0..len-2]: 槽位间连接词 (如 ["", ""])
+ * ================================================================ */
+
+int template_build_from_pos_patterns(MasterTopology* master,
+                                      CognitiveController* cc,
+                                      int min_count) {
+    if (!master || !cc) return 0;
+    if (cc->pos_pattern_count == 0) return 0;
+
+    SubTopology* tpl = master_get_sub_topology_by_type(master, TOPO_TEMPLATE);
+    if (!tpl || !tpl->net) return 0;
+
+    int built = 0;
+    int max_build = 64;  /* 最多64个语法模板，避免膨胀 */
+
+    /* 按观测次数排序（简单的冒泡排序，PATTERN_COUNT 小） */
+    POSPattern sorted[MAX_POS_PATTERNS];
+    int sc = cc->pos_pattern_count < MAX_POS_PATTERNS
+             ? cc->pos_pattern_count : MAX_POS_PATTERNS;
+    memcpy(sorted, cc->pos_patterns, (size_t)sc * sizeof(POSPattern));
+    for (int i = 0; i < sc - 1; i++) {
+        for (int j = i + 1; j < sc; j++) {
+            if (sorted[j].count > sorted[i].count) {
+                POSPattern tmp = sorted[i];
+                sorted[i] = sorted[j];
+                sorted[j] = tmp;
+            }
+        }
+    }
+
+    /* 去重：同一 POS 序列只取最高频的 */
+    for (int i = 0; i < sc && built < max_build; i++) {
+        POSPattern* pat = &sorted[i];
+        if (pat->count < min_count) continue;
+        if (pat->length < 2 || pat->length > 4) continue;
+
+        /* 去重检查：已有同序列模板？ */
+        int dup = 0;
+        for (int j = 0; j < i && !dup; j++) {
+            if (sorted[j].length != pat->length) continue;
+            int same = 1;
+            for (int k = 0; k < pat->length; k++) {
+                if (sorted[j].pos_seq[k] != pat->pos_seq[k])
+                    { same = 0; break; }
+            }
+            if (same) dup = 1;
+        }
+        if (dup) continue;
+
+        /* 构建模板节点名称 */
+        const char* pos_names[] = {
+            "?", "N", "V", "Adj", "Adv", "Pron", "Prep", "Conj", "Num", "Part", "Int"
+        };
+        char name_buf[128];
+        int np = 0;
+        for (int k = 0; k < pat->length; k++) {
+            int tag = pat->pos_seq[k];
+            const char* pn = (tag >= 0 && tag <= POS_INTERJ) ? pos_names[tag] : "?";
+            np += snprintf(name_buf + np, sizeof(name_buf) - np,
+                           "%s%s", (k > 0 ? "+" : ""), pn);
+        }
+
+        /* 创建特征向量（槽位 POS 向量化） */
+        float feat[NODE_FEATURE_DIM];
+        memset(feat, 0, sizeof(feat));
+        for (int k = 0; k < pat->length && k < NODE_FEATURE_DIM; k++)
+            feat[k] = (float)pat->pos_seq[k] / (float)POS_COUNT;
+
+        float* feat_copy = (float*)malloc((size_t)NODE_FEATURE_DIM * sizeof(float));
+        if (!feat_copy) continue;
+        memcpy(feat_copy, feat, (size_t)NODE_FEATURE_DIM * sizeof(float));
+
+        ReasoningNode* tn = huarong_net_add_node(tpl->net, name_buf,
+                                                   feat_copy, NODE_FEATURE_DIM);
+        if (!tn) { free(feat_copy); continue; }
+
+        /* 存入 POS 序列 + 自动生成连接词 */
+        tn->tpl_pos_len = pat->length;
+        for (int k = 0; k < pat->length; k++)
+            tn->tpl_pos_seq[k] = pat->pos_seq[k];
+        for (int k = 0; k < pat->length - 1; k++) {
+            const char* conn = pos_connector_map(
+                pat->pos_seq[k], pat->pos_seq[k+1]);
+            if (conn && conn[0])
+                snprintf(tn->tpl_connectors[k], 8, "%s", conn);
+            else
+                tn->tpl_connectors[k][0] = '\0';
+        }
+
+        /* 初始化置信度：基于观测频率 */
+        tn->confidence = pat->count > 50 ? 0.8f :
+                         pat->count > 20 ? 0.6f :
+                         pat->count > 5  ? 0.4f : 0.25f;
+
+        /* 更新 pattern 的 syntax_node_id */
+        pat->syntax_node_id = tn->node_id;
+
+        built++;
+    }
+
+    if (built > 0) {
+        master->use_template_voting = 1;
+    }
     return built;
 }
 

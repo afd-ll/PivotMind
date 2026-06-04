@@ -4,6 +4,7 @@
 #include "path_encoding.h"
 #include "multi_topology.h"
 #include "huarong_topology.h"
+#include "cognitive_controller.h"
 
 /* ================================================================
  *  模板构建器 — 从路径频率表生成模板节点
@@ -176,5 +177,29 @@ int template_decay_inactive_links(MasterTopology* master,
  * @return 创建的模板节点数, 0 表示数据不足或已构建
  */
 int template_auto_build(MasterTopology* master, int min_entries, int max_templates);
+
+/* ================================================================
+ *  语法句式模板 — 基于 POS 序列的主谓宾/定中/状中等句式
+ *
+ *  从 CognitiveController 收集的 POS 模式自动构建模板节点。
+ *  每个模板节点编码一个 POS 序列 + 槽位间连接词。
+ *
+ *  示例：
+ *    [POS_NOUN, POS_VERB, POS_NOUN] + {"", ""}  → 主谓宾 SVO
+ *    [POS_ADJ,  POS_NOUN]              + {"的"}   → 定中 Adj+的+N
+ *    [POS_ADV,  POS_VERB]              + {"地"}   → 状中 Adv+地+V
+ * ================================================================ */
+
+/**
+ * 从 POS 模式构建语法句式模板
+ *
+ * @param master    主拓扑
+ * @param cc        认知调度中心（含 pos_patterns）
+ * @param min_count 最低观测次数才创建模板 (建议 3)
+ * @return 创建的模板节点数
+ */
+int template_build_from_pos_patterns(MasterTopology* master,
+                                      CognitiveController* cc,
+                                      int min_count);
 
 #endif /* TEMPLATE_BUILDER_H */

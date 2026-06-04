@@ -220,12 +220,24 @@ char* dialog_generate(DialogReasoning* reasoning, const char* input,
                 if (satisfaction < dsys->controller->satisfaction_threshold) continue;
             }
 
-            // 路径转输出（从路径[1]开始，路径[0]是起点本身）
-            // 增强：去重+插入连接词，提升输出连贯性
+            // ===== 路径转输出：模板驱动结构化 =====
+            // 对相邻概念对 (path[p-1], path[p]) 查模板匹配。
+            // 匹配 → 用模板代表概念作为桥梁，输出 "A的[代表概念]是B"
+            // 无匹配 → 纯拼接 + 连接词兜底
             const char* last_concept = NULL;
             const char* connectives[] = {"", "的", "是", "和", "了", "在"};
             int conn_count = sizeof(connectives)/sizeof(connectives[0]);
             int conn_idx = 0;
+
+            // 先输出路径起点本身的语义
+            {
+                ReasoningNode* start_node = (path_nodes[0] >= 0 && path_nodes[0] < sub->net->node_count)
+                    ? sub->net->nodes[path_nodes[0]] : NULL;
+                if (start_node && start_node->concept) {
+                    pos += snprintf(response + pos, max_len - pos, "%s", start_node->concept);
+                    last_concept = start_node->concept;
+                }
+            }
             
             for (int p = 1; p < path_len && pos < max_len - 10; p++) {
                 int nid = path_nodes[p];
@@ -233,18 +245,43 @@ char* dialog_generate(DialogReasoning* reasoning, const char* input,
                 ReasoningNode* node = sub->net->nodes[nid];
                 if (!node || !node->concept) continue;
                 
-                // 去重：跳过连续相同概念
+                // 去重
                 if (last_concept && strcmp(last_concept, node->concept) == 0) continue;
-                last_concept = node->concept;
                 
-                // 每2~3个概念插入一个连接词（平滑输出）
-                if (p > 1 && p < path_len - 1 && (p % 3 == 0) && strlen(connectives[conn_idx]) > 0) {
-                    pos += snprintf(response + pos, max_len - pos, "%s",
-                                    connectives[conn_idx]);
-                    conn_idx = (conn_idx + 1) % conn_count;
+                // --- 模板锚点对匹配 ---
+                int prev_nid = path_nodes[p-1];
+                int tpl_id = -1;
+                if (dsys && dsys->master && dsys->master->use_template_voting
+                    && prev_nid >= 0 && prev_nid < sub->net->node_count) {
+                    tpl_id = master_find_template_for_pair(
+                        dsys->master, sub->topo_id, prev_nid, nid);
+                }
+
+                if (tpl_id >= 0) {
+                    // 语法模板匹配：使用模板的连接词连接当前节点
+                    const char* connector = template_get_connector(
+                        dsys->master, tpl_id, 0);
+                    if (connector && connector[0]) {
+                        // 先输出连接词，再输出当前概念（如 "的苹果"）
+                        pos += snprintf(response + pos, max_len - pos,
+                            "%s%s", connector, node->concept);
+                    } else {
+                        // 无连接词：直接拼接（如主谓/动宾结构）
+                        pos += snprintf(response + pos, max_len - pos,
+                            "%s", node->concept);
+                    }
+                } else {
+                    // 无模板匹配：连接词兜底
+                    if (p > 1 && p < path_len - 1 && (p % 3 == 0)
+                        && strlen(connectives[conn_idx]) > 0) {
+                        pos += snprintf(response + pos, max_len - pos, "%s",
+                                        connectives[conn_idx]);
+                        conn_idx = (conn_idx + 1) % conn_count;
+                    }
+                    pos += snprintf(response + pos, max_len - pos, "%s", node->concept);
                 }
                 
-                pos += snprintf(response + pos, max_len - pos, "%s", node->concept);
+                last_concept = node->concept;
             }
 
             // 喂走边路径到认知调度中心

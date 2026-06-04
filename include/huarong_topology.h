@@ -56,6 +56,12 @@ typedef struct ReasoningNode {
     int selection_count;       // 被贪心走边选中的累计次数
     NodeType node_type;        // 节点类型（功能词/普通词/专有名词）
     
+    // 模板节点元数据 — 语法句式模板（仅 TOPO_TEMPLATE 节点有效）
+    // 编码 POS 序列 + 槽位间连接词，如 [N]的[V]是[Adj] 表示定中+系表
+    int   tpl_pos_len;             // POS 序列长度 (2-4)
+    int   tpl_pos_seq[4];          // 各槽位的 POSTag（值为 POSTag 枚举）
+    char  tpl_connectors[4][8];    // 槽位间连接词（最大3个，每个最多7字符+'\0'）
+    
     // 元信息
     int is_reversible;         // 是否支持可逆操作
     int is_visited;            // 搜索过程中是否已访问

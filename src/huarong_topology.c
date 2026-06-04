@@ -38,6 +38,9 @@ ReasoningNode* create_reasoning_node(int node_id, const char* concept,
     node->heat = 1.0f;               // 初始满热度
     node->selection_count = 0;
     node->node_type = NODE_TYPE_COMMON_WORD;  // 默认普通词
+    node->tpl_pos_len = 0;     // 非模板节点
+    memset(node->tpl_pos_seq, 0, sizeof(node->tpl_pos_seq));
+    memset(node->tpl_connectors, 0, sizeof(node->tpl_connectors));
     
     // 分配特征向量
     if (feature_dim > 0 && feature_dim <= 1000000) {  /* 防止整数溢出 */

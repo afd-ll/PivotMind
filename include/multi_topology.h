@@ -275,6 +275,54 @@ void master_get_system_status(MasterTopology* master,
 void master_visualize_topology(MasterTopology* master, int topo_id);
 void master_visualize_cross_links(MasterTopology* master);
 
+// ========== 模板锚点匹配 ==========
+
+/**
+ * 查找 (node_a, node_b) 匹配的模板节点
+ *
+ * 模板系统建立了 vocab(node_a) → template 和 vocab(node_b) → template 的
+ * 跨拓扑连接。此函数查找同时连接两个 anchor 的模板节点，用于：
+ * - 走边时优先选择符合模板的候选
+ * - 输出时用模板节点概念结构化回复
+ *
+ * @param master 主拓扑
+ * @param vocab_topo_id 词汇拓扑 ID
+ * @param node_a 第一个 anchor 节点 ID
+ * @param node_b 第二个 anchor 节点 ID
+ * @return 匹配的模板节点 ID，-1 表示无匹配
+ */
+int master_find_template_for_pair(MasterTopology* master,
+                                   int vocab_topo_id,
+                                   int node_a, int node_b);
+
+/**
+ * 无锁版本 — 调用方需已持 rwlock 或确保单线程访问
+ */
+int master_find_template_for_pair_nolock(MasterTopology* master,
+                                          int vocab_topo_id,
+                                          int node_a, int node_b);
+
+/**
+ * 获取词汇节点对应的 POS 标签
+ * 通过跨拓扑连接 vocab → TOPO_SYNTAX 查找
+ */
+int master_get_node_pos_tag(MasterTopology* master,
+                             int vocab_topo_id, int node_id);
+
+/**
+ * 获取模板节点槽位间的连接词
+ * @param slot 槽位索引 (0=s0→s1, 1=s1→s2, 2=s2→s3)
+ * @return 连接词字符串，无则返回 ""
+ */
+const char* template_get_connector(MasterTopology* master,
+                                    int tpl_node_id, int slot);
+
+/**
+ * 内置 POS 对 → 连接词映射
+ * 用于模板构建时自动生成连接词
+ */
+const char* pos_connector_map(int pos_a, int pos_b);
+
 // ========== 走边路径生成 ==========
 /**
  * 贪心走边路径生成
