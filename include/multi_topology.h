@@ -163,6 +163,9 @@ typedef struct MasterTopology {
     struct PathFrequencyTable* freq_table;   // 路径三元组频率表
     int use_template_voting;                  // 是否启用模板跨拓扑投票
     int template_decay_round;                 // 冷路径稀释轮次计数
+
+    // ========== 外部词典（词→词性标注） ==========
+    void* ext_dict;                           // DictTable* 指针，外部管理生命周期
 } MasterTopology;
 
 // ==================== API函数声明 ====================

@@ -33,6 +33,7 @@
 #include "topology_growth.h"
 #include "feature_io.h"
 #include "cognitive_controller.h"  /* POSTag / pos_tag_chinese for syntax topology */
+#include "dict_loader.h"           /* 词典分词 + 词性标注 */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -562,17 +563,38 @@ void autonomic_learn_from_dialog(MasterTopology* master,
         }
     }
 
-    // 提取单字
-    char input_chars[MAX_CHARS_PER_TEXT][8];
-    char response_chars[MAX_CHARS_PER_TEXT][8];
+    // ===== 提取词汇 =====
+    // 有词典时：分词 + 词性标注；无词典时：逐字提取（兼容旧行为）
+    char input_chars[MAX_CHARS_PER_TEXT][64];
+    char response_chars[MAX_CHARS_PER_TEXT][64];
+    char input_pos[MAX_CHARS_PER_TEXT][8];
+    char response_pos[MAX_CHARS_PER_TEXT][8];
     int input_utf8_lens[MAX_CHARS_PER_TEXT];
     int response_utf8_lens[MAX_CHARS_PER_TEXT];
 
-    int input_count = extract_ordered_chars(user_input, input_chars, input_utf8_lens);
-    int response_count = extract_ordered_chars(ai_response, response_chars, response_utf8_lens);
+    DictTable* dict = (DictTable*)master->ext_dict;
+    int input_count, response_count;
+
+    if (dict) {
+        /* 词典分词路径：词级建模 + 词性标注 */
+        input_count  = dict_segment_text(dict, user_input,  input_chars,  input_pos,  MAX_CHARS_PER_TEXT);
+        response_count = dict_segment_text(dict, ai_response, response_chars, response_pos, MAX_CHARS_PER_TEXT);
+    } else {
+        /* 逐字路径（无词典时兼容旧逻辑） */
+        char tmp_in_chars[MAX_CHARS_PER_TEXT][8];
+        char tmp_res_chars[MAX_CHARS_PER_TEXT][8];
+        input_count  = extract_ordered_chars(user_input,  tmp_in_chars,  input_utf8_lens);
+        response_count = extract_ordered_chars(ai_response, tmp_res_chars, response_utf8_lens);
+        /* 复制到 input_chars 大缓冲区 */
+        for (int i = 0; i < input_count; i++)  snprintf(input_chars[i], 64, "%s", tmp_in_chars[i]);
+        for (int i = 0; i < response_count; i++) snprintf(response_chars[i], 64, "%s", tmp_res_chars[i]);
+        /* 无词典时词性标记为空 */
+        for (int i = 0; i < input_count; i++)  input_pos[i][0] = '\0';
+        for (int i = 0; i < response_count; i++) response_pos[i][0] = '\0';
+    }
     if (input_count == 0 || response_count == 0) return;
 
-    // 查找或创建节点 — 不在拓扑中的汉字自动创建
+    // 查找或创建词汇拓扑节点
     ReasoningNode* input_nodes[MAX_CHARS_PER_TEXT];
     ReasoningNode* response_nodes[MAX_CHARS_PER_TEXT];
 
@@ -581,6 +603,31 @@ void autonomic_learn_from_dialog(MasterTopology* master,
     }
     for (int i = 0; i < response_count; i++) {
         response_nodes[i] = huarong_net_find_or_create_node(vocab->net, response_chars[i], NULL, 0, vocab->node_hash);
+    }
+
+    // ===== 词典词 → 语法拓扑 POS 连接 =====
+    if (dict && syntax && syntax->net) {
+        for (int i = 0; i < input_count; i++) {
+            if (!input_nodes[i] || input_pos[i][0] == '\0' || input_pos[i][0] == 'x') continue;
+            const char* syntax_name = pos_to_syntax_node(input_pos[i]);
+            if (!syntax_name) continue;
+            ReasoningNode* pos_node = huarong_net_find_or_create_node(
+                syntax->net, syntax_name, NULL, 0, syntax->node_hash);
+            if (pos_node) {
+                /* 词汇节点 → 语法 POS 节点（跨拓扑连接） */
+                boost_connection_weighted(vocab, input_nodes[i], pos_node, state, 0.3f);
+            }
+        }
+        for (int i = 0; i < response_count; i++) {
+            if (!response_nodes[i] || response_pos[i][0] == '\0' || response_pos[i][0] == 'x') continue;
+            const char* syntax_name = pos_to_syntax_node(response_pos[i]);
+            if (!syntax_name) continue;
+            ReasoningNode* pos_node = huarong_net_find_or_create_node(
+                syntax->net, syntax_name, NULL, 0, syntax->node_hash);
+            if (pos_node) {
+                boost_connection_weighted(vocab, response_nodes[i], pos_node, state, 0.3f);
+            }
+        }
     }
 
     // 核心1：输入字内部的共现边（相邻字权重更高，编码字序）

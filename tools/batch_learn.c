@@ -25,6 +25,7 @@
 #include "cross_edge_io.h"
 #include "template_builder.h"
 #include "node_hash.h"
+#include "dict_loader.h"
 #include "pivotmind_version.h"
 
 // ==================== JSON 简易解析 ====================
@@ -316,6 +317,22 @@ int main(int argc, char* argv[]) {
     // 初始化线程池供认知调度使用
     master_get_thread_pool(master);
     printf("  ✓ 线程池已就绪\n");
+
+    // 加载外部词典（词→词性标注，如果存在）
+    {
+        const char* dict_path = "data/jieba_dict.txt";
+        FILE* df = fopen(dict_path, "r");
+        if (df) {
+            fclose(df);
+            DictTable* dt = dict_table_create(524288);
+            if (dt && dict_load_jieba(dt, dict_path) > 0) {
+                master->ext_dict = dt;
+                printf("  ✓ 词典已加载 (%d 条), 启用词级建模\n", dict_table_size(dt));
+            }
+        } else {
+            printf("  - 词典未找到 (%s), 回退逐字模式\n", dict_path);
+        }
+    }
 
     // 尝试加载或重建跨拓扑连接（调试临时跳过重建以加速）
     {
