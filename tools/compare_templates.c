@@ -49,7 +49,7 @@ static int run_walk(MasterTopology* master, SubTopology* vocab,
     if (sn) sn->activation = 0.8f;
     master->use_template_voting = use_tpl;
     int pl = topology_walk_greedy(vocab, start_id, path, scores,
-                                  MAX_WALK_STEPS, vis, 1.0f, master, NULL);
+                                  MAX_WALK_STEPS, vis, 1.0f, master, NULL, NULL);
     master->use_template_voting = 0;
     if (sn) sn->activation = saved;
     return pl;
@@ -105,7 +105,7 @@ int main(int argc, char** argv) {
             float sa = sn->activation; sn->activation = 0.8f;
             unsigned char* vis = (unsigned char*)calloc((size_t)bms, 1);
             int pn[32]; float ps[32];
-            int pl = topology_walk_greedy(vocab, ranks[s].node_id, pn, ps, 20, vis, 1.0f, master, NULL);
+            int pl = topology_walk_greedy(vocab, ranks[s].node_id, pn, ps, 20, vis, 1.0f, master, NULL, NULL);
             sn->activation = sa;
             for (int p = 0; p < pl - 2; p++) path_freq_table_record(freq, vocab->topo_id, pn[p], pn[p+1], pn[p+2]);
             free(vis);

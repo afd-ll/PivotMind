@@ -36,6 +36,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
 #include <math.h>
 #include <time.h>
 
@@ -51,20 +52,36 @@ typedef struct {
 } ActivatedEdges;
 
 #define MAX_CHARS_PER_TEXT PM_CHARS_PER_TEXT
+/* 线程局部存储：__thread (GCC/Clang), __declspec(thread) (MSVC), _Thread_local (C11) */
+#if defined(__GNUC__) || defined(__clang__)
+#define PM_THREAD_LOCAL __thread
+#elif defined(_MSC_VER)
+#define PM_THREAD_LOCAL __declspec(thread)
+#else
+#define PM_THREAD_LOCAL _Thread_local
+#endif
+
 #define MAX_ACTIVATED_PAIRS PM_ACTIVATED_PAIRS
 
-// 全局激活记录（每轮对话重置）—— __thread 支持可重入
-static __thread ActivatedEdges g_activated[MAX_ACTIVATED_PAIRS];
-static __thread int g_activated_count;
+/* 全局激活记录（每轮对话重置）—— 线程局部存储支持可重入
+ * 使用 (topo_type << 24 | node_id) 复合键避免跨拓扑 node_id 冲突 */
+static PM_THREAD_LOCAL ActivatedEdges g_activated[MAX_ACTIVATED_PAIRS];
+static PM_THREAD_LOCAL int g_activated_count;
 
 static void reset_activation_record(void) {
     g_activated_count = 0;
 }
 
-static void record_edge_activated(ReasoningNode* node, int edge_index) {
+/* 使用复合键: (topo_type << 24) | node_id */
+static int make_compound_key(int topo_type, int node_id) {
+    return (topo_type << 24) | (node_id & 0xFFFFFF);
+}
+
+static void record_edge_activated(ReasoningNode* node, int edge_index, int topo_type) {
     if (!node) return;
+    int compound_id = make_compound_key(topo_type, node->node_id);
     for (int i = 0; i < g_activated_count; i++) {
-        if (g_activated[i].node_id == node->node_id) {
+        if (g_activated[i].node_id == compound_id) {
             for (int j = 0; j < g_activated[i].edge_count; j++) {
                 if (g_activated[i].edge_indices[j] == edge_index)
                     return;
@@ -76,28 +93,10 @@ static void record_edge_activated(ReasoningNode* node, int edge_index) {
         }
     }
     if (g_activated_count < MAX_ACTIVATED_PAIRS) {
-        g_activated[g_activated_count].node_id = node->node_id;
-        g_activated[g_activated_count].edge_count = 0;
-        if (g_activated[g_activated_count].edge_count < 128) {
-            g_activated[g_activated_count].edge_indices[g_activated[g_activated_count].edge_count++] = edge_index;
-        }
+        g_activated[g_activated_count].node_id = compound_id;
+        g_activated[g_activated_count].edge_count = 1;
+        g_activated[g_activated_count].edge_indices[0] = edge_index;
         g_activated_count++;
-    }
-}
-
-static void record_connection_activated(ReasoningNode* a, ReasoningNode* b) {
-    if (!a || !b) return;
-    for (int i = 0; i < a->connection_count; i++) {
-        if (a->connections[i] == b) {
-            record_edge_activated(a, i);
-            break;
-        }
-    }
-    for (int i = 0; i < b->connection_count; i++) {
-        if (b->connections[i] == a) {
-            record_edge_activated(b, i);
-            break;
-        }
     }
 }
 
@@ -397,6 +396,18 @@ static int extract_ordered_chars(const char* text, char chars[MAX_CHARS_PER_TEXT
     return count;
 }
 
+/* ================================================================
+ *  原子浮点加法 — CAS 循环实现
+ *  Mingw GCC 不支持 __atomic_fetch_add(float*, ...)
+ * ================================================================ */
+static inline void atomic_float_add(float* ptr, float val) {
+    union { float f; uint32_t i; } old, new_val;
+    do {
+        old.f = *ptr;
+        new_val.f = old.f + val;
+    } while (!__sync_bool_compare_and_swap((uint32_t*)ptr, old.i, new_val.i));
+}
+
 
 // ==================== 在拓扑中查找节点 ====================
 
@@ -420,60 +431,63 @@ static void boost_connection_weighted(SubTopology* topo, ReasoningNode* a, Reaso
 
     int existing_a_to_b = -1;
     int existing_b_to_a = -1;
-    if (net) pthread_mutex_lock(&net->mutex);
-    for (int i = 0; i < a->connection_count; i++) {
-        if (a->connections[i] == b) { existing_a_to_b = i; break; }
-    }
-    if (existing_a_to_b >= 0) {
-        float dc = AUTONOMIC_LEARNING_RATE * (1.0f - a->connection_confidences[existing_a_to_b]);
+    
+    /* 节点级条纹锁：hash(node_id) & 255 选锁
+     * 20线程 × 分散到256把锁 → 对撞率 <8%，无撞零等待 */
+    existing_a_to_b = node_conn_find(a, b);
+    if (existing_a_to_b >= 0 && net) {
+        int li = a->node_id & 255;
+        pthread_mutex_lock(&net->node_locks[li]);
         float dw = AUTONOMIC_LEARNING_RATE * 0.5f * weight_mult;
-        a->connection_confidences[existing_a_to_b] += dc;
         a->connection_weights[existing_a_to_b] += dw;
-        if (a->connection_weights[existing_a_to_b] > 0.9f) a->connection_weights[existing_a_to_b] = 0.9f;
+        if (a->connection_weights[existing_a_to_b] > 0.9f)
+            a->connection_weights[existing_a_to_b] = 0.9f;
+        float dc = AUTONOMIC_LEARNING_RATE * (1.0f - a->connection_confidences[existing_a_to_b]);
+        a->connection_confidences[existing_a_to_b] += dc;
+        pthread_mutex_unlock(&net->node_locks[li]);
     }
-    for (int i = 0; i < b->connection_count; i++) {
-        if (b->connections[i] == a) { existing_b_to_a = i; break; }
-    }
-    if (existing_b_to_a >= 0) {
-        float dc = AUTONOMIC_LEARNING_RATE * (1.0f - b->connection_confidences[existing_b_to_a]);
+    existing_b_to_a = node_conn_find(b, a);
+    if (existing_b_to_a >= 0 && net) {
+        int li = b->node_id & 255;
+        pthread_mutex_lock(&net->node_locks[li]);
         float dw = AUTONOMIC_LEARNING_RATE * 0.5f * weight_mult;
-        b->connection_confidences[existing_b_to_a] += dc;
         b->connection_weights[existing_b_to_a] += dw;
-        if (b->connection_weights[existing_b_to_a] > 0.9f) b->connection_weights[existing_b_to_a] = 0.9f;
+        if (b->connection_weights[existing_b_to_a] > 0.9f)
+            b->connection_weights[existing_b_to_a] = 0.9f;
+        float dc = AUTONOMIC_LEARNING_RATE * (1.0f - b->connection_confidences[existing_b_to_a]);
+        b->connection_confidences[existing_b_to_a] += dc;
+        pthread_mutex_unlock(&net->node_locks[li]);
     }
-    if (existing_a_to_b >= 0) record_connection_activated(a, b);
-    if (net) pthread_mutex_unlock(&net->mutex);
+    if (existing_a_to_b >= 0) record_edge_activated(a, existing_a_to_b,
+        topo ? (int)topo->type : 0);
+    if (existing_b_to_a >= 0) record_edge_activated(b, existing_b_to_a,
+        topo ? (int)topo->type : 0);
 
-    // ── 新建边：不持锁调 add_connection（内部锁扩容）──
+    // ── 新建边：add_connection 内部持锁扩容 ──
     if (existing_a_to_b < 0 && net) {
         int ret = huarong_net_add_connection(net, a->node_id, b->node_id, base_weight);
         if (ret == 0) {
-            for (int i = 0; i < a->connection_count; i++) {
-                if (a->connections[i] == b) {
-                    a->connection_confidences[i] = AUTONOMIC_INITIAL_CONFIDENCE;
-                    record_connection_activated(a, b);
-                    if (a->features && b->features && a->feature_dim == b->feature_dim)
-                        hebbian_update(a->features, b->features, a->feature_dim, 0.02f);
-                    break;
-                }
+            int idx = node_conn_find(a, b);
+            if (idx >= 0) {
+                a->connection_confidences[idx] = AUTONOMIC_INITIAL_CONFIDENCE;
+                record_edge_activated(a, idx, topo ? (int)topo->type : 0);
+                if (a->features && b->features && a->feature_dim == b->feature_dim)
+                    hebbian_update(a->features, b->features, a->feature_dim, 0.02f);
             }
         }
     }
     if (existing_b_to_a < 0 && net) {
         huarong_net_add_connection(net, b->node_id, a->node_id, base_weight);
-        for (int i = 0; i < b->connection_count; i++) {
-            if (b->connections[i] == a) {
-                b->connection_confidences[i] = AUTONOMIC_INITIAL_CONFIDENCE;
-                break;
-            }
+        int idx = node_conn_find(b, a);
+        if (idx >= 0) {
+            b->connection_confidences[idx] = AUTONOMIC_INITIAL_CONFIDENCE;
         }
     }
 
 
     // 刷新状态累加器
     if (state && state->initialized) {
-        #pragma omp atomic
-        state->pending_updates++;
+        __sync_fetch_and_add(&state->pending_updates, 1);
         int sIdx = edge_shard_index(a->node_id, b->node_id);
         pthread_mutex_lock(&state->shards[sIdx].lock);
         state->shards[sIdx].pending_count++;
@@ -817,8 +831,6 @@ void autonomic_decay_all(MasterTopology* master) {
             float node_importance = (node->selection_count > 0)
                 ? 1.0f / (1.0f + 0.05f * node->selection_count)  // 越重要衰减越慢
                 : 1.0f;
-            float eff_decay = 1.0f - (1.0f - AUTONOMIC_DECAY_RATE) * node_importance;
-
             // 三档差异化衰减
             for (int e = 0; e < node->connection_count; e++) {
                 float conf = node->connection_confidences[e];

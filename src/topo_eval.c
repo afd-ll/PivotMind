@@ -269,7 +269,7 @@ PathStepStats topo_path_step_stats(MasterTopology* master, int num_trials) {
         // 使用跨拓扑走边
         int len = topology_walk_cross(master, topo_id, start_node,
                                       path_topos, path_nodes, NULL,
-                                      max_score_len, NULL, NULL, NULL, NULL);
+                                      max_score_len, NULL, NULL, NULL, NULL, NULL);
 
         if (len < 1) len = 1;  // 至少包含起始节点
         lengths[i] = len;
@@ -350,7 +350,7 @@ float topo_associative_diversity(MasterTopology* master,
         // 每次走边使用不同的随机种子（通过激活衰减等自然产生变化）
         int len = topology_walk_cross(master, start_topo_id, start_node_id,
                                       path_topos, path_nodes, NULL,
-                                      max_path_len, NULL, NULL, NULL, NULL);
+                                      max_path_len, NULL, NULL, NULL, NULL, NULL);
 
         if (len <= 0) continue;
 
@@ -448,7 +448,7 @@ float topo_inference_stability(MasterTopology* master,
 
         lens[r] = topology_walk_cross(master, start_topo_id, start_node_id,
                                        path_topos, paths[r], NULL,
-                                       max_path_len, NULL, NULL, NULL, NULL);
+                                       max_path_len, NULL, NULL, NULL, NULL, NULL);
         free(path_topos);
     }
 
@@ -741,7 +741,7 @@ TopoHealthReport topo_health_report(MasterTopology* master) {
                 if (sub && sub->net && sub->net->node_count > 0) {
                     int len = topology_walk_cross(master, t, 0,
                                                    sample_topos, sample_path,
-                                                   NULL, 32, NULL, NULL, NULL, NULL);
+                                                   NULL, 32, NULL, NULL, NULL, NULL, NULL);
                     if (len > 1) {
                         report.semantic_coherence =
                             topo_semantic_coherence(sub, sample_path, len);

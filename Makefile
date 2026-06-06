@@ -6,7 +6,7 @@
 
 # 编译�?
 CC = gcc
-CFLAGS = -Wall -Wextra -O2 -Iinclude -I. -Ilibs -std=gnu99 -fopenmp -pthread -MD -MP -D_USE_MATH_DEFINES
+CFLAGS = -pipe -Wall -Wextra -O2 -Iinclude -I. -Ilibs -std=gnu99 -fopenmp -pthread -MD -MP -D_USE_MATH_DEFINES
 LDFLAGS = -lm
 DEBUG_CFLAGS = -Wall -Wextra -g -O0 -Iinclude -I. -Ilibs -std=gnu99 -fopenmp -pthread -MD -MP -DDEBUG
 
@@ -15,6 +15,8 @@ BUILD_DIR = build/bin
 OBJ_DIR = build/obj
 DEP_DIR = build/dep
 $(shell mkdir -p $(BUILD_DIR) $(OBJ_DIR) $(DEP_DIR))
+
+export TMPDIR = /tmp
 
 # 源文件（通配自动发现�?
 CORE_SRC = $(wildcard src/*.c)
@@ -57,13 +59,13 @@ $(LIB_NAME): $(CORE_OBJ)
 # ========== 二进�?==========
 
 $(BUILD_DIR)/digital_life: $(OBJ_DIR)/digital_life.o $(LIB_NAME)
-	$(CC) $(CFLAGS) -o $@ $(OBJ_DIR)/digital_life.o -L. -lpivotmind $(LDFLAGS)
+	TMPDIR=/tmp $(CC) $(CFLAGS) -o $@ $(OBJ_DIR)/digital_life.o -L. -lpivotmind $(LDFLAGS)
 
 $(BUILD_DIR)/seed_builder: $(OBJ_DIR)/seed_builder.o $(LIB_NAME)
-	$(CC) $(CFLAGS) -o $@ $(OBJ_DIR)/seed_builder.o -L. -lpivotmind $(LDFLAGS)
+	TMPDIR=/tmp $(CC) $(CFLAGS) -o $@ $(OBJ_DIR)/seed_builder.o -L. -lpivotmind $(LDFLAGS)
 
 $(BUILD_DIR)/debug_seed: $(OBJ_DIR)/debug_seed.o $(LIB_NAME)
-	$(CC) $(CFLAGS) -o $@ $(OBJ_DIR)/debug_seed.o -L. -lpivotmind $(LDFLAGS)
+	TMPDIR=/tmp $(CC) $(CFLAGS) -o $@ $(OBJ_DIR)/debug_seed.o -L. -lpivotmind $(LDFLAGS)
 
 $(BUILD_DIR)/test_dialog: $(OBJ_DIR)/test_dialog.o $(LIB_NAME)
 	$(CC) $(CFLAGS) -o $@ $(OBJ_DIR)/test_dialog.o -L. -lpivotmind $(LDFLAGS)

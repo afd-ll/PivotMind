@@ -65,7 +65,7 @@ static WalkMetrics eval_single_walk(SubTopology* vocab, MasterTopology* master,
 
     master->use_template_voting = use_tpl;
     int pl = topology_walk_greedy(vocab, start_id, path, scores,
-                                  MAX_WALK_STEPS, vis, 1.0f, master, NULL);
+                                  MAX_WALK_STEPS, vis, 1.0f, master, NULL, NULL);
     master->use_template_voting = 0;
     if (sn) sn->activation = saved_act;
     free(vis);

@@ -54,8 +54,10 @@ CognitiveController* cognitive_controller_create(MasterTopology* master,
 
     // 初始意图向量：词汇和语义拓扑更高权重（回答生成的主要信号源）
     // 词汇=0.20 语义=0.18 情绪=0.10 语法=0.10 上下文=0.12 领域=0.08 语用=0.07 文化=0.05 概念=0.10
+    // 主拓扑/模板/预留位 = 0.0
     static const float default_intent[MAX_SUBTOPOS] = {
-        0.20f, 0.18f, 0.10f, 0.10f, 0.12f, 0.08f, 0.07f, 0.05f, 0.10f
+        0.20f, 0.18f, 0.10f, 0.10f, 0.12f, 0.08f, 0.07f, 0.05f, 0.10f,
+        0.00f, 0.00f, 0.00f  /* 主拓扑, 模板, 预留 */
     };
     for (int i = 0; i < MAX_SUBTOPOS; i++) {
         cc->intent_weights[i] = default_intent[i];
@@ -139,7 +141,7 @@ void calc_context_activations(CognitiveController* cc,
             ReasoningNode* node = sub->net->nodes[n];
             if (!node || !node->concept) continue;
             // 精确匹配 token（O(log n) 二分查找）+ 反向模糊匹配
-            if (tok_count > 0 && bsearch(&node->concept, tokens, tok_count,
+            if (tok_count > 0 && bsearch(node->concept, tokens, tok_count,
                                          sizeof(char*),
                                          (int(*)(const void*,const void*))strcmp)) {
                 match_count++;
@@ -1635,6 +1637,46 @@ float cc_scaffold_bonus(CognitiveController* cc, int position, POSTag candidate_
     if (expected == POS_ADV  && candidate_pos == POS_ADJ)  return 0.08f;
     if (expected == POS_VERB && candidate_pos == POS_ADJ)  return 0.05f;
     return -0.15f;
+}
+
+float cc_pattern_match_score(CognitiveController* cc, int topo_id,
+                              const int* pos_trail, int trail_len) {
+    if (!cc || !pos_trail || trail_len < 2) return 0.0f;
+
+    float best_score = 0.0f;
+
+    // 1. 匹配内置句式 (CN_PATTERNS) — 前缀匹配
+    for (int i = 0; CN_PATTERNS[i].name; i++) {
+        const SentencePattern* sp = &CN_PATTERNS[i];
+        if (sp->seq_len < trail_len) continue;
+
+        int match_count = 0;
+        for (int k = 0; k < trail_len; k++) {
+            if ((POSTag)pos_trail[k] == sp->pos_seq[k]) match_count++;
+        }
+
+        float match_ratio = (float)match_count / trail_len;
+        float score = match_ratio * sp->weight;
+        if (match_ratio > 0.8f) score += 0.1f;  // 高度匹配奖励
+        if (score > best_score) best_score = score;
+    }
+
+    // 2. 匹配自动发现的 POS 模式
+    for (int i = 0; i < cc->pos_pattern_count; i++) {
+        POSPattern* pp = &cc->pos_patterns[i];
+        if (pp->length < trail_len || pp->count < 3) continue;
+
+        int match_count = 0;
+        for (int k = 0; k < trail_len; k++) {
+            if ((POSTag)pos_trail[k] == pp->pos_seq[k]) match_count++;
+        }
+
+        float match_ratio = (float)match_count / trail_len;
+        float score = match_ratio * pp->avg_freq;
+        if (score > best_score) best_score = score;
+    }
+
+    return best_score;
 }
 
 int cc_get_selected_pattern(CognitiveController* cc, POSTag* seq_out) {

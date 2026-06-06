@@ -124,6 +124,9 @@ MasterTopology* master_topology_create(int max_sub_topos) {
 void master_topology_destroy(MasterTopology* master) {
     if (!master) return;
 
+    /* 获取写锁，防止销毁期间其他线程仍在访问拓扑数据 */
+    pthread_rwlock_wrlock(&master->rwlock);
+
     // 销毁所有子拓扑
     for (int i = 0; i < master->sub_topo_count; i++) {
         SubTopology* sub = master->sub_topologies[i];
@@ -197,13 +200,19 @@ int master_add_sub_topology(MasterTopology* master,
         master->sub_topologies = new_topos;
         master->sub_topo_capacity = new_capacity;
 
-        /* 同步扩容 active_node_ids 和 activation_levels */
+        /* 同步扩容 active_node_ids 和 activation_levels，任一失败则回滚 */
         int* new_node_ids = (int*)realloc(master->active_node_ids,
                                           (size_t)new_capacity * sizeof(int));
         float* new_act_lev = (float*)realloc(master->activation_levels,
                                              (size_t)new_capacity * sizeof(float));
-        if (new_node_ids) master->active_node_ids = new_node_ids;
-        if (new_act_lev)  master->activation_levels = new_act_lev;
+        if (!new_node_ids || !new_act_lev) {
+            /* 任一失败则两个都保持旧指针（realloc 失败时原内存不变） */
+            free(new_node_ids);  /* 如果 new_node_ids 成功了但 new_act_lev 失败 */
+            free(new_act_lev);
+            return -1;
+        }
+        master->active_node_ids = new_node_ids;
+        master->activation_levels = new_act_lev;
     }
     
     // 创建子拓扑
@@ -1189,7 +1198,7 @@ char* master_generate_response(MasterTopology* master,
                 int path_len = topology_walk_greedy(
                     vocab_sub, start_id,
                     path_nodes, path_scores,
-                    20, global_visited, 1.0f, master, NULL);
+                    20, global_visited, 1.0f, master, NULL, NULL);
                 
                 // 从路径[1]开始（路径[0]是起点本身），拼接输出
                 for (int p = 1; p < path_len && pos < max_output_len - 10; p++) {
@@ -1401,7 +1410,8 @@ int topology_walk_greedy(SubTopology* sub, int start_node_id,
                          int max_len, unsigned char* visited,
                          float intent_weight,
                          MasterTopology* master,
-                         const float* query_anchor) {
+                         const float* query_anchor,
+                         void* cc_ptr) {
     if (!sub || !sub->net || !path_out || max_len <= 0) return 0;
 
     HuarongTopologyNet* net = sub->net;
@@ -1443,6 +1453,17 @@ int topology_walk_greedy(SubTopology* sub, int start_node_id,
         context_count++;
     }
     path_len++;
+
+    // POS 追踪：记录路径上每步的词性，供模式匹配和句式引导用
+    int pos_trail[64] = {0};
+    int pos_trail_len = 0;
+    CognitiveController* cc = (CognitiveController*)cc_ptr;
+
+    // 记录起点 POS
+    if (cc && start_node_ptr && start_node_ptr->concept) {
+        pos_trail[0] = (int)pos_tag_chinese(start_node_ptr->concept);
+        pos_trail_len = 1;
+    }
 
     // 情感基调：路径的情感色彩走向，EMA 累积（效价约束）
     float context_valence = start_node_ptr ? start_node_ptr->valence : 0.0f;
@@ -1654,6 +1675,20 @@ int topology_walk_greedy(SubTopology* sub, int start_node_id,
                 }
             }
 
+            // --- 路径模式 + 句式 scaffold 引导 ---
+            if (cc && pos_trail_len > 0) {
+                // 1) 路径模式匹配：POS 序列是否符合已知句式（奖励自然句型）
+                float pattern_bonus = cc_pattern_match_score(
+                    cc, sub->topo_id, pos_trail, pos_trail_len);
+                score += pattern_bonus;
+
+                // 2) 句式 scaffold 引导分
+                const char* cand_label = target->concept;
+                POSTag cand_pos = pos_tag_chinese(cand_label);
+                float scaffold_b = cc_scaffold_bonus(cc, pos_trail_len, cand_pos);
+                score += scaffold_b;
+            }
+
             if (score > best_score) {
                 best_score = score;
                 best_next_id = tid;
@@ -1677,6 +1712,14 @@ int topology_walk_greedy(SubTopology* sub, int start_node_id,
         visited[current_id / 8] |= (unsigned char)(1 << (current_id % 8));
         path_out[path_len] = current_id;
         if (scores_out) scores_out[path_len] = best_score;
+
+        // 更新 POS 追踪
+        if (cc && pos_trail_len < 64) {
+            ReasoningNode* sn = net->nodes[current_id];
+            const char* sl = sn ? sn->concept : NULL;
+            pos_trail[pos_trail_len] = (int)pos_tag_chinese(sl);
+            pos_trail_len++;
+        }
 
         // 更新被选节点的热度（热度衰减在线更新）
         ReasoningNode* stepped_node = net->nodes[current_id];
@@ -1759,7 +1802,8 @@ int competitive_queue_generate(
     const float* query_anchor,
     int max_len,
     int* path_out,
-    float* scores_out)
+    float* scores_out,
+    void* cc_ptr)
 {
     if (!sub || !sub->net || !path_out || max_len <= 0) return 0;
     HuarongTopologyNet* net = sub->net;
@@ -1780,6 +1824,11 @@ int competitive_queue_generate(
 
     int path_len = 0;
     float context_valence = 0.0f;
+
+    // POS 追踪和 cognitie controller
+    int pos_trail[64] = {0};
+    int pos_trail_len = 0;
+    CognitiveController* cc = (CognitiveController*)cc_ptr;
 
     // 候选节点缓存（复用避免每轮 malloc）
     typedef struct { int node_id; float score; } CQCandidate;
@@ -1836,6 +1885,18 @@ int competitive_queue_generate(
             // 置信度加权
             score *= (0.3f + 0.7f * node->confidence);
 
+            // --- 路径模式 + 句式 scaffold 引导 ---
+            if (cc && pos_trail_len > 0) {
+                float pattern_bonus = cc_pattern_match_score(
+                    cc, sub->topo_id, pos_trail, pos_trail_len);
+                score += pattern_bonus;
+
+                const char* cl = node->concept;
+                POSTag tag = pos_tag_chinese(cl);
+                float scaffold_b = cc_scaffold_bonus(cc, pos_trail_len, tag);
+                score += scaffold_b;
+            }
+
             candidates[cand_count].node_id = i;
             candidates[cand_count].score = score;
             cand_count++;
@@ -1863,6 +1924,12 @@ int competitive_queue_generate(
         visited[winner_id / 8] |= (unsigned char)(1 << (winner_id % 8));
         path_out[path_len] = winner_id;
         if (scores_out) scores_out[path_len] = best_score;
+
+        // 更新 POS 追踪
+        if (cc && pos_trail_len < 64) {
+            pos_trail[pos_trail_len] = (int)pos_tag_chinese(winner->concept);
+            pos_trail_len++;
+        }
 
         // ---- 6. 胜者广播：激活其邻居 ----
         for (int c = 0; c < winner->connection_count; c++) {
@@ -1917,7 +1984,8 @@ int topology_walk_beam(SubTopology* sub, int start_node_id,
                        int max_len, unsigned char* visited,
                        float intent_weight,
                        MasterTopology* master,
-                       const float* query_anchor) {
+                       const float* query_anchor,
+                       void* cc_ptr) {
     (void)master; (void)query_anchor;  /* 预留: 跨拓扑 beam search */
     if (!sub || !sub->net || !path_out || max_len <= 0) return 0;
 
@@ -2063,6 +2131,27 @@ int topology_walk_beam(SubTopology* sub, int start_node_id,
                     if (tpl_id >= 0) {
                         score += 0.15f;
                     }
+                }
+
+                // --- 路径模式约束 & 句式 scaffold (P2) ---
+                if (cc_ptr && beam->len >= 1) {
+                    CognitiveController* cc = (CognitiveController*)cc_ptr;
+                    // 构建当前 beam 的 POS 序列
+                    int bpos_trail[64]; int bpl = 0;
+                    for (int pi = 0; pi < beam->len && bpl < 32; pi++) {
+                        int nid = beam->nodes[pi];
+                        ReasoningNode* nn = (nid >= 0 && nid < node_count)
+                            ? net->nodes[nid] : NULL;
+                        bpos_trail[bpl++] = (int)pos_tag_chinese(
+                            nn ? nn->concept : NULL);
+                    }
+                    float pattern_bonus = cc_pattern_match_score(
+                        cc, sub->topo_id, bpos_trail, bpl);
+                    score += pattern_bonus;
+
+                    POSTag tag = pos_tag_chinese(target->concept);
+                    float scaffold_b = cc_scaffold_bonus(cc, bpl, tag);
+                    score += scaffold_b;
                 }
 
                 float new_cum = beam->cum_score + score;
@@ -2214,7 +2303,8 @@ int topology_walk_cross(MasterTopology* master,
                         unsigned char** visited_bitmaps,
                         const char* avoid_chars,
                         const float* topo_act,
-                        const float* query_anchor) {
+                        const float* query_anchor,
+                        void* cc_ptr) {
     (void)query_anchor;  /* 预留: 跨拓扑锚点引导 */
     if (!master || !path_topos_out || !path_nodes_out || max_len <= 0) return 0;
     if (start_topo_id < 0 || start_topo_id >= master->sub_topo_count) return 0;
@@ -2242,6 +2332,11 @@ int topology_walk_cross(MasterTopology* master,
     int path_len = 0;
     int cur_topo = start_topo_id;
     int cur_node = start_node_id;
+
+    // POS 追踪和 cognitive controller
+    int pos_trail[64] = {0};
+    int pos_trail_len = 0;
+    CognitiveController* cc = (CognitiveController*)cc_ptr;
 
     // 防回声：记录已输出的概念字符（路径内防重复）
     char used_chars[256] = {0};
@@ -2438,6 +2533,18 @@ int topology_walk_cross(MasterTopology* master,
                             }
                         }
 
+                        // --- 路径模式 + 句式 scaffold 引导 ---
+                        if (cc && pos_trail_len > 0 && tgt_node) {
+                            float pattern_bonus = cc_pattern_match_score(
+                                cc, cur_topo, pos_trail, pos_trail_len);
+                            score += pattern_bonus;
+
+                            const char* cl = tgt_node->concept;
+                            POSTag tag = pos_tag_chinese(cl);
+                            float scaffold_b = cc_scaffold_bonus(cc, pos_trail_len, tag);
+                            score += scaffold_b;
+                        }
+
                         if (score > best_score) {
                             best_score = score;
                             best_topo = to_topo;
@@ -2522,6 +2629,18 @@ int topology_walk_cross(MasterTopology* master,
                 context_count++;
             }
         }
+
+        // 更新 POS 追踪
+        if (cc && pos_trail_len < 64) {
+            SubTopology* ps = master_get_sub_topology(master, cur_topo);
+            if (ps && ps->net && cur_node < ps->net->node_count) {
+                ReasoningNode* pn = ps->net->nodes[cur_node];
+                pos_trail[pos_trail_len] = (int)pos_tag_chinese(
+                    pn ? pn->concept : NULL);
+                pos_trail_len++;
+            }
+        }
+
         path_len++;
     }
 
@@ -2780,7 +2899,15 @@ int master_rebuild_edges_by_similarity(MasterTopology* master, float threshold, 
     return total_edges;
 }
 
-// ==================== 状态持久化功能 (v5 format: 含特征向量+sentinel) ====================
+// ==================== 状态持久化功能 ====================
+
+void huarong_net_cleanup_retired_batch(MasterTopology* master) {
+    if (!master) return;
+    for (int t = 0; t < master->sub_topo_count; t++) {
+        SubTopology* sub = master->sub_topologies[t];
+        if (sub && sub->net) huarong_net_cleanup_retired(sub->net);
+    }
+}
 
 #define STATE_FORMAT_VERSION 5
 

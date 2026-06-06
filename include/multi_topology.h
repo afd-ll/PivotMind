@@ -350,7 +350,8 @@ int topology_walk_greedy(SubTopology* sub, int start_node_id,
                          int max_len, unsigned char* visited,
                          float intent_weight,
                          MasterTopology* master,
-                         const float* query_anchor);
+                         const float* query_anchor,
+                         void* cc_ptr);
 
 /**
  * Beam search 走边路径生成 (K=3)
@@ -362,7 +363,8 @@ int topology_walk_beam(SubTopology* sub, int start_node_id,
                        int max_len, unsigned char* visited,
                        float intent_weight,
                        MasterTopology* master,
-                       const float* query_anchor);
+                       const float* query_anchor,
+                       void* cc_ptr);
 
 /**
  * 跨拓扑走边路径生成
@@ -392,7 +394,8 @@ int topology_walk_cross(MasterTopology* master,
                         unsigned char** visited_bitmaps,
                         const char* avoid_chars,
                         const float* topo_act,
-                        const float* query_anchor);
+                        const float* query_anchor,
+                        void* cc_ptr);
 
 // ========== 竞争队列生成（替代贪心走边） ==========
 
@@ -417,7 +420,8 @@ int competitive_queue_generate(SubTopology* sub,
                                const float* query_anchor,
                                int max_len,
                                int* path_out,
-                               float* scores_out);
+                               float* scores_out,
+                               void* cc_ptr);
 
 // ========== 状态持久化 ==========
 

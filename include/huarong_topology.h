@@ -41,6 +41,12 @@ typedef struct ReasoningNode {
     float* connection_confidences; // 边置信度
     int connection_count;      // 连接数量
     
+    // 连接哈希表 — O(1) 查找目标节点在 connections[] 中的索引
+    // 开放寻址，key=目标节点指针, value=connections[]数组下标
+    struct { void* target; int index; }* conn_hash;
+    int conn_hash_mask;        // 桶数-1 (2^n-1), 0=未初始化
+    int conn_hash_entries;     // 当前条目数
+    
     // 节点状态
     float activation;          // 当前激活值
     float confidence;          // 节点置信度 (兼容旧代码)
@@ -82,11 +88,42 @@ typedef struct HuarongTopologyNet {
     int is_training;           // 是否处于训练模式
 
     // 线程安全
-    pthread_mutex_t mutex;     // 保护拓扑数据结构
+    pthread_mutex_t mutex;         // 仅保护 add_connection 扩容路径
+    pthread_mutex_t node_locks[256]; // 节点级锁池：hash(node_id)&255 选锁
+    
+    // 延迟释放链表 — 扩容旧数组暂存，epoch 结束统一清理
+    void* retired_conns;           // 链表头节点
+    int retired_pending;            // 是否有待清理的旧数组
 } HuarongTopologyNet;
 
 /** 节点默认连接初始容量 */
 #define DEFAULT_CONNECTION_CAPACITY PM_DEFAULT_CONN_CAP
+
+/* ================================================================
+ *  节点连接哈希表 API — O(1) 查找目标节点在 connections[] 中的索引
+ * ================================================================ */
+
+/** 查找目标节点在 node->connections[] 中的位置 */
+static inline int node_conn_find(ReasoningNode* node, ReasoningNode* target) {
+    if (!node || !node->conn_hash || node->conn_hash_mask < 0 || !target) return -1;
+    uintptr_t h = ((uintptr_t)target >> 3);
+    int mask = node->conn_hash_mask;
+    for (int i = 0; i <= mask; i++) {
+        int idx = (int)((h + (uintptr_t)i) & (uintptr_t)mask);
+        if (node->conn_hash[idx].target == target)
+            return node->conn_hash[idx].index;
+        if (!node->conn_hash[idx].target)
+            return -1;
+    }
+    return -1;
+}
+
+/** 插入 (target, index) 映射 — net 用于延迟释放旧哈希表 */
+int node_conn_hash_insert(HuarongTopologyNet* net, ReasoningNode* node,
+                           ReasoningNode* target, int index);
+
+/** 释放节点的连接哈希表 */
+void node_conn_hash_free(ReasoningNode* node);
 
 // ==================== 核心API函数 ==================== 
 
@@ -99,6 +136,14 @@ HuarongTopologyNet* huarong_net_create(int max_nodes);
  * 销毁华容道拓扑网络
  */
 void huarong_net_destroy(HuarongTopologyNet* net);
+
+/** 清理训练期间延迟释放的扩容旧数组（epoch 结束时调用） */
+void huarong_net_cleanup_retired(HuarongTopologyNet* net);
+
+struct MasterTopology;  /* 前向声明 — 避免与 multi_topology.h 循环依赖 */
+
+/** 批量清理所有子拓扑的延迟释放数组 */
+void huarong_net_cleanup_retired_batch(struct MasterTopology* master);
 
 /**
  * 添加推理节点

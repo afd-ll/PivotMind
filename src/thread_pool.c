@@ -19,6 +19,8 @@
 #include <string.h>
 #include <pthread.h>
 #include <unistd.h>
+#include <time.h>
+#include <errno.h>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -49,6 +51,14 @@ struct ThreadPool {
 };
 
 // ==================== CPU 核数检测 ====================
+
+/* 带超时的条件等待，timeout_sec 秒后返回 ETIMEDOUT */
+static int cond_timedwait_sec(pthread_cond_t* cond, pthread_mutex_t* mtx, int timeout_sec) {
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    ts.tv_sec += timeout_sec;
+    return pthread_cond_timedwait(cond, mtx, &ts);
+}
 
 static int detect_cpu_count(void) {
 #ifdef _WIN32
@@ -162,9 +172,14 @@ void thread_pool_destroy(ThreadPool* pool) {
     pthread_mutex_lock(&pool->mutex);
     pool->shutdown = 1;
     pthread_cond_broadcast(&pool->cv_batch);
-    /* 等待进行中的 batch 完成 */
-    while (pool->running) {
-        pthread_cond_wait(&pool->cv_done, &pool->mutex);
+    /* 等待进行中的 batch 完成（最多等5秒，防止worker崩溃导致的永久死锁） */
+    int destroy_timeout = 0;
+    while (pool->running && !destroy_timeout) {
+        int rc = cond_timedwait_sec(&pool->cv_done, &pool->mutex, 5);
+        if (rc == ETIMEDOUT) {
+            fprintf(stderr, "[线程池] 警告：等待批次完成超时，强制销毁\n");
+            destroy_timeout = 1;
+        }
     }
     pthread_mutex_unlock(&pool->mutex);
 
@@ -214,10 +229,15 @@ int thread_pool_batch(ThreadPool* pool, ThreadTask* tasks, int count) {
     }
     __sync_fetch_and_add(&pool->total_tasks_executed, local_executed);
 
-    // 等待所有 worker 完成窃取
+    // 等待所有 worker 完成窃取（最多等10秒防死锁）
     pthread_mutex_lock(&pool->mutex);
-    while (pool->workers_done < pool->num_workers) {
-        pthread_cond_wait(&pool->cv_done, &pool->mutex);
+    int batch_timeout = 0;
+    while (pool->workers_done < pool->num_workers && !batch_timeout) {
+        int rc = cond_timedwait_sec(&pool->cv_done, &pool->mutex, 10);
+        if (rc == ETIMEDOUT) {
+            fprintf(stderr, "[线程池] 警告：等待 worker 完成超时，强制结束批次\n");
+            batch_timeout = 1;
+        }
     }
     pool->running = 0;
     pthread_mutex_unlock(&pool->mutex);

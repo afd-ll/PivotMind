@@ -31,9 +31,7 @@
 #include "template_builder.h"
 
 #ifdef _WIN32
-#ifdef _WIN32
 #include <windows.h>
-#endif
 #endif
 
 // ==================== 溯智系统核心 ====================
@@ -83,11 +81,11 @@ static void trigger_learning_cycle(ActiveLearner* learner) {
     cleanup_forgotten_knowledge(learner);
 }
 
-// 信号处理
+// 信号处理 (使用 async-signal-safe 函数)
 void signal_handler(int signum) {
-    (void)signum;  // 未使用的信号码
+    (void)signum;
     if (g_system) {
-        printf("\n[系统] 收到退出信号，正在关闭...\n");
+        write(STDOUT_FILENO, "\n[系统] 收到退出信号，正在关闭...\n", 40);
         g_system->shutdown_requested = 1;
     }
 }
@@ -312,7 +310,7 @@ DigitalLifeSystem* digital_life_create() {
                     int dummy_pn[32]; float dummy_ps[32];
                     (void)dummy_pn; (void)dummy_ps;
                     topology_walk_greedy(vocab, sn->node_id, dummy_pn, dummy_ps,
-                                         20, vis, 1.0f, sys->topology, NULL);
+                                         20, vis, 1.0f, sys->topology, NULL, NULL);
                     sn->activation = saved;
                     free(vis);
                 }
@@ -615,7 +613,7 @@ void handle_dialog(DigitalLifeSystem* sys, char* input) {
                     if (strlen(stripped) > 0) {
                         char key[512];
                         snprintf(key, sizeof(key), "response:%s", stripped);
-                        memory_store(sys->memory, key, strdup(better_answer),
+                        memory_store(sys->memory, key, (void*)better_answer,
                                    strlen(better_answer) + 1, MEMORY_TYPE_STRING, 0.95f);
                         printf("  → 已存入记忆: 下次听到「%s」就会用这个回答\n", stripped);
                     }

@@ -464,6 +464,9 @@ int main(int argc, char* argv[]) {
             autonomic_decay_all(master);
         }
 
+        // 清理训练期间延迟释放的扩容旧数组
+        huarong_net_cleanup_retired_batch(master);
+
         epoch_pairs = omp_processed;
         total_pairs += epoch_pairs;
     }

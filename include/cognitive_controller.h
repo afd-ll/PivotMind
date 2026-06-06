@@ -380,6 +380,22 @@ float cc_scaffold_bonus(CognitiveController* cc, int position,
                          POSTag candidate_pos);
 
 /**
+ * 路径模式匹配评分 — 检查当前 POS 序列与已知句式模式的匹配度
+ *
+ * 遍历内置句式 (CN_PATTERNS) 和自动发现的 POS 模式 (pos_patterns)，
+ * 对当前已走过的 POS 序列做前缀匹配，返回最佳匹配分。
+ * 用于 walk 阶段的候选评分，引导路径向自然句式靠拢。
+ *
+ * @param cc        认知调度中心
+ * @param topo_id   当前子拓扑 ID（预留，可用于拓扑专属模式）
+ * @param pos_trail 当前路径的 POS 序列（int 数组，值为 POSTag 枚举）
+ * @param trail_len 序列长度
+ * @return 匹配评分 (0.0-1.0)，越高越符合已知句式
+ */
+float cc_pattern_match_score(CognitiveController* cc, int topo_id,
+                              const int* pos_trail, int trail_len);
+
+/**
  * 获取选中的句式模板 POS 序列（用于调试）
  */
 int cc_get_selected_pattern(CognitiveController* cc, POSTag* seq_out);

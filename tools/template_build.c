@@ -160,7 +160,7 @@ int main(int argc, char** argv) {
             unsigned char* vis = (unsigned char*)calloc((size_t)bms, 1);
             int pn[32]; float ps[32];
             int pl = topology_walk_greedy(vocab, sid, pn, ps, MAX_WALK_STEPS,
-                                          vis, 1.0f, master, NULL);
+                                          vis, 1.0f, master, NULL, NULL);
             sn->activation = saved;
             if (pl >= 3) {
                 for (int p = 0; p < pl - 2; p++)

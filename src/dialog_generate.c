@@ -9,6 +9,7 @@
 #include "multi_topology.h"
 #include "huarong_topology.h"
 #include "cognitive_params.h"
+#include "cognitive_controller.h"
 #include "utf8_tokenizer.h"
 #include "string_pool.h"
 #include "common.h"
@@ -118,6 +119,12 @@ char* dialog_generate(DialogReasoning* reasoning, const char* input,
             if (sum_w > 0.0f) intent_weight = 0.4f + 0.6f * (weighted_sum / sum_w);
         }
 
+        // ===== 句式 scaffold 选择：从输入提取 POS 序列匹配最佳句式 =====
+        void* cc_ptr = dsys ? dsys->controller : NULL;
+        if (cc_ptr && input && input[0]) {
+            cc_select_sentence_pattern((CognitiveController*)cc_ptr, input);
+        }
+
         unsigned char* global_visited = NULL;
         int global_bm_size = 0;
         int max_path = PM_WALK_MAX_OUTPUT;
@@ -159,7 +166,7 @@ char* dialog_generate(DialogReasoning* reasoning, const char* input,
                 sub, dsys ? dsys->master : NULL,
                 intent_weight, anchor_ptr,
                 max_path < max_len ? max_path : max_len,
-                path_nodes, path_scores);
+                path_nodes, path_scores, cc_ptr);
 
             // ===== 策略2：Beam search（全局+局部混合，K=5） =====
             if (path_len <= 1) {
@@ -168,7 +175,7 @@ char* dialog_generate(DialogReasoning* reasoning, const char* input,
                     max_path < max_len ? max_path : max_len,
                     global_visited, intent_weight,
                     dsys ? dsys->master : NULL,
-                    anchor_ptr);
+                    anchor_ptr, cc_ptr);
             }
             
             // ===== 策略3：贪心走边（最终回退） =====
@@ -178,7 +185,7 @@ char* dialog_generate(DialogReasoning* reasoning, const char* input,
                     max_path < max_len ? max_path : max_len,
                     global_visited, intent_weight,
                     dsys ? dsys->master : NULL,
-                    anchor_ptr);
+                    anchor_ptr, cc_ptr);
             }
 
             if (path_len <= 1) continue;

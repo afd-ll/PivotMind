@@ -1092,6 +1092,12 @@ DialogSystem* dialog_system_create(MasterTopology* master, MemorySystem* memory,
         printf("[对话系统] 认知调度中心: 创建失败\n");
     }
 
+    // 初始化句式拓扑（16种固定句式 + POS scaffolding）
+    if (sys->controller) {
+        cc_init_sentence_topology(sys->controller);
+        printf("[对话系统] 句式拓扑: 已就绪（16种基础句式）\n");
+    }
+
     // 初始化 BPTT 学习器（RNN 在线反向传播）
 #define BPTT_HIDDEN_DIM 256
     sys->bptt = bptt_learner_create(sys->master, BPTT_HIDDEN_DIM, 32);

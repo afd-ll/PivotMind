@@ -176,7 +176,7 @@ int main(int argc, char** argv) {
 
             int path_len = topology_walk_greedy(
                 vocab, start_id, path_nodes, path_scores,
-                MAX_WALK_STEPS, visited, 1.0f, master, NULL);
+                MAX_WALK_STEPS, visited, 1.0f, master, NULL, NULL);
 
             start_node->activation = saved_act;
 
