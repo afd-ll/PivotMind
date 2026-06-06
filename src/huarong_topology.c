@@ -271,7 +271,7 @@ int node_conn_hash_insert(HuarongTopologyNet* net, ReasoningNode* node,
     if (!node || !target || index < 0) return -1;
     if (!node->conn_hash || node->conn_hash_mask < 0) {
         int sz = CONN_HASH_INIT_SIZE;
-        node->conn_hash = (typeof(node->conn_hash))calloc((size_t)sz, sizeof(*node->conn_hash));
+        node->conn_hash = (ConnHashEntry*)calloc((size_t)sz, sizeof(ConnHashEntry));
         if (!node->conn_hash) return -1;
         node->conn_hash_mask = sz - 1;
         node->conn_hash_entries = 0;
@@ -281,8 +281,8 @@ int node_conn_hash_insert(HuarongTopologyNet* net, ReasoningNode* node,
     int cap = node->conn_hash_mask + 1;
     if (node->conn_hash_entries * 100 / cap >= CONN_HASH_MAX_LOAD) {
         int new_cap = cap * 2;
-        typeof(node->conn_hash) old_hash = node->conn_hash;
-        typeof(node->conn_hash) nht = (typeof(node->conn_hash))calloc((size_t)new_cap, sizeof(*nht));
+        ConnHashEntry* old_hash = node->conn_hash;
+        ConnHashEntry* nht = (ConnHashEntry*)calloc((size_t)new_cap, sizeof(ConnHashEntry));
         if (!nht) return -1;
 
         int new_mask = new_cap - 1;
@@ -383,8 +383,8 @@ int huarong_net_add_connection(HuarongTopologyNet* net,
     if (!from_node || !to_node) { pthread_mutex_unlock(&net->node_locks[li]); return -1; }
 
     // 检查连接是否已存在（O(1) 哈希查找）
-    if (node_conn_find(from_node, to_node) >= 0) {
-        int idx = node_conn_find(from_node, to_node);
+    int idx = node_conn_find(from_node, to_node);
+    if (idx >= 0) {
         from_node->connection_weights[idx] = weight;
         pthread_mutex_unlock(&net->node_locks[li]);
         return 0;

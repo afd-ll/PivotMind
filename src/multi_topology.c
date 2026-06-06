@@ -3318,9 +3318,9 @@ int master_load_state(MasterTopology* master, const char* file_path) {
     // 哨兵记录 [-1,0,0,0,0,0] 已在跨拓扑循环中消耗(from_topo=-1触发break)
     if (from_topo == -1) {
         int tpl_voting = 0;
-        fread(&tpl_voting, sizeof(int), 1, fp);
+        if (fread(&tpl_voting, sizeof(int), 1, fp) != 1) goto load_error;
         master->use_template_voting = tpl_voting;
-        fread(&master->template_decay_round, sizeof(int), 1, fp);
+        if (fread(&master->template_decay_round, sizeof(int), 1, fp) != 1) goto load_error;
 
         int freq_entry_count = 0;
         int64_t freq_total = 0;
@@ -3350,6 +3350,11 @@ int master_load_state(MasterTopology* master, const char* file_path) {
            file_path, loaded_nodes, loaded_links);
     
     return loaded_nodes;
+
+load_error:
+    fprintf(stderr, "[状态持久化] 错误: 从 %s 读取失败\n", file_path);
+    fclose(fp);
+    return -1;
 }
 
 // ==================== 统计输出 ====================

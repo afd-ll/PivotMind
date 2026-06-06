@@ -17,6 +17,11 @@ typedef enum {
 
 // ==================== 华容道拓扑神经网络核心结构 ==================== 
 
+typedef struct {
+    void* target;    /* 目标节点指针 */
+    int   index;     /* 在 connections[] 数组中的下标 */
+} ConnHashEntry;
+
 /**
  * 推理节点（类比华容道的滑块）
  * 代表知识图谱中的一个概念节点
@@ -43,7 +48,7 @@ typedef struct ReasoningNode {
     
     // 连接哈希表 — O(1) 查找目标节点在 connections[] 中的索引
     // 开放寻址，key=目标节点指针, value=connections[]数组下标
-    struct { void* target; int index; }* conn_hash;
+    ConnHashEntry* conn_hash;    /* 连接哈希表: O(1)查找目标节点 index */
     int conn_hash_mask;        // 桶数-1 (2^n-1), 0=未初始化
     int conn_hash_entries;     // 当前条目数
     

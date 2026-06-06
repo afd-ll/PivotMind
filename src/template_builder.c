@@ -114,6 +114,37 @@ typedef struct {
 
 #define PREFIX_HASH_SIZE 4093  /* 质数 */
 
+/* 前缀哈希函数 (开放寻址) */
+static unsigned prefix_hash_key(int node_a, int node_b) {
+    return (unsigned)(((size_t)node_a * 31u + (size_t)node_b * 17u) % PREFIX_HASH_SIZE);
+}
+
+static int prefix_hash_lookup(PrefixEntry* table, int node_a, int node_b) {
+    unsigned h = prefix_hash_key(node_a, node_b);
+    for (int probe = 0; probe < PREFIX_HASH_SIZE; probe++) {
+        unsigned idx = (h + (unsigned)probe) % PREFIX_HASH_SIZE;
+        if (!table[idx].is_used) return -1;  /* not found */
+        if (table[idx].key.node_a == node_a && table[idx].key.node_b == node_b)
+            return table[idx].group_index;
+    }
+    return -1;  /* table full, fall through */
+}
+
+static int prefix_hash_insert(PrefixEntry* table, int node_a, int node_b, int group_index) {
+    unsigned h = prefix_hash_key(node_a, node_b);
+    for (int probe = 0; probe < PREFIX_HASH_SIZE; probe++) {
+        unsigned idx = (h + (unsigned)probe) % PREFIX_HASH_SIZE;
+        if (!table[idx].is_used) {
+            table[idx].key.node_a = node_a;
+            table[idx].key.node_b = node_b;
+            table[idx].group_index = group_index;
+            table[idx].is_used = 1;
+            return 0;
+        }
+    }
+    return -1;  /* table full */
+}
+
 /* ================================================================
  *  Step 1: 前缀分组
  * ================================================================ */
@@ -132,24 +163,22 @@ TripletPrefixGroup* template_group_triplets(
     }
     if (valid == 0) { *group_count_out = 0; return NULL; }
 
-    /* 预分配 groups (最多 valid 个不同前缀) */
+    /* 预分配 groups + 前缀哈希表（O(1)查找替代O(n)线性扫描） */
     int groups_cap = (valid < 64) ? 64 : valid;
     TripletPrefixGroup* groups = (TripletPrefixGroup*)calloc(
         (size_t)groups_cap, sizeof(TripletPrefixGroup));
     if (!groups) return NULL;
     int gcount = 0;
+    
+    PrefixEntry* prefix_table = (PrefixEntry*)calloc(PREFIX_HASH_SIZE, sizeof(PrefixEntry));
+    if (!prefix_table) { free(groups); return NULL; }
 
     for (int i = 0; i < result_count; i++) {
         IrreducibilityResult* r = &results[i];
         if (r->ir_ratio < cfg->min_ratio) continue;
 
-        /* 查找/创建前缀组 */
-        int gi = -1;
-        for (int g = 0; g < gcount; g++) {
-            if (groups[g].node_a == r->node_a && groups[g].node_b == r->node_b) {
-                gi = g; break;
-            }
-        }
+        /* 前缀哈希查找 O(1) */
+        int gi = prefix_hash_lookup(prefix_table, r->node_a, r->node_b);
 
         if (gi < 0) {
             /* 扩容 */
@@ -157,7 +186,7 @@ TripletPrefixGroup* template_group_triplets(
                 groups_cap *= 2;
                 TripletPrefixGroup* ng = (TripletPrefixGroup*)realloc(
                     groups, (size_t)groups_cap * sizeof(TripletPrefixGroup));
-                if (!ng) { template_free_groups(groups, gcount); return NULL; }
+                if (!ng) { free(prefix_table); template_free_groups(groups, gcount); return NULL; }
                 groups = ng;
             }
             gi = gcount;
@@ -173,9 +202,10 @@ TripletPrefixGroup* template_group_triplets(
             groups[gi].counts      = (int*)malloc(
                 (size_t)groups[gi].capacity * sizeof(int));
             if (!groups[gi].node_c_list || !groups[gi].ir_ratios || !groups[gi].counts) {
-                template_free_groups(groups, gi); return NULL;
+                free(prefix_table); template_free_groups(groups, gi); return NULL;
             }
             gcount++;
+            prefix_hash_insert(prefix_table, r->node_a, r->node_b, gi);
         }
 
         /* 添加到组 */
@@ -214,6 +244,7 @@ TripletPrefixGroup* template_group_triplets(
         gcount = dst;
     }
 
+    free(prefix_table);
     *group_count_out = gcount;
     if (gcount == 0) { free(groups); return NULL; }
     return groups;

@@ -23,8 +23,9 @@
 
 // ========== Utility Functions ==========
 
-/** 向量的余弦相似度 */
+/** 向量的余弦相似度，任一指针为NULL或dim<=0返回0 */
 static inline float cosine_similarity(const float* a, const float* b, int dim) {
+    if (!a || !b || dim <= 0) return 0.0f;
     float dot = 0, na = 0, nb = 0;
     for (int i = 0; i < dim; i++) {
         dot += a[i] * b[i];
@@ -35,12 +36,13 @@ static inline float cosine_similarity(const float* a, const float* b, int dim) {
     return (norm < 1e-10f) ? 0.0f : dot / norm;
 }
 
-/** Hebbian 更新: 将两个向量互相拉近 */
+/** Hebbian 更新: 将两个向量互相拉近，任一为NULL则跳过 */
 static inline void hebbian_update(float* a, float* b, int dim, float lr) {
+    if (!a || !b || dim <= 0) return;
     for (int i = 0; i < dim; i++) {
         float diff = b[i] - a[i];
         a[i] += lr * diff;
-        b[i] -= lr * diff;  // 对称更新
+        b[i] -= lr * diff;  /* 对称更新 */
     }
 }
 
