@@ -5,6 +5,26 @@
 #include <string.h>
 #include <math.h>
 
+/* 从概念文本生成确定性特征种子（FNV-1a 哈希 → 浮点向量） */
+static void concept_to_feature_seed(const char* concept, float* feats, int dim) {
+    if (!concept || !feats || dim <= 0) return;
+    /* FNV-1a 种子哈希 */
+    unsigned hash = 2166136261u;
+    for (const char* p = concept; *p; p++) {
+        hash ^= (unsigned char)*p;
+        hash *= 16777619u;
+    }
+    /* 用 hash 生成 24 维确定性伪随机种子，扩展到 dim */ 
+    for (int i = 0; i < dim; i++) {
+        unsigned h = hash ^ (unsigned)(i * 0x9E3779B9u);
+        h = (h ^ (h >> 16)) * 0x85EBCA6Bu;
+        h = (h ^ (h >> 13)) * 0xC2B2AE35u;
+        h = h ^ (h >> 16);
+        /* 映射到 [-0.1, 0.1]，作为小信号种子 */
+        feats[i] = ((float)(h & 0xFFFF) / 32768.0f - 1.0f) * 0.1f;
+    }
+}
+
 // ==================== 推理节点实现 ==================== 
 
 ReasoningNode* create_reasoning_node(int node_id, const char* concept, 
@@ -52,7 +72,8 @@ ReasoningNode* create_reasoning_node(int node_id, const char* concept,
             if (features) {
                 memcpy(node->features, features, feature_dim * sizeof(float));
             } else {
-                memset(node->features, 0, feature_dim * sizeof(float));
+                /* 用概念文本哈希生成非零种子特征，而非全零 */
+                concept_to_feature_seed(concept, node->features, feature_dim);
             }
         }
         /* 若 node->features==NULL (malloc 失败)，回滚时 free(NULL) 安全，
