@@ -183,7 +183,8 @@ ReasoningNode* huarong_net_add_node(HuarongTopologyNet* net,
 
 /**
  * 线程安全的查找或创建节点
- * 在 net->mutex 保护下，先查哈希表/线性扫描，找不到则创建
+ * 乐观锁：先无锁查哈希表，命中直接返回（O(1) 无竞争）
+ * 未命中再持锁 double-check + 线性扫描 + 创建
  */
 ReasoningNode* huarong_net_find_or_create_node(HuarongTopologyNet* net,
                                                const char* concept,
@@ -192,9 +193,16 @@ ReasoningNode* huarong_net_find_or_create_node(HuarongTopologyNet* net,
                                                NodeHashTable* hash) {
     if (!net || !concept) return NULL;
 
+    /* 快速路径：无锁查哈希表（99%+ 的调用命中此路径） */
+    if (hash) {
+        ReasoningNode* existing = node_hash_find(hash, concept);
+        if (existing) return existing;
+    }
+
+    /* 慢速路径：持锁 double-check */
     pthread_mutex_lock(&net->mutex);
 
-    // 先查哈希表
+    // 再查一次哈希表（其他线程可能在此间隙创建了）
     if (hash) {
         ReasoningNode* existing = node_hash_find(hash, concept);
         if (existing) {
@@ -453,18 +461,32 @@ int huarong_net_add_connection(HuarongTopologyNet* net,
     return 0;
 }
 
-// 添加双向连接（原子操作：同时建立两个方向）
+// 添加双向连接（用节点级锁替代全局锁，允许并行双向建边）
 int huarong_net_add_bidirectional_connection(HuarongTopologyNet* net,
                                               int node_a_id, int node_b_id,
                                               float weight) {
     if (!net || node_a_id < 0 || node_a_id >= net->node_count ||
         node_b_id < 0 || node_b_id >= net->node_count) return -1;
 
-    pthread_mutex_lock(&net->mutex);
-    /* 内部实现：复用 add_connection 逻辑但只持一次锁 */
+    /* 节点级锁，按ID排序避免死锁 */
+    int li_a = node_a_id & 255;
+    int li_b = node_b_id & 255;
+    if (li_a == li_b) {
+        pthread_mutex_lock(&net->node_locks[li_a]);
+    } else if (li_a < li_b) {
+        pthread_mutex_lock(&net->node_locks[li_a]);
+        pthread_mutex_lock(&net->node_locks[li_b]);
+    } else {
+        pthread_mutex_lock(&net->node_locks[li_b]);
+        pthread_mutex_lock(&net->node_locks[li_a]);
+    }
     ReasoningNode* a = net->nodes[node_a_id];
     ReasoningNode* b = net->nodes[node_b_id];
-    if (!a || !b) { pthread_mutex_unlock(&net->mutex); return -1; }
+    if (!a || !b) {
+        pthread_mutex_unlock(&net->node_locks[li_a]);
+        if (li_a != li_b) pthread_mutex_unlock(&net->node_locks[li_b]);
+        return -1;
+    }
 
     /* 检查 A→B 是否已存在 */
     int a_has_b = -1;
@@ -480,7 +502,9 @@ int huarong_net_add_bidirectional_connection(HuarongTopologyNet* net,
     /* 原子地建立两个方向 */
     if (a_has_b < 0) {
         if (a->connection_count >= a->connection_capacity) {
-            pthread_mutex_unlock(&net->mutex); return -1;
+            pthread_mutex_unlock(&net->node_locks[li_a]);
+            if (li_a != li_b) pthread_mutex_unlock(&net->node_locks[li_b]);
+            return -1;
         }
         a->connections[a->connection_count] = b;
         a->connection_weights[a->connection_count] = weight;
@@ -492,7 +516,9 @@ int huarong_net_add_bidirectional_connection(HuarongTopologyNet* net,
     }
     if (b_has_a < 0) {
         if (b->connection_count >= b->connection_capacity) {
-            pthread_mutex_unlock(&net->mutex); return -1;
+            pthread_mutex_unlock(&net->node_locks[li_a]);
+            if (li_a != li_b) pthread_mutex_unlock(&net->node_locks[li_b]);
+            return -1;
         }
         b->connections[b->connection_count] = a;
         b->connection_weights[b->connection_count] = weight;
@@ -503,7 +529,8 @@ int huarong_net_add_bidirectional_connection(HuarongTopologyNet* net,
         b->connection_weights[b_has_a] = weight;
     }
 
-    pthread_mutex_unlock(&net->mutex);
+    pthread_mutex_unlock(&net->node_locks[li_a]);
+    if (li_a != li_b) pthread_mutex_unlock(&net->node_locks[li_b]);
     return 0;
 }
 

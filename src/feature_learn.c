@@ -23,92 +23,79 @@
 int feature_learn_graph_smooth(HuarongTopologyNet* net, int iterations) {
     if (!net || net->node_count <= 0 || iterations <= 0) return -1;
 
-    // 保护 features / connection_weights / connection_confidences 读写
-    // 与 boost_connection_weighted / hebbian_update 的并发访问
     pthread_mutex_lock(&net->mutex);
 
     int total_nodes = net->node_count;
     int dim = NODE_FEATURE_DIM;
 
-    // 检查是否所有节点都有 features
     int has_features = 0;
     for (int i = 0; i < total_nodes; i++) {
-        if (net->nodes[i] && net->nodes[i]->features) {
-            has_features = 1;
-            break;
-        }
+        if (net->nodes[i] && net->nodes[i]->features) { has_features = 1; break; }
     }
-    if (!has_features) {
-        pthread_mutex_unlock(&net->mutex);
-        return -1;
-    }
+    if (!has_features) { pthread_mutex_unlock(&net->mutex); return -1; }
 
-    // 临时缓冲区：new_features[total_nodes * dim] + weight_sums[total_nodes]
     float* new_features = (float*)calloc(total_nodes * dim, sizeof(float));
     float* weight_sums = (float*)calloc(total_nodes, sizeof(float));
     if (!new_features || !weight_sums) {
-        free(new_features);
-        free(weight_sums);
-        pthread_mutex_unlock(&net->mutex);
-        return -1;
+        free(new_features); free(weight_sums);
+        pthread_mutex_unlock(&net->mutex); return -1;
     }
 
     for (int iter = 0; iter < iterations; iter++) {
         memset(new_features, 0, total_nodes * dim * sizeof(float));
         memset(weight_sums, 0, total_nodes * sizeof(float));
 
+        /* 并行累积邻居特征贡献 (OpenMP, critical section 保护写冲突) */
+        #pragma omp parallel for schedule(dynamic, 100)
         for (int i = 0; i < total_nodes; i++) {
             ReasoningNode* node = net->nodes[i];
             if (!node || !node->features || node->connection_count <= 0) continue;
-
             float* src_feat = node->features;
 
             for (int c = 0; c < node->connection_count; c++) {
                 ReasoningNode* nb = node->connections[c];
                 if (!nb || !nb->features || nb->node_id < 0 || nb->node_id >= total_nodes) continue;
-
                 int nb_id = nb->node_id;
                 float w = node->connection_weights[c];
                 float conf = (node->connection_confidences && c < node->connection_count)
                              ? node->connection_confidences[c] : 0.5f;
-                float total_weight = w * conf;
-                if (total_weight < 0.01f) continue;
+                float tw = w * conf;
+                if (tw < 0.01f) continue;
 
-                // 对称平滑: i→nb 方向 — i 的特征贡献给 nb
+                #pragma omp critical
                 {
-                    float* dst = new_features + nb_id * dim;
-                    for (int d = 0; d < dim; d++)
-                        dst[d] += total_weight * src_feat[d];
-                    weight_sums[nb_id] += total_weight;
-                }
-
-                // 对称平滑: nb→i 方向 — nb 的特征贡献给 i
-                if (nb->features) {
-                    float* dst = new_features + i * dim;
-                    float* nb_feat = nb->features;
-                    for (int d = 0; d < dim; d++)
-                        dst[d] += total_weight * nb_feat[d];
-                    weight_sums[i] += total_weight;
+                    float* dst_nb = new_features + nb_id * dim;
+                    float* dst_i  = new_features + i * dim;
+                    float* nbf = nb->features;
+                    weight_sums[nb_id] += tw;
+                    weight_sums[i]     += tw;
+                    for (int d = 0; d < dim; d++) {
+                        dst_nb[d] += tw * src_feat[d];
+                        dst_i[d]  += tw * nbf[d];
+                    }
                 }
             }
         }
 
-        // 归一化并写回
-        int updated = 0;
+        /* 并行归一化 */
+        #pragma omp parallel for schedule(static)
         for (int i = 0; i < total_nodes; i++) {
             if (weight_sums[i] > 0.001f && net->nodes[i] && net->nodes[i]->features) {
-                float inv_sum = 1.0f / weight_sums[i];
+                float inv = 1.0f / weight_sums[i];
+                float* dst = net->nodes[i]->features;
+                float* src = new_features + i * dim;
                 for (int d = 0; d < dim; d++)
-                    net->nodes[i]->features[d] = new_features[i * dim + d] * inv_sum;
-                updated++;
+                    dst[d] = src[d] * inv;
             }
         }
 
+        /* 快速失败检查 */
+        int updated = 0;
+        for (int i = 0; i < total_nodes && updated == 0; i++)
+            if (weight_sums[i] > 0.001f) updated = 1;
         if (updated == 0 && iter == 0) {
-            free(new_features);
-            free(weight_sums);
-            pthread_mutex_unlock(&net->mutex);
-            return -1;
+            free(new_features); free(weight_sums);
+            pthread_mutex_unlock(&net->mutex); return -1;
         }
     }
 
