@@ -118,7 +118,8 @@ int feature_learn_graph_smooth(HuarongTopologyNet* net, int iterations) {
         }
     }
 
-    for (int iter = 0; iter < iterations; iter++) {
+    int iter;
+    for (iter = 0; iter < iterations; iter++) {
         memset(merged_feats, 0, feat_bytes);
         memset(merged_ws, 0, ws_bytes);
 
@@ -205,15 +206,39 @@ int feature_learn_graph_smooth(HuarongTopologyNet* net, int iterations) {
             }
         }
 
-        /* 并行归一化 */
-        #pragma omp parallel for schedule(static)
-        for (int i = 0; i < total_nodes; i++) {
-            if (merged_ws[i] > 0.001f && net->nodes[i] && net->nodes[i]->features) {
-                float inv = 1.0f / merged_ws[i];
-                float* dst = net->nodes[i]->features;
-                float* src = merged_feats + i * dim;
-                for (int d = 0; d < dim; d++)
-                    dst[d] = src[d] * inv;
+        /* 并行归一化 + 收敛检测 */
+        {
+            float max_delta = 0.0f;
+            float delta_buf[64] = {0};  /* 每线程一个 */
+            #pragma omp parallel
+            {
+                int tid = omp_get_thread_num();
+                float local_max = 0.0f;
+                #pragma omp for schedule(static)
+                for (int i = 0; i < total_nodes; i++) {
+                    if (merged_ws[i] > 0.001f && net->nodes[i] && net->nodes[i]->features) {
+                        float inv = 1.0f / merged_ws[i];
+                        float* dst = net->nodes[i]->features;
+                        float* src = merged_feats + i * dim;
+                        /* 每 8 个节点检测一次位移（采样 12.5% 节省开销） */
+                        if ((i & 7) == 0) {
+                            float d = fabsf(src[0] * inv - dst[0]);
+                            if (d > local_max) local_max = d;
+                        }
+                        for (int d = 0; d < dim; d++)
+                            dst[d] = src[d] * inv;
+                    }
+                }
+                if (tid < 64) delta_buf[tid] = local_max;
+            }
+            for (int t = 0; t < nthreads && t < 64; t++)
+                if (delta_buf[t] > max_delta) max_delta = delta_buf[t];
+
+            /* 收敛检测: 位移极小则提前结束后续迭代 */
+            if (iter > 0 && max_delta < 0.0005f) {
+                printf("[特征学习] 图平滑收敛 (iter=%d/%d, max_delta=%.6f)\n",
+                       iter + 1, iterations, max_delta);
+                break;
             }
         }
 
@@ -238,6 +263,6 @@ int feature_learn_graph_smooth(HuarongTopologyNet* net, int iterations) {
     }
 
     pthread_mutex_unlock(&net->mutex);
-    printf("[特征学习] 图平滑完成 (%d 节点, %d 轮)\n", total_nodes, iterations);
+    printf("[特征学习] 图平滑完成 (%d 节点, %d 轮)\n", total_nodes, iter + 1);
     return 0;
 }
