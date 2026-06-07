@@ -17,6 +17,23 @@
 #include <stdio.h>
 #include <omp.h>
 
+/* FNV-1a 哈希种子 (与 huarong_topology.c 中 concept_to_feature_seed 一致) */
+static void feature_seed_from_concept(const char* concept, float* feats, int dim) {
+    if (!concept || !feats || dim <= 0) return;
+    unsigned hash = 2166136261u;
+    for (const char* p = concept; *p; p++) {
+        hash ^= (unsigned char)*p;
+        hash *= 16777619u;
+    }
+    for (int i = 0; i < dim; i++) {
+        unsigned h = hash ^ (unsigned)(i * 0x9E3779B9u);
+        h = (h ^ (h >> 16)) * 0x85EBCA6Bu;
+        h = (h ^ (h >> 13)) * 0xC2B2AE35u;
+        h = h ^ (h >> 16);
+        feats[i] = ((float)(h & 0xFFFF) / 32768.0f - 1.0f) * 0.1f;
+    }
+}
+
 #ifndef NODE_FEATURE_DIM
 #define NODE_FEATURE_DIM PM_NODE_FEATURE_DIM
 #endif
@@ -36,11 +53,23 @@ int feature_learn_graph_smooth(HuarongTopologyNet* net, int iterations) {
     int total_nodes = net->node_count;
     int dim = NODE_FEATURE_DIM;
 
-    int has_features = 0;
+    /* 自动分配缺失的特征向量（首次运行时的延迟初始化） */
+    int auto_allocated = 0;
     for (int i = 0; i < total_nodes; i++) {
-        if (net->nodes[i] && net->nodes[i]->features) { has_features = 1; break; }
+        ReasoningNode* node = net->nodes[i];
+        if (!node) continue;
+        if (!node->features) {
+            node->features = (float*)calloc(dim, sizeof(float));
+            if (node->features) {
+                feature_seed_from_concept(node->concept, node->features, dim);
+                node->feature_dim = dim;
+                auto_allocated++;
+            }
+        }
     }
-    if (!has_features) { pthread_mutex_unlock(&net->mutex); return -1; }
+    if (auto_allocated > 0) {
+        printf("[特征学习] 自动初始化 %d 个节点特征向量\n", auto_allocated);
+    }
 
     size_t feat_bytes = (size_t)total_nodes * dim * sizeof(float);
     size_t ws_bytes   = (size_t)total_nodes * sizeof(float);
