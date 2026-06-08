@@ -26,6 +26,7 @@
 #include "concept_abstraction.h"
 #include "common.h"
 #include "autonomic_learner.h"
+#include "active_learner.h"
 #include "cognitive_controller.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -1511,6 +1512,17 @@ char* dialog_process(DialogSystem* sys, const char* user_input, DialogReasoning*
                                      (AutonomicState*)sys->auto_state,
                                      sys->controller ? sys->controller->causal_graph : NULL,
                                      sys->controller ? sys->controller->memory : NULL);
+
+                /* 主动学习：不满意时压制走错的边 */
+                if (sys->learner && sys->controller && sys->last_knowledge_quality < 0.5f) {
+                    feedback_correct(sys->learner, user_input, response,
+                                     sys->last_knowledge_quality);
+                }
+            }
+
+            /* 后台时钟：上一轮对话中高激活节点，作为"自发性思维"注入下轮 */
+            if (sys->controller && sys->master) {
+                master_decay_activations(sys->master, 0.97f);
             }
 
             /* 跳过在线学习 — 调试用 */
