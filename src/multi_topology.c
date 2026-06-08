@@ -3177,7 +3177,7 @@ int master_load_state(MasterTopology* master, const char* file_path) {
             loaded_nodes++;
             if (fmt_ver == 1) continue;
             // v2: 跳过连接数据
-            for (int c = 0; c < conn_count && conn_count > 0 && conn_count < 10000; c++) {
+            for (int c = 0; c < conn_count && conn_count > 0; c++) {
                 int skip_id; float skip_w, skip_b, skip_c;
                 if (fread(&skip_id, sizeof(int), 1, fp) != 1) break;
                 if (fread(&skip_w, sizeof(float), 1, fp) != 1) break;
@@ -3219,7 +3219,7 @@ int master_load_state(MasterTopology* master, const char* file_path) {
         // 连接数据处理
         if (fmt_ver >= 3) {
             // [v3] 按概念名恢复连接
-            for (int c = 0; c < conn_count && conn_count > 0 && conn_count < 10000; c++) {
+            for (int c = 0; c < conn_count && conn_count > 0; c++) {
                 int tgt_concept_len;
                 if (fread(&tgt_concept_len, sizeof(int), 1, fp) != 1) break;
                 if (tgt_concept_len > 0 && tgt_concept_len <= 4096) {
@@ -3259,7 +3259,7 @@ int master_load_state(MasterTopology* master, const char* file_path) {
             }
         } else if (fmt_ver >= 2) {
             // [v2] 读取并丢弃连接数据（目标用 node_id 存储，加载后无效）
-            for (int c = 0; c < conn_count && conn_count > 0 && conn_count < 10000; c++) {
+            for (int c = 0; c < conn_count && conn_count > 0; c++) {
                 int skip_id; float skip_w, skip_b, skip_c;
                 if (fread(&skip_id, sizeof(int), 1, fp) != 1) break;
                 if (fread(&skip_w, sizeof(float), 1, fp) != 1) break;
