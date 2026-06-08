@@ -1515,8 +1515,9 @@ char* dialog_process(DialogSystem* sys, const char* user_input, DialogReasoning*
 
                 /* 主动学习：不满意时压制走错的边 */
                 if (sys->learner && sys->controller && sys->last_knowledge_quality < 0.5f) {
-                    feedback_correct(sys->learner, user_input, response,
-                                     sys->last_knowledge_quality);
+                    char fb[64];
+                    snprintf(fb, 63, "low_quality=%.2f", sys->last_knowledge_quality);
+                    feedback_correct(sys->learner, user_input, response, fb);
                 }
             }
 
