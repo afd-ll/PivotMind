@@ -75,21 +75,16 @@ char* dialog_generate(DialogReasoning* reasoning, const char* input,
     float* anchor_ptr = anchor_valid ? query_anchor : NULL;
     
     // 拓扑驱动生成：联想推理产出的概念
-    if (dsys && dsys->master && dsys->master->sub_topo_count > 0) {
+    // 优先走模板生成链路，master_generate_response 作为兜底
+    {
         int total_nodes = 0;
         for (int t = 0; t < dsys->master->sub_topo_count; t++) {
             SubTopology* sub = dsys->master->sub_topologies[t];
             if (sub && sub->net) total_nodes += sub->net->node_count;
         }
-        if (total_nodes >= 10) {
-            char* topo_response = master_generate_response(
-                dsys->master, input, max_len);
-            if (topo_response && strlen(topo_response) > 0) {
-                char* safe = strdup(topo_response);
-                free(topo_response);
-                return safe;
-            }
-            if (topo_response) free(topo_response);
+        // 启用模板跨拓扑投票（使 use_template_voting 标志生效）
+        if (dsys->master->use_template_voting == 0 && total_nodes >= 100) {
+            dsys->master->use_template_voting = 1;
         }
     }
     
@@ -303,7 +298,17 @@ char* dialog_generate(DialogReasoning* reasoning, const char* input,
 
         if (global_visited) free(global_visited);
 
-        // 兜底：走边没走出结果，输出最高激活概念
+        // 兜底1：模板生成无输出，回退到 master_generate_response
+        if (pos == 0 && dsys && dsys->master) {
+            char* topo_response = master_generate_response(
+                dsys->master, input, max_len);
+            if (topo_response && strlen(topo_response) > 0) {
+                snprintf(response, max_len, "%s", topo_response);
+                pos = (int)strlen(response);
+            }
+            if (topo_response) free(topo_response);
+        }
+        // 兜底2：走边没走出结果，输出最高激活概念
         if (pos == 0 && reasoning->assoc_count > 0) {
             snprintf(response, max_len, "%s", reasoning->associations[0].concept);
         }
