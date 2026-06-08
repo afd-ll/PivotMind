@@ -151,6 +151,7 @@ typedef struct {
     float last_knowledge_quality;
     CognitiveController* controller;
     BpttLearner* bptt;               // RNN BPTT 在线学习器
+    void* auto_state;                  // AutonomicState* 对话中的自主刷盘状态
 
     // 预测误差反馈环
     int last_path_node_ids[PM_PATH_TRACK];

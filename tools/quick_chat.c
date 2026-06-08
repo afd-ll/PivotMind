@@ -46,9 +46,14 @@ int main(int argc, char** argv) {
     if (!ds) { printf("× 失败\n"); return 1; }
 
     printf("生成回答...\n");
+    fflush(stdout);
     DialogReasoning* reasoning = NULL;
+    fprintf(stderr, ">>> calling dialog_process...\n"); fflush(stderr);
     char* resp = dialog_process(ds, question, &reasoning);
+    fprintf(stderr, ">>> resp = %p (%s)\n", (void*)resp, resp ? resp : "NULL"); fflush(stderr);
+    fprintf(stderr, ">>> AI: %s\n", resp ? resp : "(无回答)"); fflush(stderr);
     printf("\n>>> AI: %s\n\n", resp ? resp : "(空)");
+    fflush(stdout);
     if (reasoning) {
         printf("推理: 深度=%d 激活=%.2f 质量=%.2f 联想=%d 链长=%d\n",
                reasoning->path_depth, reasoning->avg_activation,
