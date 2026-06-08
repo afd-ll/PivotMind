@@ -24,6 +24,7 @@
 #include "feature_io.h"
 #include "cross_edge_io.h"
 #include "template_builder.h"
+#include "path_encoding.h"
 #include "node_hash.h"
 #include "dict_loader.h"
 #include "pivotmind_version.h"
@@ -483,6 +484,59 @@ int main(int argc, char* argv[]) {
 
         // 清理训练期间延迟释放的扩容旧数组
         huarong_net_cleanup_retired_batch(master);
+
+        // 路径模板: 贪心游走填充频率表 + 自动构建模板
+        {
+            SubTopology* vocab = master_get_sub_topology_by_type(master, TOPO_VOCABULARY);
+            if (vocab && vocab->net && vocab->net->node_count > 0) {
+                /* 贪心游走: 从活跃节点出发收集路径模式 */
+                int walked = 0;
+                int max_walks = vocab->net->node_count < 3000 ? vocab->net->node_count : 3000;
+                int path_buf[16];
+                float score_buf[16];
+                unsigned char visited[16384] = {0};
+                for (int n = 0; n < max_walks && n < vocab->net->node_count; n++) {
+                    if (!vocab->net->nodes[n]) continue;
+                    visited[vocab->net->nodes[n]->node_id & 16383] = 0;
+                }
+                for (int n = 0; n < max_walks && n < vocab->net->node_count; n++) {
+                    ReasoningNode* start = vocab->net->nodes[n];
+                    if (!start || start->connection_count < 1) continue;
+                    int len = topology_walk_greedy(vocab, start->node_id,
+                        path_buf, score_buf, 6,
+                        visited, 0.3f, master, NULL, NULL);
+                    if (len > 0) walked++;
+                }
+                if (walked > 0) printf("  → 贪心游走: %d 条路径\n", walked);
+                int built = template_auto_build(master, 500, 100);
+                if (built > 0) printf("  → 模板构建: %d 个新模板\n", built);
+
+                /* 词素合并: 扫描高置信相邻单字对，自动创建词级节点 */
+                int merged = 0;
+                DictTable* dict = (DictTable*)master->ext_dict;
+                for (int n = 0; n < vocab->net->node_count && merged < 200; n++) {
+                    ReasoningNode* node = vocab->net->nodes[n];
+                    if (!node || !node->concept || !node->connection_confidences) continue;
+                    int clen = (int)strlen(node->concept);
+                    if (clen < 2 || clen > 6) continue;  /* 只处理2-6字节的单字 */
+                    for (int c = 0; c < node->connection_count; c++) {
+                        if (node->connection_confidences[c] < 0.75f) continue;
+                        ReasoningNode* nb = node->connections[c];
+                        if (!nb || !nb->concept || nb->node_id <= node->node_id) continue;
+                        int nblen = (int)strlen(nb->concept);
+                        if (nblen < 2 || nblen > 6) continue;
+                        /* 合并: node->concept + nb->concept */
+                        char merged_word[64];
+                        snprintf(merged_word, 63, "%s%s", node->concept, nb->concept);
+                        if (dict && !dict_table_lookup(dict, merged_word)) {
+                            dict_table_insert(dict, merged_word, 10, "n");
+                            merged++;
+                        }
+                    }
+                }
+                if (merged > 0) printf("  → 词素合并: %d 个新词\n", merged);
+            }
+        }
 
         epoch_pairs = omp_processed;
         total_pairs += epoch_pairs;

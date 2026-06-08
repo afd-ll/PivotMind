@@ -3145,6 +3145,18 @@ int master_load_state(MasterTopology* master, const char* file_path) {
                 for (int p = 0; p < NODE_FEATURE_DIM; p++) {
                     if (fread(&skip, sizeof(float), 1, fp) != 1) break;
                 }
+                /* FNV-1a 种子: 从概念文本生成特征（与 create_reasoning_node 一致） */
+                unsigned h = 2166136261u;
+                for (const char* cp = concept; *cp; cp++) {
+                    h ^= (unsigned char)*cp; h *= 16777619u;
+                }
+                for (int i = 0; i < NODE_FEATURE_DIM; i++) {
+                    unsigned h2 = h ^ (unsigned)(i * 0x9E3779B9u);
+                    h2 = (h2 ^ (h2 >> 16)) * 0x85EBCA6Bu;
+                    h2 = (h2 ^ (h2 >> 13)) * 0xC2B2AE35u;
+                    h2 = h2 ^ (h2 >> 16);
+                    feat_buf[i] = ((float)(h2 & 0xFFFF) / 32768.0f - 1.0f) * 0.1f;
+                }
             }
             has_v4_features = 1;
         }

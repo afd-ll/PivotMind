@@ -126,17 +126,17 @@ DigitalLifeSystem* digital_life_create() {
     }
     
     // 添加子拓扑（扩容以支持书籍数量）
-    master_add_sub_topology(sys->topology, TOPO_VOCABULARY, "词汇拓扑", 6000, 10);
-    master_add_sub_topology(sys->topology, TOPO_SEMANTIC, "语义拓扑", 2000, 9);
-    master_add_sub_topology(sys->topology, TOPO_EMOTION, "情绪拓扑", 500, 8);
-    master_add_sub_topology(sys->topology, TOPO_SYNTAX, "语法拓扑", 500, 7);
-    master_add_sub_topology(sys->topology, TOPO_CONTEXT, "上下文拓扑", 500, 6);
-    master_add_sub_topology(sys->topology, TOPO_DOMAIN, "领域拓扑", 500, 5);
-    master_add_sub_topology(sys->topology, TOPO_PRAGMA, "语用拓扑", 500, 4);
-    master_add_sub_topology(sys->topology, TOPO_CULTURE, "文化拓扑", 500, 3);
-    master_add_sub_topology(sys->topology, TOPO_CONCEPT, "概念拓扑", 6000, 9);
-    master_add_sub_topology(sys->topology, TOPO_MASTER, "主拓扑", 100, 0);   /* 占位：保证 TOPO_TEMPLATE 获得正确的 topo_id=10 */
-    master_add_sub_topology(sys->topology, TOPO_TEMPLATE, "模板拓扑", 2000, 8);
+    master_add_sub_topology(sys->topology, TOPO_VOCABULARY, "词汇拓扑", 30000, 10);
+    master_add_sub_topology(sys->topology, TOPO_SEMANTIC, "语义拓扑", 12000, 9);
+    master_add_sub_topology(sys->topology, TOPO_EMOTION, "情绪拓扑", 4000, 8);
+    master_add_sub_topology(sys->topology, TOPO_SYNTAX, "语法拓扑", 1000, 7);
+    master_add_sub_topology(sys->topology, TOPO_CONTEXT, "上下文拓扑", 1000, 6);
+    master_add_sub_topology(sys->topology, TOPO_DOMAIN, "领域拓扑", 1000, 5);
+    master_add_sub_topology(sys->topology, TOPO_PRAGMA, "语用拓扑", 1000, 4);
+    master_add_sub_topology(sys->topology, TOPO_CULTURE, "文化拓扑", 1000, 3);
+    master_add_sub_topology(sys->topology, TOPO_CONCEPT, "概念拓扑", 12000, 9);
+    master_add_sub_topology(sys->topology, TOPO_MASTER, "主拓扑", 100, 0);
+    master_add_sub_topology(sys->topology, TOPO_TEMPLATE, "模板拓扑", 4000, 8);
     
     // 添加初始知识（可以通过训练扩展）
     printf("     添加初始知识...\n");
