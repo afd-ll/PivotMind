@@ -74,17 +74,21 @@ char* dialog_generate(DialogReasoning* reasoning, const char* input,
     }
     float* anchor_ptr = anchor_valid ? query_anchor : NULL;
     
-    // 拓扑驱动生成：联想推理产出的概念
-    // 优先走模板生成链路，master_generate_response 作为兜底
-    {
+    // 拓扑驱动生成：优先 master_generate_response
+    if (dsys && dsys->master && dsys->master->sub_topo_count > 0) {
         int total_nodes = 0;
-        for (int t = 0; t < dsys->master->sub_topo_count; t++) {
-            SubTopology* sub = dsys->master->sub_topologies[t];
-            if (sub && sub->net) total_nodes += sub->net->node_count;
-        }
-        // 启用模板跨拓扑投票（使 use_template_voting 标志生效）
-        if (dsys->master->use_template_voting == 0 && total_nodes >= 100) {
-            dsys->master->use_template_voting = 1;
+        for (int t = 0; t < dsys->master->sub_topo_count; t++)
+            if (dsys->master->sub_topologies[t] && dsys->master->sub_topologies[t]->net)
+                total_nodes += dsys->master->sub_topologies[t]->net->node_count;
+        if (total_nodes >= 10) {
+            char* topo_response = master_generate_response(dsys->master, input, max_len);
+            if (topo_response && strlen(topo_response) > 0) {
+                // 启用模板投票（为后续路径做铺垫）
+                dsys->master->use_template_voting = 1;
+                fprintf(stderr, "[gen] master_generate_response: '%s'\n", topo_response);
+                return topo_response;
+            }
+            free(topo_response);
         }
     }
     
@@ -378,6 +382,7 @@ char* dialog_generate(DialogReasoning* reasoning, const char* input,
             snprintf(response, max_len, "我正在思考这个问题...");
         }
 
+        fprintf(stderr, "[dialog_generate] returning: '%s' (len=%d)\n", response, (int)strlen(response));
         return response;
     }
     
