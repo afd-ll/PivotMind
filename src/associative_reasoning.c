@@ -424,3 +424,22 @@ void print_associations(AssociativeEngine* engine) {
     
     printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
 }
+
+/* ================================================================
+ *  梦境引擎接口：暴露联想结果供 dream_engine 使用
+ * ================================================================ */
+
+int assoc_get_count(AssociativeEngine* engine) {
+    return engine ? engine->assoc_count : 0;
+}
+
+const char* assoc_get_concept(AssociativeEngine* engine, int index,
+                              float* activation_out, int* topo_type_out,
+                              int* hop_count_out) {
+    if (!engine || index < 0 || index >= engine->assoc_count) return NULL;
+    Association* a = &engine->associations[index];
+    if (activation_out) *activation_out = a->activation;
+    if (topo_type_out)  *topo_type_out  = a->topo_type;
+    if (hop_count_out)  *hop_count_out  = a->hop_count;
+    return a->concept;
+}

@@ -2,8 +2,8 @@
  * @file background_clock.c
  * @brief 后台时钟循环实现 �?数字生命的心�?
  *
- * 独立 pthread 线程，每�?tick 一次，在后台维持系统的时间连续性�?
- * 四个核心行为：激活衰减、自发激活、状态漂移、记忆巩固�?
+ * 独立 pthread 线程，每秒 tick 一次，在后台维持系统的时间连续性。
+ * 五个核心行为：激活衰减、自发激活、状态漂移、记忆巩固、梦境引擎。
  *
  * 线程安全策略�?
  *   - 激活衰�?自发激活：�?MasterTopology.rwlock 读锁
@@ -13,6 +13,7 @@
 
 #include "background_clock.h"
 #include "huarong_topology.h"
+#include "dream_engine.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -61,14 +62,17 @@ static void decay_sub_topology(SubTopology* sub, float decay_rate, float floor_v
     for (int i = 0; i < net->node_count; i++) {
         ReasoningNode* node = net->nodes[i];
         if (!node) continue;
+        int lock_idx = node->node_id & 255;
+        pthread_mutex_lock(&net->node_locks[lock_idx]);
         if (node->activation <= floor_value) {
             node->activation = 0.0f;
-            continue;
+        } else {
+            node->activation *= decay_rate;
+            if (node->activation < floor_value) {
+                node->activation = 0.0f;
+            }
         }
-        node->activation *= decay_rate;
-        if (node->activation < floor_value) {
-            node->activation = 0.0f;
-        }
+        pthread_mutex_unlock(&net->node_locks[lock_idx]);
     }
 }
 
@@ -98,9 +102,12 @@ static void spontaneous_activate(BackgroundClock* clock) {
         ReasoningNode* node = sub->net->nodes[node_idx];
         if (!node) continue;
 
+        int lock_idx = node->node_id & 255;
+        pthread_mutex_lock(&sub->net->node_locks[lock_idx]);
         float added = clock->spontaneous_strength * (0.5f + local_rand(&clock->_rng_seed) / 65535.0f);
         node->activation += added;
         if (node->activation > 1.0f) node->activation = 1.0f;
+        pthread_mutex_unlock(&sub->net->node_locks[lock_idx]);
     }
 }
 
@@ -230,12 +237,23 @@ static void* clock_loop(void* arg) {
         drift_cognitive_state(clock);
 
         // ════════════════════════════════════════════════
-        // 阶段 4：记忆巩固（�?N tick�?
-        // memory_consolidate 内部�?mutex
+        // 阶段 4：记忆巩固（每 N tick）
+        // memory_consolidate 内部有 mutex
         // ════════════════════════════════════════════════
         if (clock->memory &&
             clock->tick_count % clock->consolidate_every_n_ticks == 0) {
             memory_consolidate(clock->memory);
+        }
+
+        // ════════════════════════════════════════════════
+        // 阶段 5：梦境引擎（每 60 tick ≈ 60秒）
+        // 随机游走 + 弱边强化 + 跨拓扑联想
+        // TODO: 加 idle 检测，仅在无用户交互时触发
+        // ════════════════════════════════════════════════
+        if (clock->tick_count % 60 == 0) {
+            DreamConfig dream_cfg = DREAM_DEFAULT_CONFIG;
+            dream_cfg.verbose = clock->verbose;
+            dream_cycle(clock->master, clock->memory, &dream_cfg);
         }
     }
 

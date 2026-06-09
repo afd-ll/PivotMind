@@ -28,4 +28,10 @@ char* generate_from_associations(AssociativeEngine* engine, int max_len,
 // 打印联想路径
 void print_associations(AssociativeEngine* engine);
 
+// 梦境引擎接口：获取联想结果
+int assoc_get_count(AssociativeEngine* engine);
+const char* assoc_get_concept(AssociativeEngine* engine, int index,
+                              float* activation_out, int* topo_type_out,
+                              int* hop_count_out);
+
 #endif

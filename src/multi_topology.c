@@ -8,6 +8,7 @@
 #include "common.h"
 #include "thread_pool.h"
 #include "path_encoding.h"
+#include "dict_loader.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -115,6 +116,7 @@ MasterTopology* master_topology_create(int max_sub_topos) {
     master->freq_table = path_freq_table_create(PATH_TRIPLET_TABLE_SIZE);
     master->use_template_voting = 0;
     master->template_decay_round = 0;
+    master->last_context_node = -1;
 
     pthread_rwlock_init(&master->rwlock, NULL);
 
@@ -1018,9 +1020,12 @@ static void topo_propagate_worker(void* arg) {
             if (!target) continue;
             float transferred = node->activation * node->connection_weights[c];
             if (transferred > 0.1f) {
-                // 线程安全：每个拓扑只在一个线程内处理
+                /* 节点级锁：每个拓扑独占一线程，但后台时钟可能并发写同一节点 */
+                int tgt_lock = target->node_id & 255;
+                pthread_mutex_lock(&sub->net->node_locks[tgt_lock]);
                 target->activation += transferred;
                 if (target->activation > 1.0f) target->activation = 1.0f;
+                pthread_mutex_unlock(&sub->net->node_locks[tgt_lock]);
                 count++;
             }
         }
@@ -1140,7 +1145,51 @@ char* master_generate_response(MasterTopology* master,
     
     master->total_inferences++;
     
-    // ==================== UTF-8分词 ====================
+    // ==================== 词典分词优先 ====================
+    if (master->ext_dict) {
+        DictTable* dict = (DictTable*)master->ext_dict;
+        char dict_words[100][64] = {{0}};
+        char dict_pos[100][8] = {{0}};
+        int wc = dict_segment_text(dict, input_text, dict_words, dict_pos, 100);
+        fprintf(stderr, "[dict] segmented '%s' -> %d words\n", input_text, wc);
+        if (wc > 0) {
+            SubTopology* vocab_sub = NULL;
+            for (int t = 0; t < master->sub_topo_count; t++) {
+                if (master->sub_topologies[t] && master->sub_topologies[t]->type == TOPO_VOCABULARY)
+                { vocab_sub = master->sub_topologies[t]; break; }
+            }
+            if (vocab_sub && vocab_sub->net && vocab_sub->node_hash) {
+                char* response = (char*)calloc(max_output_len, 1);
+                int pos = 0;
+                int found = 0;
+                for (int i = 0; i < wc && pos < max_output_len - 10; i++) {
+                    ReasoningNode* node = node_hash_find(vocab_sub->node_hash, dict_words[i]);
+                    if (node && node->concept) {
+                        if (pos > 0) pos += snprintf(response + pos, max_output_len - pos, "，");
+                        pos += snprintf(response + pos, max_output_len - pos, "%s", node->concept);
+                        found = 1;
+                        for (int c = 0; c < node->connection_count && c < 3 && pos < max_output_len - 20; c++) {
+                            if (node->connection_confidences && node->connection_confidences[c] > 0.6f
+                                && node->connections[c] && node->connections[c]->concept) {
+                                pos += snprintf(response + pos, max_output_len - pos,
+                                    " %s", node->connections[c]->concept);
+                            }
+                        }
+                    }
+                }
+                if (found) return response;
+                /* 无匹配词节点 → 原样输出分词结果 */
+                for (int i = 0; i < wc && pos < max_output_len - 10; i++) {
+                    if (pos > 0) pos += snprintf(response + pos, max_output_len - pos, " ");
+                    pos += snprintf(response + pos, max_output_len - pos, "%s", dict_words[i]);
+                }
+                if (pos > 0) return response;
+                free(response);
+            }
+        }
+    }
+    
+    // ==================== UTF-8字符分词兜底 ====================
     char* tokens[100];
     int token_count = utf8_tokenize(input_text, tokens, 100);
     
@@ -1183,7 +1232,30 @@ char* master_generate_response(MasterTopology* master,
             int node_count = vocab_sub->net->node_count;
             int bitmap_size = (node_count + 7) / 8;
             unsigned char* global_visited = (unsigned char*)calloc(bitmap_size, 1);
-            
+
+            // 上下文拓扑 → 词汇激活传播：当前活跃上下文增强相关词汇节点
+            {
+                SubTopology* ctx = master_get_sub_topology_by_type(master, TOPO_CONTEXT);
+                if (ctx && ctx->net && ctx->node_hash && master->last_context_node >= 0
+                    && master->last_context_node < ctx->net->node_count) {
+                    ReasoningNode* ctx_node = ctx->net->nodes[master->last_context_node];
+                    if (ctx_node && ctx_node->activation > 0.1f) {
+                        float boost = ctx_node->activation * 0.25f;
+                        for (int si = 0; si < start_count; si++) {
+                            int vid = start_nodes[si];
+                            if (vid < 0 || vid >= node_count) continue;
+                            ReasoningNode* vn = vocab_sub->net->nodes[vid];
+                            if (!vn) continue;
+                            int lock_idx = vn->node_id & 255;
+                            pthread_mutex_lock(&vocab_sub->net->node_locks[lock_idx]);
+                            vn->activation += boost;
+                            if (vn->activation > 1.0f) vn->activation = 1.0f;
+                            pthread_mutex_unlock(&vocab_sub->net->node_locks[lock_idx]);
+                        }
+                    }
+                }
+            }
+
             // 从每个起点走边贪心
             for (int si = 0; si < start_count && pos < max_output_len - 10; si++) {
                 int start_id = start_nodes[si];
@@ -1200,13 +1272,46 @@ char* master_generate_response(MasterTopology* master,
                     path_nodes, path_scores,
                     20, global_visited, 1.0f, master, NULL, NULL);
                 
-                // 从路径[1]开始（路径[0]是起点本身），拼接输出
-                for (int p = 1; p < path_len && pos < max_output_len - 10; p++) {
-                    int nid = path_nodes[p];
-                    if (nid < 0 || nid >= node_count) continue;
-                    ReasoningNode* node = vocab_sub->net->nodes[nid];
-                    if (!node || !node->concept) continue;
-                    pos += snprintf(response + pos, max_output_len - pos, "%s", node->concept);
+                // 模板增强输出：起点概念 + 模板连接词 + 后续概念
+                {
+                    // 先输出起点概念（路径[0]）
+                    if (path_len > 0) {
+                        int sid = path_nodes[0];
+                        if (sid >= 0 && sid < node_count) {
+                            ReasoningNode* sn = vocab_sub->net->nodes[sid];
+                            if (sn && sn->concept)
+                                pos += snprintf(response + pos, max_output_len - pos, "%s", sn->concept);
+                        }
+                    }
+                    // 从路径[1]开始，用模板连接词衔接
+                    for (int p = 1; p < path_len && pos < max_output_len - 10; p++) {
+                        int nid = path_nodes[p];
+                        if (nid < 0 || nid >= node_count) continue;
+                        ReasoningNode* node = vocab_sub->net->nodes[nid];
+                        if (!node || !node->concept) continue;
+
+                        // 模板衔接：查找 prev → cur 的语法连接词
+                        const char* connector = NULL;
+                        if (master->use_template_voting) {
+                            int prev_nid = path_nodes[p - 1];
+                            if (prev_nid >= 0 && prev_nid < node_count) {
+                                int tpl_id = master_find_template_for_pair_nolock(
+                                    master, 0, prev_nid, nid);
+                                if (tpl_id >= 0)
+                                    connector = template_get_connector(master, tpl_id, 0);
+                                // 内置 POS 映射兜底
+                                if (!connector || !connector[0]) {
+                                    ReasoningNode* pn = vocab_sub->net->nodes[prev_nid];
+                                    POSTag pa = pn ? pos_tag_chinese(pn->concept) : POS_UNKNOWN;
+                                    POSTag pb = pos_tag_chinese(node->concept);
+                                    connector = pos_connector_map((int)pa, (int)pb);
+                                }
+                            }
+                        }
+                        if (connector && connector[0])
+                            pos += snprintf(response + pos, max_output_len - pos, "%s", connector);
+                        pos += snprintf(response + pos, max_output_len - pos, "%s", node->concept);
+                    }
                 }
             }
             
@@ -1228,7 +1333,7 @@ char* master_generate_response(MasterTopology* master,
         free(tokens[i]);
     }
     
-    // 默认回复
+    // 默认回复（所有尝试均失败）
     char* result = (char*)malloc(max_output_len);
     if (result) {
         snprintf(result, max_output_len, "我理解了，正在学习这个概念。");
@@ -1939,18 +2044,28 @@ int competitive_queue_generate(
             if (nid < 0 || nid >= node_count) continue;
             if (visited[nid / 8] & (unsigned char)(1 << (nid % 8))) continue;
             float boost = winner->connection_weights[c] * CQ_BROADCAST_GAIN * winner->activation;
+            int nbr_lock = neighbor->node_id & 255;
+            pthread_mutex_lock(&net->node_locks[nbr_lock]);
             if (neighbor->activation < boost) neighbor->activation = boost;
+            pthread_mutex_unlock(&net->node_locks[nbr_lock]);
         }
 
         // ---- 7. 胜者抑制：压低自身避免重复 ----
-        winner->activation *= CQ_SUPPRESS_FACTOR;
+        {   int w_lock = winner->node_id & 255;
+            pthread_mutex_lock(&net->node_locks[w_lock]);
+            winner->activation *= CQ_SUPPRESS_FACTOR;
+            pthread_mutex_unlock(&net->node_locks[w_lock]);
+        }
 
         // ---- 8. 全局衰减 ----
         // 原 0.7f 衰减太快导致一轮耗尽候选 → 改为 0.85f，保留更多激活信号
         for (int i = 0; i < node_count; i++) {
             if (net->nodes[i]) {
+                int d_lock = net->nodes[i]->node_id & 255;
+                pthread_mutex_lock(&net->node_locks[d_lock]);
                 net->nodes[i]->activation *= 0.85f;
                 if (net->nodes[i]->activation < 0.01f) net->nodes[i]->activation = 0.0f;
+                pthread_mutex_unlock(&net->node_locks[d_lock]);
             }
         }
 
@@ -1964,9 +2079,14 @@ int competitive_queue_generate(
         path_len++;
     }
 
-    // ---- 恢复原始激活值 ----
+    // ---- 恢复原始激活值（持锁写入，防止后台时钟竞态） ----
     for (int i = 0; i < node_count; i++) {
-        if (net->nodes[i]) net->nodes[i]->activation = saved_activations[i];
+        if (net->nodes[i]) {
+            int r_lock = net->nodes[i]->node_id & 255;
+            pthread_mutex_lock(&net->node_locks[r_lock]);
+            net->nodes[i]->activation = saved_activations[i];
+            pthread_mutex_unlock(&net->node_locks[r_lock]);
+        }
     }
 
     free(candidates);

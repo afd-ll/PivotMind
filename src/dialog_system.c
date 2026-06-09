@@ -136,8 +136,12 @@ static void dialog_topo_worker(void* arg) {
             }
 
             if (new_activation > ACTIVATION_THRESHOLD) {
+                /* 节点级锁：保护 activation 字段防止与后台时钟竞态 */
+                int conn_lock = connected->node_id & 255;
+                pthread_mutex_lock(&sub->net->node_locks[conn_lock]);
                 if (new_activation > connected->activation)
                     connected->activation = new_activation;
+                pthread_mutex_unlock(&sub->net->node_locks[conn_lock]);
 
                 pthread_mutex_lock(task->assoc_mutex);
                 dialog_add_association(reasoning,
@@ -1158,6 +1162,190 @@ void dialog_system_destroy(DialogSystem* sys) {
     free(sys);
 }
 
+#define CTX_MAX_INSTANCES  16    /* 上下文拓扑最大实例节点数 */
+#define CTX_EVICT_HEAT     0.02f /* 实例节点热度低于此值可被淘汰 */
+
+/** 意图 → 上下文种子节点名映射 */
+static const char* context_seed_for_intent(DialogIntent intent) {
+    switch (intent) {
+        case INTENT_QUERY:   return "Q&A";
+        case INTENT_EXPLAIN: return "EXPLAIN";
+        case INTENT_HOWTO:   return "HOWTO";
+        case INTENT_CHAT:    return "CHAT";
+        default:             return "CHAT";
+    }
+}
+
+/**
+ * 上下文实例节点管理 - 话题追踪 + 整理
+ *
+ * 设计：
+ *   - 种子节点（4个固定）：Q&A/EXPLAIN/CHAT/HOWTO - 类型锚点
+ *   - 实例节点（最大16个）：每话题创建一个，命名 "TYPE#N|话题摘要"
+ *   - 实例→种子：双向连接（属于该类型）
+ *   - 实例→实例：时间线串联
+ *   - 整理策略：LRU淘汰 + 热度衰减 + 同话题复用
+ */
+static void dialog_activate_context(MasterTopology* master, DialogIntent intent) {
+    SubTopology* ctx = master_get_sub_topology_by_type(master, TOPO_CONTEXT);
+    if (!ctx || !ctx->net || !ctx->node_hash) return;
+
+    const char* type_name = context_seed_for_intent(intent);
+
+    /* 1. 确保种子节点存在 */
+    ReasoningNode* seed = node_hash_find(ctx->node_hash, type_name);
+    if (!seed) {
+        seed = huarong_net_add_node(ctx->net, type_name, NULL, 0);
+        if (seed) { seed->confidence = 0.7f; node_hash_add(ctx->node_hash, seed); }
+    }
+    if (!seed) return;
+    seed->activation = 0.6f;
+    seed->heat = 1.0f;  /* 种子节点热度永不清除 */
+
+    /* 2. 提取当前话题摘要（词汇拓扑 Top2 高激活概念） */
+    char topic[128] = "";
+    SubTopology* vocab = master_get_sub_topology_by_type(master, TOPO_VOCABULARY);
+    if (vocab && vocab->net) {
+        int found = 0, pos = 0;
+        for (int i = 0; i < vocab->net->node_count && found < 2; i++) {
+            ReasoningNode* vn = vocab->net->nodes[i];
+            if (!vn || !vn->concept || vn->activation < 0.5f) continue;
+            if (found > 0 && pos < (int)sizeof(topic) - 1) topic[pos++] = ',';
+            int n = snprintf(topic + pos, sizeof(topic) - pos, "%s", vn->concept);
+            if (n > 0) pos += n;
+            found++;
+        }
+    }
+    if (!topic[0]) snprintf(topic, sizeof(topic), "?");
+
+    /* 3. 查找是否已有同类型 + 同话题的实例节点（复用） */
+    ReasoningNode* inst = NULL;
+    for (int i = 0; i < ctx->net->node_count; i++) {
+        ReasoningNode* n = ctx->net->nodes[i];
+        if (!n || !n->concept || n == seed) continue;
+        /* 同类型且话题摘要匹配 → 复用 */
+        if (strstr(n->concept, type_name) && strstr(n->concept, topic)) {
+            inst = n;
+            break;
+        }
+    }
+
+    /* 4. 无匹配实例 → 创建新实例节点 */
+    if (!inst) {
+        /* 先检查容量：超过上限则淘汰最冷实例 */
+        int inst_count = 0;
+        for (int i = 0; i < ctx->net->node_count; i++) {
+            ReasoningNode* n = ctx->net->nodes[i];
+            if (n && n->concept && n != seed && strchr(n->concept, '#')
+                && n->heat > 0.0f) inst_count++;  /* 不计数已淘汰的死节点 */
+        }
+        if (inst_count >= CTX_MAX_INSTANCES) {
+            /* LRU: 淘汰热度最低的实例节点 */
+            int evict_id = -1;
+            float min_heat = 2.0f;
+            for (int i = 0; i < ctx->net->node_count; i++) {
+                ReasoningNode* n = ctx->net->nodes[i];
+                if (!n || !n->concept || n == seed || !strchr(n->concept, '#')
+                    || n->heat <= 0.0f) continue;  /* 跳过已淘汰的死节点 */
+                if (n->heat < min_heat) { min_heat = n->heat; evict_id = n->node_id; }
+            }
+            if (evict_id >= 0 && min_heat < CTX_EVICT_HEAT) {
+                ReasoningNode* evict = ctx->net->nodes[evict_id];
+                if (evict && evict->concept) {
+                    node_hash_remove(ctx->node_hash, evict->concept);
+                    evict->activation = 0.0f;
+                    evict->heat = 0.0f;
+                }
+            }
+        }
+
+        /* 创建实例节点名 */
+        static int ctx_round = 0;
+        ctx_round++;
+        char name[256];
+        snprintf(name, sizeof(name), "%s#%d|%s", type_name, ctx_round, topic);
+        inst = huarong_net_add_node(ctx->net, name, NULL, 0);
+        if (!inst) return;
+        inst->confidence = 0.5f;
+        node_hash_add(ctx->node_hash, inst);
+
+        /* 实例→种子：双向连接 */
+        int already_seed = 0;
+        for (int c = 0; c < inst->connection_count; c++)
+            if (inst->connections[c] == seed) { already_seed = 1; break; }
+        if (!already_seed) {
+            huarong_net_add_connection(ctx->net, seed->node_id, inst->node_id, 0.7f);
+            huarong_net_add_connection(ctx->net, inst->node_id, seed->node_id, 0.7f);
+        }
+
+        /* 时间线串联：上一实例 → 当前实例 */
+        if (master->last_context_node >= 0 &&
+            master->last_context_node < ctx->net->node_count &&
+            master->last_context_node != inst->node_id) {
+            ReasoningNode* prev = ctx->net->nodes[master->last_context_node];
+            if (prev && prev != seed && prev->heat > 0.0f) {
+                int already = 0;
+                for (int c = 0; c < inst->connection_count; c++)
+                    if (inst->connections[c] == prev) { already = 1; break; }
+                if (!already) {
+                    huarong_net_add_connection(ctx->net, prev->node_id, inst->node_id, 0.5f);
+                    huarong_net_add_connection(ctx->net, inst->node_id, prev->node_id, 0.5f);
+                }
+            }
+        }
+    }
+
+    /* 5. 激活实例节点 */
+    inst->activation = 0.85f;
+    inst->heat = (inst->heat < 0.05f) ? 0.5f : fminf(1.0f, inst->heat + 0.1f);
+    inst->selection_count++;
+    master_activate_node(master, ctx->topo_id, inst->node_id, 0.85f);
+    master->last_context_node = inst->node_id;
+
+    /* 6. 跨拓扑连接：实例 → 词汇（上限5） */
+    if (vocab && vocab->net && master->cross_link_count < 50000) {
+        int linked = 0;
+        for (int i = 0; i < vocab->net->node_count && linked < 5; i++) {
+            ReasoningNode* vn = vocab->net->nodes[i];
+            if (!vn || vn->activation < 0.3f) continue;
+            if (!cross_link_exists(master, ctx->topo_id, inst->node_id,
+                                   vocab->topo_id, vn->node_id)) {
+                master_add_cross_link(master, ctx->topo_id, inst->node_id,
+                                     vocab->topo_id, vn->node_id, 0.45f, "ctx-vocab");
+                linked++;
+            }
+        }
+    }
+
+    /* 7. 跨拓扑连接：实例 → 语义（上限3） */
+    SubTopology* semantic = master_get_sub_topology_by_type(master, TOPO_SEMANTIC);
+    if (semantic && semantic->net && master->cross_link_count < 50000) {
+        int linked = 0;
+        for (int i = 0; i < semantic->net->node_count && linked < 3; i++) {
+            ReasoningNode* sn = semantic->net->nodes[i];
+            if (!sn || sn->activation < 0.2f) continue;
+            if (!cross_link_exists(master, ctx->topo_id, inst->node_id,
+                                   semantic->topo_id, sn->node_id)) {
+                master_add_cross_link(master, ctx->topo_id, inst->node_id,
+                                     semantic->topo_id, sn->node_id, 0.40f, "ctx-semantic");
+                linked++;
+            }
+        }
+    }
+
+    /* 8. 全局衰减：所有实例节点热度衰减（模拟遗忘） */
+    for (int i = 0; i < ctx->net->node_count; i++) {
+        ReasoningNode* n = ctx->net->nodes[i];
+        if (!n || n == seed || !n->concept || !strchr(n->concept, '#')) continue;
+        n->heat *= 0.92f;
+        if (n->activation > 0.01f) n->activation *= 0.85f;
+    }
+}
+
+
+
+// ==================== 对话系统核心 ====================
+
 char* dialog_process(DialogSystem* sys, const char* user_input, DialogReasoning** out_reasoning) {
     if (!sys || !user_input) return strdup("系统错误...");
 
@@ -1586,24 +1774,25 @@ char* dialog_process(DialogSystem* sys, const char* user_input, DialogReasoning*
                 }
             }
             
-            // 存入上下文拓扑：理解用户输入的场景
-            SubTopology* context_sub = master_get_sub_topology_by_type(sys->master, TOPO_CONTEXT);
-            if (context_sub && context_sub->net) {
-                char context_key[512];
-                snprintf(context_key, sizeof(context_key), "用户:%s", user_input);
-                huarong_net_add_node(context_sub->net, context_key, NULL, 0);
+            // 上下文拓扑激活：意图→种子节点→跨拓扑连接→话题追踪
+            if (sys->master) {
+                DialogIntent intent = (sem && sem->intent.intent >= INTENT_QUERY)
+                    ? sem->intent.intent : INTENT_CHAT;
+                dialog_activate_context(sys->master, intent);
+
+                /* 定期修剪跨拓扑连接表：每 20 轮清理低质量连接 */
+                if (sys->turn_count > 0 && sys->turn_count % 20 == 0) {
+                    int pruned = master_prune_cross_links(
+                        sys->master, 0.15f, 3);
+                    if (pruned > 0) {
+                        fprintf(stderr, "[上下文清理] 第%d轮 修剪%d条低质量跨拓扑连接\n",
+                                sys->turn_count, pruned);
+                    }
+                }
             }
         }
         if (sys->master && response) {
             auto_learn_concepts(sys->master, response, sys->str_pool);
-            
-            // 存入上下文拓扑：理解AI回复的场景
-            SubTopology* context_sub = master_get_sub_topology_by_type(sys->master, TOPO_CONTEXT);
-            if (context_sub && context_sub->net) {
-                char context_key[512];
-                snprintf(context_key, sizeof(context_key), "AI:%s", response);
-                huarong_net_add_node(context_sub->net, context_key, NULL, 0);
-            }
         }
     }
 
