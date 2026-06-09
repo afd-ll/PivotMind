@@ -28,6 +28,7 @@
 #include "autonomic_learner.h"
 #include "active_learner.h"
 #include "cognitive_controller.h"
+#include "web_search.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -44,6 +45,7 @@
 
 // 前向声明
 static const char* get_confidence_level_name(CausalConfidenceLevel level);
+static WebResult* dialog_search_concept(const char* concept);
 
 // ==================== 推理常量 ====================
 
@@ -651,7 +653,7 @@ DialogReasoning* dialog_reason(DialogInput* input, MasterTopology* master,
                     found_count++;
                 }
             } else {
-                // 找不到节点？像人脑一样，创建新节点来学习这个概念！
+                // 找不到节点？创建新节点 + 联网学习
                 int new_id = huarong_net_dynamic_add_node(sub->net, input->tokens[i], NULL, 0);
                 if (new_id >= 0 && sub->node_hash) {
                     ReasoningNode* new_node = sub->net->nodes[sub->net->node_count - 1];
@@ -665,8 +667,49 @@ DialogReasoning* dialog_reason(DialogInput* input, MasterTopology* master,
                     
                     if (found_count < PM_CONCEPT_MAX) {
                         found_nodes[found_count] = new_node;
-                        found_topo_ids[found_count] = t;  // 记录拓扑索引
+                        found_topo_ids[found_count] = t;
                         found_count++;
+                    }
+
+                    /* 联网搜索学习：为不懂的概念查询百度百科 */
+                    {
+                        WebResult* wr = dialog_search_concept(new_node->concept);
+                        if (wr && wr->keyword_count > 0) {
+                            int learned = 0;
+                            for (int k = 0; k < wr->keyword_count && learned < 4; k++) {
+                                if (!wr->keywords[k] || strlen(wr->keywords[k]) < 2) continue;
+                                int has_text = 0;
+                                for (const char* cp = wr->keywords[k]; *cp; cp++)
+                                    if ((unsigned char)*cp > 127 || isalpha((unsigned char)*cp))
+                                        { has_text = 1; break; }
+                                if (!has_text) continue;
+
+                                ReasoningNode* exist = node_hash_find(sub->node_hash, wr->keywords[k]);
+                                if (!exist) {
+                                    ReasoningNode* kn = huarong_net_add_node(
+                                        sub->net, wr->keywords[k], NULL, 0);
+                                    if (kn) {
+                                        kn->confidence = 0.35f;
+                                        node_hash_add(sub->node_hash, kn);
+                                        huarong_net_add_connection(sub->net,
+                                            new_node->node_id, kn->node_id, 0.3f);
+                                        learned++;
+                                    }
+                                } else if (exist != new_node) {
+                                    int already = 0;
+                                    for (int c = 0; c < new_node->connection_count; c++)
+                                        if (new_node->connections[c] == exist) { already=1; break; }
+                                    if (!already)
+                                        huarong_net_add_connection(sub->net,
+                                            new_node->node_id, exist->node_id, 0.35f);
+                                }
+                            }
+                            if (learned > 0) {
+                                fprintf(stderr, "[对话学习] '%s' → 联网学习 %d 个关联概念\n",
+                                        new_node->concept, learned);
+                            }
+                        }
+                        web_result_free(wr);
                     }
                 }
             }
@@ -1174,6 +1217,14 @@ static const char* context_seed_for_intent(DialogIntent intent) {
         case INTENT_CHAT:    return "CHAT";
         default:             return "CHAT";
     }
+}
+
+/** 对话中联网搜索概念：短超时（3秒），不阻塞对话 */
+static WebResult* dialog_search_concept(const char* concept) {
+    if (!concept || !concept[0]) return NULL;
+    char url[1024];
+    snprintf(url, sizeof(url), "https://baike.baidu.com/item/%s", concept);
+    return web_search(url, 3000, 32768);  /* 3秒超时，不阻塞对话 */
 }
 
 /**

@@ -449,6 +449,31 @@ int self_learner_cycle(SelfLearner* sl) {
         }
     }
 
+    /* 7. 二次好奇心：对新发现的节点（未探索）做快速审查 */
+    {
+        SubTopology* vocab = sl->master->sub_topologies[0];
+        if (vocab && vocab->net) {
+            int second_pass = 0;
+            for (int i = 0; i < vocab->net->node_count && second_pass < 3; i++) {
+                ReasoningNode* n = vocab->net->nodes[i];
+                if (!n || !n->concept) continue;
+                /* 跳过已探索或连接数太多（已充分关联）的节点 */
+                ExploreRecord* rec = find_record(sl, vocab->topo_id, n->node_id);
+                if (rec && rec->explore_count > 0) continue;
+                if (n->connection_count > 3) continue;
+                /* 对新概念做快速探索 */
+                WalkStep steps[16];
+                int len = deep_walk(sl, vocab->topo_id, n->node_id, steps, 16);
+                if (len >= 3) total_mods += audit_path(sl, steps, len);
+                for (int j = 0; j < len; j++)
+                    mark_explored(sl, steps[j].topo_id, steps[j].node_id);
+                second_pass++;
+            }
+            if (sl->cfg.verbose && second_pass > 0)
+                fprintf(stderr, "[自学] 二次好奇心: 探索 %d 个新概念\n", second_pass);
+        }
+    }
+
     sl->total_cycles++;
     if (sl->cfg.verbose && total_mods > 0) {
         fprintf(stderr, "[自学] 周期#%d完成: %d处修正 (传递:%d 创建:%d 降权:%d)\n",
