@@ -73,7 +73,8 @@ static void reset_activation_record(void) {
     g_activated_count = 0;
 }
 
-/* 使用复合键: (topo_type << 24) | node_id */
+/* 使用复合键: (topo_type << 24) | node_id
+ * 约束: topo_type 须 < 256（当前拓扑类型枚举远小于此值，安全） */
 static int make_compound_key(int topo_type, int node_id) {
     return (topo_type << 24) | (node_id & 0xFFFFFF);
 }
@@ -400,6 +401,9 @@ static int extract_ordered_chars(const char* text, char chars[MAX_CHARS_PER_TEXT
 /* ================================================================
  *  原子浮点加法 — CAS 循环实现
  *  Mingw GCC 不支持 __atomic_fetch_add(float*, ...)
+ *  注: CAS 循环存在理论 ABA 风险（另一线程在同一位置做两次修改
+ *  导致值回到原样时 CAS 误判成功）；当前使用场景（权重/置信度累加）
+ *  下最坏情况丢失一次微小浮点更新，不会导致 crash，可接受
  * ================================================================ */
 static inline void atomic_float_add(float* ptr, float val) {
     union { float f; uint32_t i; } old, new_val;
