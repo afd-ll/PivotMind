@@ -12,6 +12,7 @@
 #include "huarong_topology.h"
 #include "node_hash.h"
 #include "common.h"
+#include "web_search.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -387,6 +388,66 @@ int self_learner_cycle(SelfLearner* sl) {
         /* 5. 标记已探索 */
         for (int i = 0; i < len; i++) {
             mark_explored(sl, steps[i].topo_id, steps[i].node_id);
+        }
+
+        /* 6. 孤立节点 → 联网搜索学习 */
+        if (len <= 1) {
+            SubTopology* sub = sl->master->sub_topologies[seeds_topo[s]];
+            if (sub && sub->net && seeds_node[s] < sub->net->node_count) {
+                ReasoningNode* node = sub->net->nodes[seeds_node[s]];
+                if (node && node->concept && node->connection_count == 0) {
+                    /* 构建搜索URL：使用简单的搜索引擎 */
+                    char search_url[1024];
+                    /* 对中文词做URL编码简化处理 */
+                    snprintf(search_url, sizeof(search_url),
+                        "http://www.baidu.com/s?wd=%s&rn=1",
+                        node->concept);
+
+                    WebResult* wr = web_search(search_url, 5000, 32768);
+                    if (wr && wr->keyword_count > 0) {
+                        SubTopology* vocab = sl->master->sub_topologies[0];
+                        if (vocab && vocab->net && vocab->node_hash) {
+                            int learned = 0;
+                            for (int k = 0; k < wr->keyword_count && learned < 5; k++) {
+                                if (!wr->keywords[k] || strlen(wr->keywords[k]) < 2) continue;
+                                /* 跳过纯数字/英文短词 */
+                                int is_text = 0;
+                                for (const char* cp = wr->keywords[k]; *cp; cp++)
+                                    if ((unsigned char)*cp > 127) { is_text = 1; break; }
+                                if (!is_text) continue;
+
+                                ReasoningNode* exist = node_hash_find(vocab->node_hash, wr->keywords[k]);
+                                if (!exist) {
+                                    ReasoningNode* new_n = huarong_net_add_node(
+                                        vocab->net, wr->keywords[k], NULL, 0);
+                                    if (new_n) {
+                                        new_n->confidence = 0.3f;
+                                        node_hash_add(vocab->node_hash, new_n);
+                                        huarong_net_add_connection(vocab->net,
+                                            node->node_id, new_n->node_id, 0.25f);
+                                        learned++;
+                                        total_mods++;
+                                    }
+                                } else if (exist != node) {
+                                    int already = 0;
+                                    for (int c = 0; c < node->connection_count; c++)
+                                        if (node->connections[c] == exist) { already = 1; break; }
+                                    if (!already) {
+                                        huarong_net_add_connection(vocab->net,
+                                            node->node_id, exist->node_id, 0.3f);
+                                        total_mods++;
+                                    }
+                                }
+                            }
+                            if (sl->cfg.verbose && learned > 0) {
+                                fprintf(stderr, "[自学] 联网学习 '%s' → 新增%d个关联概念\n",
+                                        node->concept, learned);
+                            }
+                        }
+                    }
+                    web_result_free(wr);
+                }
+            }
         }
     }
 
