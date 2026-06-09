@@ -130,7 +130,7 @@ int dream_cycle(MasterTopology* master, MemorySystem* memory,
                     if (n0->connections[c] == n1) {
                         float w = n0->connection_weights ? n0->connection_weights[c] : 0.0f;
                         if (w < 0.4f && w > 0.0f) {
-                            int lk = n0->node_id & 255;
+                            int lk = n0->node_id & (PM_NODE_LOCK_COUNT - 1);
                             pthread_mutex_lock(&st0->net->node_locks[lk]);
                             n0->connection_weights[c] += cfg.weak_edge_boost;
                             if (n0->connection_weights[c] > 1.0f)
@@ -174,7 +174,7 @@ int dream_cycle(MasterTopology* master, MemorySystem* memory,
             for (int _i = 0; _i < (sub)->net->node_count; _i++) { \
                 ReasoningNode* _n = (sub)->net->nodes[_i]; \
                 if (!_n || _n->activation < 0.01f) continue; \
-                int _lk = _n->node_id & 255; \
+                int _lk = _n->node_id & (PM_NODE_LOCK_COUNT - 1); \
                 pthread_mutex_lock(&(sub)->net->node_locks[_lk]); \
                 _n->activation *= cfg.dream_decay; \
                 if (_n->activation < 0.01f) _n->activation = 0.0f; \

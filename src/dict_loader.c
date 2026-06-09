@@ -192,7 +192,7 @@ int dict_segment_text(DictTable* dt, const char* text,
             if (best_len >= 63) best_len = 63;
             memcpy(out_words[count], p, best_len);
             out_words[count][best_len] = '\0';
-            strncpy(out_pos[count], best_pos, 7);
+            memcpy(out_pos[count], best_pos, 7);  /* POS标签最大7字节 */
             out_pos[count][7] = '\0';
             p += best_len;
         } else {

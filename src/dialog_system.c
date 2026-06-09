@@ -137,7 +137,7 @@ static void dialog_topo_worker(void* arg) {
 
             if (new_activation > ACTIVATION_THRESHOLD) {
                 /* 节点级锁：保护 activation 字段防止与后台时钟竞态 */
-                int conn_lock = connected->node_id & 255;
+                int conn_lock = connected->node_id & (PM_NODE_LOCK_COUNT - 1);
                 pthread_mutex_lock(&sub->net->node_locks[conn_lock]);
                 if (new_activation > connected->activation)
                     connected->activation = new_activation;
@@ -1436,7 +1436,7 @@ char* dialog_process(DialogSystem* sys, const char* user_input, DialogReasoning*
                         snprintf(cause_key, 255, "%s_cause_%d", user_input, i);
                         snprintf(effect_key, 255, "%.2f", causal_results[i].total_strength);
                         memory_store_causal_rule(sys->memory, cause_key,
-                            effect_key, causal_results[i].total_strength, 1);
+                            effect_key, causal_results[i].total_strength, NULL);
                     }
                 }
             }

@@ -1021,7 +1021,7 @@ static void topo_propagate_worker(void* arg) {
             float transferred = node->activation * node->connection_weights[c];
             if (transferred > 0.1f) {
                 /* 节点级锁：每个拓扑独占一线程，但后台时钟可能并发写同一节点 */
-                int tgt_lock = target->node_id & 255;
+                int tgt_lock = target->node_id & (PM_NODE_LOCK_COUNT - 1);
                 pthread_mutex_lock(&sub->net->node_locks[tgt_lock]);
                 target->activation += transferred;
                 if (target->activation > 1.0f) target->activation = 1.0f;
@@ -1246,7 +1246,7 @@ char* master_generate_response(MasterTopology* master,
                             if (vid < 0 || vid >= node_count) continue;
                             ReasoningNode* vn = vocab_sub->net->nodes[vid];
                             if (!vn) continue;
-                            int lock_idx = vn->node_id & 255;
+                            int lock_idx = vn->node_id & (PM_NODE_LOCK_COUNT - 1);
                             pthread_mutex_lock(&vocab_sub->net->node_locks[lock_idx]);
                             vn->activation += boost;
                             if (vn->activation > 1.0f) vn->activation = 1.0f;
@@ -2044,14 +2044,14 @@ int competitive_queue_generate(
             if (nid < 0 || nid >= node_count) continue;
             if (visited[nid / 8] & (unsigned char)(1 << (nid % 8))) continue;
             float boost = winner->connection_weights[c] * CQ_BROADCAST_GAIN * winner->activation;
-            int nbr_lock = neighbor->node_id & 255;
+            int nbr_lock = neighbor->node_id & (PM_NODE_LOCK_COUNT - 1);
             pthread_mutex_lock(&net->node_locks[nbr_lock]);
             if (neighbor->activation < boost) neighbor->activation = boost;
             pthread_mutex_unlock(&net->node_locks[nbr_lock]);
         }
 
         // ---- 7. 胜者抑制：压低自身避免重复 ----
-        {   int w_lock = winner->node_id & 255;
+        {   int w_lock = winner->node_id & (PM_NODE_LOCK_COUNT - 1);
             pthread_mutex_lock(&net->node_locks[w_lock]);
             winner->activation *= CQ_SUPPRESS_FACTOR;
             pthread_mutex_unlock(&net->node_locks[w_lock]);
@@ -2061,7 +2061,7 @@ int competitive_queue_generate(
         // 原 0.7f 衰减太快导致一轮耗尽候选 → 改为 0.85f，保留更多激活信号
         for (int i = 0; i < node_count; i++) {
             if (net->nodes[i]) {
-                int d_lock = net->nodes[i]->node_id & 255;
+                int d_lock = net->nodes[i]->node_id & (PM_NODE_LOCK_COUNT - 1);
                 pthread_mutex_lock(&net->node_locks[d_lock]);
                 net->nodes[i]->activation *= 0.85f;
                 if (net->nodes[i]->activation < 0.01f) net->nodes[i]->activation = 0.0f;
@@ -2082,7 +2082,7 @@ int competitive_queue_generate(
     // ---- 恢复原始激活值（持锁写入，防止后台时钟竞态） ----
     for (int i = 0; i < node_count; i++) {
         if (net->nodes[i]) {
-            int r_lock = net->nodes[i]->node_id & 255;
+            int r_lock = net->nodes[i]->node_id & (PM_NODE_LOCK_COUNT - 1);
             pthread_mutex_lock(&net->node_locks[r_lock]);
             net->nodes[i]->activation = saved_activations[i];
             pthread_mutex_unlock(&net->node_locks[r_lock]);

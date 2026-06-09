@@ -62,7 +62,7 @@ static void decay_sub_topology(SubTopology* sub, float decay_rate, float floor_v
     for (int i = 0; i < net->node_count; i++) {
         ReasoningNode* node = net->nodes[i];
         if (!node) continue;
-        int lock_idx = node->node_id & 255;
+        int lock_idx = node->node_id & (PM_NODE_LOCK_COUNT - 1);
         pthread_mutex_lock(&net->node_locks[lock_idx]);
         if (node->activation <= floor_value) {
             node->activation = 0.0f;
@@ -102,7 +102,7 @@ static void spontaneous_activate(BackgroundClock* clock) {
         ReasoningNode* node = sub->net->nodes[node_idx];
         if (!node) continue;
 
-        int lock_idx = node->node_id & 255;
+        int lock_idx = node->node_id & (PM_NODE_LOCK_COUNT - 1);
         pthread_mutex_lock(&sub->net->node_locks[lock_idx]);
         float added = clock->spontaneous_strength * (0.5f + local_rand(&clock->_rng_seed) / 65535.0f);
         node->activation += added;

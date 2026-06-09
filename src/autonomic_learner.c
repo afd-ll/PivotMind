@@ -437,11 +437,11 @@ static void boost_connection_weighted(SubTopology* topo, ReasoningNode* a, Reaso
     int existing_a_to_b = -1;
     int existing_b_to_a = -1;
     
-    /* 节点级条纹锁：hash(node_id) & 255 选锁
+    /* 节点级条纹锁：hash(node_id) & (PM_NODE_LOCK_COUNT - 1) 选锁
      * 20线程 × 分散到256把锁 → 对撞率 <8%，无撞零等待 */
     existing_a_to_b = node_conn_find(a, b);
     if (existing_a_to_b >= 0 && net) {
-        int li = a->node_id & 255;
+        int li = a->node_id & (PM_NODE_LOCK_COUNT - 1);
         pthread_mutex_lock(&net->node_locks[li]);
         float dw = AUTONOMIC_LEARNING_RATE * 0.5f * weight_mult;
         a->connection_weights[existing_a_to_b] += dw;
@@ -453,7 +453,7 @@ static void boost_connection_weighted(SubTopology* topo, ReasoningNode* a, Reaso
     }
     existing_b_to_a = node_conn_find(b, a);
     if (existing_b_to_a >= 0 && net) {
-        int li = b->node_id & 255;
+        int li = b->node_id & (PM_NODE_LOCK_COUNT - 1);
         pthread_mutex_lock(&net->node_locks[li]);
         float dw = AUTONOMIC_LEARNING_RATE * 0.5f * weight_mult;
         b->connection_weights[existing_b_to_a] += dw;

@@ -403,7 +403,7 @@ int huarong_net_add_connection(HuarongTopologyNet* net,
         return -1;
     }
 
-    int li = from_node_id & 255;
+    int li = from_node_id & (PM_NODE_LOCK_COUNT - 1);
     pthread_mutex_lock(&net->node_locks[li]);
 
     ReasoningNode* from_node = net->nodes[from_node_id];
@@ -490,8 +490,8 @@ int huarong_net_add_bidirectional_connection(HuarongTopologyNet* net,
         node_b_id < 0 || node_b_id >= net->node_count) return -1;
 
     /* 节点级锁，按ID排序避免死锁 */
-    int li_a = node_a_id & 255;
-    int li_b = node_b_id & 255;
+    int li_a = node_a_id & (PM_NODE_LOCK_COUNT - 1);
+    int li_b = node_b_id & (PM_NODE_LOCK_COUNT - 1);
     if (li_a == li_b) {
         pthread_mutex_lock(&net->node_locks[li_a]);
     } else if (li_a < li_b) {

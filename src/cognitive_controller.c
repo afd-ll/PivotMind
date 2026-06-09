@@ -1641,6 +1641,7 @@ float cc_scaffold_bonus(CognitiveController* cc, int position, POSTag candidate_
 
 float cc_pattern_match_score(CognitiveController* cc, int topo_id,
                               const int* pos_trail, int trail_len) {
+    (void)topo_id;  /* 预留：未来可按拓扑类型调整匹配策略 */
     if (!cc || !pos_trail || trail_len < 2) return 0.0f;
 
     float best_score = 0.0f;

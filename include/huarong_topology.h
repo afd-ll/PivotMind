@@ -94,7 +94,7 @@ typedef struct HuarongTopologyNet {
 
     // 线程安全
     pthread_mutex_t mutex;         // 仅保护 add_connection 扩容路径
-    pthread_mutex_t node_locks[256]; // 节点级锁池：hash(node_id)&255 选锁
+    pthread_mutex_t node_locks[PM_NODE_LOCK_COUNT]; // 节点级锁池
     
     // 延迟释放链表 — 扩容旧数组暂存，epoch 结束统一清理
     void* retired_conns;           // 链表头节点
