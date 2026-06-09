@@ -1219,12 +1219,12 @@ static const char* context_seed_for_intent(DialogIntent intent) {
     }
 }
 
-/** 对话中联网搜索概念：短超时（3秒），不阻塞对话 */
+/** 对话中联网搜索概念：超短超时（1秒），不阻塞对话 */
 static WebResult* dialog_search_concept(const char* concept) {
     if (!concept || !concept[0]) return NULL;
     char url[1024];
     snprintf(url, sizeof(url), "https://baike.baidu.com/item/%s", concept);
-    return web_search(url, 3000, 32768);  /* 3秒超时，不阻塞对话 */
+    return web_search(url, 1000, 32768);  /* 1秒超时，不阻塞对话 */
 }
 
 /**
