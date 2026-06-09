@@ -14,6 +14,7 @@
 #include "background_clock.h"
 #include "huarong_topology.h"
 #include "dream_engine.h"
+#include "self_learner.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -255,6 +256,11 @@ static void* clock_loop(void* arg) {
             dream_cfg.verbose = clock->verbose;
             dream_cycle(clock->master, clock->memory, &dream_cfg);
         }
+
+        // 阶段 6：自主学习（每 120 tick ≈ 2分钟）
+        if (clock->tick_count % 120 == 0 && clock->self_learner) {
+            self_learner_cycle((SelfLearner*)clock->self_learner);
+        }
     }
 
     if (clock->verbose) printf("[后台时钟] 已停止，�?tick=%d\n", clock->tick_count);
@@ -284,6 +290,9 @@ BackgroundClock* background_clock_create(MasterTopology* master,
 
     clock->is_running = 0;
     clock->tick_count = 0;
+
+    /* 初始化自主学习器 */
+    clock->self_learner = self_learner_create(master, NULL);
 
     /* 初始化线程安全本�?RNG 种子 */
     clock->_rng_seed = (unsigned int)time(NULL) ^ (unsigned int)(uintptr_t)clock;
@@ -321,6 +330,11 @@ void background_clock_destroy(BackgroundClock* clock) {
 
     if (clock->is_running) {
         background_clock_stop(clock);
+    }
+
+    if (clock->self_learner) {
+        self_learner_destroy((SelfLearner*)clock->self_learner);
+        clock->self_learner = NULL;
     }
 
     free(clock);

@@ -7,6 +7,8 @@
  * 2. 低噪自发激活 — 模拟"念头涌现"（大脑背景放电）
  * 3. 全局认知状态漂移 — drive/emotion/valence 回归基线
  * 4. 记忆巩固 tick — 周期性 STM→LTM 迁移
+ * 5. 梦境引擎 — 随机联想+弱边强化
+ * 6. 自主学习 — 好奇心驱动探索+知识审查+自纠错
  *
  * 线程模型：独立 pthread 后台线程，通过 MasterTopology.rwlock
  * 读锁与前台对话线程协调，遵循 ActiveLearner 的 create/start/stop/destroy 模式。
@@ -53,6 +55,7 @@ typedef struct BackgroundClock {
 
     int   verbose;                   // 是否打印后台日志（0=静默 1=详细）
     unsigned int _rng_seed;          // 线程安全本地 RNG 种子
+    void* self_learner;              // 自主学习器句柄（opaque, 由 clock 管理生命周期）
 } BackgroundClock;
 
 // ==================== API 函数 ====================
