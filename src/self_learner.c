@@ -396,12 +396,10 @@ int self_learner_cycle(SelfLearner* sl) {
             if (sub && sub->net && seeds_node[s] < sub->net->node_count) {
                 ReasoningNode* node = sub->net->nodes[seeds_node[s]];
                 if (node && node->concept && node->connection_count == 0) {
-                    /* 构建搜索URL：使用简单的搜索引擎 */
+                    /* 构建搜索URL：优先百度百科（静态HTML，可解析） */
                     char search_url[1024];
-                    /* 对中文词做URL编码简化处理 */
                     snprintf(search_url, sizeof(search_url),
-                        "http://www.baidu.com/s?wd=%s&rn=1",
-                        node->concept);
+                        "https://baike.baidu.com/item/%s", node->concept);
 
                     WebResult* wr = web_search(search_url, 5000, 32768);
                     if (wr && wr->keyword_count > 0) {
