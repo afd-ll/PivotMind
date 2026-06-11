@@ -26,7 +26,11 @@ Prefrontal* prefrontal_create(MasterTopology* topology,
     pf->controller = cognitive_controller_create(topology, memory);
     if (!pf->controller) { dialog_system_destroy(pf->dialog); free(pf); return NULL; }
 
-    printf("[前额叶] 就绪 (对话系统+认知调度)\n");
+    pf->accept_threshold = 0.55f;
+    pf->max_retries = 3;
+
+    printf("[前额叶] 就绪 (DLPFC生成+ACC监控, 阈值=%.2f, 最大回溯=%d)\n",
+           pf->accept_threshold, pf->max_retries);
     return pf;
 }
 
@@ -42,18 +46,65 @@ char* prefrontal_chat(Prefrontal* pf, const char* input) {
 
     /* 意图推断 */
     cognitive_controller_set_context(pf->controller, input, NULL);
-
     float ctx_activations[MAX_SUBTOPOS] = {0};
     calc_context_activations(pf->controller, ctx_activations);
     compute_intent(pf->controller, ctx_activations);
 
-    /* 执行对话 */
-    DialogReasoning* reasoning = NULL;
-    char* response = dialog_process(pf->dialog, input, &reasoning);
+    /* ── DLPFC 生成 + ACC 监控 + 回溯循环 ── */
+    char* response = NULL;
+    int retries = 0;
+
+    for (int attempt = 0; attempt < pf->max_retries; attempt++) {
+        DialogReasoning* reasoning = NULL;
+        char* candidate = dialog_process(pf->dialog, input, &reasoning);
+
+        if (!candidate) continue;
+
+        /* ── ACC 评估 ── */
+        GeneratedSequence seq = {0};
+        /* 解析 candidate 为单词序列 */
+        char* tok = strtok(strdup(candidate), " \t\n\r");
+        while (tok && seq.count < MAX_GENERATED_WORDS) {
+            seq.words[seq.count] = tok;
+            seq.word_ids[seq.count] = 0;  /* ID 后续接入 */
+            seq.count++;
+            tok = strtok(NULL, " \t\n\r");
+        }
+
+        cingulate_evaluate(&seq, pf->topology, input, 5);
+
+        CingulateGate gate = cingulate_gate(&seq, pf->accept_threshold);
+
+        if (gate == CINGULATE_PASS) {
+            /* 通过 — 输出 */
+            response = candidate;
+            if (reasoning) dialog_reasoning_destroy(reasoning);
+            pf->total_retries += retries;
+            if (retries > 0) fprintf(stderr, "[ACC] 回溯%d次后通过 (得分=%.2f)\n",
+                                     retries, seq.total_score);
+            break;
+        }
+
+        if (gate == CINGULATE_BACKTRACK && attempt < pf->max_retries - 1) {
+            /* 回溯 — 告知 controller 降低出错的子拓扑权重 */
+            fprintf(stderr, "[ACC] 回溯 (step=%d, 原因=%s, 得分=%.2f)\n",
+                    seq.backtrack_step, seq.error_msg ? seq.error_msg : "?",
+                    seq.total_score);
+            cognitive_controller_snapshot(pf->controller, 0.1f);  /* 降低本路径权重 */
+            retries++;
+            if (reasoning) dialog_reasoning_destroy(reasoning);
+            free(candidate);
+            continue;
+        }
+
+        /* 彻底失败 — 用最后一次结果 */
+        if (reasoning) dialog_reasoning_destroy(reasoning);
+        free(candidate);
+        break;
+    }
 
     if (response) {
         cognitive_controller_snapshot(pf->controller, 0.5f);
-        if (reasoning) dialog_reasoning_destroy(reasoning);
     }
 
     return response;
