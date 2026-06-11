@@ -1,0 +1,32 @@
+[Unit]
+Description=PivotMind Cognitive Engine Gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=cx
+WorkingDirectory=/home/cx/pivotmind
+ExecStart=/home/cx/pivotmind/build/bin/pivotmind_gateway 8080 /home/cx/pivotmind
+Restart=on-failure
+RestartSec=5
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+# 优雅关闭
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+# 安全限制
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/home/cx/pivotmind
+
+# 日志
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=pivotmind
+
+[Install]
+WantedBy=multi-user.target

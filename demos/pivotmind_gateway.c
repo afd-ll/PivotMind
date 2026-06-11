@@ -1,0 +1,765 @@
+/**
+ * @file pivotmind_gateway.c
+ * @brief PivotMind HTTP Gateway - REST API 服务网关
+ *
+ * 暴露 HTTP 接口，支持远程对话和状态查询
+ * 链接 libpivotmind.a，复用完整认知引擎
+ *
+ * API:
+ *   POST /chat       {"msg":"..."}   -> {"reply":"...","nodes":492}
+ *   GET  /status                      -> {"nodes":492,"uptime":3600,...}
+ *   GET  /health                      -> {"status":"ok"}
+ *   POST /learn      {"msg":"..."}   -> {"result":"learned"}
+ *   POST /feedback   {"msg":"...","rating":"correct|wrong"} -> {"result":"ok"}
+ *
+ * 用法:
+ *   pivotmind_gateway [port] [workdir]
+ *   pivotmind_gateway           # 默认 8080, 工作目录 .
+ *   pivotmind_gateway 9090 /opt/pivotmind
+ */
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <signal.h>
+#include <errno.h>
+#include <time.h>
+#include <pthread.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+
+#include "dialog_system.h"
+#include "active_learner.h"
+#include "brainstem.h"
+#include "thalamus.h"
+#include "perception.h"
+#include "hippocampus.h"
+#include "prefrontal.h"
+#include "multi_topology.h"
+#include "memory_system.h"
+#include "feature_io.h"
+#include "cross_edge_io.h"
+#include "feature_pretrain.h"
+#include "path_encoding.h"
+#include "template_builder.h"
+#include "node_cache.h"
+
+// ==================== 配置 ====================
+
+#define GW_DEFAULT_PORT    8080
+#define GW_MAX_REQUEST     (64 * 1024)   // 64KB 请求上限
+#define GW_MAX_RESPONSE    (128 * 1024)  // 128KB 响应上限
+#define GW_READ_TIMEOUT_S  10
+#define GW_BACKLOG         16
+
+// ==================== 系统状态 ====================
+
+typedef struct {
+    // 核心组件 (与 digital_life.c 相同)
+    MasterTopology*   topology;
+    MemorySystem*     memory;
+    CausalGraph*      causal_graph;
+    DialogSystem*     dialog;        /* 兼容旧代码 — 指向 prefrontal->dialog */
+    Prefrontal*       prefrontal;   /* 前额叶 — 对话+认知调度 */
+    ActiveLearner*    learner;
+    Brainstem*       brainstem;     /* 脑干 — 心跳+昼夜节律 */
+    Thalamus*        thalamus;      /* 丘脑 — 系统调度器 */
+    Perception*      perception;    /* 感觉皮层 — 自主搜索学习 */
+    Hippocampus*     hippocampus;   /* 海马体 — 记忆+巩固 */
+    NodeCache*       brain_cache;   /* 大脑式节点冷热缓存 */
+
+    // 运行控制
+    volatile int shutdown_requested;
+    volatile int engine_ready;       // 引擎是否完成初始化
+    time_t       start_time;
+    long         total_dialogs;
+    long         total_learning_cycles;
+
+    // 网关配置
+    int   port;
+    char  workdir[512];
+} GatewaySystem;
+
+static GatewaySystem* g_gw = NULL;
+
+// ==================== 信号处理 ====================
+
+static void gw_signal_handler(int signum) {
+    (void)signum;
+    if (g_gw) {
+        const char msg[] = "\n[gateway] 收到退出信号，正在关闭...\n";
+        write(STDOUT_FILENO, msg, sizeof(msg) - 1);
+        g_gw->shutdown_requested = 1;
+    }
+}
+
+// ==================== JSON 工具 ====================
+
+// 简易 JSON 字符串转义 (处理 " \ \n \r \t)
+static int json_escape(const char* src, char* dst, int dst_size) {
+    if (!src || !dst || dst_size < 2) return -1;
+    int j = 0;
+    for (int i = 0; src[i] && j < dst_size - 2; i++) {
+        switch (src[i]) {
+            case '"':  if (j + 2 >= dst_size) goto done; dst[j++] = '\\'; dst[j++] = '"';  break;
+            case '\\': if (j + 2 >= dst_size) goto done; dst[j++] = '\\'; dst[j++] = '\\'; break;
+            case '\n': if (j + 2 >= dst_size) goto done; dst[j++] = '\\'; dst[j++] = 'n';  break;
+            case '\r': if (j + 2 >= dst_size) goto done; dst[j++] = '\\'; dst[j++] = 'r';  break;
+            case '\t': if (j + 2 >= dst_size) goto done; dst[j++] = '\\'; dst[j++] = 't';  break;
+            default:   dst[j++] = src[i]; break;
+        }
+    }
+done:
+    dst[j] = '\0';
+    return j;
+}
+
+// 从 JSON body 提取 "key":"value" (简单实现，不处理嵌套)
+static char* json_extract_string(const char* json, const char* key, char* buf, int buf_size) {
+    if (!json || !key || !buf || buf_size < 1) return NULL;
+
+    // 构建 "key" 搜索模式
+    char pattern[128];
+    snprintf(pattern, sizeof(pattern), "\"%s\"", key);
+
+    const char* pos = strstr(json, pattern);
+    if (!pos) return NULL;
+
+    pos += strlen(pattern);
+    // 跳过空白和冒号
+    while (*pos == ' ' || *pos == ':' || *pos == '\t') pos++;
+    if (*pos != '"') return NULL;
+    pos++; // 跳过开头引号
+
+    int i = 0;
+    while (*pos && *pos != '"' && i < buf_size - 1) {
+        if (*pos == '\\' && *(pos + 1)) {
+            pos++;
+            switch (*pos) {
+                case 'n':  buf[i++] = '\n'; break;
+                case 'r':  buf[i++] = '\r'; break;
+                case 't':  buf[i++] = '\t'; break;
+                case '"':  buf[i++] = '"';  break;
+                case '\\': buf[i++] = '\\'; break;
+                default:   buf[i++] = *pos; break;
+            }
+        } else {
+            buf[i++] = *pos;
+        }
+        pos++;
+    }
+    buf[i] = '\0';
+    return (i > 0) ? buf : NULL;
+}
+
+// ==================== HTTP 工具 ====================
+
+// 发送 HTTP 响应
+static void http_send(int fd, int status, const char* content_type, const char* body) {
+    const char* status_text = (status == 200) ? "OK" :
+                              (status == 400) ? "Bad Request" :
+                              (status == 404) ? "Not Found" :
+                              (status == 413) ? "Payload Too Large" :
+                              "Internal Server Error";
+
+    char header[1024];
+    int body_len = (int)strlen(body);
+    int hdr_len = snprintf(header, sizeof(header),
+        "HTTP/1.1 %d %s\r\n"
+        "Content-Type: %s\r\n"
+        "Content-Length: %d\r\n"
+        "Access-Control-Allow-Origin: *\r\n"
+        "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
+        "Access-Control-Allow-Headers: Content-Type\r\n"
+        "Connection: close\r\n"
+        "\r\n",
+        status, status_text, content_type, body_len);
+
+    send(fd, header, hdr_len, MSG_NOSIGNAL);
+    send(fd, body, body_len, MSG_NOSIGNAL);
+}
+
+// 发送 JSON 响应
+static void http_json(int fd, int status, const char* json_body) {
+    http_send(fd, status, "application/json; charset=utf-8", json_body);
+}
+
+// ==================== 系统初始化 (复用 digital_life 逻辑) ====================
+
+static int gw_system_init(GatewaySystem* gw) {
+    printf("[gateway] 初始化 PivotMind 引擎...\n");
+
+    // 1. 记忆系统
+    gw->memory = memory_system_create(500, 2000, 5000);
+    if (!gw->memory) { fprintf(stderr, "[gateway] 记忆系统创建失败\n"); return -1; }
+    printf("[gateway]   记忆系统就绪\n");
+
+    // 2. 多拓扑网络
+    gw->topology = master_topology_create(16);
+    if (!gw->topology) { fprintf(stderr, "[gateway] 拓扑网络创建失败\n"); return -1; }
+
+    master_add_sub_topology(gw->topology, TOPO_VOCABULARY, "词汇拓扑", 30000, 10);
+    master_add_sub_topology(gw->topology, TOPO_SEMANTIC,  "语义拓扑", 12000, 9);
+    master_add_sub_topology(gw->topology, TOPO_EMOTION,   "情绪拓扑", 4000, 8);
+    master_add_sub_topology(gw->topology, TOPO_SYNTAX,    "语法拓扑", 1000, 7);
+    master_add_sub_topology(gw->topology, TOPO_CONTEXT,  "上下文拓扑", 1000, 6);
+    master_add_sub_topology(gw->topology, TOPO_DOMAIN,    "领域拓扑", 1000, 5);
+    master_add_sub_topology(gw->topology, TOPO_PRAGMA,   "语用拓扑", 1000, 4);
+    master_add_sub_topology(gw->topology, TOPO_CULTURE,  "文化拓扑", 1000, 3);
+    master_add_sub_topology(gw->topology, TOPO_CONCEPT,  "概念拓扑", 12000, 9);
+    master_add_sub_topology(gw->topology, TOPO_MASTER,   "主拓扑", 100, 0);
+    master_add_sub_topology(gw->topology, TOPO_TEMPLATE, "模板拓扑", 4000, 8);
+
+    // 初始知识
+    SubTopology* vocab = master_get_sub_topology_by_type(gw->topology, TOPO_VOCABULARY);
+    SubTopology* semantic = master_get_sub_topology_by_type(gw->topology, TOPO_SEMANTIC);
+    if (vocab && semantic) {
+        huarong_net_add_node(vocab->net, "我", NULL, 0);
+        huarong_net_add_node(vocab->net, "你", NULL, 0);
+        huarong_net_add_node(vocab->net, "是", NULL, 0);
+        huarong_net_add_node(vocab->net, "什么", NULL, 0);
+        huarong_net_add_node(vocab->net, "学习", NULL, 0);
+        huarong_net_add_node(vocab->net, "知道", NULL, 0);
+        huarong_net_add_node(vocab->net, "帮助", NULL, 0);
+        huarong_net_add_node(semantic->net, "自我", NULL, 0);
+        huarong_net_add_node(semantic->net, "他人", NULL, 0);
+        huarong_net_add_node(semantic->net, "存在", NULL, 0);
+        huarong_net_add_node(semantic->net, "知识", NULL, 0);
+        huarong_net_add_node(semantic->net, "理解", NULL, 0);
+        huarong_net_add_node(semantic->net, "协助", NULL, 0);
+        huarong_net_add_connection(vocab->net, 0, 0, 0.9f);
+        huarong_net_add_connection(vocab->net, 1, 1, 0.9f);
+        huarong_net_add_connection(vocab->net, 4, 3, 0.8f);
+        huarong_net_add_connection(vocab->net, 5, 4, 0.8f);
+        huarong_net_add_connection(vocab->net, 6, 5, 0.8f);
+    }
+    printf("[gateway]   认知网络就绪 (%d 拓扑)\n", gw->topology->sub_topo_count);
+
+    // 3. 因果图
+    gw->causal_graph = causal_graph_create(1000, 5000);
+    if (!gw->causal_graph) { fprintf(stderr, "[gateway] 因果图创建失败\n"); return -1; }
+    printf("[gateway]   因果图就绪\n");
+
+    // 4. 学习器
+    gw->learner = active_learner_create(gw->topology, gw->memory);
+    if (!gw->learner) { fprintf(stderr, "[gateway] 学习器创建失败\n"); return -1; }
+    active_learner_set_interval(gw->learner, 300);
+    printf("[gateway]   学习器就绪 (间隔: 300s)\n");
+
+    // 5. 前额叶（对话系统+认知调度）
+    gw->prefrontal = prefrontal_create(gw->topology, gw->memory, gw->causal_graph, gw->learner);
+    if (!gw->prefrontal) { fprintf(stderr, "[gateway] 前额叶创建失败\n"); return -1; }
+    gw->dialog = prefrontal_dialog(gw->prefrontal);  /* 兼容旧代码 */
+    printf("[gateway]   前额叶就绪\n");
+
+    // 脑干
+    gw->brainstem = brainstem_create(gw->topology, gw->memory, gw->dialog->cognitive_state);
+    if (!gw->brainstem) { fprintf(stderr, "[gateway] 脑干创建失败\n"); return -1; }
+    printf("[gateway]   脑干就绪\n");
+
+    // 丘脑调度器
+    gw->thalamus = thalamus_create();
+    if (!gw->thalamus) { fprintf(stderr, "[gateway] 丘脑创建失败\n"); return -1; }
+    printf("[gateway]   丘脑就绪\n");
+
+    // 感觉皮层（自主语料输送口）
+    gw->perception = perception_create(gw->topology, gw->memory, gw->learner, NULL);
+    if (!gw->perception) { fprintf(stderr, "[gateway] 感觉皮层创建失败\n"); return -1; }
+    printf("[gateway]   感觉皮层就绪\n");
+
+    // 海马体（记忆+巩固+感知联动）
+    gw->hippocampus = hippocampus_create(gw->topology, gw->memory, gw->perception);
+    if (!gw->hippocampus) { fprintf(stderr, "[gateway] 海马体创建失败\n"); return -1; }
+    printf("[gateway]   海马体就绪\n");
+
+    // 加载持久化数据
+    if (access("pivotmind_state.dat", F_OK) == 0) {
+        int loaded = master_load_state(gw->topology, "pivotmind_state.dat");
+        if (loaded >= 0) printf("[gateway]   加载拓扑状态: %d 节点\n", loaded);
+    }
+
+    int feat_loaded = load_features(gw->topology, "features.bin");
+    if (feat_loaded > 0) printf("[gateway]   加载特征向量: %d 节点\n", feat_loaded);
+    else { int initted = init_random_features(gw->topology); printf("[gateway]   初始化特征向量: %d 节点\n", initted); }
+
+    int cross_loaded = load_cross_edges(gw->topology, "cross_edges.bin");
+    if (cross_loaded > 0) printf("[gateway]   加载跨拓扑连接: %d 条\n", cross_loaded);
+    else { int rebuilt = rebuild_cross_connections(gw->topology); printf("[gateway]   重建跨拓扑连接: %d 条\n", rebuilt); }
+
+    memory_load_seed(gw->memory, "memory_seed.dat");
+
+    // 模板拓扑 (懒加载：启动时不全量构建，边用边积累)
+    SubTopology* tpl = master_get_sub_topology_by_type(gw->topology, TOPO_TEMPLATE);
+    if (tpl && tpl->net && tpl->net->node_count > 0) {
+        printf("[gateway]   模板拓扑就绪 (%d 节点)\n", tpl->net->node_count);
+        gw->topology->use_template_voting = 1;
+    } else {
+        printf("[gateway]   模板拓扑空，将在对话中逐步构建\n");
+    }
+    // 无论模板是否就绪，都开启投票（空模板时自动降级为无模板）
+    gw->topology->use_template_voting = 1;
+
+    // 大脑式节点缓存（用于冷热管理）
+    // 创建在加载状态之后、启动后台时钟之前
+    gw->brain_cache = node_cache_create("brain_state.dat",
+                                         gw->topology->sub_topologies[0]->net->max_nodes + 10000);
+    if (!gw->brain_cache) {
+        fprintf(stderr, "[gateway] 大脑缓存创建失败\n");
+        return -1;
+    }
+    brainstem_set_node_cache(gw->brainstem, gw->brain_cache);
+    brainstem_set_thalamus(gw->brainstem, gw->thalamus);
+    brainstem_set_perception(gw->brainstem, gw->perception);
+    brainstem_set_hippocampus(gw->brainstem, gw->hippocampus);
+
+    // 启动后台线程
+    active_learner_start(gw->learner);
+    brainstem_start(gw->brainstem);
+
+    gw->start_time = time(NULL);
+    gw->engine_ready = 1;  // 引擎初始化完成，可接受请求
+    printf("[gateway] PivotMind 引擎就绪\n");
+
+    return 0;
+}
+
+// ==================== 保存并关闭 ====================
+
+static void gw_system_shutdown(GatewaySystem* gw) {
+    if (!gw) return;
+    printf("[gateway] 正在关闭...\n");
+
+    // 停止后台
+    if (gw->learner) active_learner_stop(gw->learner);
+    if (gw->brainstem) brainstem_stop(gw->brainstem);
+
+    // 保存状态
+    if (gw->topology) {
+        int saved = master_save_state(gw->topology, "pivotmind_state.dat");
+        if (saved >= 0) printf("[gateway]   保存拓扑状态: %d 节点\n", saved);
+        int feat_saved = save_features(gw->topology, "features.bin");
+        if (feat_saved > 0) printf("[gateway]   保存特征: %d 节点\n", feat_saved);
+        int cross_saved = save_cross_edges(gw->topology, "cross_edges.bin");
+        if (cross_saved > 0) printf("[gateway]   保存跨拓扑连接: %d 条\n", cross_saved);
+    }
+    if (gw->memory) {
+        int saved = memory_save_seed(gw->memory, "memory_seed.dat");
+        if (saved >= 0) printf("[gateway]   保存记忆种子: %d 条\n", saved);
+    }
+
+    // 销毁
+    if (gw->brainstem)    brainstem_stop(gw->brainstem);
+    if (gw->hippocampus) hippocampus_destroy(gw->hippocampus);
+    if (gw->thalamus)     thalamus_destroy(gw->thalamus);
+    if (gw->perception)   perception_destroy(gw->perception);
+    if (gw->brainstem)    brainstem_destroy(gw->brainstem);
+    if (gw->brain_cache) node_cache_destroy(gw->brain_cache);
+    if (gw->learner)     active_learner_destroy(gw->learner);
+    if (gw->prefrontal)  prefrontal_destroy(gw->prefrontal);
+    if (gw->causal_graph) causal_graph_destroy(gw->causal_graph);
+    if (gw->topology)    master_topology_destroy(gw->topology);
+    if (gw->memory)      memory_system_destroy(gw->memory);
+
+    printf("[gateway] 已关闭 (运行 %lld 秒, 对话 %lld 轮)\n",
+           (long long)(time(NULL) - gw->start_time), (long long)gw->total_dialogs);
+}
+
+// ==================== 请求处理 ====================
+
+// POST /chat - 对话
+static void handle_chat(GatewaySystem* gw, int fd, const char* body) {
+    char msg[2048] = {0};
+    if (!json_extract_string(body, "msg", msg, sizeof(msg)) || strlen(msg) == 0) {
+        http_json(fd, 400, "{\"error\":\"missing or empty 'msg' field\"}");
+        return;
+    }
+
+    // 调用对话引擎
+    DialogReasoning* reasoning = NULL;
+    char* response = dialog_process(gw->dialog, msg, &reasoning);
+
+    if (response) {
+        char escaped[GW_MAX_RESPONSE];
+        json_escape(response, escaped, sizeof(escaped));
+
+        // 统计节点数
+        int total_nodes = 0;
+        for (int t = 0; t < gw->topology->sub_topo_count; t++) {
+            if (gw->topology->sub_topologies[t] && gw->topology->sub_topologies[t]->net)
+                total_nodes += gw->topology->sub_topologies[t]->net->node_count;
+        }
+
+        char json[GW_MAX_RESPONSE];
+        snprintf(json, sizeof(json),
+            "{\"reply\":\"%s\",\"nodes\":%d,\"dialogs\":%lld}",
+            escaped, total_nodes, (long long)gw->total_dialogs + 1);
+
+        http_json(fd, 200, json);
+
+        gw->total_dialogs++;
+
+        // 增量模板维护：每轮对话构建 2 条模板，逐步积累
+        {
+            SubTopology* _tpl = master_get_sub_topology_by_type(gw->topology, TOPO_TEMPLATE);
+            int _tpl_count = (_tpl && _tpl->net) ? _tpl->net->node_count : 0;
+            // 每 5 轮对话构建 2 条模板（避免高频构建拖慢响应）
+            if (gw->total_dialogs % 5 == 0 && _tpl_count < 2000) {
+                template_auto_build(gw->topology, 2, 5);
+            }
+            // 每 200 轮对话做一次衰减清理
+            if (gw->total_dialogs % 200 == 0) {
+                template_decay_inactive_links(gw->topology, 20, 0.85f);
+            }
+        }
+
+        if (reasoning) dialog_reasoning_destroy(reasoning);
+        free(response);
+    } else {
+        http_json(fd, 200, "{\"reply\":\"(无回应)\",\"nodes\":0}");
+    }
+}
+
+// POST /learn - 主动学习
+static void handle_learn(GatewaySystem* gw, int fd, const char* body) {
+    char msg[2048] = {0};
+    if (!json_extract_string(body, "msg", msg, sizeof(msg)) || strlen(msg) == 0) {
+        http_json(fd, 400, "{\"error\":\"missing or empty 'msg' field\"}");
+        return;
+    }
+
+    learn_from_dialog(gw->learner, msg, "", "");
+    gw->total_learning_cycles++;
+
+    http_json(fd, 200, "{\"result\":\"learned\"}");
+}
+
+// POST /feedback - 反馈
+static void handle_feedback(GatewaySystem* gw, int fd, const char* body) {
+    char msg[2048] = {0};
+    char rating[64] = {0};
+
+    if (!json_extract_string(body, "msg", msg, sizeof(msg)) || strlen(msg) == 0) {
+        http_json(fd, 400, "{\"error\":\"missing 'msg' field\"}");
+        return;
+    }
+    if (!json_extract_string(body, "rating", rating, sizeof(rating)) || strlen(rating) == 0) {
+        http_json(fd, 400, "{\"error\":\"missing 'rating' field (correct/wrong)\"}");
+        return;
+    }
+
+    // 处理反馈
+    float confidence = 0.5f;
+    if (strcmp(rating, "correct") == 0 || strcmp(rating, "对") == 0) {
+        confidence = 0.95f;
+    } else if (strcmp(rating, "wrong") == 0 || strcmp(rating, "错") == 0) {
+        confidence = 0.2f;
+    } else {
+        http_json(fd, 400, "{\"error\":\"rating must be 'correct' or 'wrong'\"}");
+        return;
+    }
+
+    // 存入记忆
+    char key[512];
+    snprintf(key, sizeof(key), "feedback:%s", msg);
+    memory_store(gw->memory, key, (void*)rating, strlen(rating) + 1, MEMORY_TYPE_STRING, confidence);
+
+    http_json(fd, 200, "{\"result\":\"ok\"}");
+}
+
+// GET /status - 状态查询
+static void handle_status(GatewaySystem* gw, int fd) {
+    int total_nodes = 0;
+    int template_nodes = 0;
+    for (int t = 0; t < gw->topology->sub_topo_count; t++) {
+        if (gw->topology->sub_topologies[t] && gw->topology->sub_topologies[t]->net)
+            total_nodes += gw->topology->sub_topologies[t]->net->node_count;
+    }
+    SubTopology* tpl = master_get_sub_topology_by_type(gw->topology, TOPO_TEMPLATE);
+    if (tpl && tpl->net) template_nodes = tpl->net->node_count;
+
+    long long uptime = (long long)(time(NULL) - gw->start_time);
+    char real_time_buf[32];
+    const char* real_time = "unknown";
+    if (gw->brainstem) {
+        real_time = brainstem_get_real_time(gw->brainstem, real_time_buf, sizeof(real_time_buf));
+    }
+    int clock_ticks = gw->brainstem ? brainstem_tick_count(gw->brainstem) : 0;
+    float circadian = gw->brainstem ? brainstem_get_circadian(gw->brainstem) : 0.5f;
+    const char* circadian_phase = gw->brainstem ? brainstem_get_circadian_phase(gw->brainstem) : "unknown";
+    long cache_frozen = gw->brain_cache ? gw->brain_cache->total_freezes : 0;
+    long cache_thawed = gw->brain_cache ? gw->brain_cache->total_thaws : 0;
+
+    char json[2048];
+    snprintf(json, sizeof(json),
+        "{"
+        "\"status\":\"running\","
+        "\"real_time\":\"%s\","
+        "\"uptime\":%lld,"
+        "\"clock_ticks\":%d,"
+        "\"circadian\":%.2f,"
+        "\"circadian_phase\":\"%s\","
+        "\"dialogs\":%lld,"
+        "\"learn_calls\":%lld,"
+        "\"total_nodes\":%d,"
+        "\"template_nodes\":%d,"
+        "\"template_voting\":%s,"
+        "\"brain_frozen\":%ld,"
+        "\"brain_thawed\":%ld,"
+        "\"topologies\":%d,"
+        "\"port\":%d"
+        "}",
+        real_time ? real_time : "unknown",
+        uptime,
+        clock_ticks,
+        (double)circadian,
+        circadian_phase,
+        (long long)gw->total_dialogs,
+        (long long)gw->total_learning_cycles,
+        total_nodes,
+        template_nodes,
+        gw->topology->use_template_voting ? "true" : "false",
+        cache_frozen,
+        cache_thawed,
+        gw->topology->sub_topo_count,
+        gw->port);
+
+    http_json(fd, 200, json);
+}
+
+// GET /health - 健康检查
+static void handle_health(GatewaySystem* gw, int fd) {
+    if (gw->engine_ready) {
+        http_json(fd, 200, "{\"status\":\"ok\"}");
+    } else {
+        http_json(fd, 503, "{\"status\":\"loading\",\"message\":\"engine initializing\"}");
+    }
+}
+
+// ==================== HTTP 请求解析 ====================
+
+typedef struct {
+    char method[8];
+    char path[256];
+    char body[GW_MAX_REQUEST];
+    int  body_len;
+} HttpRequest;
+
+static int parse_request(int fd, HttpRequest* req) {
+    memset(req, 0, sizeof(HttpRequest));
+
+    // 读取请求 (先读 header，再读 body)
+    char buf[GW_MAX_REQUEST];
+    int total = 0;
+    int header_end = -1;
+
+    // 设读取超时
+    struct timeval tv = { .tv_sec = GW_READ_TIMEOUT_S, .tv_usec = 0 };
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+    while (total < (int)sizeof(buf) - 1) {
+        int n = recv(fd, buf + total, 1, 0);
+        if (n <= 0) break;
+        total += n;
+        buf[total] = '\0';
+
+        // 检查 header 结束 (\r\n\r\n)
+        if (header_end < 0 && total >= 4) {
+            for (int i = 0; i <= total - 4; i++) {
+                if (buf[i] == '\r' && buf[i+1] == '\n' && buf[i+2] == '\r' && buf[i+3] == '\n') {
+                    header_end = i;
+                    break;
+                }
+            }
+        }
+
+        // header 已读完，检查 Content-Length 继续读 body
+        if (header_end >= 0) {
+            int header_size = header_end + 4;
+            int body_received = total - header_size;
+
+            // 找 Content-Length
+            char* cl = strcasestr(buf, "Content-Length:");
+            if (cl) {
+                int content_length = atoi(cl + 15);
+                if (content_length > GW_MAX_REQUEST) return -1; // 太大
+                if (body_received >= content_length) break; // body 完整
+            } else {
+                break; // 无 body
+            }
+        }
+    }
+
+    if (total == 0 || header_end < 0) return -1;
+
+    // 解析方法
+    char* p = buf;
+    int i = 0;
+    while (*p && *p != ' ' && i < (int)sizeof(req->method) - 1) req->method[i++] = *p++;
+    req->method[i] = '\0';
+    if (*p == ' ') p++;
+
+    // 解析路径
+    i = 0;
+    while (*p && *p != ' ' && *p != '?' && i < (int)sizeof(req->path) - 1) req->path[i++] = *p++;
+    req->path[i] = '\0';
+
+    // 提取 body
+    int header_size = header_end + 4;
+    req->body_len = total - header_size;
+    if (req->body_len > 0) {
+        memcpy(req->body, buf + header_size, req->body_len);
+        req->body[req->body_len] = '\0';
+    }
+
+    return 0;
+}
+
+// ==================== 连接处理 ====================
+
+static void handle_connection(GatewaySystem* gw, int client_fd) {
+    HttpRequest req;
+    if (parse_request(client_fd, &req) < 0) {
+        http_json(client_fd, 400, "{\"error\":\"bad request\"}");
+        close(client_fd);
+        return;
+    }
+
+    // CORS preflight
+    if (strcmp(req.method, "OPTIONS") == 0) {
+        http_send(client_fd, 200, "text/plain", "");
+        close(client_fd);
+        return;
+    }
+
+    // 路由
+    if (strcmp(req.method, "GET") == 0) {
+        if (strcmp(req.path, "/health") == 0) {
+            handle_health(gw, client_fd);
+        } else if (strcmp(req.path, "/status") == 0) {
+            if (!gw->engine_ready) {
+                http_json(client_fd, 503, "{\"status\":\"loading\"}");
+            } else {
+                handle_status(gw, client_fd);
+            }
+        } else {
+            http_json(client_fd, 404, "{\"error\":\"not found\"}");
+        }
+    } else if (strcmp(req.method, "POST") == 0) {
+        if (!gw->engine_ready) {
+            http_json(client_fd, 503, "{\"status\":\"loading\",\"message\":\"engine initializing\"}");
+        } else if (strcmp(req.path, "/chat") == 0) {
+            handle_chat(gw, client_fd, req.body);
+        } else if (strcmp(req.path, "/learn") == 0) {
+            handle_learn(gw, client_fd, req.body);
+        } else if (strcmp(req.path, "/feedback") == 0) {
+            handle_feedback(gw, client_fd, req.body);
+        } else {
+            http_json(client_fd, 404, "{\"error\":\"not found\"}");
+        }
+    } else {
+        http_json(client_fd, 400, "{\"error\":\"method not allowed\"}");
+    }
+
+    close(client_fd);
+}
+
+// ==================== 主函数 ====================
+
+int main(int argc, char* argv[]) {
+    // 解析参数
+    int port = GW_DEFAULT_PORT;
+    const char* workdir = ".";
+
+    if (argc >= 2) port = atoi(argv[1]);
+    if (argc >= 3) workdir = argv[2];
+
+    // 切换工作目录
+    if (chdir(workdir) != 0) {
+        fprintf(stderr, "[gateway] 无法切换到工作目录: %s (%s)\n", workdir, strerror(errno));
+        return 1;
+    }
+
+    // 创建系统
+    GatewaySystem gw = {0};
+    g_gw = &gw;
+    gw.port = port;
+    strncpy(gw.workdir, workdir, sizeof(gw.workdir) - 1);
+
+    // 信号处理
+    signal(SIGINT, gw_signal_handler);
+    signal(SIGTERM, gw_signal_handler);
+    signal(SIGPIPE, SIG_IGN); // 忽略断开连接的写
+
+    // 创建监听 socket (先绑定端口，再初始化引擎，避免加载期间 SSH 连不上)
+    int server_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (server_fd < 0) {
+        fprintf(stderr, "[gateway] socket 创建失败: %s\n", strerror(errno));
+        return 1;
+    }
+
+    int opt = 1;
+    setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+    struct sockaddr_in addr = {
+        .sin_family = AF_INET,
+        .sin_addr.s_addr = INADDR_ANY,
+        .sin_port = htons(port)
+    };
+
+    if (bind(server_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        fprintf(stderr, "[gateway] bind 失败: %s\n", strerror(errno));
+        close(server_fd);
+        return 1;
+    }
+
+    if (listen(server_fd, GW_BACKLOG) < 0) {
+        fprintf(stderr, "[gateway] listen 失败: %s\n", strerror(errno));
+        close(server_fd);
+        return 1;
+    }
+
+    printf("[gateway] 端口 %d 已绑定 (引擎初始化中...)\n", port);
+
+    // 后台线程初始化引擎 (避免阻塞主循环，加载期间仍可响应 /health)
+    pthread_t init_thread;
+    if (pthread_create(&init_thread, NULL, (void* (*)(void*))gw_system_init, &gw) != 0) {
+        fprintf(stderr, "[gateway] 无法创建初始化线程\n");
+        close(server_fd);
+        return 1;
+    }
+    pthread_detach(init_thread);
+
+    // 主循环 (引擎初始化期间 /health 返回 loading，初始化完成后正常服务)
+    while (!gw.shutdown_requested) {
+        // 用非阻塞 accept + 短超时，避免初始化卡住时无法响应信号
+        struct timeval tv = { .tv_sec = 1, .tv_usec = 0 };
+        setsockopt(server_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+        struct sockaddr_in client_addr;
+        socklen_t client_len = sizeof(client_addr);
+        int client_fd = accept(server_fd, (struct sockaddr*)&client_addr, &client_len);
+
+        if (client_fd < 0) {
+            if (errno == EINTR || gw.shutdown_requested) break;
+            if (errno == EAGAIN || errno == EWOULDBLOCK) continue;
+            // 可能是超时，继续循环
+            continue;
+        }
+
+        handle_connection(&gw, client_fd);
+    }
+
+    // 等待引擎初始化线程结束 (如果还在跑)
+    while (!gw.engine_ready && !gw.shutdown_requested) {
+        usleep(100000); // 100ms
+    }
+
+    // 清理
+    close(server_fd);
+    gw_system_shutdown(&gw);
+
+    printf("[gateway] 再见!\n");
+    return 0;
+}

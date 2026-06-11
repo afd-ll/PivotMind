@@ -61,6 +61,9 @@ $(LIB_NAME): $(CORE_OBJ)
 $(BUILD_DIR)/digital_life: $(OBJ_DIR)/digital_life.o $(LIB_NAME)
 	TMPDIR=/tmp $(CC) $(CFLAGS) -o $@ $(OBJ_DIR)/digital_life.o -L. -lpivotmind $(LDFLAGS)
 
+$(BUILD_DIR)/pivotmind_gateway: $(OBJ_DIR)/pivotmind_gateway.o $(LIB_NAME)
+	TMPDIR=/tmp $(CC) $(CFLAGS) -o $@ $(OBJ_DIR)/pivotmind_gateway.o -L. -lpivotmind $(LDFLAGS)
+
 $(BUILD_DIR)/seed_builder: $(OBJ_DIR)/seed_builder.o $(LIB_NAME)
 	TMPDIR=/tmp $(CC) $(CFLAGS) -o $@ $(OBJ_DIR)/seed_builder.o -L. -lpivotmind $(LDFLAGS)
 
@@ -96,7 +99,7 @@ $(BUILD_DIR)/eval_templates: $(OBJ_DIR)/eval_templates.o $(LIB_NAME)
 # ========== 构建目标 ==========
 
 # 默认 (跳过 clean)
-all: $(LIB_NAME) seed-builder debug-seed digital-life
+all: $(LIB_NAME) seed-builder debug-seed digital-life gateway
 
 # Linux 一键构建全�?
 linux: clean
@@ -109,6 +112,7 @@ debug:
 
 # 各个可执行文�?
 digital-life: $(BUILD_DIR)/digital_life
+gateway: $(BUILD_DIR)/pivotmind_gateway
 seed-builder: $(BUILD_DIR)/seed_builder
 debug-seed: $(BUILD_DIR)/debug_seed
 test-dialog: $(BUILD_DIR)/test_dialog
@@ -142,4 +146,4 @@ test:
 	$(CC) $(CFLAGS) -o $(BUILD_DIR)/test_runner tests/test_runner.c -L. -lpivotmind $(LDFLAGS)
 	./$(BUILD_DIR)/test_runner
 
-.PHONY: all linux debug digital-life seed-builder debug-seed test-dialog corpus-train batch-learn batch-learn-lowmem template-build path-analyze compare-templates eval-templates run clean install test
+.PHONY: all linux debug digital-life gateway seed-builder debug-seed test-dialog corpus-train batch-learn batch-learn-lowmem template-build path-analyze compare-templates eval-templates run clean install test

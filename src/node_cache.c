@@ -1,0 +1,368 @@
+/**
+ * @file node_cache.c
+ * @brief 大脑式节点冷热缓存实现
+ */
+
+#include "node_cache.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+
+/* 文件格式常量 */
+#define NC_MAGIC      0x42434950  /* "PCIB" = PivotMind Cold-Brain Index */
+#define NC_VERSION    1
+#define NC_BITMAP_SIZE(node_cap)  (((node_cap) + 7) / 8)
+
+/* 每个节点的文件头 */
+#define NC_NODE_HDR_SZ  12  /* concept_len(4) + feat_dim(4) + conn_count(4) */
+
+/* ================================================================
+ *  内部工具
+ * ================================================================ */
+
+/* 位图操作 */
+static inline int bitmap_test(uint8_t* bm, int idx) {
+    return (bm[idx >> 3] >> (idx & 7)) & 1;
+}
+static inline void bitmap_set(uint8_t* bm, int idx) {
+    bm[idx >> 3] |= (uint8_t)(1 << (idx & 7));
+}
+
+/* 基于 node_id 在拓扑网络中查找节点指针 */
+static ReasoningNode* nc_lookup_node(HuarongTopologyNet* net, int node_id) {
+    if (!net || node_id < 0 || node_id >= net->node_count) return NULL;
+    return net->nodes[node_id];
+}
+
+/* ================================================================
+ *  创建 / 销毁
+ * ================================================================ */
+
+NodeCache* node_cache_create(const char* filepath, int node_cap) {
+    if (!filepath || node_cap < 1) return NULL;
+
+    NodeCache* nc = (NodeCache*)calloc(1, sizeof(NodeCache));
+    if (!nc) return NULL;
+
+    strncpy(nc->filepath, filepath, sizeof(nc->filepath) - 1);
+    nc->node_count = node_cap;
+
+    /* 分配内存索引表 */
+    int bm_sz = NC_BITMAP_SIZE(node_cap);
+    nc->bitmap  = (uint8_t*)calloc(1, bm_sz);
+    nc->offsets = (int64_t*)calloc(node_cap, sizeof(int64_t));
+    nc->sizes   = (int32_t*)calloc(node_cap, sizeof(int32_t));
+    if (!nc->bitmap || !nc->offsets || !nc->sizes) {
+        node_cache_destroy(nc);
+        return NULL;
+    }
+
+    pthread_mutex_init(&nc->lock, NULL);
+
+    /* 打开/创建文件 */
+    int is_new = 0;
+    FILE* f = fopen(filepath, "rb");
+    if (!f) {
+        is_new = 1;
+    } else {
+        /* 读取已有文件头 */
+        uint32_t hdr[4];
+        if (fread(hdr, 4, 4, f) != 4 || hdr[0] != NC_MAGIC || hdr[1] != NC_VERSION) {
+            fclose(f);
+            is_new = 1;
+        } else {
+            int file_nodes = (int)hdr[2];
+            if (file_nodes != node_cap) {
+                fprintf(stderr, "[node_cache] 警告: 文件节点数(%d) != 预期(%d), 重建索引\n",
+                        file_nodes, node_cap);
+                fclose(f);
+                is_new = 1;
+            } else {
+                /* 读取 bitmap */
+                size_t _nr = fread(nc->bitmap, 1, bm_sz, f);
+                /* 读取索引表 */
+                _nr += fread(nc->offsets, sizeof(int64_t), node_cap, f);
+                _nr += fread(nc->sizes,   sizeof(int32_t), node_cap, f);
+                (void)_nr;
+                fclose(f);
+            }
+        }
+    }
+
+    if (is_new) {
+        /* 创建新文件 */
+        f = fopen(filepath, "wb+");
+        if (!f) { node_cache_destroy(nc); return NULL; }
+        uint32_t hdr[4] = { NC_MAGIC, NC_VERSION, (uint32_t)node_cap, 0 };
+        size_t _nw = fwrite(hdr, 4, 4, f);
+        _nw += fwrite(nc->bitmap, 1, bm_sz, f);
+        _nw += fwrite(nc->offsets, sizeof(int64_t), node_cap, f);
+        _nw += fwrite(nc->sizes,   sizeof(int32_t), node_cap, f);
+        (void)_nw;
+        fflush(f);
+    } else {
+        /* 以读写模式打开 */
+        f = fopen(filepath, "r+b");
+        if (!f) { node_cache_destroy(nc); return NULL; }
+    }
+
+    nc->fp = f;
+    /* 计算索引区结束位置（数据区起始） */
+    int64_t data_start = 16 + bm_sz + node_cap * 16;
+    fseeko(f, data_start, SEEK_SET);
+
+    printf("[node_cache] 就绪: %s (%s, %d 节点)\n",
+           filepath, is_new ? "新建" : "已存在", node_cap);
+    return nc;
+}
+
+void node_cache_destroy(NodeCache* nc) {
+    if (!nc) return;
+    if (nc->fp) fclose(nc->fp);
+    free(nc->bitmap);
+    free(nc->offsets);
+    free(nc->sizes);
+    pthread_mutex_destroy(&nc->lock);
+    free(nc);
+}
+
+/* ================================================================
+ *  序列化 / 反序列化
+ * ================================================================ */
+
+/** 计算节点数据块大小 */
+static int nc_node_data_size(ReasoningNode* node) {
+    if (!node) return 0;
+    int sz = NC_NODE_HDR_SZ;  /* header */
+    sz += (int)strlen(node->concept ? node->concept : "") + 1;  /* concept string */
+    sz += node->feature_dim * (int)sizeof(float);              /* features */
+    /* connections: target_id(4) + weight(4) + bias(4) + conf(4) = 16B each */
+    sz += node->connection_count * 16;
+    return sz;
+}
+
+/** 序列化一个节点到内存缓冲区 */
+static int nc_serialize_node(ReasoningNode* node, uint8_t* buf, int buf_sz) {
+    if (!node || !buf) return -1;
+
+    const char* concept = node->concept ? node->concept : "";
+    int concept_len = (int)strlen(concept);
+    int needed = NC_NODE_HDR_SZ + concept_len + 1
+               + node->feature_dim * (int)sizeof(float)
+               + node->connection_count * 16;
+
+    if (needed > buf_sz) return -1;
+
+    uint8_t* p = buf;
+
+    /* 写入 header */
+    memcpy(p, &concept_len, 4);                   p += 4;
+    memcpy(p, &node->feature_dim, 4);             p += 4;
+    memcpy(p, &node->connection_count, 4);        p += 4;
+
+    /* concept 字符串 */
+    memcpy(p, concept, concept_len + 1);          p += concept_len + 1;
+
+    /* features */
+    if (node->features && node->feature_dim > 0) {
+        memcpy(p, node->features, node->feature_dim * sizeof(float));
+    }
+    p += node->feature_dim * sizeof(float);
+
+    /* connections: 每条边保存 target 的 node_id + weight + bias + confidence */
+    for (int i = 0; i < node->connection_count; i++) {
+        int target_id = 0;
+        if (node->connections && node->connections[i])
+            target_id = node->connections[i]->node_id;
+        float w  = (node->connection_weights && i < node->connection_capacity) ? node->connection_weights[i] : 0.0f;
+        float mb = (node->connection_motivational_bias && i < node->connection_capacity) ? node->connection_motivational_bias[i] : 0.0f;
+        float cf = (node->connection_confidences && i < node->connection_capacity) ? node->connection_confidences[i] : 0.0f;
+
+        memcpy(p, &target_id, 4);  p += 4;
+        memcpy(p, &w, 4);          p += 4;
+        memcpy(p, &mb, 4);         p += 4;
+        memcpy(p, &cf, 4);         p += 4;
+    }
+
+    return (int)(p - buf);
+}
+
+/** 写入节点到文件的指定偏移 */
+static int nc_write_node_at(NodeCache* nc, HuarongTopologyNet* net, ReasoningNode* node, int64_t offset) {
+    int size = nc_node_data_size(node);
+    if (size <= 0 || size > (1<<24)) return -1;  /* 16MB 上限 */
+
+    uint8_t* buf = (uint8_t*)malloc(size);
+    if (!buf) return -1;
+
+    int written = nc_serialize_node(node, buf, size);
+    if (written > 0) {
+        fseeko(nc->fp, offset, SEEK_SET);
+        size_t _nw2 = fwrite(buf, 1, (size_t)written, nc->fp);
+        (void)_nw2;
+        fflush(nc->fp);
+    }
+    free(buf);
+    return (written > 0) ? 0 : -1;
+}
+
+/* ================================================================
+ *  公共 API
+ * ================================================================ */
+
+int node_cache_save_node(NodeCache* nc, HuarongTopologyNet* net, ReasoningNode* node) {
+    if (!nc || !node) return -1;
+
+    pthread_mutex_lock(&nc->lock);
+
+    int64_t offset;
+    if (!bitmap_test(nc->bitmap, node->node_id)) {
+        /* 首次写入：追加到文件末尾 */
+        fseeko(nc->fp, 0, SEEK_END);
+        offset = ftello(nc->fp);
+        nc->offsets[node->node_id] = offset;
+    } else {
+        offset = nc->offsets[node->node_id];
+    }
+
+    if (nc_write_node_at(nc, net, node, offset) < 0) {
+        pthread_mutex_unlock(&nc->lock);
+        return -1;
+    }
+
+    int size = nc_node_data_size(node);
+    nc->sizes[node->node_id] = size;
+    bitmap_set(nc->bitmap, node->node_id);
+
+    pthread_mutex_unlock(&nc->lock);
+    return 0;
+}
+
+int node_cache_freeze(NodeCache* nc, HuarongTopologyNet* net, ReasoningNode* node) {
+    if (!nc || !node || node->is_cooled) return -1;
+
+    /* 1. 保存到文件 */
+    if (node_cache_save_node(nc, net, node) < 0) return -1;
+
+    /* 2. 释放连接相关内存 */
+    free(node->connections);
+    free(node->connection_weights);
+    free(node->connection_motivational_bias);
+    free(node->connection_confidences);
+    if (node->conn_hash) {
+        free(node->conn_hash);
+        node->conn_hash = NULL;
+        node->conn_hash_mask = 0;
+        node->conn_hash_entries = 0;
+    }
+
+    node->connections = NULL;
+    node->connection_weights = NULL;
+    node->connection_motivational_bias = NULL;
+    node->connection_confidences = NULL;
+    node->connection_count = 0;
+    node->connection_capacity = 0;
+    node->is_cooled = 1;
+
+    __sync_fetch_and_add(&nc->total_freezes, 1);
+    return 0;
+}
+
+int node_cache_thaw(NodeCache* nc, HuarongTopologyNet* net, ReasoningNode* node) {
+    if (!nc || !node || !node->is_cooled) return -1;
+    if (!node->concept) return -1;
+    if (!bitmap_test(nc->bitmap, node->node_id)) {
+        /* 节点从未保存过（可能是系统初始节点），标记为热即可 */
+        node->is_cooled = 0;
+        return 0;
+    }
+
+    pthread_mutex_lock(&nc->lock);
+
+    int64_t offset = nc->offsets[node->node_id];
+    int size = nc->sizes[node->node_id];
+    if (offset <= 0 || size <= 0) {
+        pthread_mutex_unlock(&nc->lock);
+        return -1;
+    }
+
+    uint8_t* buf = (uint8_t*)malloc(size);
+    if (!buf) { pthread_mutex_unlock(&nc->lock); return -1; }
+
+    fseeko(nc->fp, offset, SEEK_SET);
+    int nread = (int)fread(buf, 1, size, nc->fp);
+    pthread_mutex_unlock(&nc->lock);
+
+    if (nread < NC_NODE_HDR_SZ) { free(buf); return -1; }
+
+    /* 解析数据块 */
+    uint8_t* p = buf;
+    int concept_len, feat_dim, conn_count;
+    memcpy(&concept_len, p, 4);  p += 4;
+    memcpy(&feat_dim,    p, 4);  p += 4;
+    memcpy(&conn_count,  p, 4);  p += 4;
+
+    /* concept（已在内存，跳过比对 — 文件中的和 struct 中的应该一致） */
+    p += concept_len + 1;
+
+    /* features（如果 features 为空，分配并加载） */
+    if (feat_dim > 0 && !node->features) {
+        node->features = (float*)calloc(feat_dim, sizeof(float));
+        if (node->features) {
+            memcpy(node->features, p, feat_dim * sizeof(float));
+            node->feature_dim = feat_dim;
+        }
+    }
+    p += feat_dim * sizeof(float);
+
+    /* 重建 connections 数组 */
+    if (conn_count > 0) {
+        int cap = conn_count + 4;  /* 留一点扩容空间 */
+        node->connections = (ReasoningNode**)calloc(cap, sizeof(ReasoningNode*));
+        node->connection_weights = (float*)calloc(cap, sizeof(float));
+        node->connection_motivational_bias = (float*)calloc(cap, sizeof(float));
+        node->connection_confidences = (float*)calloc(cap, sizeof(float));
+
+        if (!node->connections || !node->connection_weights) {
+            free(buf);
+            return -1;
+        }
+        node->connection_capacity = cap;
+        node->connection_count = conn_count;
+
+        for (int i = 0; i < conn_count; i++) {
+            int target_id;
+            float w, mb, cf;
+            memcpy(&target_id, p, 4);  p += 4;
+            memcpy(&w, p, 4);          p += 4;
+            memcpy(&mb, p, 4);         p += 4;
+            memcpy(&cf, p, 4);         p += 4;
+
+            node->connections[i] = nc_lookup_node(net, target_id);
+            node->connection_weights[i] = w;
+            if (node->connection_motivational_bias) node->connection_motivational_bias[i] = mb;
+            if (node->connection_confidences) node->connection_confidences[i] = cf;
+        }
+
+        /* 重建连接哈希表 */
+        if (node->connections[0]) {
+            int hash_cap = 16;
+            while (hash_cap < conn_count * 2) hash_cap *= 2;
+            node->conn_hash = (ConnHashEntry*)calloc(hash_cap, sizeof(ConnHashEntry));
+            if (node->conn_hash) {
+                node->conn_hash_mask = hash_cap - 1;
+                for (int i = 0; i < conn_count; i++) {
+                    if (node->connections[i]) {
+                        node_conn_hash_insert(NULL, node, node->connections[i], i);
+                    }
+                }
+            }
+        }
+    }
+
+    free(buf);
+    node->is_cooled = 0;
+    __sync_fetch_and_add(&nc->total_thaws, 1);
+    return 0;
+}

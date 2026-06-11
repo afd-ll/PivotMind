@@ -3,6 +3,7 @@
 
 #include "constants.h"
 #include "cognitive_params.h"
+#include <stdint.h>
 #include <pthread.h>
 
 /** 前置声明（避免循环包含 node_hash.h） */
@@ -76,6 +77,7 @@ typedef struct ReasoningNode {
     // 元信息
     int is_reversible;         // 是否支持可逆操作
     int is_visited;            // 搜索过程中是否已访问
+    volatile int is_cooled;    // 大脑模式: 连接数据已冻入文件 (0=热 1=冷)
 } ReasoningNode;
 
 /**
