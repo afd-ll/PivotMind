@@ -26,8 +26,8 @@ Prefrontal* prefrontal_create(MasterTopology* topology,
     pf->controller = cognitive_controller_create(topology, memory);
     if (!pf->controller) { dialog_system_destroy(pf->dialog); free(pf); return NULL; }
 
-    pf->accept_threshold = 0.55f;
-    pf->max_retries = 3;
+    pf->accept_threshold = 0.40f;  /* 放宽通过阈值 */
+    pf->max_retries = 2;            /* 最多2次 */
 
     printf("[前额叶] 就绪 (DLPFC生成+ACC监控, 阈值=%.2f, 最大回溯=%d)\n",
            pf->accept_threshold, pf->max_retries);
@@ -62,13 +62,16 @@ char* prefrontal_chat(Prefrontal* pf, const char* input) {
 
         /* ── ACC 评估 ── */
         GeneratedSequence seq = {0};
-        /* 解析 candidate 为单词序列 */
-        char* tok = strtok(strdup(candidate), " \t\n\r");
-        while (tok && seq.count < MAX_GENERATED_WORDS) {
-            seq.words[seq.count] = tok;
-            seq.word_ids[seq.count] = 0;  /* ID 后续接入 */
-            seq.count++;
-            tok = strtok(NULL, " \t\n\r");
+        char* dup = strdup(candidate);
+        if (dup) {
+            char* tok = strtok(dup, " \t\n\r");
+            while (tok && seq.count < MAX_GENERATED_WORDS) {
+                seq.words[seq.count] = tok;
+                seq.word_ids[seq.count] = 0;
+                seq.count++;
+                tok = strtok(NULL, " \t\n\r");
+            }
+            /* dup 所有权转移给 seq.words，不在此 free */
         }
 
         cingulate_evaluate(&seq, pf->topology, input, 5);
@@ -86,14 +89,16 @@ char* prefrontal_chat(Prefrontal* pf, const char* input) {
         }
 
         if (gate == CINGULATE_BACKTRACK && attempt < pf->max_retries - 1) {
-            /* 回溯 — 告知 controller 降低出错的子拓扑权重 */
             fprintf(stderr, "[ACC] 回溯 (step=%d, 原因=%s, 得分=%.2f)\n",
                     seq.backtrack_step, seq.error_msg ? seq.error_msg : "?",
                     seq.total_score);
-            cognitive_controller_snapshot(pf->controller, 0.1f);  /* 降低本路径权重 */
+            cognitive_controller_snapshot(pf->controller, 0.1f);
             retries++;
             if (reasoning) dialog_reasoning_destroy(reasoning);
+            free(dup);
             free(candidate);
+            /* 仅在第1次回溯时重新生成，第2次直接用 */
+            if (retries > 1) { response = candidate; break; }
             continue;
         }
 

@@ -340,12 +340,10 @@ static void gw_system_shutdown(GatewaySystem* gw) {
     if (!gw) return;
     printf("[gateway] 正在关闭...\n");
 
-    // 停止后台
-    // brainstem 管理自己的 self_learner, 不单独 stop active_learner
-    // active_learner_stop 保留为空操作（线程未启动时安全）
+    // 1. 停止脑干 → 冻结所有活性节点 → 确保状态完整
     if (gw->brainstem) brainstem_stop(gw->brainstem);
 
-    // 保存状态
+    // 2. 保存完整状态到主文件（覆盖旧版本）
     if (gw->topology) {
         int saved = master_save_state(gw->topology, "pivotmind_state.dat");
         if (saved >= 0) printf("[gateway]   保存拓扑状态: %d 节点\n", saved);
@@ -359,8 +357,12 @@ static void gw_system_shutdown(GatewaySystem* gw) {
         if (saved >= 0) printf("[gateway]   保存记忆种子: %d 条\n", saved);
     }
 
-    // 销毁
-    if (gw->brainstem)    brainstem_stop(gw->brainstem);
+    // 3. 删除临时状态文件（brain_state.dat 只是脑干运行缓存，主状态已在上面保存）
+    remove("brain_state.dat");
+    printf("[gateway]   清理临时状态文件\n");
+
+    // 4. 销毁资源（brainstem 已在上方 stop，这里只 destroy）
+    if (gw->brain_cache) node_cache_destroy(gw->brain_cache);
     if (gw->hippocampus) hippocampus_destroy(gw->hippocampus);
     if (gw->cerebellum)  cerebellum_destroy(gw->cerebellum);
     if (gw->thalamus)     thalamus_destroy(gw->thalamus);
