@@ -178,17 +178,6 @@ void thalamus_tick(Thalamus* th) {
         }
     }
 
-    /* ── CPU 保护：过载时全局降速 ── */
-    if (th->cpu_usage > th->cpu_high_threshold) {
-        float cpu_protect = 1.0f - (th->cpu_usage - th->cpu_high_threshold) * 2.0f;
-        if (cpu_protect < 0.1f) cpu_protect = 0.1f;
-        for (int i = 0; i < THAL_SUBSYSTEM_COUNT; i++) {
-            if (i == THAL_PREFRONTAL) continue;
-            th->throttle[i] *= cpu_protect;
-        }
-        g_last_reason = "CPU过载保护，全局降速";
-    }
-
     /* ── 记录历史 ── */
     if (th->throttle_history_pos < 32) {
         for (int i = 0; i < THAL_SUBSYSTEM_COUNT; i++) {

@@ -2,19 +2,8 @@
  * @file brainstem.h
  * @brief 脑干节律控制器 — 维持数字生命的基础节律
  *
- * 大脑类比：
- *   脑干控制心跳、呼吸、睡眠-觉醒周期。不参与高级认知，
- *   但为所有高级功能提供稳定的生物钟基础。
- *
- * 核心职责：
- * 1. 昼夜节律 — 根据实时时钟调制全系统活跃水平
- * 2. 稀疏激活衰减 — 仅抽样处理节点（大脑模式）
- * 3. 自发激活 — 模拟背景放电
- * 4. 认知状态漂移 — drive/emotion/valence 回归基线
- * 5. 节点冷却管理 — 冻结低激活节点到磁盘
- * 6. 触发梦境引擎 / 自主学习（接收丘脑的 throttle 信号）
- *
- * 线程模型：独立 pthread 后台线程
+ * 大脑类比：脑干控制心跳、呼吸、睡眠-觉醒周期。
+ * 系统映射：心跳节律、昼夜周期、稀疏衰减、节点冻结、自主子系统调度。
  */
 
 #ifndef BRAINSTEM_H
@@ -49,13 +38,13 @@ typedef struct Brainstem {
     unsigned int _rng_seed;
     void* self_learner;
     void* node_cache;
-    void* thalamus;      /* 丘脑调度器 (opaque) */
-    void* perception;    /* 感觉皮层 (opaque) */
-    void* hippocampus;   /* 海马体 (opaque) — 用于巩固+感知联动 */
+    void* thalamus;
+    void* perception;
+    void* hippocampus;
+    void* cerebellum;
 } Brainstem;
 
-Brainstem* brainstem_create(MasterTopology* master,
-                             MemorySystem* memory,
+Brainstem* brainstem_create(MasterTopology* master, MemorySystem* memory,
                              CognitiveState* state);
 void brainstem_start(Brainstem* bs);
 void brainstem_stop(Brainstem* bs);
@@ -66,9 +55,10 @@ const char* brainstem_get_real_time(Brainstem* bs, char* buf, int size);
 long brainstem_get_uptime(Brainstem* bs);
 float brainstem_get_circadian(Brainstem* bs);
 const char* brainstem_get_circadian_phase(Brainstem* bs);
-void brainstem_set_node_cache(Brainstem* bs, void* node_cache);
-void brainstem_set_thalamus(Brainstem* bs, void* thalamus);
-void brainstem_set_perception(Brainstem* bs, void* perception);
-void brainstem_set_hippocampus(Brainstem* bs, void* hippocampus);
+void brainstem_set_node_cache(Brainstem* bs, void* nc);
+void brainstem_set_thalamus(Brainstem* bs, void* th);
+void brainstem_set_perception(Brainstem* bs, void* p);
+void brainstem_set_hippocampus(Brainstem* bs, void* hc);
+void brainstem_set_cerebellum(Brainstem* bs, void* cb);
 
 #endif

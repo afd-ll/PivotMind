@@ -13,6 +13,7 @@
 #include "thalamus.h"
 #include "perception.h"
 #include "hippocampus.h"
+#include "cerebellum.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -210,7 +211,16 @@ static void* brainstem_loop(void* arg) {
 
         drift_cognitive_state(bs);
 
-        /* ── 丘脑调度 ── （每30 tick一次，≈30秒） */
+        /* ── 小脑平衡 ── （每10 tick更新一次） */
+        if (bs->tick_count % 10 == 0 && bs->cerebellum) {
+            float mem_gb = 0;
+            { FILE* f = fopen("/proc/self/status", "r"); if (f) { char line[256]; while (fgets(line, sizeof(line), f)) { if (strncmp(line, "VmRSS:", 6) == 0) { mem_gb = (float)atol(line + 6) / 1048576.0f; break; } } fclose(f); } }
+            float load = 0;
+            { FILE* f = fopen("/proc/loadavg", "r"); if (f) { fscanf(f, "%f", &load); fclose(f); load *= 16.67f; } } /* load→CPU% */
+            cerebellum_tick((Cerebellum*)bs->cerebellum, load, mem_gb, circadian);
+        }
+
+        /* ── 丘脑调度+感觉皮层 ── */
         if (bs->tick_count % 30 == 0 && bs->thalamus) {
             Thalamus* th = (Thalamus*)bs->thalamus;
             thalamus_set_circadian(th, circadian,
@@ -383,4 +393,8 @@ void brainstem_set_perception(Brainstem* bs, void* perception) {
 
 void brainstem_set_hippocampus(Brainstem* bs, void* hippocampus) {
     if (bs) bs->hippocampus = hippocampus;
+}
+
+void brainstem_set_cerebellum(Brainstem* bs, void* cerebellum) {
+    if (bs) bs->cerebellum = cerebellum;
 }

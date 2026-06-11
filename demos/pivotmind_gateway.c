@@ -36,6 +36,7 @@
 #include "thalamus.h"
 #include "perception.h"
 #include "hippocampus.h"
+#include "cerebellum.h"
 #include "prefrontal.h"
 #include "multi_topology.h"
 #include "memory_system.h"
@@ -68,6 +69,7 @@ typedef struct {
     Thalamus*        thalamus;      /* 丘脑 — 系统调度器 */
     Perception*      perception;    /* 感觉皮层 — 自主搜索学习 */
     Hippocampus*     hippocampus;   /* 海马体 — 记忆+巩固 */
+    Cerebellum*      cerebellum;    /* 小脑 — 资源平衡 */
     NodeCache*       brain_cache;   /* 大脑式节点冷热缓存 */
 
     // 运行控制
@@ -274,6 +276,11 @@ static int gw_system_init(GatewaySystem* gw) {
     if (!gw->hippocampus) { fprintf(stderr, "[gateway] 海马体创建失败\n"); return -1; }
     printf("[gateway]   海马体就绪\n");
 
+    // 小脑（资源平衡）
+    gw->cerebellum = cerebellum_create();
+    if (!gw->cerebellum) { fprintf(stderr, "[gateway] 小脑创建失败\n"); return -1; }
+    printf("[gateway]   小脑就绪\n");
+
     // 加载持久化数据
     if (access("pivotmind_state.dat", F_OK) == 0) {
         int loaded = master_load_state(gw->topology, "pivotmind_state.dat");
@@ -313,6 +320,7 @@ static int gw_system_init(GatewaySystem* gw) {
     brainstem_set_thalamus(gw->brainstem, gw->thalamus);
     brainstem_set_perception(gw->brainstem, gw->perception);
     brainstem_set_hippocampus(gw->brainstem, gw->hippocampus);
+    brainstem_set_cerebellum(gw->brainstem, gw->cerebellum);
     brainstem_set_verbose(gw->brainstem, 1);  /* 开启脑区日志 */
 
     // 学习已由脑干统一调度，不再单独启动 active_learner 线程
@@ -354,6 +362,7 @@ static void gw_system_shutdown(GatewaySystem* gw) {
     // 销毁
     if (gw->brainstem)    brainstem_stop(gw->brainstem);
     if (gw->hippocampus) hippocampus_destroy(gw->hippocampus);
+    if (gw->cerebellum)  cerebellum_destroy(gw->cerebellum);
     if (gw->thalamus)     thalamus_destroy(gw->thalamus);
     if (gw->perception)   perception_destroy(gw->perception);
     if (gw->brainstem)    brainstem_destroy(gw->brainstem);
