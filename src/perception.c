@@ -165,12 +165,23 @@ void perception_tick(Perception* p, float throttle) {
     if (!p) return;
 
     p->tick_counter++;
-    if (p->tick_counter < p->cfg.cycle_interval_ticks) return;
+    p->fallback_counter++;
+
+    /* 保底触发：无论多忙，到达间隔必须搜一次 */
+    int force_search = (p->fallback_counter >= p->cfg.fallback_interval_ticks);
+
+    if (!force_search && p->tick_counter < p->cfg.cycle_interval_ticks) return;
     p->tick_counter = 0;
 
-    /* throttle 控制：越大越可能执行 */
-    float roll = (float)_perception_rand(&(unsigned int){0}) / 32767.0f;
-    if (roll > throttle) return;
+    if (force_search) {
+        p->fallback_counter = 0;
+        if (p->cfg.verbose) fprintf(stderr, "[感觉皮层] 保底触发 (超过%d秒无搜索)\n",
+                                    p->cfg.fallback_interval_ticks);
+        throttle = 1.0f;  /* 强制全速搜索 */
+    } else {
+        float roll = (float)_perception_rand(&(unsigned int){0}) / 32767.0f;
+        if (roll > throttle) return;
+    }
 
     /* 采样：从词汇拓扑中选好奇心得分最高的节点 */
     SubTopology* vocab = NULL;

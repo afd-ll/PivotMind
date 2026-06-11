@@ -37,11 +37,12 @@ typedef struct {
     int   min_confidence_for_search; /* 置信度低于此值才搜 (默认0.3) */
     int   search_timeout_ms;        /* 单次搜索超时(ms) (默认5000) */
     int   cycle_interval_ticks;     /* 搜索周期间隔(脑干tick数) (默认300) */
+    int   fallback_interval_ticks;  /* 保底触发间隔 — 无论多忙必搜 (默认1200=20分钟) */
     int   verbose;
 } PerceptionConfig;
 
 #define PERCEPTION_DEFAULT_CONFIG { \
-    5, 0.3f, 5000, 300, 1 \
+    5, 0.3f, 5000, 300, 1200, 1 \
 }
 
 /** 感觉皮层句柄 */
@@ -58,6 +59,7 @@ typedef struct Perception {
 
     /* 状态 */
     int   tick_counter;               /* tick 计数（由外部递增） */
+    int   fallback_counter;           /* 保底触发计时器 */
 } Perception;
 
 /**

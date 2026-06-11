@@ -5,12 +5,14 @@
 
 #include "hippocampus.h"
 #include "perception.h"
+#include "thalamus.h"
 #include <stdio.h>
 #include <stdlib.h>
 
 Hippocampus* hippocampus_create(MasterTopology* topology,
                                   MemorySystem* memory,
-                                  void* perception) {
+                                  void* perception,
+                                  void* thalamus) {
     if (!topology || !memory) return NULL;
 
     Hippocampus* hc = (Hippocampus*)calloc(1, sizeof(Hippocampus));
@@ -19,8 +21,11 @@ Hippocampus* hippocampus_create(MasterTopology* topology,
     hc->topology   = topology;
     hc->memory     = memory;
     hc->perception = perception;
+    hc->thalamus   = thalamus;
 
-    printf("[海马体] 就绪 (感知联动=%s)\n", perception ? "ON" : "OFF");
+    printf("[海马体] 就绪 (感知联动=%s, 丘脑反馈=%s)\n",
+           perception ? "ON" : "OFF",
+           thalamus ? "ON" : "OFF");
     return hc;
 }
 
@@ -62,6 +67,11 @@ int hippocampus_consolidate(Hippocampus* hc) {
                 }
             }
         }
+    }
+
+    /* 通知丘脑 */
+    if (hc->thalamus) {
+        thalamus_report((Thalamus*)hc->thalamus, consolidated, (int)hc->web_queries, -1);
     }
 
     return consolidated;

@@ -29,6 +29,7 @@ typedef struct Hippocampus {
     MasterTopology* topology;
     MemorySystem*   memory;
     void*           perception;    /* 感觉皮层 (opaque, 用于巩固联网) */
+    void*           thalamus;      /* 丘脑 (opaque, 用于反馈上报) */
 
     /* 统计 */
     long consolidations;
@@ -38,10 +39,12 @@ typedef struct Hippocampus {
 /**
  * 创建海马体
  * @param perception 感觉皮层指针，NULL=巩固时不联网
+ * @param thalamus 丘脑指针，NULL=不上报反馈
  */
 Hippocampus* hippocampus_create(MasterTopology* topology,
                                   MemorySystem* memory,
-                                  void* perception);
+                                  void* perception,
+                                  void* thalamus);
 
 void hippocampus_destroy(Hippocampus* hc);
 

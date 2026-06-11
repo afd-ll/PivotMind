@@ -13,7 +13,7 @@
  *  子系统名称（调试用）
  * ================================================================ */
 
-static const char* SYS_NAMES[THAL_SUBSYSTEM_COUNT] = {
+static const char* SYS_NAMES[THAL_SUBSYSTEM_COUNT] __attribute__((unused)) = {
     "前额叶(对话)",
     "海马体(学习)",
     "默认模式网络(梦境)",
@@ -233,4 +233,13 @@ const char* thalamus_phase_description(Thalamus* th) {
 const char* thalamus_decision_reason(Thalamus* th) {
     (void)th;
     return g_last_reason;
+}
+
+void thalamus_report(Thalamus* th, int consolidated, int searched, int dreamed) {
+    if (!th) return;
+    pthread_mutex_lock(&th->lock);
+    if (consolidated >= 0) th->fb_hippo_consolidated = consolidated;
+    if (searched     >= 0) th->fb_percept_searched   = searched;
+    if (dreamed      >= 0) th->fb_dmn_dreamed        = dreamed;
+    pthread_mutex_unlock(&th->lock);
 }

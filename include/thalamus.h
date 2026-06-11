@@ -68,6 +68,11 @@ typedef struct {
     float throttle[THAL_SUBSYSTEM_COUNT];  /* 0.0=暂停, 0.5=半速, 1.0=全速 */
     int   active_subsystem;                /* 当前活跃的子系统 */
 
+    /* ── 反馈信号（各脑区上报） ── */
+    int   fb_hippo_consolidated;    /* 海马体本轮巩固数 */
+    int   fb_percept_searched;      /* 感觉皮层本轮搜索数 */
+    int   fb_dmn_dreamed;           /* DMN 梦境边修改数 */
+
     /* ── 历史统计 ── */
     float throttle_history[THAL_SUBSYSTEM_COUNT][32];  /* 环形历史 */
     int   throttle_history_pos;
@@ -139,6 +144,14 @@ const char* thalamus_phase_description(Thalamus* th);
  * 获取当前决策理由（用于调试）
  */
 const char* thalamus_decision_reason(Thalamus* th);
+
+/**
+ * 脑区反馈上报 — 完成一轮工作后调用
+ * @param consolidated  海马体巩固结果数 (-1=不更新)
+ * @param searched      感觉皮层搜索结果数 (-1=不更新)
+ * @param dreamed       DMN梦境边修改数 (-1=不更新)
+ */
+void thalamus_report(Thalamus* th, int consolidated, int searched, int dreamed);
 
 #ifdef __cplusplus
 }

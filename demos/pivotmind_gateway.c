@@ -43,7 +43,7 @@
 #include "cross_edge_io.h"
 #include "feature_pretrain.h"
 #include "path_encoding.h"
-#include "template_builder.h"
+#include "broca.h"
 #include "node_cache.h"
 
 // ==================== 配置 ====================
@@ -270,7 +270,7 @@ static int gw_system_init(GatewaySystem* gw) {
     printf("[gateway]   感觉皮层就绪\n");
 
     // 海马体（记忆+巩固+感知联动）
-    gw->hippocampus = hippocampus_create(gw->topology, gw->memory, gw->perception);
+    gw->hippocampus = hippocampus_create(gw->topology, gw->memory, gw->perception, gw->thalamus);
     if (!gw->hippocampus) { fprintf(stderr, "[gateway] 海马体创建失败\n"); return -1; }
     printf("[gateway]   海马体就绪\n");
 
@@ -313,9 +313,10 @@ static int gw_system_init(GatewaySystem* gw) {
     brainstem_set_thalamus(gw->brainstem, gw->thalamus);
     brainstem_set_perception(gw->brainstem, gw->perception);
     brainstem_set_hippocampus(gw->brainstem, gw->hippocampus);
+    brainstem_set_verbose(gw->brainstem, 1);  /* 开启脑区日志 */
 
-    // 启动后台线程
-    active_learner_start(gw->learner);
+    // 学习已由脑干统一调度，不再单独启动 active_learner 线程
+    // active_learner_start(gw->learner);
     brainstem_start(gw->brainstem);
 
     gw->start_time = time(NULL);
@@ -332,7 +333,8 @@ static void gw_system_shutdown(GatewaySystem* gw) {
     printf("[gateway] 正在关闭...\n");
 
     // 停止后台
-    if (gw->learner) active_learner_stop(gw->learner);
+    // brainstem 管理自己的 self_learner, 不单独 stop active_learner
+    // active_learner_stop 保留为空操作（线程未启动时安全）
     if (gw->brainstem) brainstem_stop(gw->brainstem);
 
     // 保存状态
@@ -376,15 +378,13 @@ static void handle_chat(GatewaySystem* gw, int fd, const char* body) {
         return;
     }
 
-    // 调用对话引擎
-    DialogReasoning* reasoning = NULL;
-    char* response = dialog_process(gw->dialog, msg, &reasoning);
+    // 调用前额叶（意图推断+认知调度+对话）
+    char* response = prefrontal_chat(gw->prefrontal, msg);
 
     if (response) {
         char escaped[GW_MAX_RESPONSE];
         json_escape(response, escaped, sizeof(escaped));
 
-        // 统计节点数
         int total_nodes = 0;
         for (int t = 0; t < gw->topology->sub_topo_count; t++) {
             if (gw->topology->sub_topologies[t] && gw->topology->sub_topologies[t]->net)
@@ -397,7 +397,6 @@ static void handle_chat(GatewaySystem* gw, int fd, const char* body) {
             escaped, total_nodes, (long long)gw->total_dialogs + 1);
 
         http_json(fd, 200, json);
-
         gw->total_dialogs++;
 
         // 增量模板维护：每轮对话构建 2 条模板，逐步积累
@@ -406,15 +405,14 @@ static void handle_chat(GatewaySystem* gw, int fd, const char* body) {
             int _tpl_count = (_tpl && _tpl->net) ? _tpl->net->node_count : 0;
             // 每 5 轮对话构建 2 条模板（避免高频构建拖慢响应）
             if (gw->total_dialogs % 5 == 0 && _tpl_count < 2000) {
-                template_auto_build(gw->topology, 2, 5);
+                broca_build_templates(gw->topology, 2, 5);
             }
             // 每 200 轮对话做一次衰减清理
             if (gw->total_dialogs % 200 == 0) {
-                template_decay_inactive_links(gw->topology, 20, 0.85f);
+                broca_decay_templates(gw->topology, 20, 0.85f);
             }
         }
 
-        if (reasoning) dialog_reasoning_destroy(reasoning);
         free(response);
     } else {
         http_json(fd, 200, "{\"reply\":\"(无回应)\",\"nodes\":0}");
