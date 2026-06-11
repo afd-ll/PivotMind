@@ -412,6 +412,9 @@ static void handle_chat(GatewaySystem* gw, int fd, const char* body) {
         http_json(fd, 200, json);
         gw->total_dialogs++;
 
+        /* 海马体记下这次对话 — 巩固时自动建 QA 连接 */
+        if (gw->hippocampus) hippocampus_log_dialog(gw->hippocampus, msg, response);
+
         // 增量模板维护：每轮对话构建 2 条模板，逐步积累
         {
             SubTopology* _tpl = master_get_sub_topology_by_type(gw->topology, TOPO_TEMPLATE);

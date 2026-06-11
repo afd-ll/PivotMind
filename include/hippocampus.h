@@ -28,6 +28,11 @@ extern "C" {
 typedef struct Hippocampus {
     MasterTopology* topology;
     MemorySystem*   memory;
+
+    /* 对话日志缓冲 — 用于自动抽 QA 对 */
+    char dialog_log[4][1024];   /* 最近4轮对话 */
+    int  log_pos;
+    int  log_count;
     void*           perception;    /* 感觉皮层 (opaque, 用于巩固联网) */
     void*           thalamus;      /* 丘脑 (opaque, 用于反馈上报) */
 

@@ -73,15 +73,11 @@ char* prefrontal_chat(Prefrontal* pf, const char* input) {
     /* 硬阻断 */
     if (seq.total_score < pf->block_threshold) return NULL;
 
-    /* 拼合成回复 + 自适应阈值更新 */
+    /* 拼合（扩散引擎已含模板连接词，直接拼接） */
     char buf[2048];
     int pos = 0;
-    const char* connectors[] = {"","的","是","和","了","在"};
-    for (int w = 0; w < n && pos < (int)sizeof(buf)-10; w++) {
-        if (w > 0 && w < n-1 && (w % 3 == 0))
-            pos += snprintf(buf+pos, sizeof(buf)-pos, "%s", connectors[w % 6]);
+    for (int w = 0; w < n && pos < (int)sizeof(buf)-10; w++)
         pos += snprintf(buf+pos, sizeof(buf)-pos, "%s", words[w]);
-    }
     response = strdup(buf);
 
     pf->recent_scores[pf->recent_pos] = seq.total_score;

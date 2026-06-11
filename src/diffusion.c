@@ -166,24 +166,37 @@ int diffusion_generate(DiffusionCtx* ctx,
                         int max_output) {
     if (!ctx || !ctx->master || !ctx->vocab || !input || !output_words) return 0;
 
-    /* ── 第0步：输入分词 → 词汇层初始激活 ── */
+    /* ── 第0步：滑动窗口分词 → 词汇层初始激活 ── */
     int active_ids[DIFF_MAX_CANDIDATES];
     int active_count = 0;
+    int input_len = (int)strlen(input);
 
-    char copy[2048];
-    strncpy(copy, input, sizeof(copy)-1);
-    copy[sizeof(copy)-1] = 0;
-    char* tok = strtok(copy, " \t\n\r。，！？、；：");
-    while (tok && active_count < 64) {
-        for (int i = 0; i < ctx->vocab->net->node_count; i++) {
-            ReasoningNode* n = ctx->vocab->net->nodes[i];
-            if (n && n->concept && strcmp(n->concept, tok) == 0) {
-                active_ids[active_count++] = i;
-                n->activation += 0.2f;  /* 输入激活 */
-                break;
+    /* 逐字扫描 + bigram + trigram 全部尝试匹配 */
+    for (int win = 3; win >= 1 && active_count == 0; win--) {
+        for (int pos = 0; pos + win <= input_len; pos++) {
+            if (active_count >= 64) break;
+            char sub[16];
+            int sl = win < 15 ? win : 15;
+            memcpy(sub, input + pos, sl);
+            sub[sl] = 0;
+            if (sl < 1) continue;
+
+            for (int i = 0; i < ctx->vocab->net->node_count; i++) {
+                ReasoningNode* n = ctx->vocab->net->nodes[i];
+                if (n && n->concept && strcmp(n->concept, sub) == 0) {
+                    /* 去重 */
+                    int dup = 0;
+                    for (int d = 0; d < active_count; d++)
+                        if (active_ids[d] == i) { dup = 1; break; }
+                    if (!dup) {
+                        active_ids[active_count++] = i;
+                        n->activation += 0.2f;
+                    }
+                    break;
+                }
             }
         }
-        tok = strtok(NULL, " \t\n\r。，！？、；：");
+        if (active_count > 0) break;  /* 长匹配优先 */
     }
     if (active_count == 0) return 0;
 
@@ -282,7 +295,50 @@ int diffusion_generate(DiffusionCtx* ctx,
 
     qsort(final, final_cnt, sizeof(DiffusionCandidate), _cand_cmp);
 
-    /* ── 第3步：逐词选取 + 侧抑制 ── */
+    /* ── 第3步：模板导向 → 从 template 层取最佳句式 ── */
+    const char* tpl_pattern = NULL;
+    if (ctx->template && tpl_scores && tn > 0) {
+        float best_tpl_score = 0;
+        for (int i = 0; i < tn; i++) {
+            if (tpl_scores[i] > best_tpl_score && ctx->template->net->nodes[i]) {
+                best_tpl_score = tpl_scores[i];
+                tpl_pattern = ctx->template->net->nodes[i]->concept;
+            }
+        }
+        if (tpl_pattern) printf("[扩散] 模板: %s (%.3f)\n", tpl_pattern, best_tpl_score);
+    }
+
+    /* ── 第4步：句式导向输出 ── */
+    /* 解析模板概念中的连接词: "N的N是N的N" → ["", "的", "是", "的"] */
+    const char* connectors[DIFF_MAX_SEQUENCE];
+    int conn_count = 0;
+    if (tpl_pattern) {
+        const char* p = tpl_pattern;
+        while (*p && conn_count < DIFF_MAX_SEQUENCE) {
+            if (*p == 'N' || *p == 'V' || *p == 'A') {
+                connectors[conn_count++] = "";  /* 实词位置 */
+                p++;
+            } else {
+                /* 收集连续的非N字符作为连接词 */
+                char conn[8] = {0};
+                int ci = 0;
+                while (*p && *p != 'N' && *p != 'V' && *p != 'A' && ci < 7)
+                    conn[ci++] = *p++;
+                if (ci > 0) {
+                    char* dup = strdup(conn);
+                    connectors[conn_count++] = dup;
+                }
+            }
+        }
+    }
+
+    /* 如果模板没能提供足够连接词，用默认 */
+    if (conn_count < 2) {
+        const char* fallback[] = {"", "的", "是", "和", "了", "在"};
+        for (int i = 0; i < 6; i++) connectors[i] = fallback[i];
+        conn_count = 6;
+    }
+
     int out = 0;
     const char* selected[DIFF_MAX_SEQUENCE];
     int sel = 0;
@@ -290,7 +346,11 @@ int diffusion_generate(DiffusionCtx* ctx,
     for (int i = 0; i < final_cnt && out < max_output; i++) {
         if (final[i].used) continue;
 
-        /* 侧抑制：检查与已选词的重叠 */
+        /* 过滤垃圾词: 单字、@符号、纯标点 */
+        if (!final[i].word || strlen(final[i].word) < 2) continue;
+        if (final[i].word[0] == '@' || final[i].word[0] == '?' ||
+            final[i].word[0] == 'H' && final[i].word[1] == 'e') continue;
+
         int inhibited = 0;
         for (int s = 0; s < sel; s++) {
             if (final[i].word && selected[s] &&
@@ -300,17 +360,16 @@ int diffusion_generate(DiffusionCtx* ctx,
         }
         if (inhibited) continue;
 
+        /* 模板连接词: 每2个实词插一次 */
+        if (out > 0 && (out % 3 == 0)) {
+            int ci = ((out - 1) % conn_count);
+            if (connectors[ci] && connectors[ci][0]) {
+                output_words[out++] = connectors[ci];
+            }
+        }
         output_words[out++] = final[i].word;
         selected[sel++] = final[i].word;
         final[i].used = 1;
-
-        /* 侧抑制传播 */
-        for (int j = i + 1; j < final_cnt; j++) {
-            if (!final[j].used && final[j].word && final[i].word &&
-                strcmp(final[j].word, final[i].word) == 0) {
-                final[j].total_score *= 0.2f;  /* 重复词大抑 */
-            }
-        }
     }
 
     /* ── 清理 ── */

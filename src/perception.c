@@ -149,12 +149,17 @@ static int search_and_learn(Perception* p, const char* concept, PerceptionSource
 
 static int curiosity_score_node(ReasoningNode* node) {
     if (!node || !node->concept || node->is_cooled) return -1;
-    /* 越低置信度 + 越少连接 → 越需要搜索 */
-    if (node->connection_count == 0) return 100;  /* 孤立节点最高优先级 */
-    if (node->confidence < 0.1f) return 80;
-    if (node->connection_count < 5) return 60;
-    if (node->confidence < 0.3f) return 40;
-    return 0;
+    int score = 0;
+    if (node->connection_count == 0)      score += 100;  /* 孤立节点 */
+    else if (node->connection_count < 3)  score += 70;
+    else if (node->connection_count < 10) score += 40;
+    if (node->confidence < 0.1f)          score += 30;
+    else if (node->confidence < 0.3f)     score += 15;
+    if (node->activation < 0.05f)         score += 25;   /* 未激活过 = 需要探索 */
+    else if (node->activation < 0.2f)     score += 10;
+    /* 最近没被选中的节点加分（热度衰减反向） */
+    if (node->heat > 0.8f)               score += 20;
+    return score;
 }
 
 /* ================================================================
@@ -198,7 +203,7 @@ void perception_tick(Perception* p, float throttle) {
     int cand_n = 0;
 
     unsigned int rng = (unsigned int)time(NULL);
-    for (int i = 0; i < 200 && cand_n < MAX_CANDIDATES; i++) {
+    for (int i = 0; i < 800 && cand_n < MAX_CANDIDATES; i++) {
         int idx = _perception_rand(&rng) % vocab->net->node_count;
         ReasoningNode* node = vocab->net->nodes[idx];
         if (!node || !node->concept) continue;

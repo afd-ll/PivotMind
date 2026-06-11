@@ -42,7 +42,7 @@ typedef struct {
 } PerceptionConfig;
 
 #define PERCEPTION_DEFAULT_CONFIG { \
-    5, 0.3f, 5000, 300, 1200, 1 \
+    8, 0.1f, 5000, 50, 200, 1 \
 }
 
 /** 感觉皮层句柄 */
