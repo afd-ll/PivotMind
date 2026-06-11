@@ -78,6 +78,8 @@ typedef struct {
     time_t       start_time;
     long         total_dialogs;
     long         total_learning_cycles;
+    time_t       last_learn_time;     // 限流用
+    int          learn_burst;         // 限流burst计数
 
     // 网关配置
     int   port;
@@ -438,39 +440,62 @@ static void handle_learn(GatewaySystem* gw, int fd, const char* body) {
         return;
     }
 
-    /* 轻量学习：逐词入拓扑 + 相邻边激活 */
+    /* 限流：每秒最多50次，burst=5 */
+    time_t now = time(NULL);
+    if (now == gw->last_learn_time) {
+        if (++gw->learn_burst > 5) {
+            http_json(fd, 429, "{\"error\":\"rate limit\"}");
+            return;
+        }
+    } else {
+        gw->last_learn_time = now;
+        gw->learn_burst = 0;
+    }
+
     MasterTopology* m = gw->topology;
-    if (m) {
-        SubTopology* vocab = NULL;
-        for (int t = 0; t < m->sub_topo_count; t++) {
-            if (m->sub_topologies[t] && m->sub_topologies[t]->type == TOPO_VOCABULARY) {
-                vocab = m->sub_topologies[t]; break;
+    if (!m) { http_json(fd, 200, "{\"result\":\"no topology\"}"); return; }
+
+    SubTopology* vocab = NULL;
+    for (int t = 0; t < m->sub_topo_count; t++) {
+        if (m->sub_topologies[t] && m->sub_topologies[t]->type == TOPO_VOCABULARY)
+            { vocab = m->sub_topologies[t]; break; }
+    }
+    if (!vocab || !vocab->net) { http_json(fd, 200, "{\"result\":\"no vocab\"}"); return; }
+
+    /* 分词 → 查现有节点(去重) → 建边 */
+    char copy[2048];
+    strncpy(copy, msg, sizeof(copy)-1);
+    copy[sizeof(copy)-1] = 0;
+    char* tok = strtok(copy, " \t\n\r。，！？、；：\"\"''（）《》…—");
+    int prev_id = -1;
+    int added = 0;
+
+    while (tok) {
+        if (strlen(tok) >= 2) {
+            int nid = -1;
+            for (int i = 0; i < vocab->net->node_count; i++) {
+                ReasoningNode* nd = vocab->net->nodes[i];
+                if (nd && nd->concept && strcmp(nd->concept, tok) == 0)
+                    { nid = i; break; }
+            }
+            if (nid < 0 && vocab->net->node_count < vocab->net->max_nodes) {
+                nid = huarong_net_dynamic_add_node(vocab->net, tok, NULL, 0);
+                if (nid >= 0) added++;
+            }
+            if (nid >= 0) {
+                vocab->net->nodes[nid]->activation += 0.1f;
+                if (prev_id >= 0 && prev_id != nid)
+                    huarong_net_add_connection(vocab->net, prev_id, nid, 0.4f);
+                prev_id = nid;
             }
         }
-        if (vocab && vocab->net) {
-            char copy[2048];
-            strncpy(copy, msg, sizeof(copy)-1);
-            copy[sizeof(copy)-1] = 0;
-            char* tok = strtok(copy, " \t\n\r。，！？、；：\"\"''（）《》…—");
-            int prev_id = -1;
-            while (tok) {
-                if (strlen(tok) >= 2) {
-                    int nid = huarong_net_dynamic_add_node(vocab->net, tok, NULL, 0);
-                    if (nid >= 0) {
-                        vocab->net->nodes[nid]->activation += 0.1f;
-                        if (prev_id >= 0 && prev_id != nid) {
-                            huarong_net_add_connection(vocab->net, prev_id, nid, 0.4f);
-                        }
-                        prev_id = nid;
-                    }
-                }
-                tok = strtok(NULL, " \t\n\r。，！？、；：\"\"''（）《》…—");
-            }
-        }
+        tok = strtok(NULL, " \t\n\r。，！？、；：\"\"''（）《》…—");
     }
 
     gw->total_learning_cycles++;
-    http_json(fd, 200, "{\"result\":\"learned\"}");
+    char resp[128];
+    snprintf(resp, sizeof(resp), "{\"result\":\"learned\",\"added\":%d}", added);
+    http_json(fd, 200, resp);
 }
 
 // POST /feedback - 反馈

@@ -4,6 +4,8 @@
  */
 
 #include "prefrontal.h"
+#include "cingulate.h"
+#include "diffusion.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -52,62 +54,51 @@ char* prefrontal_chat(Prefrontal* pf, const char* input) {
     calc_context_activations(pf->controller, ctx_activations);
     compute_intent(pf->controller, ctx_activations);
 
-    /* ── DLPFC 生成 + ACC 自适应门控 ── */
+    /* ── 多层扩散生成 + ACC 自适应门控 ── */
     char* response = NULL;
 
-    for (int attempt = 0; attempt <= pf->max_retries; attempt++) {
-        DialogReasoning* reasoning = NULL;
-        char* candidate = dialog_process(pf->dialog, input, &reasoning);
-        if (!candidate) { if (reasoning) dialog_reasoning_destroy(reasoning); continue; }
+    DiffusionCtx dctx;
+    if (diffusion_init(&dctx, pf->topology) != 0) return NULL;
 
-        /* ACC 评分 */
-        GeneratedSequence seq = {0};
-        char* dup = strdup(candidate);
-        if (dup) {
-            char* tok = strtok(dup, " \t\n\r");
-            while (tok && seq.count < MAX_GENERATED_WORDS) {
-                seq.words[seq.count] = tok;
-                seq.count++;
-                tok = strtok(NULL, " \t\n\r");
-            }
-        }
-        cingulate_evaluate(&seq, pf->topology, input, 5);
+    const char* words[DIFF_MAX_SEQUENCE];
+    int n = diffusion_generate(&dctx, input, words, DIFF_MAX_SEQUENCE);
+    if (n < 2) return NULL;
 
-        /* 硬阻断：垃圾回复 */
-        if (seq.total_score < pf->block_threshold) {
-            if (reasoning) dialog_reasoning_destroy(reasoning);
-            free(dup);
-            free(candidate);
-            continue;
-        }
+    /* 序列评分 */
+    GeneratedSequence seq = {0};
+    for (int i = 0; i < n && i < MAX_GENERATED_WORDS; i++) seq.words[i] = words[i];
+    seq.count = n < MAX_GENERATED_WORDS ? n : MAX_GENERATED_WORDS;
+    cingulate_evaluate(&seq, pf->topology, input, 5);
 
-        /* 放行 + 自适应更新阈值 */
-        response = candidate;
-        if (reasoning) dialog_reasoning_destroy(reasoning);
-        pf->recent_scores[pf->recent_pos] = seq.total_score;
-        pf->recent_pos = (pf->recent_pos + 1) % 100;
+    /* 硬阻断 */
+    if (seq.total_score < pf->block_threshold) return NULL;
 
-        /* 每10次采样更新阈值 = 75分位数 */
-        if (pf->recent_pos % 10 == 0) {
-            float buf[100];
-            memcpy(buf, pf->recent_scores, sizeof(buf));
-            /* 冒泡取75分位（只算前100个） */
-            int n = pf->recent_pos < 10 ? pf->recent_pos + 1 : 100;
-            for (int i = 0; i < n - 1; i++)
-                for (int j = i + 1; j < n; j++)
-                    if (buf[i] < buf[j]) { float t = buf[i]; buf[i] = buf[j]; buf[j] = t; }
-            int p75 = (int)(n * 0.25f);
-            float new_threshold = p75 < n ? buf[p75] : buf[0];
-            if (new_threshold > pf->accept_threshold + 0.02f)
-                pf->accept_threshold = new_threshold;
-            if (pf->accept_threshold < 0.10f) pf->accept_threshold = 0.10f;
-        }
+    /* 拼合成回复 + 自适应阈值更新 */
+    char buf[2048];
+    int pos = 0;
+    const char* connectors[] = {"","的","是","和","了","在"};
+    for (int w = 0; w < n && pos < (int)sizeof(buf)-10; w++) {
+        if (w > 0 && w < n-1 && (w % 3 == 0))
+            pos += snprintf(buf+pos, sizeof(buf)-pos, "%s", connectors[w % 6]);
+        pos += snprintf(buf+pos, sizeof(buf)-pos, "%s", words[w]);
+    }
+    response = strdup(buf);
 
-        free(dup);
-        break;
+    pf->recent_scores[pf->recent_pos] = seq.total_score;
+    pf->recent_pos = (pf->recent_pos + 1) % 100;
+    if (pf->recent_pos % 10 == 0) {
+        float buf2[100]; memcpy(buf2, pf->recent_scores, sizeof(buf2));
+        int m = pf->recent_pos < 10 ? pf->recent_pos + 1 : 100;
+        for (int i = 0; i < m-1; i++)
+            for (int j = i+1; j < m; j++)
+                if (buf2[i] < buf2[j]) { float t = buf2[i]; buf2[i] = buf2[j]; buf2[j] = t; }
+        int p75 = (int)(m * 0.25f);
+        float new_th = p75 < m ? buf2[p75] : buf2[0];
+        if (new_th > pf->accept_threshold + 0.02f) pf->accept_threshold = new_th;
+        if (pf->accept_threshold < 0.10f) pf->accept_threshold = 0.10f;
     }
 
-    if (response) cognitive_controller_snapshot(pf->controller, 0.5f);
+    cognitive_controller_snapshot(pf->controller, 0.5f);
     return response;
 }
 
