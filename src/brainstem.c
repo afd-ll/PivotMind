@@ -14,6 +14,7 @@
 #include "perception.h"
 #include "hippocampus.h"
 #include "cerebellum.h"
+#include "reticular.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -218,6 +219,11 @@ static void* brainstem_loop(void* arg) {
             float load = 0;
             { FILE* f = fopen("/proc/loadavg", "r"); if (f) { fscanf(f, "%f", &load); fclose(f); load *= 16.67f; } } /* load→CPU% */
             cerebellum_tick((Cerebellum*)bs->cerebellum, load, mem_gb, circadian);
+        }
+
+        /* ── 网状结构注意力过滤 ── （每60 tick ≈ 1分钟） */
+        if (bs->tick_count % 60 == 0) {
+            reticular_attend(bs->master, 50);
         }
 
         /* ── 丘脑调度+感觉皮层 ── */
