@@ -311,6 +311,8 @@ int diffusion_generate(DiffusionCtx* ctx,
     /* ── 第4步：句式导向输出 ── */
     /* 解析模板概念中的连接词: "N的N是N的N" → ["", "的", "是", "的"] */
     const char* connectors[DIFF_MAX_SEQUENCE];
+    char conn_pool[128];  /* 小对象池，避免 strdup 泄漏 */
+    int conn_pool_pos = 0;
     int conn_count = 0;
     if (tpl_pattern) {
         const char* p = tpl_pattern;
@@ -320,13 +322,13 @@ int diffusion_generate(DiffusionCtx* ctx,
                 p++;
             } else {
                 /* 收集连续的非N字符作为连接词 */
-                char conn[8] = {0};
                 int ci = 0;
-                while (*p && *p != 'N' && *p != 'V' && *p != 'A' && ci < 7)
-                    conn[ci++] = *p++;
+                while (*p && *p != 'N' && *p != 'V' && *p != 'A' && ci < 7 && conn_pool_pos + ci < 127)
+                    conn_pool[conn_pool_pos + ci++] = *p++;
                 if (ci > 0) {
-                    char* dup = strdup(conn);
-                    connectors[conn_count++] = dup;
+                    conn_pool[conn_pool_pos + ci] = 0;
+                    connectors[conn_count++] = conn_pool + conn_pool_pos;
+                    conn_pool_pos += ci + 1;
                 }
             }
         }
