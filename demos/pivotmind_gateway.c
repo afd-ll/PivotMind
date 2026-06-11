@@ -438,9 +438,49 @@ static void handle_learn(GatewaySystem* gw, int fd, const char* body) {
         return;
     }
 
-    learn_from_dialog(gw->learner, msg, "", "");
-    gw->total_learning_cycles++;
+    /* 轻量学习：逐词入拓扑 + 相邻边激活 */
+    MasterTopology* m = gw->topology;
+    if (m) {
+        SubTopology* vocab = NULL;
+        for (int t = 0; t < m->sub_topo_count; t++) {
+            if (m->sub_topologies[t] && m->sub_topologies[t]->type == TOPO_VOCABULARY) {
+                vocab = m->sub_topologies[t]; break;
+            }
+        }
+        if (vocab && vocab->net) {
+            /* 简单切分：按标点和空格 */
+            char copy[2048];
+            strncpy(copy, msg, sizeof(copy)-1);
+            copy[sizeof(copy)-1] = 0;
+            char* tok = strtok(copy, " \t\n\r。，！？、；：\"\"''（）《》…—");
+            int prev_id = -1;
+            while (tok) {
+                if (strlen(tok) >= 2) {
+                    /* 找或建节点（遍历现有节点匹配 concept） */
+                    int nid = -1;
+                    for (int i = 0; i < vocab->net->node_count; i++) {
+                        ReasoningNode* nd = vocab->net->nodes[i];
+                        if (nd && nd->concept && strcmp(nd->concept, tok) == 0)
+                            { nid = i; break; }
+                    }
+                    if (nid < 0) {
+                        ReasoningNode* new_n = huarong_net_add_node(vocab->net, strdup(tok), NULL, 0);
+                        nid = new_n ? new_n->node_id : -1;
+                    }
+                    if (nid >= 0) {
+                        vocab->net->nodes[nid]->activation += 0.1f;
+                        if (prev_id >= 0 && prev_id != nid) {
+                            huarong_net_add_connection(vocab->net, prev_id, nid, 0.4f);
+                        }
+                        prev_id = nid;
+                    }
+                }
+                tok = strtok(NULL, " \t\n\r。，！？、；：\"\"''（）《》…—");
+            }
+        }
+    }
 
+    gw->total_learning_cycles++;
     http_json(fd, 200, "{\"result\":\"learned\"}");
 }
 
