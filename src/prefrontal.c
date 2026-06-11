@@ -26,8 +26,10 @@ Prefrontal* prefrontal_create(MasterTopology* topology,
     pf->controller = cognitive_controller_create(topology, memory);
     if (!pf->controller) { dialog_system_destroy(pf->dialog); free(pf); return NULL; }
 
-    pf->accept_threshold = 0.40f;  /* 放宽通过阈值 */
-    pf->max_retries = 2;            /* 最多2次 */
+    pf->accept_threshold = 0.15f;   /* 初始很低，让回复先通过 */
+    pf->block_threshold  = 0.08f;   /* 只拦截明显垃圾 */
+    pf->max_retries = 1;
+    pf->recent_pos = 0;
 
     printf("[前额叶] 就绪 (DLPFC生成+ACC监控, 阈值=%.2f, 最大回溯=%d)\n",
            pf->accept_threshold, pf->max_retries);
@@ -50,68 +52,62 @@ char* prefrontal_chat(Prefrontal* pf, const char* input) {
     calc_context_activations(pf->controller, ctx_activations);
     compute_intent(pf->controller, ctx_activations);
 
-    /* ── DLPFC 生成 + ACC 监控 + 回溯循环 ── */
+    /* ── DLPFC 生成 + ACC 自适应门控 ── */
     char* response = NULL;
-    int retries = 0;
 
-    for (int attempt = 0; attempt < pf->max_retries; attempt++) {
+    for (int attempt = 0; attempt <= pf->max_retries; attempt++) {
         DialogReasoning* reasoning = NULL;
         char* candidate = dialog_process(pf->dialog, input, &reasoning);
+        if (!candidate) { if (reasoning) dialog_reasoning_destroy(reasoning); continue; }
 
-        if (!candidate) continue;
-
-        /* ── ACC 评估 ── */
+        /* ACC 评分 */
         GeneratedSequence seq = {0};
         char* dup = strdup(candidate);
         if (dup) {
             char* tok = strtok(dup, " \t\n\r");
             while (tok && seq.count < MAX_GENERATED_WORDS) {
                 seq.words[seq.count] = tok;
-                seq.word_ids[seq.count] = 0;
                 seq.count++;
                 tok = strtok(NULL, " \t\n\r");
             }
-            /* dup 所有权转移给 seq.words，不在此 free */
         }
-
         cingulate_evaluate(&seq, pf->topology, input, 5);
 
-        CingulateGate gate = cingulate_gate(&seq, pf->accept_threshold);
-
-        if (gate == CINGULATE_PASS) {
-            /* 通过 — 输出 */
-            response = candidate;
-            if (reasoning) dialog_reasoning_destroy(reasoning);
-            pf->total_retries += retries;
-            if (retries > 0) fprintf(stderr, "[ACC] 回溯%d次后通过 (得分=%.2f)\n",
-                                     retries, seq.total_score);
-            break;
-        }
-
-        if (gate == CINGULATE_BACKTRACK && attempt < pf->max_retries - 1) {
-            fprintf(stderr, "[ACC] 回溯 (step=%d, 原因=%s, 得分=%.2f)\n",
-                    seq.backtrack_step, seq.error_msg ? seq.error_msg : "?",
-                    seq.total_score);
-            cognitive_controller_snapshot(pf->controller, 0.1f);
-            retries++;
+        /* 硬阻断：垃圾回复 */
+        if (seq.total_score < pf->block_threshold) {
             if (reasoning) dialog_reasoning_destroy(reasoning);
             free(dup);
             free(candidate);
-            /* 仅在第1次回溯时重新生成，第2次直接用 */
-            if (retries > 1) { response = candidate; break; }
             continue;
         }
 
-        /* 彻底失败 — 用最后一次结果 */
+        /* 放行 + 自适应更新阈值 */
+        response = candidate;
         if (reasoning) dialog_reasoning_destroy(reasoning);
-        free(candidate);
+        pf->recent_scores[pf->recent_pos] = seq.total_score;
+        pf->recent_pos = (pf->recent_pos + 1) % 100;
+
+        /* 每10次采样更新阈值 = 75分位数 */
+        if (pf->recent_pos % 10 == 0) {
+            float buf[100];
+            memcpy(buf, pf->recent_scores, sizeof(buf));
+            /* 冒泡取75分位（只算前100个） */
+            int n = pf->recent_pos < 10 ? pf->recent_pos + 1 : 100;
+            for (int i = 0; i < n - 1; i++)
+                for (int j = i + 1; j < n; j++)
+                    if (buf[i] < buf[j]) { float t = buf[i]; buf[i] = buf[j]; buf[j] = t; }
+            int p75 = (int)(n * 0.25f);
+            float new_threshold = p75 < n ? buf[p75] : buf[0];
+            if (new_threshold > pf->accept_threshold + 0.02f)
+                pf->accept_threshold = new_threshold;
+            if (pf->accept_threshold < 0.10f) pf->accept_threshold = 0.10f;
+        }
+
+        free(dup);
         break;
     }
 
-    if (response) {
-        cognitive_controller_snapshot(pf->controller, 0.5f);
-    }
-
+    if (response) cognitive_controller_snapshot(pf->controller, 0.5f);
     return response;
 }
 

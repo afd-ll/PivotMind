@@ -27,9 +27,12 @@ typedef struct Prefrontal {
     MemorySystem*        memory;
 
     /* ACC 门控参数 */
-    float accept_threshold;     /* 通过阈值 (默认 0.55) */
-    int   max_retries;          /* 最大回溯次数 (默认 3) */
+    float accept_threshold;     /* 通过阈值 (自适应，初始0.15) */
+    float block_threshold;      /* 阻断阈值 (硬限制，默认0.08) */
+    int   max_retries;          /* 最大回溯次数 (默认1) */
     int   total_retries;        /* 累计回溯统计 */
+    float recent_scores[100];   /* 最近通过的得分环形记录 */
+    int   recent_pos;
 } Prefrontal;
 
 Prefrontal* prefrontal_create(MasterTopology* topology,
