@@ -448,7 +448,6 @@ static void handle_learn(GatewaySystem* gw, int fd, const char* body) {
             }
         }
         if (vocab && vocab->net) {
-            /* 简单切分：按标点和空格 */
             char copy[2048];
             strncpy(copy, msg, sizeof(copy)-1);
             copy[sizeof(copy)-1] = 0;
@@ -456,17 +455,7 @@ static void handle_learn(GatewaySystem* gw, int fd, const char* body) {
             int prev_id = -1;
             while (tok) {
                 if (strlen(tok) >= 2) {
-                    /* 找或建节点（遍历现有节点匹配 concept） */
-                    int nid = -1;
-                    for (int i = 0; i < vocab->net->node_count; i++) {
-                        ReasoningNode* nd = vocab->net->nodes[i];
-                        if (nd && nd->concept && strcmp(nd->concept, tok) == 0)
-                            { nid = i; break; }
-                    }
-                    if (nid < 0) {
-                        ReasoningNode* new_n = huarong_net_add_node(vocab->net, strdup(tok), NULL, 0);
-                        nid = new_n ? new_n->node_id : -1;
-                    }
+                    int nid = huarong_net_dynamic_add_node(vocab->net, tok, NULL, 0);
                     if (nid >= 0) {
                         vocab->net->nodes[nid]->activation += 0.1f;
                         if (prev_id >= 0 && prev_id != nid) {
