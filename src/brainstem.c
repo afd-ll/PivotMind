@@ -210,6 +210,32 @@ static void* brainstem_loop(void* arg) {
 
         pthread_rwlock_unlock(&bs->master->rwlock);
 
+        /* ── 堆监控：每30tick内存快照 + 连接增长趋势 ── */
+        if (bs->tick_count % 30 == 0) {
+            long rss_kb = 0, vsz_kb = 0;
+            { FILE* f = fopen("/proc/self/status", "r"); if (f) {
+                char line[256];
+                while (fgets(line, sizeof(line), f)) {
+                    if (strncmp(line, "VmRSS:", 6) == 0) rss_kb = atol(line + 6);
+                    if (strncmp(line, "VmSize:", 7) == 0) vsz_kb = atol(line + 7);
+                }
+                fclose(f);
+            }}
+            int total_conns = 0, total_edges = 0;
+            for (int t = 0; t < bs->master->sub_topo_count; t++) {
+                SubTopology* sub = bs->master->sub_topologies[t];
+                if (!sub || !sub->net) continue;
+                total_edges += sub->net->node_count;
+                for (int i = 0; i < sub->net->node_count; i++)
+                    if (sub->net->nodes[i])
+                        total_conns += sub->net->nodes[i]->connection_count;
+            }
+            fprintf(stderr,
+                "[堆监控] tick=%d 节点=%d 连接=%d RSS=%.1fMB VSZ=%.1fMB\n",
+                bs->tick_count, total_edges, total_conns,
+                rss_kb / 1024.0f, vsz_kb / 1024.0f);
+        }
+
         drift_cognitive_state(bs);
 
         /* ── 小脑平衡 ── （每10 tick更新一次） */
