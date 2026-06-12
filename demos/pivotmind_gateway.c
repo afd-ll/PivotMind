@@ -475,12 +475,7 @@ static void handle_learn(GatewaySystem* gw, int fd, const char* body) {
 
     while (tok) {
         if (strlen(tok) >= 2) {
-            int nid = -1;
-            for (int i = 0; i < vocab->net->node_count; i++) {
-                ReasoningNode* nd = vocab->net->nodes[i];
-                if (nd && nd->concept && strcmp(nd->concept, tok) == 0)
-                    { nid = i; break; }
-            }
+            int nid = huarong_net_find_concept(vocab->net, tok);
             if (nid < 0 && vocab->net->node_count < vocab->net->max_nodes) {
                 nid = huarong_net_dynamic_add_node(vocab->net, tok, NULL, 0);
                 if (nid >= 0) added++;

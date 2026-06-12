@@ -270,6 +270,50 @@ static void* brainstem_loop(void* arg) {
             perception_tick((Perception*)bs->perception, p_throttle);
         }
 
+        /* ── 突触缩放(每600tick≈10min)：弱边衰减，极弱释放 ── */
+        if (bs->tick_count % 600 == 0) {
+            int decayed = 0, released = 0;
+            for (int t = 0; t < bs->master->sub_topo_count; t++) {
+                SubTopology* sub = bs->master->sub_topologies[t];
+                if (!sub || !sub->net) continue;
+                for (int i = 0; i < sub->net->node_count; i++) {
+                    ReasoningNode* node = sub->net->nodes[i];
+                    if (!node) continue;
+                    int kept = 0;
+                    for (int c = 0; c < node->connection_count; c++) {
+                        float w = node->connection_weights[c];
+                        float conf = node->connection_confidences ?
+                            node->connection_confidences[c] : 0.5f;
+                        float strength = w * conf;
+                        if (strength < 0.001f) {
+                            released++;  /* 极弱→释放 */
+                            continue;
+                        }
+                        if (strength < 0.01f) {
+                            node->connection_weights[c] *= 0.5f;   decayed++;
+                        } else if (strength < 0.05f) {
+                            node->connection_weights[c] *= 0.9f;   decayed++;
+                        }
+                        /* 压缩数组：不移出桶的保留 */
+                        if (kept != c) {
+                            node->connections[kept] = node->connections[c];
+                            node->connection_weights[kept] = node->connection_weights[c];
+                            if (node->connection_motivational_bias)
+                                node->connection_motivational_bias[kept] =
+                                    node->connection_motivational_bias[c];
+                            if (node->connection_confidences)
+                                node->connection_confidences[kept] =
+                                    node->connection_confidences[c];
+                        }
+                        kept++;
+                    }
+                    node->connection_count = kept;
+                }
+            }
+            if (decayed > 0 || released > 0)
+                fprintf(stderr, "[突触缩放] 衰减%d条 释放%d条\n", decayed, released);
+        }
+
         if (bs->hippocampus && bs->tick_count % bs->consolidate_every_n_ticks == 0) {
             hippocampus_consolidate((Hippocampus*)bs->hippocampus);
         }

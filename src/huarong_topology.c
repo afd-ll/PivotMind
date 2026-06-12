@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <limits.h>
 
 /* 从概念文本生成确定性特征种子（FNV-1a 哈希 → 浮点向量） */
 static void concept_to_feature_seed(const char* concept, float* feats, int dim) {
@@ -159,7 +160,7 @@ HuarongTopologyNet* huarong_net_create(int max_nodes) {
 
 void huarong_net_destroy(HuarongTopologyNet* net) {
     if (!net) return;
-    
+    free(net->concept_hash);
     // 清理延迟释放的旧数组
     huarong_net_cleanup_retired(net);
     
@@ -174,6 +175,67 @@ void huarong_net_destroy(HuarongTopologyNet* net) {
         pthread_mutex_destroy(&net->node_locks[i]);
     
     free(net);
+}
+
+/* ================================================================
+ *  概念哈希表 — O(1) concept→node_id 查找
+ * ================================================================ */
+#define CHASH_INIT_CAP 131072  /* 2^17, 覆盖67100节点 */
+
+static unsigned int _chash_djb2(const char* s) {
+    unsigned int h = 5381;
+    while (*s) h = ((h << 5) + h) + (unsigned char)*s++;
+    return h;
+}
+
+static void _concept_hash_insert(HuarongTopologyNet* net, const char* name, int nid) {
+    if (!net || !name) return;
+    /* 惰性初始化 */
+    if (!net->concept_hash) {
+        int cap = CHASH_INIT_CAP;
+        net->concept_hash = (typeof(net->concept_hash))calloc(cap, sizeof(*net->concept_hash));
+        if (!net->concept_hash) return;
+        net->concept_hash_mask = cap - 1;
+    }
+    /* 负载因子 > 0.6 则扩容 */
+    if (net->concept_hash_count > (net->concept_hash_mask + 1) * 6 / 10) {
+        int old_cap = net->concept_hash_mask + 1;
+        int new_cap = old_cap * 2;
+        typeof(net->concept_hash) nu = (typeof(nu))calloc(new_cap, sizeof(*nu));
+        if (!nu) return;
+        int new_mask = new_cap - 1;
+        for (int i = 0; i < old_cap; i++) {
+            if (!net->concept_hash[i].name) continue;
+            unsigned int h = _chash_djb2(net->concept_hash[i].name) & (unsigned)new_mask;
+            while (nu[h].name) h = (h + 1) & new_mask;
+            nu[h] = net->concept_hash[i];
+        }
+        free(net->concept_hash);
+        net->concept_hash = nu;
+        net->concept_hash_mask = new_mask;
+    }
+    unsigned int h = _chash_djb2(name) & (unsigned)net->concept_hash_mask;
+    while (net->concept_hash[h].name) {
+        if (strcmp(net->concept_hash[h].name, name) == 0) {
+            net->concept_hash[h].node_id = nid; return;  /* 更新 */
+        }
+        h = (h + 1) & (unsigned)net->concept_hash_mask;
+    }
+    net->concept_hash[h].name = name;
+    net->concept_hash[h].node_id = nid;
+    net->concept_hash_count++;
+}
+
+int huarong_net_find_concept(HuarongTopologyNet* net, const char* concept) {
+    if (!net || !net->concept_hash || !concept) return -1;
+    unsigned int mask = (unsigned)net->concept_hash_mask;
+    unsigned int h = _chash_djb2(concept) & mask;
+    while (net->concept_hash[h].name) {
+        if (strcmp(net->concept_hash[h].name, concept) == 0)
+            return net->concept_hash[h].node_id;
+        h = (h + 1) & mask;
+    }
+    return -1;
 }
 
 ReasoningNode* huarong_net_add_node(HuarongTopologyNet* net, 
@@ -195,6 +257,8 @@ ReasoningNode* huarong_net_add_node(HuarongTopologyNet* net,
     
     if (node) {
         net->nodes[net->node_count++] = node;
+        /* 自动注册到概念哈希表 */
+        _concept_hash_insert(net, concept, node_id);
     }
     
     pthread_mutex_unlock(&net->mutex);

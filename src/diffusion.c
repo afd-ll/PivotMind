@@ -181,18 +181,14 @@ int diffusion_generate(DiffusionCtx* ctx,
             sub[sl] = 0;
             if (sl < 1) continue;
 
-            for (int i = 0; i < ctx->vocab->net->node_count; i++) {
-                ReasoningNode* n = ctx->vocab->net->nodes[i];
-                if (n && n->concept && strcmp(n->concept, sub) == 0) {
-                    /* 去重 */
-                    int dup = 0;
-                    for (int d = 0; d < active_count; d++)
-                        if (active_ids[d] == i) { dup = 1; break; }
-                    if (!dup) {
-                        active_ids[active_count++] = i;
-                        n->activation += 0.2f;
-                    }
-                    break;
+            int nid = huarong_net_find_concept(ctx->vocab->net, sub);
+            if (nid >= 0) {
+                int dup = 0;
+                for (int d = 0; d < active_count; d++)
+                    if (active_ids[d] == nid) { dup = 1; break; }
+                if (!dup) {
+                    active_ids[active_count++] = nid;
+                    ctx->vocab->net->nodes[nid]->activation += 0.2f;
                 }
             }
         }
@@ -200,20 +196,32 @@ int diffusion_generate(DiffusionCtx* ctx,
     }
     if (active_count == 0) return 0;
 
-    /* ── 分配评分数组 ── */
+    /* ── 分配/复用评分数组 (静态避免反复calloc) ── */
     int vn = ctx->vocab->net->node_count;
-    float* vocab_scores = (float*)calloc(vn, sizeof(float));
-    float* sem_scores   = NULL;
-    float* tpl_scores   = NULL;
-    float* emo_scores   = NULL;
-    if (!vocab_scores) return 0;
-
     int sn = ctx->semantic ? ctx->semantic->net->node_count : 0;
     int tn = ctx->template ? ctx->template->net->node_count : 0;
     int en = ctx->emotion  ? ctx->emotion->net->node_count  : 0;
-    if (sn) sem_scores = (float*)calloc(sn, sizeof(float));
-    if (tn) tpl_scores = (float*)calloc(tn, sizeof(float));
-    if (en) emo_scores = (float*)calloc(en, sizeof(float));
+    int need = vn;
+    if (sn > need) need = sn;
+    if (tn > need) need = tn;
+    if (en > need) need = en;
+    if (!ctx->_vocab_scores || ctx->_score_cap < need) {
+        free(ctx->_vocab_scores); free(ctx->_sem_scores);
+        free(ctx->_tpl_scores);   free(ctx->_emo_scores);
+        ctx->_vocab_scores = (float*)calloc(need, sizeof(float));
+        ctx->_sem_scores   = sn ? (float*)calloc(sn, sizeof(float)) : NULL;
+        ctx->_tpl_scores   = tn ? (float*)calloc(tn, sizeof(float)) : NULL;
+        ctx->_emo_scores   = en ? (float*)calloc(en, sizeof(float)) : NULL;
+        ctx->_score_cap    = need;
+    }
+    float* vocab_scores = ctx->_vocab_scores;
+    float* sem_scores   = ctx->_sem_scores;
+    float* tpl_scores   = ctx->_tpl_scores;
+    float* emo_scores   = ctx->_emo_scores;
+    memset(vocab_scores, 0, vn * sizeof(float));
+    if (sem_scores) memset(sem_scores, 0, sn * sizeof(float));
+    if (tpl_scores) memset(tpl_scores, 0, tn * sizeof(float));
+    if (emo_scores) memset(emo_scores, 0, en * sizeof(float));
 
     /* ── 第1步：词汇层初始扩散 ── */
     float cur_decay = 1.0f;
@@ -374,11 +382,7 @@ int diffusion_generate(DiffusionCtx* ctx,
         final[i].used = 1;
     }
 
-    /* ── 清理 ── */
-    free(vocab_scores);
-    free(sem_scores);
-    free(tpl_scores);
-    free(emo_scores);
+    /* ── 静态数组不释放 (ctx生命周期管理) ── */
 
     return out;
 }

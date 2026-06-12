@@ -101,6 +101,11 @@ typedef struct HuarongTopologyNet {
     // 延迟释放链表 — 扩容旧数组暂存，epoch 结束统一清理
     void* retired_conns;           // 链表头节点
     int retired_pending;            // 是否有待清理的旧数组
+
+    /* 概念名→节点ID 哈希表 (O(1) 查找) */
+    struct { const char* name; int node_id; }* concept_hash;
+    int concept_hash_mask;         /* 桶数-1 */
+    int concept_hash_count;        /* 条目数 */
 } HuarongTopologyNet;
 
 /** 节点默认连接初始容量 */
@@ -159,6 +164,9 @@ ReasoningNode* huarong_net_add_node(HuarongTopologyNet* net,
                                    const char* concept, 
                                    float* features, 
                                    int feature_dim);
+
+/** 概念名→节点ID O(1)查找 (概念哈希表) */
+int huarong_net_find_concept(HuarongTopologyNet* net, const char* concept);
 
 /**
  * 线程安全的查找或创建节点（原子操作）

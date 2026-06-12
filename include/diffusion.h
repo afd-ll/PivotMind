@@ -53,6 +53,13 @@ typedef struct {
     SubTopology*    semantic;
     SubTopology*    template;
     SubTopology*    emotion;
+
+    /* 预分配评分数组 (避免每次calloc/free造成的堆碎片) */
+    float*  _vocab_scores;
+    float*  _sem_scores;
+    float*  _tpl_scores;
+    float*  _emo_scores;
+    int     _score_cap;       /* 数组容量 */
 } DiffusionCtx;
 
 /** 从输入文本生成序列 */
