@@ -6,6 +6,7 @@
  */
 
 #include "brainstem.h"
+#include "health_monitor.h"
 #include "huarong_topology.h"
 #include "dmn.h"
 #include "self_learner.h"
@@ -245,6 +246,14 @@ static void* brainstem_loop(void* arg) {
             float load = 0;
             { FILE* f = fopen("/proc/loadavg", "r"); if (f) { fscanf(f, "%f", &load); fclose(f); load *= 16.67f; } } /* load→CPU% */
             cerebellum_tick((Cerebellum*)bs->cerebellum, load, mem_gb, circadian);
+        }
+
+        /* ── 内感受自检 ── （每120 tick ≈ 2分钟，检测不适并自动干预） */
+        static HealthMonitor* _hm = NULL;
+        if (!_hm) _hm = health_monitor_create();
+        if (_hm && bs->tick_count % 120 == 0) {
+            /* controller 通过 bs 间接访问不到，用全局 gw 传 */
+            health_monitor_tick(_hm, bs->master, NULL);
         }
 
         /* ── 网状结构注意力过滤 ── （每60 tick ≈ 1分钟） */
