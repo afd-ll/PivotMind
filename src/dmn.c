@@ -4,6 +4,7 @@
  */
 
 #include "dmn.h"
+#include <stdlib.h>
 #include "dream_engine.h"
 #include "diffusion.h"
 #include <string.h>

@@ -4,6 +4,8 @@
  */
 
 #include "health_monitor.h"
+#include "feature_io.h"
+#include "cross_edge_io.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

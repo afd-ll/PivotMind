@@ -38,6 +38,7 @@
 #include <pthread.h>
 
 #include "thread_pool.h"
+#include <ctype.h>
 
 #ifdef _WIN32
 #include <windows.h>

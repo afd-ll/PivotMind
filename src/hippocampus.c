@@ -4,6 +4,7 @@
  */
 
 #include "hippocampus.h"
+#include <string.h>
 #include "perception.h"
 #include "thalamus.h"
 #include <stdio.h>

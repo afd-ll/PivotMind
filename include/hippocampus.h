@@ -56,9 +56,12 @@ void hippocampus_destroy(Hippocampus* hc);
 /** 记忆巩固（审查+联网补全模糊概念） */
 int hippocampus_consolidate(Hippocampus* hc);
 
+/** 记录对话到海马体日志 */
+void hippocampus_log_dialog(Hippocampus* hc, const char* input, const char* response);
+
 /** 记忆存取（委托 memory_system） */
-static inline void* hippocampus_remember(Hippocampus* hc, const char* key, int ctx_id) {
-    return hc ? memory_recall(hc->memory, key, ctx_id) : NULL;
+static inline void* hippocampus_remember(Hippocampus* hc, const char* key) {
+    return hc ? memory_retrieve(hc->memory, key) : NULL;
 }
 
 static inline int hippocampus_store(Hippocampus* hc, const char* key, void* data, int len, int type, float conf) {
