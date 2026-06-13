@@ -407,13 +407,12 @@ static void gw_system_shutdown(GatewaySystem* gw) {
     }
 
     // 5. 销毁资源（brainstem 已在上方 stop，这里只 destroy）
-    if (gw->brain_cache) node_cache_destroy(gw->brain_cache);
+    if (gw->brain_cache) node_cache_destroy(gw->brain_cache);  gw->brain_cache = NULL;
     if (gw->hippocampus) hippocampus_destroy(gw->hippocampus);
     if (gw->cerebellum)  cerebellum_destroy(gw->cerebellum);
     if (gw->thalamus)     thalamus_destroy(gw->thalamus);
     if (gw->perception)   perception_destroy(gw->perception);
     if (gw->brainstem)    brainstem_destroy(gw->brainstem);
-    if (gw->brain_cache) node_cache_destroy(gw->brain_cache);
     if (gw->learner)     active_learner_destroy(gw->learner);
     if (gw->prefrontal)  prefrontal_destroy(gw->prefrontal);
     if (gw->causal_graph) causal_graph_destroy(gw->causal_graph);
