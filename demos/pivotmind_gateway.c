@@ -46,6 +46,7 @@
 #include "feature_pretrain.h"
 #include "path_encoding.h"
 #include "train_mode.h"
+#include "learning_scheduler.h"
 #include "broca.h"
 #include "node_cache.h"
 
@@ -86,6 +87,9 @@ typedef struct {
     TrainMode*      train_mode;      /* 训练模式实例 */
     int             train_mode_flag; /* --train-mode 标志 */
     TrainConfig     train_config;    /* 训练配置 */
+
+    // 学习调度器（自学习 + 增量训练闭环）
+    struct LearningScheduler* scheduler;
 
     // 网关配置
     int   port;
@@ -348,6 +352,21 @@ static int gw_system_init(GatewaySystem* gw) {
             fprintf(stderr, "[gateway] 训练模式创建失败\n");
         }
     }
+
+    // 学习调度器（始终启动，后台自学习循环）
+    {
+        SchedulerConfig scfg = SCHEDULER_DEFAULT_CONFIG;
+        if (gw->train_config.corpus_path)
+            scfg.batch_corpus_path = gw->train_config.corpus_path;
+        gw->scheduler = learning_scheduler_create(gw->topology, gw->memory,
+                                                   gw->learner, &scfg);
+        if (gw->scheduler) {
+            learning_scheduler_start(gw->scheduler);
+            printf("[gateway]   学习调度器已启动 (自学习=%d次/轮, 语料=%s)\n",
+                   scfg.self_learn_cycles,
+                   scfg.batch_corpus_path ? scfg.batch_corpus_path : "无(仅自学习)");
+        }
+    }
     printf("[gateway] PivotMind 引擎就绪\n");
 
     return 0;
@@ -380,7 +399,14 @@ static void gw_system_shutdown(GatewaySystem* gw) {
     remove("brain_state.dat");
     printf("[gateway]   清理临时状态文件\n");
 
-    // 4. 销毁资源（brainstem 已在上方 stop，这里只 destroy）
+    // 4. 停止学习调度器
+    if (gw->scheduler) {
+        printf("[gateway]   停止学习调度器...\n");
+        learning_scheduler_destroy(gw->scheduler);
+        gw->scheduler = NULL;
+    }
+
+    // 5. 销毁资源（brainstem 已在上方 stop，这里只 destroy）
     if (gw->brain_cache) node_cache_destroy(gw->brain_cache);
     if (gw->hippocampus) hippocampus_destroy(gw->hippocampus);
     if (gw->cerebellum)  cerebellum_destroy(gw->cerebellum);
@@ -607,6 +633,57 @@ static void handle_status(GatewaySystem* gw, int fd) {
     http_json(fd, 200, json);
 }
 
+// GET /scheduler - 学习调度器状态
+static void handle_scheduler(GatewaySystem* gw, int fd) {
+    if (!gw->scheduler) {
+        http_json(fd, 404, "{\"error\":\"scheduler not initialized\"}");
+        return;
+    }
+
+    const char* phase_name = "idle";
+    int total_loops = 0;
+    int sel_cycles = 0, sel_mods = 0;
+    int batch_nodes = 0, batch_edges = 0;
+    int eval_candidates = 0;
+    long phase_elapsed = 0;
+
+    learning_scheduler_get_stats(gw->scheduler,
+        &total_loops, &sel_cycles, &sel_mods,
+        &batch_nodes, &batch_edges, &eval_candidates,
+        &phase_name, &phase_elapsed);
+
+    char json[1024];
+    snprintf(json, sizeof(json),
+        "{"
+        "\"phase\":\"%s\","
+        "\"phase_elapsed_s\":%ld,"
+        "\"total_loops\":%d,"
+        "\"self_learn_cycles\":%d,\"self_learn_mods\":%d,"
+        "\"batch_nodes\":%d,\"batch_edges\":%d,"
+        "\"eval_freeze_candidates\":%d"
+        "}",
+        phase_name, phase_elapsed,
+        total_loops, sel_cycles, sel_mods,
+        batch_nodes, batch_edges, eval_candidates);
+
+    http_json(fd, 200, json);
+}
+
+// GET /scheduler/stats - 自学习器详细统计
+static void handle_scheduler_self_stats(GatewaySystem* gw, int fd) {
+    if (!gw->scheduler) {
+        http_json(fd, 404, "{\"error\":\"scheduler not initialized\"}");
+        return;
+    }
+
+    LearningPhase phase = learning_scheduler_get_phase(gw->scheduler);
+    (void)phase;
+
+    // 从 self_learner 获取统计
+    // （通过 scheduler_get_stats 已提供主要数据，此处为兼容更详细的未来扩展）
+    http_json(fd, 200, "{\"detail\":\"use /scheduler for summary\"}");
+}
+
 // GET /health - 健康检查
 static void handle_health(GatewaySystem* gw, int fd) {
     if (gw->engine_ready) {
@@ -733,6 +810,10 @@ static void handle_connection(GatewaySystem* gw, int client_fd) {
                     st, p.current_round, p.total_rounds, p.total_fed, p.total_added_nodes, p.total_added_edges, p.total_learned);
                 http_json(client_fd, 200, tr);
             }
+        } else if (strcmp(req.path, "/scheduler") == 0) {
+            handle_scheduler(gw, client_fd);
+        } else if (strcmp(req.path, "/scheduler/stats") == 0) {
+            handle_scheduler_self_stats(gw, client_fd);
         } else {
             http_json(client_fd, 404, "{\"error\":\"not found\"}");
         }
