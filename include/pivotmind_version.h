@@ -19,17 +19,10 @@
 extern "C" {
 #endif
 
-#if 0
-#define PIVOTMIND_VERSION       "0.2.3"
-#define PIVOTMIND_MAJOR         0
-#define PIVOTMIND_MINOR         2
-#define PIVOTMIND_PATCH         3
-#else
 #define PIVOTMIND_VERSION       "0.2.4"
 #define PIVOTMIND_MAJOR         0
 #define PIVOTMIND_MINOR         2
 #define PIVOTMIND_PATCH         4
-#endif (v0.2.4: 内置训练模式 --train-mode + 架构修正)
 
 /* 版本字符串（编译时间戳自动追加） */
 #define PIVOTMIND_VERSION_FULL  PIVOTMIND_VERSION " (" __DATE__ " " __TIME__ ")"
