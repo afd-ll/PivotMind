@@ -15,7 +15,12 @@
 #include <string.h>
 #include <math.h>
 #include <stdio.h>
+#ifdef _OPENMP
 #include <omp.h>
+#else
+static inline int omp_get_num_threads(void) { return 1; }
+static inline int omp_get_thread_num(void) { return 0; }
+#endif
 
 /* FNV-1a 哈希种子 (与 huarong_topology.c 中 concept_to_feature_seed 一致) */
 static void feature_seed_from_concept(const char* concept, float* feats, int dim) {
