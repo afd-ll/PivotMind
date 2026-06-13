@@ -14,7 +14,7 @@
 
 没有 Transformer，没有 embedding 向量，没有反向传播。只有节点、边、激活、衰减——以及一个永不停歇的后台时钟。
 
-**当前版本：v0.2.3**
+**当前版本：v0.2.4**
 
 ---
 
@@ -149,7 +149,7 @@
 
 ---
 
-## 当前运行指标（v0.2.3 实测）
+## 当前运行指标（v0.2.4 实测）
 
 | 指标 | 数值 |
 |------|------|
@@ -254,8 +254,9 @@ pivotmind/
 | v0.2.1 | 海马体对话记录，DMN 扩散引导，感觉皮层激活优化 |
 | v0.2.2 | 概念哈希 O(1)，扩散静态数组，突触缩放衰减 |
 | **v0.2.3** | **堆损坏修复，多层扩散四层同步约束，内感受自检（GREEN/YELLOW/RED），堆监控，突触缩放自动修剪，4h+ 稳定运行** |
+| **v0.2.4** | **内置训练模式 --train-mode，Q→A 直接强连接代替教学格式，修复 double-free/连接爆炸，删除虚词过滤** |
 
-> 详细变更记录见 [changelogs/019-v0.2.3-stability.md](changelogs/019-v0.2.3-stability.md)
+> 详细变更记录：v0.2.3 → [changelogs/027-v0.2.3-stability.md](changelogs/027-v0.2.3-stability.md) ｜ v0.2.4 → [changelogs/029-v0.2.4-training-fix.md](changelogs/029-v0.2.4-training-fix.md)
 
 ---
 
