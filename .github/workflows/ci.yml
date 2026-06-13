@@ -29,4 +29,4 @@ jobs:
       - name: Verify ARM ELF
         run: |
           file build/bin/*
-          readelf -h build/bin/digital_life | grep 'Machine:'
+          readelf -h build/bin/pivotmind_gateway | grep 'Machine:'
