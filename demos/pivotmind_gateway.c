@@ -632,6 +632,59 @@ static void handle_status(GatewaySystem* gw, int fd) {
     http_json(fd, 200, json);
 }
 
+// GET / - 仪表盘首页
+static void handle_root(GatewaySystem* gw, int fd) {
+    (void)gw;
+    const char* html =
+        "<!DOCTYPE html>"
+        "<html lang='zh-CN'><head><meta charset='utf-8'>"
+        "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+        "<title>玄枢 · PivotMind</title>"
+        "<style>"
+        "*{margin:0;padding:0;box-sizing:border-box}"
+        "body{background:#0a0e17;color:#c8d6e5;font-family:-apple-system,'Segoe UI',sans-serif;padding:20px;min-height:100vh}"
+        "h1{font-size:24px;font-weight:300;color:#48dbfb;margin-bottom:4px;letter-spacing:2px}"
+        ".sub{color:#576574;font-size:13px;margin-bottom:30px}"
+        ".grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px;margin-bottom:24px}"
+        ".card{background:#111827;border:1px solid #1e293b;border-radius:12px;padding:20px;position:relative;overflow:hidden}"
+        ".card::before{content:'';position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,#48dbfb,#0abde3)}"
+        ".card-label{font-size:11px;text-transform:uppercase;color:#64748b;letter-spacing:1px;margin-bottom:8px}"
+        ".card-value{font-size:28px;font-weight:600;color:#e2e8f0}"
+        ".card-value.green{color:#10b981}"
+        ".card-value.cyan{color:#06b6d4}"
+        ".card-value.yellow{color:#f59e0b}"
+        ".status-dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;background:#10b981;box-shadow:0 0 8px #10b98166}"
+        ".phase-badge{display:inline-block;padding:4px 12px;border-radius:20px;font-size:12px;font-weight:500;background:#1e293b;color:#48dbfb;border:1px solid #1e4055}"
+        "</style></head><body>"
+        "<h1>玄枢</h1><div class='sub'>PivotMind · Cognitive Engine</div>"
+        "<div class='grid' id='cards'></div>"
+        "<div style='display:grid;grid-template-columns:1fr 1fr;gap:16px'>"
+        "<div class='card'><div class='card-label'>学习调度器</div><div id='scheduler'><div class='card-value cyan'>加载中...</div></div></div>"
+        "<div class='card'><div class='card-label'>知识拓扑</div><div id='topology'><div class='card-value cyan'>加载中...</div></div></div>"
+        "</div>"
+        "<script>"
+        "async function load(){"
+        "try{let s=await(await fetch('/status')).json();"
+        "document.getElementById('cards').innerHTML="
+        "'<div class=card><div class=card-label>状态</div><div class=card-value><span class=status-dot></span>'+s.status+'</div></div>'"
+        "+'<div class=card><div class=card-label>运行时间</div><div class=card-value>'+Math.floor(s.uptime/3600)+'<span style=font-size:13px;color:#64748b>时</span>'+Math.floor(s.uptime%3600/60)+'<span style=font-size:13px;color:#64748b>分</span></div></div>'"
+        "+'<div class=card><div class=card-label>节点</div><div class=card-value style=color:#10b981>'+s.total_nodes.toLocaleString()+'</div></div>'"
+        "+'<div class=card><div class=card-label>版本</div><div class=card-value style=color:#8b5cf6>'+s.version+'</div></div>';"
+        "}catch(e){}"
+        "try{let sc=await(await fetch('/scheduler')).json();"
+        "let ph=document.getElementById('scheduler');"
+        "ph.innerHTML='<div style=margin-bottom:8px><span class=phase-badge>'+(sc.phase||'idle')+'</span><span style=float:right;font-size:12px;color:#64748b>'+sc.phase_elapsed_s+'s</span></div>'"
+        "+'<div style=display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;text-align:center>'"
+        "+'<div><div style=font-size:20px;font-weight:600;color:#10b981>'+(sc.total_loops||0)+'</div><div style=font-size:10px;color:#64748b>闭环</div></div>'"
+        "+'<div><div style=font-size:20px;font-weight:600;color:#06b6d4>'+(sc.self_learn_mods||0)+'</div><div style=font-size:10px;color:#64748b>修正</div></div>'"
+        "+'<div><div style=font-size:20px;font-weight:600;color:#f59e0b>'+(sc.eval_freeze_candidates||0)+'</div><div style=font-size:10px;color:#64748b>冷冻候选</div></div>';"
+        "}catch(e){}"
+        "setTimeout(load,5000)}"
+        "load()"
+        "</script></body></html>";
+    http_send(fd, 200, "text/html; charset=utf-8", html);
+}
+
 // GET /scheduler - 学习调度器状态
 static void handle_scheduler(GatewaySystem* gw, int fd) {
     if (!gw->scheduler) {
@@ -790,7 +843,9 @@ static void handle_connection(GatewaySystem* gw, int client_fd) {
 
     // 路由
     if (strcmp(req.method, "GET") == 0) {
-        if (strcmp(req.path, "/health") == 0) {
+        if (strcmp(req.path, "/") == 0 || strcmp(req.path, "/dashboard") == 0) {
+            handle_root(gw, client_fd);
+        } else if (strcmp(req.path, "/health") == 0) {
             handle_health(gw, client_fd);
         } else if (strcmp(req.path, "/status") == 0) {
             if (!gw->engine_ready) {
