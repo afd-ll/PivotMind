@@ -28,6 +28,7 @@
 #include <pthread.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include "pivotmind_version.h"
 #include <arpa/inet.h>
 
 #include "dialog_system.h"
@@ -44,6 +45,7 @@
 #include "cross_edge_io.h"
 #include "feature_pretrain.h"
 #include "path_encoding.h"
+#include "train_mode.h"
 #include "broca.h"
 #include "node_cache.h"
 
@@ -80,6 +82,10 @@ typedef struct {
     long         total_learning_cycles;
     time_t       last_learn_time;     // 限流用
     int          learn_burst;         // 限流burst计数
+    // 训练模式
+    TrainMode*      train_mode;      /* 训练模式实例 */
+    int             train_mode_flag; /* --train-mode 标志 */
+    TrainConfig     train_config;    /* 训练配置 */
 
     // 网关配置
     int   port;
@@ -331,6 +337,17 @@ static int gw_system_init(GatewaySystem* gw) {
 
     gw->start_time = time(NULL);
     gw->engine_ready = 1;  // 引擎初始化完成，可接受请求
+
+    // 训练模式: 引擎就绪后自动开始喂料
+    printf("[DEBUG] train_mode_flag=%d, corpus=%s, topology=%p\n", gw->train_mode_flag, gw->train_config.corpus_path ? gw->train_config.corpus_path : "NULL", (void*)gw->topology);
+    if (gw->train_mode_flag && gw->topology) {
+        gw->train_mode = train_mode_create(gw->topology, gw->memory, gw->learner, gw->train_config);
+        if (gw->train_mode) {
+            train_mode_start(gw->train_mode);
+        } else {
+            fprintf(stderr, "[gateway] 训练模式创建失败\n");
+        }
+    }
     printf("[gateway] PivotMind 引擎就绪\n");
 
     return 0;
@@ -569,7 +586,8 @@ static void handle_status(GatewaySystem* gw, int fd) {
         "\"brain_frozen\":%ld,"
         "\"brain_thawed\":%ld,"
         "\"topologies\":%d,"
-        "\"port\":%d"
+        "\"port\":%d,"
+        "\"version\":\"%s\""
         "}",
         real_time ? real_time : "unknown",
         uptime,
@@ -584,7 +602,7 @@ static void handle_status(GatewaySystem* gw, int fd) {
         cache_frozen,
         cache_thawed,
         gw->topology->sub_topo_count,
-        gw->port);
+        gw->port, PIVOTMIND_VERSION);
 
     http_json(fd, 200, json);
 }
@@ -704,6 +722,17 @@ static void handle_connection(GatewaySystem* gw, int client_fd) {
             } else {
                 handle_status(gw, client_fd);
             }
+        } else if (strcmp(req.path, "/train/status") == 0) {
+            if (!gw->train_mode) {
+                http_json(client_fd, 404, "{\"error\":\"train mode not enabled\"}");
+            } else {
+                TrainProgress p = train_mode_get_progress(gw->train_mode);
+                const char* st = p.state==TRAIN_RUNNING?"running":p.state==TRAIN_PAUSED?"paused":p.state==TRAIN_COMPLETED?"completed":"idle";
+                char tr[512];
+                snprintf(tr, sizeof(tr), "{\"state\":\"%s\",\"round\":%d,\"total_rounds\":%d,\"fed\":%ld,\"added_nodes\":%ld,\"added_edges\":%ld,\"learn_count\":%ld}",
+                    st, p.current_round, p.total_rounds, p.total_fed, p.total_added_nodes, p.total_added_edges, p.total_learned);
+                http_json(client_fd, 200, tr);
+            }
         } else {
             http_json(client_fd, 404, "{\"error\":\"not found\"}");
         }
@@ -716,6 +745,28 @@ static void handle_connection(GatewaySystem* gw, int client_fd) {
             handle_learn(gw, client_fd, req.body);
         } else if (strcmp(req.path, "/feedback") == 0) {
             handle_feedback(gw, client_fd, req.body);
+        } else if (strncmp(req.path, "/train/", 7) == 0) {
+            if (!gw->train_mode) {
+                http_json(client_fd, 404, "{\"error\":\"train mode not enabled\"}");
+            } else if (strcmp(req.path, "/train/status") == 0) {
+                TrainProgress p = train_mode_get_progress(gw->train_mode);
+                const char* st = p.state==TRAIN_RUNNING?"running":p.state==TRAIN_PAUSED?"paused":p.state==TRAIN_COMPLETED?"completed":"idle";
+                char tr[512];
+                snprintf(tr, sizeof(tr), "{\"state\":\"%s\",\"round\":%d,\"total_rounds\":%d,\"fed\":%ld,\"added_nodes\":%ld,\"added_edges\":%ld,\"learn_count\":%ld}",
+                    st, p.current_round, p.total_rounds, p.total_fed, p.total_added_nodes, p.total_added_edges, p.total_learned);
+                http_json(client_fd, 200, tr);
+            } else if (strcmp(req.path, "/train/pause") == 0) {
+                train_mode_pause(gw->train_mode);
+                http_json(client_fd, 200, "{\"result\":\"paused\"}");
+            } else if (strcmp(req.path, "/train/resume") == 0) {
+                train_mode_resume(gw->train_mode);
+                http_json(client_fd, 200, "{\"result\":\"resumed\"}");
+            } else if (strcmp(req.path, "/train/stop") == 0) {
+                train_mode_stop(gw->train_mode);
+                http_json(client_fd, 200, "{\"result\":\"stopped\"}");
+            } else {
+                http_json(client_fd, 404, "{\"error\":\"unknown train command\"}");
+            }
         } else {
             http_json(client_fd, 404, "{\"error\":\"not found\"}");
         }
@@ -729,12 +780,52 @@ static void handle_connection(GatewaySystem* gw, int client_fd) {
 // ==================== 主函数 ====================
 
 int main(int argc, char* argv[]) {
+    printf("[gateway] PivotMind v%s\n", PIVOTMIND_VERSION);
     // 解析参数
     int port = GW_DEFAULT_PORT;
+    int train_mode_flag = 0;
+    TrainConfig train_config = {NULL, CORPUS_JSON_QA, 1, 20, 100, 5000, 0};
     const char* workdir = ".";
 
-    if (argc >= 2) port = atoi(argv[1]);
-    if (argc >= 3) workdir = argv[2];
+    // 解析命令行参数（兼容旧的位置参数和新的 --train-mode 选项）
+    // 先解析 --train-mode 和训练相关参数
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--train-mode") == 0) {
+            train_mode_flag = 1;
+            if (!train_config.corpus_path)
+                train_config.corpus_path = "data/hermes_knowledge_base.json";
+        } else if (strcmp(argv[i], "--corpus") == 0 && i+1 < argc) {
+            train_config.corpus_path = argv[++i];
+        } else if (strcmp(argv[i], "--rounds") == 0 && i+1 < argc) {
+            train_config.rounds = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--speed") == 0 && i+1 < argc) {
+            train_config.speed = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--batch") == 0 && i+1 < argc) {
+            train_config.batch_learn_interval = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--format") == 0 && i+1 < argc) {
+            const char* fmt = argv[++i];
+            if (strcmp(fmt, "pipe") == 0) train_config.format = CORPUS_PIPE_QA;
+            else if (strcmp(fmt, "text") == 0 || strcmp(fmt, "plain") == 0) train_config.format = CORPUS_PLAIN_TEXT;
+            else train_config.format = CORPUS_JSON_QA;
+        } else if (strcmp(argv[i], "--save-interval") == 0 && i+1 < argc) {
+            train_config.save_interval = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--verbose") == 0) {
+            train_config.verbose = 1;
+        } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
+            printf("用法: pivotmind_gateway [port] [workdir] [--train-mode] [选项]\n");
+            train_config_print_defaults();
+            return 0;
+        } else if (argv[i][0] != '-') {
+            // 兼容旧的位置参数
+            if (port == GW_DEFAULT_PORT && atoi(argv[i]) > 0)
+                port = atoi(argv[i]);
+            else
+                workdir = argv[i];
+        }
+    }
+    // 自动检测语料格式
+    if (train_config.corpus_path)
+        train_config.format = train_detect_format(train_config.corpus_path);
 
     // 切换工作目录
     if (chdir(workdir) != 0) {
@@ -744,6 +835,8 @@ int main(int argc, char* argv[]) {
 
     // 创建系统
     GatewaySystem gw = {0};
+    gw.train_mode_flag = train_mode_flag;
+    gw.train_config = train_config;
     g_gw = &gw;
     gw.port = port;
     strncpy(gw.workdir, workdir, sizeof(gw.workdir) - 1);
@@ -819,6 +912,14 @@ int main(int argc, char* argv[]) {
 
     // 清理
     close(server_fd);
+
+    // 停止训练模式
+    if (gw.train_mode) {
+        // train_mode_destroy 内部会调 train_mode_stop，不重复调
+        train_mode_destroy(gw.train_mode);
+        gw.train_mode = NULL;
+    }
+
     gw_system_shutdown(&gw);
 
     printf("[gateway] 再见!\n");
