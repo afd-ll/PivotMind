@@ -257,6 +257,10 @@ static int deep_walk(SelfLearner* sl, int start_topo, int start_node,
  *   - 矛盾：暂简化实现（TODO: 需要否定概念检测）
  *   - 语义：相似节点无连接 → 建议连接
  */
+static int _fuzzy_roll(void) {
+    return (rand() % 100) < 15;  // 15% 模糊区
+}
+
 static int audit_path(SelfLearner* sl, WalkStep* steps, int len) {
     int mods = 0;
 
@@ -278,16 +282,24 @@ static int audit_path(SelfLearner* sl, WalkStep* steps, int len) {
                     if (na->connections[ci] == nc) { a_to_c = 1; break; }
                 }
                 if (!a_to_c) {
-                    SubTopology* sub = sl->master->sub_topologies[steps[a].topo_id];
-                    if (sub && sub->net) {
-                        huarong_net_add_connection(sub->net, na->node_id,
-                            nc->node_id, sl->cfg.transitive_boost);
-                        sl->total_transitive++;
-                        mods++;
+                    // 15% 模糊区：即使条件满足也随机跳过（防回音壁）
+                    if (_fuzzy_roll()) {
                         if (sl->cfg.verbose) {
-                            fprintf(stderr, "[自学] 传递性: %s→%s→%s → 新建 %s→%s\n",
-                                    na->concept, nb->concept, nc->concept,
-                                    na->concept, nc->concept);
+                            fprintf(stderr, "[自学] 模糊跳过: %s→%s→%s\n",
+                                    na->concept, nb->concept, nc->concept);
+                        }
+                    } else {
+                        SubTopology* sub = sl->master->sub_topologies[steps[a].topo_id];
+                        if (sub && sub->net) {
+                            huarong_net_add_connection(sub->net, na->node_id,
+                                nc->node_id, sl->cfg.transitive_boost);
+                            sl->total_transitive++;
+                            mods++;
+                            if (sl->cfg.verbose) {
+                                fprintf(stderr, "[自学] 传递性: %s→%s→%s → 新建 %s→%s\n",
+                                        na->concept, nb->concept, nc->concept,
+                                        na->concept, nc->concept);
+                            }
                         }
                     }
                 }
@@ -363,6 +375,9 @@ static int audit_path(SelfLearner* sl, WalkStep* steps, int len) {
 
 int self_learner_cycle(SelfLearner* sl) {
     if (!sl || !sl->master) return 0;
+
+    /* 持读锁保护 cross_adj 等共享结构不被 master_add_cross_link 并发修改 */
+    pthread_rwlock_rdlock(&sl->master->rwlock);
 
     sl->cycle_num++;
     int seeds_topo[MAX_SEEDS], seeds_node[MAX_SEEDS];
@@ -481,6 +496,7 @@ int self_learner_cycle(SelfLearner* sl) {
                 sl->total_transitive, sl->total_created, sl->total_demoted);
     }
 
+    pthread_rwlock_unlock(&sl->master->rwlock);
     return total_mods;
 }
 

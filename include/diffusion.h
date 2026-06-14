@@ -60,6 +60,9 @@ typedef struct {
     float*  _tpl_scores;
     float*  _emo_scores;
     int     _score_cap;       /* 数组容量 */
+
+    /* 温度扰动参数 (0=关闭, >0 添加随机扰动, 默认0.15) */
+    float   temperature;
 } DiffusionCtx;
 
 /** 从输入文本生成序列 */
@@ -75,7 +78,8 @@ int diffusion_init(DiffusionCtx* ctx, MasterTopology* master);
 int diffusion_spread(SubTopology* layer,
                       int* active_ids, int active_count,
                       float* scores,     /* [node_count] 累积分数 */
-                      float decay);
+                      float decay,
+                      float temperature);  /* 0=关闭, >0 添加随机扰动 */
 
 /** 跨层激活：通过cross_edge从源层扩散到目标层 */
 int diffusion_cross_spread(MasterTopology* master,

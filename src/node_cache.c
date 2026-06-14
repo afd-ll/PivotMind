@@ -245,6 +245,10 @@ int node_cache_freeze(NodeCache* nc, HuarongTopologyNet* net, ReasoningNode* nod
     /* 1. 保存到文件 */
     if (node_cache_save_node(nc, net, node) < 0) return -1;
 
+    /* 持节点锁后释放连接内存（防止与 self_learner / brainstem 竞争） */
+    int lock_idx = node->node_id & (PM_NODE_LOCK_COUNT - 1);
+    pthread_mutex_lock(&net->node_locks[lock_idx]);
+
     /* 2. 释放连接相关内存 */
     free(node->connections);
     free(node->connection_weights);
@@ -266,6 +270,8 @@ int node_cache_freeze(NodeCache* nc, HuarongTopologyNet* net, ReasoningNode* nod
     node->is_cooled = 1;
 
     __sync_fetch_and_add(&nc->total_freezes, 1);
+
+    pthread_mutex_unlock(&net->node_locks[lock_idx]);
     return 0;
 }
 

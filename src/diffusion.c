@@ -24,6 +24,7 @@ int diffusion_init(DiffusionCtx* ctx, MasterTopology* master) {
     ctx->top_k  = 8;
     ctx->output_len = 20;
     ctx->decay  = 0.7f;
+    ctx->temperature = 0.15f;  // 默认温度扰动
 
     for (int t = 0; t < master->sub_topo_count; t++) {
         SubTopology* sub = master->sub_topologies[t];
@@ -54,7 +55,8 @@ int diffusion_init(DiffusionCtx* ctx, MasterTopology* master) {
 int diffusion_spread(SubTopology* layer,
                       int* active_ids, int active_count,
                       float* scores,
-                      float decay) {
+                      float decay,
+                      float temperature) {
     if (!layer || !layer->net || !scores || active_count <= 0) return 0;
 
     int spread = 0;
@@ -68,6 +70,12 @@ int diffusion_spread(SubTopology* layer,
             int tid = node->connections[c] ? node->connections[c]->node_id : -1;
             if (tid < 0 || tid >= layer->net->node_count) continue;
             float w = node->connection_weights[c] * decay;
+            // 温度扰动：如果 temperature > 0，添加随机噪声
+            if (temperature > 0.0f) {
+                float noise = ((float)(rand() % 201) - 100.0f) / 100.0f;  // -1.0 ~ 1.0
+                w *= (1.0f + noise * temperature);
+                if (w < 0.0f) w = 0.0f;
+            }
             scores[tid] += w;
             spread++;
         }
@@ -233,7 +241,8 @@ int diffusion_generate(DiffusionCtx* ctx,
         cur_decay *= ctx->decay;
 
         /* 词汇层自身扩散 */
-        diffusion_spread(ctx->vocab, cur_ids, cur_count, vocab_scores, cur_decay);
+        diffusion_spread(ctx->vocab, cur_ids, cur_count,
+                         vocab_scores, cur_decay, ctx->temperature);
 
         /* 跨到语义层（名称匹配） */
         if (ctx->semantic && sem_scores) {
@@ -246,7 +255,7 @@ int diffusion_generate(DiffusionCtx* ctx,
             }
             if (sem_cnt > 0) {
                 diffusion_spread(ctx->semantic, sem_active, sem_cnt,
-                                 sem_scores, cur_decay * 0.3f);
+                                 sem_scores, cur_decay * 0.3f, ctx->temperature);
                 /* 语义层回归词汇层 */
                 _cross_by_name(ctx->semantic, sem_active, sem_cnt,
                                 ctx->vocab, vocab_scores, cur_decay * 0.3f);

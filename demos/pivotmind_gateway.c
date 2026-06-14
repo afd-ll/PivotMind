@@ -46,6 +46,7 @@
 #include "feature_pretrain.h"
 #include "path_encoding.h"
 #include "train_mode.h"
+#include "topology_brain.h"
 #include "learning_scheduler.h"
 #include "broca.h"
 #include "node_cache.h"
@@ -90,6 +91,9 @@ typedef struct {
 
     // 学习调度器（自学习 + 增量训练闭环）
     struct LearningScheduler* scheduler;
+
+    // 脑区索引（9+1 脑区，词性涌现）
+    struct TopologyBrain* topo_brain;
 
     // 网关配置
     int   port;
@@ -367,6 +371,14 @@ static int gw_system_init(GatewaySystem* gw) {
                    scfg.batch_corpus_path ? scfg.batch_corpus_path : "无(仅自学习)");
         }
     }
+
+    // 脑区索引（9+1 脑区，词性涌现模块）
+    {
+        gw->topo_brain = topobrain_create(65536);  // 预分配 64K 节点
+        if (gw->topo_brain) {
+            printf("[gateway]   脑区索引就绪 (9+1 脑区)\n");
+        }
+    }
     printf("[gateway] PivotMind 引擎就绪\n");
 
     return 0;
@@ -406,7 +418,13 @@ static void gw_system_shutdown(GatewaySystem* gw) {
         gw->scheduler = NULL;
     }
 
-    // 5. 销毁资源（brainstem 已在上方 stop，这里只 destroy）
+    // 5. 脑区索引
+    if (gw->topo_brain) {
+        topobrain_destroy(gw->topo_brain);
+        gw->topo_brain = NULL;
+    }
+
+    // 6. 销毁资源（brainstem 已在上方 stop，这里只 destroy）
     if (gw->brain_cache) node_cache_destroy(gw->brain_cache);  gw->brain_cache = NULL;
     if (gw->hippocampus) hippocampus_destroy(gw->hippocampus);
     if (gw->cerebellum)  cerebellum_destroy(gw->cerebellum);
@@ -639,54 +657,70 @@ static void handle_root(GatewaySystem* gw, int fd) {
         "<!DOCTYPE html>"
         "<html lang='zh-CN'><head><meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width,initial-scale=1'>"
-        "<title>玄枢 · PivotMind</title>"
+        "<title>玄枢 PivotMind</title>"
         "<style>"
         "*{margin:0;padding:0;box-sizing:border-box}"
-        "body{background:#0a0e17;color:#c8d6e5;font-family:-apple-system,'Segoe UI',sans-serif;padding:20px;min-height:100vh}"
-        "h1{font-size:24px;font-weight:300;color:#48dbfb;margin-bottom:4px;letter-spacing:2px}"
-        ".sub{color:#576574;font-size:13px;margin-bottom:30px}"
-        ".grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px;margin-bottom:24px}"
-        ".card{background:#111827;border:1px solid #1e293b;border-radius:12px;padding:20px;position:relative;overflow:hidden}"
-        ".card::before{content:'';position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,#48dbfb,#0abde3)}"
-        ".card-label{font-size:11px;text-transform:uppercase;color:#64748b;letter-spacing:1px;margin-bottom:8px}"
-        ".card-value{font-size:28px;font-weight:600;color:#e2e8f0}"
-        ".card-value.green{color:#10b981}"
-        ".card-value.cyan{color:#06b6d4}"
-        ".card-value.yellow{color:#f59e0b}"
-        ".status-dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;background:#10b981;box-shadow:0 0 8px #10b98166}"
-        ".phase-badge{display:inline-block;padding:4px 12px;border-radius:20px;font-size:12px;font-weight:500;background:#1e293b;color:#48dbfb;border:1px solid #1e4055}"
+        "body{background:#0a0e17;color:#e2e8f0;font-family:'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;padding:16px}"
+        "h1{font-size:22px;font-weight:300;color:#48dbfb;margin-bottom:2px;letter-spacing:2px}"
+        ".sub{color:#576574;font-size:12px;margin-bottom:20px}"
+        ".grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:14px}"
+        ".row{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:14px}"
+        ".card{background:#111827;border:1px solid #1e293b;border-radius:10px;padding:14px}"
+        ".lbl{font-size:10px;color:#64748b;letter-spacing:1px;text-transform:uppercase;margin-bottom:4px}"
+        ".val{font-size:22px;font-weight:600;color:#e2e8f0}"
+        ".val.green{color:#10b981}"
+        ".val.cyan{color:#06b6d4}"
+        ".val.yellow{color:#f59e0b}"
+        ".val.purple{color:#a78bfa}"
+        ".dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;background:#10b981}"
+        ".tag{display:inline-block;padding:2px 10px;border-radius:12px;font-size:11px;background:#1e293b;color:#48dbfb;border:1px solid #334155}"
+        ".bar{height:3px;border-radius:2px;background:#1e293b;margin:8px 0 6px}"
+        ".fill{height:100%;border-radius:2px;background:#48dbfb;transition:width 1s}"
+        ".sg{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:4px}"
+        ".si{text-align:center;padding:4px;background:rgba(0,0,0,.3);border-radius:6px}"
+        ".sn{font-size:16px;font-weight:700}"
+        ".sn.green{color:#10b981}"
+        ".sn.cyan{color:#06b6d4}"
+        ".sn.yellow{color:#f59e0b}"
+        ".sn.purple{color:#a78bfa}"
+        ".sl{font-size:9px;color:#576574;margin-top:1px}"
+        "footer{text-align:center;margin-top:30px;padding:12px;color:#334155;font-size:11px;border-top:1px solid #1e293b}"
+        "@media(max-width:640px){body{padding:10px}.row{grid-template-columns:1fr}}"
         "</style></head><body>"
-        "<h1>玄枢</h1><div class='sub'>PivotMind · Cognitive Engine</div>"
-        "<div class='grid' id='cards'></div>"
-        "<div style='display:grid;grid-template-columns:1fr 1fr;gap:16px'>"
-        "<div class='card'><div class='card-label'>学习调度器</div><div id='scheduler'><div class='card-value cyan'>加载中...</div></div></div>"
-        "<div class='card'><div class='card-label'>知识拓扑</div><div id='topology'><div class='card-value cyan'>加载中...</div></div></div>"
+        "<h1>玄枢</h1><div class=sub>PivotMind v0.2.5</div>"
+        "<div class='grid' id=cards></div>"
+        "<div class=row>"
+        "<div class=card><div class=lbl>学习调度器</div><div id=s><div class='val cyan'>-</div></div></div>"
+        "<div class=card><div class=lbl>训练模式</div><div id=t><div class='val cyan'>未激活</div></div></div>"
         "</div>"
+        "<div class=row>"
+        "<div class=card><div class=lbl>脑区索引</div><div id=b><div class='val cyan'>-</div></div></div>"
+        "<div class=card><div class=lbl>知识拓扑</div><div id=p><div class='val cyan'>-</div></div></div>"
+        "</div>"
+        "<footer>PIVOTMIND v0.2.5</footer>"
         "<script>"
-        "async function load(){"
-        "try{let s=await(await fetch('/status')).json();"
-        "document.getElementById('cards').innerHTML="
-        "'<div class=card><div class=card-label>状态</div><div class=card-value><span class=status-dot></span>'+s.status+'</div></div>'"
-        "+'<div class=card><div class=card-label>运行时间</div><div class=card-value>'+Math.floor(s.uptime/3600)+'<span style=font-size:13px;color:#64748b>时</span>'+Math.floor(s.uptime%3600/60)+'<span style=font-size:13px;color:#64748b>分</span></div></div>'"
-        "+'<div class=card><div class=card-label>节点</div><div class=card-value style=color:#10b981>'+s.total_nodes.toLocaleString()+'</div></div>'"
-        "+'<div class=card><div class=card-label>版本</div><div class=card-value style=color:#8b5cf6>'+s.version+'</div></div>';"
-        "document.getElementById('topology').innerHTML="
-        "'<div style=display:grid;grid-template-columns:1fr 1fr;gap:8px>'"
-        "+'<div><div style=font-size:20px;font-weight:600;color:#10b981>'+(s.template_nodes||0).toLocaleString()+'</div><div style=font-size:10px;color:#64748b>模板</div></div>'"
-        "+'<div><div style=font-size:20px;font-weight:600;color:#8b5cf6>'+(s.topologies||0)+'</div><div style=font-size:10px;color:#64748b>拓扑层</div></div>'"
-        "+'<div><div style=font-size:20px;font-weight:600;color:#06b6d4>'+(s.brain_frozen||0)+'</div><div style=font-size:10px;color:#64748b>冷冻</div></div>'"
-        "+'<div><div style=font-size:20px;font-weight:600;color:#f59e0b>'+(s.brain_thawed||0)+'</div><div style=font-size:10px;color:#64748b>解冻</div></div>';"
-        "}catch(e){}"
-        "try{let sc=await(await fetch('/scheduler')).json();"
-        "let ph=document.getElementById('scheduler');"
-        "ph.innerHTML='<div style=margin-bottom:8px><span class=phase-badge>'+(sc.phase||'idle')+'</span><span style=float:right;font-size:12px;color:#64748b>'+sc.phase_elapsed_s+'s</span></div>'"
-        "+'<div style=display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;text-align:center>'"
-        "+'<div><div style=font-size:20px;font-weight:600;color:#10b981>'+(sc.total_loops||0)+'</div><div style=font-size:10px;color:#64748b>闭环</div></div>'"
-        "+'<div><div style=font-size:20px;font-weight:600;color:#06b6d4>'+(sc.self_learn_mods||0)+'</div><div style=font-size:10px;color:#64748b>修正</div></div>'"
-        "+'<div><div style=font-size:20px;font-weight:600;color:#f59e0b>'+(sc.eval_freeze_candidates||0)+'</div><div style=font-size:10px;color:#64748b>冷冻候选</div></div>';"
-        "}catch(e){}"
-        "setTimeout(load,5000)}"
-        "load()"
+        "function $(id,h){var e=document.getElementById(id);if(e)e.innerHTML=h}"
+        "function l(){"
+        "fetch('/status').then(function(r){return r.json()}).then(function(s){"
+        "$('cards','<div class=card><div class=lbl>状态</div><div class=val><span class=dot></span>'+s.status+'</div></div>'+'<div class=card><div class=lbl>运行</div><div class=val>'+Math.floor(s.uptime/3600)+'h '+Math.floor(s.uptime%3600/60)+'m</div></div>'+'<div class=card><div class=lbl>节点</div><div class=val green>'+s.total_nodes.toLocaleString()+'</div></div>'+'<div class=card><div class=lbl>版本</div><div class=val purple>'+s.version+'</div></div>')"
+        "$('p','<div class=sg>'+'<div class=si><div class=sn green>'+s.template_nodes+'</div><div class=sl>模板</div></div>'+'<div class=si><div class=sn purple>'+s.topologies+'</div><div class=sl>拓扑层</div></div>'+'<div class=si><div class=sn cyan>'+s.brain_frozen+'</div><div class=sl>冷冻</div></div>'+'<div class=si><div class=sn yellow>'+s.brain_thawed+'</div><div class=sl>解冻</div></div></div>')"
+        "}).catch(function(){})"
+        "fetch('/scheduler').then(function(r){return r.json()}).then(function(sc){"
+        "$('s','<span class=tag>'+(sc.phase||'-')+'</span> <span style=font-size:11px;color:#576574>'+sc.phase_elapsed_s+'s</span>'+'<div class=bar><div class=fill style=width:'+(sc.self_learn_mods>0?100:10)+'%></div></div>'+'<div class=sg>'+'<div class=si><div class=sn green>'+(sc.total_loops||0)+'</div><div class=sl>闭环</div></div>'+'<div class=si><div class=sn cyan>'+(sc.self_learn_cycles||0)+'</div><div class=sl>周期</div></div>'+'<div class=si><div class=sn yellow>'+(sc.self_learn_mods||0)+'</div><div class=sl>修正</div></div>'+'<div class=si><div class=sn purple>'+(sc.eval_freeze_candidates||0)+'</div><div class=sl>候选</div></div></div>')"
+        "}).catch(function(){})"
+        "fetch('/train/status').then(function(r){return r.json()}).then(function(tr){"
+        "if(tr.state==='idle'||tr.state==='completed'){"
+        "$('t','<span class=tag>'+(tr.state||'idle')+'</span> <span style=color:#576574;font-size:12px>已喂 '+(tr.total_fed||0)+' 条</span>')"
+        "}else{"
+        "var pct=tr.total_lines>0?Math.min(100,(tr.current_line/tr.total_lines*100)):0;"
+        "$('t','<span class=tag>'+(tr.state||'?')+'</span> <span style=font-size:11px;color:#576574>第'+(tr.current_round||0)+'/'+(tr.total_rounds||1)+'轮</span>'+'<div class=bar><div class=fill style=width:'+pct+'%></div></div>'+'<div style=font-size:18px;font-weight:700;color:#10b981;margin:4px 0>'+pct+'%</div>'+'<div class=sg>'+'<div class=si><div class=sn green>'+(tr.total_added_nodes||0)+'</div><div class=sl>新节点</div></div>'+'<div class=si><div class=sn yellow>'+(tr.total_added_edges||0)+'</div><div class=sl>新边</div></div></div>')"
+        "}}).catch(function(){})"
+        "fetch('/brain').then(function(r){return r.json()}).then(function(br){"
+        "if(br.error){$('b','<span style=color:#576574;font-size:13px>未激活</span>')}else{"
+        "$('b','<div class=sg>'+'<div class=si><div class=sn green>'+(br.entries||0)+'</div><div class=sl>已分类</div></div>'+'<div class=si><div class=sn cyan>'+(br.updates||0)+'</div><div class=sl>EMA</div></div>'+'<div class=si><div class=sn yellow>'+(br.migrations||0)+'</div><div class=sl>迁移</div></div>'+'<div class=si><div class=sn purple>9+1</div><div class=sl>脑区</div></div></div>')"
+        "}}).catch(function(){})"
+        "setTimeout(l,5000)}"
+        "l()"
         "</script></body></html>";
     http_send(fd, 200, "text/html; charset=utf-8", html);
 }
@@ -866,14 +900,26 @@ static void handle_connection(GatewaySystem* gw, int client_fd) {
                 TrainProgress p = train_mode_get_progress(gw->train_mode);
                 const char* st = p.state==TRAIN_RUNNING?"running":p.state==TRAIN_PAUSED?"paused":p.state==TRAIN_COMPLETED?"completed":"idle";
                 char tr[512];
-                snprintf(tr, sizeof(tr), "{\"state\":\"%s\",\"round\":%d,\"total_rounds\":%d,\"fed\":%ld,\"added_nodes\":%ld,\"added_edges\":%ld,\"learn_count\":%ld}",
-                    st, p.current_round, p.total_rounds, p.total_fed, p.total_added_nodes, p.total_added_edges, p.total_learned);
+                snprintf(tr, sizeof(tr), "{\"state\":\"%s\",\"current_round\":%d,\"total_rounds\":%d,\"current_line\":%ld,\"total_lines\":%ld,\"total_fed\":%ld,\"total_added_nodes\":%ld,\"total_added_edges\":%ld}",
+                    st, p.current_round, p.total_rounds, p.current_line, p.total_lines,
+                    p.total_fed, p.total_added_nodes, p.total_added_edges);
                 http_json(client_fd, 200, tr);
             }
         } else if (strcmp(req.path, "/scheduler") == 0) {
             handle_scheduler(gw, client_fd);
         } else if (strcmp(req.path, "/scheduler/stats") == 0) {
             handle_scheduler_self_stats(gw, client_fd);
+        } else if (strcmp(req.path, "/brain") == 0) {
+            if (gw->topo_brain) {
+                int entries, updates, migrations;
+                topobrain_get_stats(gw->topo_brain, &entries, &updates, &migrations);
+                char bj[256];
+                snprintf(bj, sizeof(bj), "{\"entries\":%d,\"updates\":%d,\"migrations\":%d}",
+                         entries, updates, migrations);
+                http_json(client_fd, 200, bj);
+            } else {
+                http_json(client_fd, 404, "{\"error\":\"brain not initialized\"}");
+            }
         } else {
             http_json(client_fd, 404, "{\"error\":\"not found\"}");
         }
@@ -893,8 +939,9 @@ static void handle_connection(GatewaySystem* gw, int client_fd) {
                 TrainProgress p = train_mode_get_progress(gw->train_mode);
                 const char* st = p.state==TRAIN_RUNNING?"running":p.state==TRAIN_PAUSED?"paused":p.state==TRAIN_COMPLETED?"completed":"idle";
                 char tr[512];
-                snprintf(tr, sizeof(tr), "{\"state\":\"%s\",\"round\":%d,\"total_rounds\":%d,\"fed\":%ld,\"added_nodes\":%ld,\"added_edges\":%ld,\"learn_count\":%ld}",
-                    st, p.current_round, p.total_rounds, p.total_fed, p.total_added_nodes, p.total_added_edges, p.total_learned);
+                snprintf(tr, sizeof(tr), "{\"state\":\"%s\",\"current_round\":%d,\"total_rounds\":%d,\"current_line\":%ld,\"total_lines\":%ld,\"total_fed\":%ld,\"total_added_nodes\":%ld,\"total_added_edges\":%ld}",
+                    st, p.current_round, p.total_rounds, p.current_line, p.total_lines,
+                    p.total_fed, p.total_added_nodes, p.total_added_edges);
                 http_json(client_fd, 200, tr);
             } else if (strcmp(req.path, "/train/pause") == 0) {
                 train_mode_pause(gw->train_mode);
@@ -947,6 +994,7 @@ int main(int argc, char* argv[]) {
             const char* fmt = argv[++i];
             if (strcmp(fmt, "pipe") == 0) train_config.format = CORPUS_PIPE_QA;
             else if (strcmp(fmt, "text") == 0 || strcmp(fmt, "plain") == 0) train_config.format = CORPUS_PLAIN_TEXT;
+            else if (strcmp(fmt, "article") == 0) train_config.format = CORPUS_ARTICLE;
             else train_config.format = CORPUS_JSON_QA;
         } else if (strcmp(argv[i], "--save-interval") == 0 && i+1 < argc) {
             train_config.save_interval = atoi(argv[++i]);

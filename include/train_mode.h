@@ -37,6 +37,7 @@ typedef enum {
     CORPUS_JSON_QA,      // [["问","答"], ...]
     CORPUS_PIPE_QA,      // 问|答
     CORPUS_PLAIN_TEXT,   // 纯文本，分词建边
+    CORPUS_ARTICLE,      // 文章阅读：字符级统计合并词发现
 } CorpusFormat;
 
 // 训练配置

@@ -8,6 +8,7 @@
 #include "train_mode.h"
 #include "huarong_topology.h"
 #include "feature_io.h"
+#include "article_reader.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -24,6 +25,7 @@ static void* train_thread_func(void* arg);
 static int train_feed_qa_json(TrainMode* tm, const char* path);
 static int train_feed_pipe_qa(TrainMode* tm, const char* path);
 static int train_feed_plain_text(TrainMode* tm, const char* path);
+static int train_feed_article(TrainMode* tm, const char* path);
 static int train_feed_one_line(TrainMode* tm, const char* text);
 static void train_do_batch_learn(TrainMode* tm);
 static void train_do_auto_save(TrainMode* tm, const char* workdir);
@@ -278,7 +280,8 @@ static void* train_thread_func(void* arg) {
     printf("[训练] 语料: %s (约%ld条), 格式: %s\n",
            path, tm->progress.total_lines,
            tm->config.format == CORPUS_JSON_QA ? "JSON QA" :
-           tm->config.format == CORPUS_PIPE_QA ? "管道QA" : "纯文本");
+           tm->config.format == CORPUS_PIPE_QA ? "管道QA" :
+           tm->config.format == CORPUS_ARTICLE ? "文章阅读" : "纯文本");
 
     for (int round = 1; round <= tm->config.rounds && !tm->should_stop; round++) {
         tm->progress.current_round = round;
@@ -292,6 +295,7 @@ static void* train_thread_func(void* arg) {
             case CORPUS_JSON_QA:   ok = train_feed_qa_json(tm, path); break;
             case CORPUS_PIPE_QA:   ok = train_feed_pipe_qa(tm, path); break;
             case CORPUS_PLAIN_TEXT: ok = train_feed_plain_text(tm, path); break;
+            case CORPUS_ARTICLE:   ok = train_feed_article(tm, path); break;
         }
 
         if (ok < 0) {
@@ -314,6 +318,14 @@ static void* train_thread_func(void* arg) {
         printf("[训练] 全部完成! 累计喂料 %ld 条, 新增节点 %ld, 新建边 %ld\n",
                tm->progress.total_fed, tm->progress.total_added_nodes,
                tm->progress.total_added_edges);
+
+        // 增量关系发现：训练结束后执行一次全图关系发现
+        // 之前禁用的 discover_new_relations 在此安全执行
+        if (tm->learner) {
+            printf("[训练] 执行增量关系发现...\n");
+            discover_new_relations(tm->learner);
+        }
+
         tm->progress.state = TRAIN_COMPLETED;
     } else {
         printf("[训练] 用户停止训练\n");
@@ -543,6 +555,86 @@ static int train_feed_plain_text(TrainMode* tm, const char* path) {
     return 0;
 }
 
+// ==================== 文章阅读 ====================
+
+static int train_feed_article(TrainMode* tm, const char* path) {
+    FILE* f = fopen(path, "r");
+    if (!f) {
+        train_set_error(tm, "无法打开语料: %s", path);
+        return -1;
+    }
+
+    // 创建文章阅读器
+    ArticleReaderConfig ar_cfg = ARTICLE_READER_DEFAULT_CONFIG;
+    ar_cfg.verbose = tm->config.verbose;
+    ArticleReader* ar = article_reader_create(tm->topology, &ar_cfg);
+    if (!ar) {
+        train_set_error(tm, "文章阅读器创建失败");
+        fclose(f);
+        return -1;
+    }
+
+    // 设置进度指针
+    article_set_progress_ptr(ar,
+                             &tm->progress.total_added_nodes,
+                             &tm->progress.total_added_edges);
+
+    long line_no = 0;
+    int total_flushes = 0;
+
+    while (fgets(tm->line_buf, sizeof(tm->line_buf), f) && !tm->should_stop) {
+        while (tm->should_pause && !tm->should_stop) usleep(200000);
+        if (tm->should_stop) break;
+
+        line_no++;
+        int slen = strlen(tm->line_buf);
+        while (slen > 0 && (tm->line_buf[slen-1] == '\n' || tm->line_buf[slen-1] == '\r'))
+            tm->line_buf[--slen] = 0;
+        if (slen < 3) continue;  // 跳过空行/短行
+
+        int result = article_process_line(ar, tm->line_buf);
+        if (result > 0) {
+            total_flushes++;
+            tm->progress.total_fed++;
+        }
+
+        tm->progress.current_line = line_no;
+
+        // 限速
+        if (tm->config.speed > 0 && line_no % tm->config.speed == 0) {
+            usleep(1000000);
+        }
+
+        // 进度日志
+        if (line_no % 1000 == 0) {
+            int nchars, npairs, nwords;
+            article_get_stats(ar, &nchars, &npairs, &nwords);
+            printf("[文章阅读] 第%d轮 进度: %ld行, 字符=%d, 对=%d, 词典=%d, "
+                   "节点=%ld\n",
+                   tm->progress.current_round, line_no,
+                   nchars, npairs, nwords,
+                   tm->progress.total_added_nodes);
+        }
+    }
+
+    // 处理剩余数据
+    int final = article_flush(ar, NULL);
+    if (final > 0) total_flushes++;
+
+    // 统计最终结果
+    int nchars, npairs, nwords;
+    article_get_stats(ar, &nchars, &npairs, &nwords);
+    printf("[文章阅读] 完成: %ld行, %d次刷新, 字符=%d, 对=%d, 词典=%d, "
+           "新增节点=%ld\n",
+           line_no, total_flushes, nchars, npairs, nwords,
+           tm->progress.total_added_nodes);
+
+    article_reader_destroy(ar);
+    fclose(f);
+    tm->progress.total_lines = line_no;
+    return 0;
+}
+
 // ==================== 核心：喂一行到引擎 ====================
 
 static int train_feed_one_line(TrainMode* tm, const char* text) {
@@ -681,6 +773,8 @@ TrainConfig train_config_from_args(int argc, char* argv[]) {
                 cfg.format = CORPUS_PIPE_QA;
             else if (strcmp(fmt, "text") == 0 || strcmp(fmt, "plain") == 0)
                 cfg.format = CORPUS_PLAIN_TEXT;
+            else if (strcmp(fmt, "article") == 0)
+                cfg.format = CORPUS_ARTICLE;
         } else if (strcmp(argv[i], "--rounds") == 0 && i + 1 < argc) {
             cfg.rounds = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--speed") == 0 && i + 1 < argc) {
@@ -705,7 +799,7 @@ TrainConfig train_config_from_args(int argc, char* argv[]) {
 void train_config_print_defaults(void) {
     printf("训练模式配置:\n");
     printf("  --corpus PATH        语料文件路径\n");
-    printf("  --format json|pipe|text  语料格式 (默认自动检测)\n");
+    printf("  --format json|pipe|text|article  语料格式 (默认自动检测)\n");
     printf("  --rounds N           训练轮数 (默认1)\n");
     printf("  --speed N            每秒喂料条数 (默认20)\n");
     printf("  --batch N            每N条触发主动学习 (默认100)\n");

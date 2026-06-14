@@ -9,7 +9,6 @@
 #include "health_monitor.h"
 #include "huarong_topology.h"
 #include "dmn.h"
-#include "self_learner.h"
 #include "node_cache.h"
 #include "thalamus.h"
 #include "perception.h"
@@ -288,9 +287,14 @@ static void* brainstem_loop(void* arg) {
                 for (int i = 0; i < sub->net->node_count; i++) {
                     ReasoningNode* node = sub->net->nodes[i];
                     if (!node) continue;
+
+                    /* 持节点锁保护连接数组 */
+                    int lock_idx = node->node_id & (PM_NODE_LOCK_COUNT - 1);
+                    pthread_mutex_lock(&sub->net->node_locks[lock_idx]);
+
                     int kept = 0;
                     for (int c = 0; c < node->connection_count; c++) {
-                        float w = node->connection_weights[c];
+                        float w = node->connection_weights ? node->connection_weights[c] : 0.5f;
                         float conf = node->connection_confidences ?
                             node->connection_confidences[c] : 0.5f;
                         float strength = w * conf;
@@ -317,6 +321,8 @@ static void* brainstem_loop(void* arg) {
                         kept++;
                     }
                     node->connection_count = kept;
+
+                    pthread_mutex_unlock(&sub->net->node_locks[lock_idx]);
                 }
             }
             if (decayed > 0 || released > 0)
@@ -333,10 +339,6 @@ static void* brainstem_loop(void* arg) {
             float dmn_throttle = bs->thalamus ?
                 thalamus_get_throttle((Thalamus*)bs->thalamus, THAL_DMN) : 1.0f;
             dmn_cycle(bs->master, bs->memory, &dmn_cfg, dmn_throttle);
-        }
-
-        if (bs->tick_count % selflearn_interval == 0 && bs->self_learner) {
-            self_learner_cycle((SelfLearner*)bs->self_learner);
         }
 
         /* 冷节点冻结 */
@@ -391,7 +393,6 @@ Brainstem* brainstem_create(MasterTopology* master, MemorySystem* memory, Cognit
     bs->tick_count    = 0;
     bs->start_time    = time(NULL);
     bs->current_time  = bs->start_time;
-    bs->self_learner  = self_learner_create(master, NULL);
     bs->_rng_seed     = (unsigned int)time(NULL) ^ (unsigned int)(uintptr_t)bs;
 
     return bs;
@@ -420,10 +421,6 @@ void brainstem_stop(Brainstem* bs) {
 void brainstem_destroy(Brainstem* bs) {
     if (!bs) return;
     if (bs->is_running) brainstem_stop(bs);
-    if (bs->self_learner) {
-        self_learner_destroy((SelfLearner*)bs->self_learner);
-        bs->self_learner = NULL;
-    }
     free(bs);
 }
 
