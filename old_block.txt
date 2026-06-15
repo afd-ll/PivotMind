@@ -1,0 +1,4 @@
+, client_fd, req.body);
+        } else if (strncmp(req.path, "/train/", 7) == 0) {
+            if (!gw->train_mode) {
+                http_json(client_fd, 404, "{\"error\":\"train mode not enabled\"}");

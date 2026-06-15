@@ -50,6 +50,7 @@
 #include "learning_scheduler.h"
 #include "broca.h"
 #include "node_cache.h"
+#include "self_learner.h"
 
 // ==================== 配置 ====================
 
@@ -75,6 +76,7 @@ typedef struct {
     Hippocampus*     hippocampus;   /* 海马体 — 记忆+巩固 */
     Cerebellum*      cerebellum;    /* 小脑 — 资源平衡 */
     NodeCache*       brain_cache;   /* 大脑式节点冷热缓存 */
+    SelfLearner*     self_learner;  /* 自主学习器 — 用于析构时释放 */
 
     // 运行控制
     volatile int shutdown_requested;
@@ -339,6 +341,18 @@ static int gw_system_init(GatewaySystem* gw) {
     brainstem_set_cerebellum(gw->brainstem, gw->cerebellum);
     brainstem_set_verbose(gw->brainstem, 1);  /* 开启脑区日志 */
 
+    // 认知调度器指针（供 health_monitor 干预满意度阈值）
+    brainstem_set_cognitive_controller(gw->brainstem, gw->prefrontal->controller);
+
+    // 自主学习器
+    {
+        gw->self_learner = self_learner_create(gw->topology, NULL);
+        if (gw->self_learner) {
+            printf("[gateway]   自主学习器就绪\n");
+            brainstem_set_self_learner(gw->brainstem, gw->self_learner);
+        }
+    }
+
     // 学习已由脑干统一调度，不再单独启动 active_learner 线程
     // active_learner_start(gw->learner);
     brainstem_start(gw->brainstem);
@@ -377,6 +391,7 @@ static int gw_system_init(GatewaySystem* gw) {
         gw->topo_brain = topobrain_create(65536);  // 预分配 64K 节点
         if (gw->topo_brain) {
             printf("[gateway]   脑区索引就绪 (9+1 脑区)\n");
+            brainstem_set_topo_brain(gw->brainstem, gw->topo_brain);
         }
     }
     printf("[gateway] PivotMind 引擎就绪\n");
@@ -426,6 +441,7 @@ static void gw_system_shutdown(GatewaySystem* gw) {
 
     // 6. 销毁资源（brainstem 已在上方 stop，这里只 destroy）
     if (gw->brain_cache) node_cache_destroy(gw->brain_cache);  gw->brain_cache = NULL;
+    if (gw->self_learner) { self_learner_destroy(gw->self_learner); gw->self_learner = NULL; }
     if (gw->hippocampus) hippocampus_destroy(gw->hippocampus);
     if (gw->cerebellum)  cerebellum_destroy(gw->cerebellum);
     if (gw->thalamus)     thalamus_destroy(gw->thalamus);

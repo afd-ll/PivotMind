@@ -169,6 +169,31 @@ void thalamus_tick(Thalamus* th) {
         }
     }
 
+    /* ── 反馈闭环：子系统产出多 → 下次自动降速 ── */
+    {
+        /* 海马体：刚巩固过 → 降速避免重复劳动 */
+        if (th->fb_hippo_consolidated > 0) {
+            float reduction = th->fb_hippo_consolidated * 0.02f;
+            if (reduction > 0.3f) reduction = 0.3f;
+            th->throttle[THAL_HIPPOCAMPUS] *= (1.0f - reduction);
+            th->fb_hippo_consolidated = 0;  /* 消费掉 */
+        }
+        /* 感觉皮层：刚搜过 → 降速 */
+        if (th->fb_percept_searched > 0) {
+            float reduction = th->fb_percept_searched * 0.01f;
+            if (reduction > 0.2f) reduction = 0.2f;
+            th->throttle[THAL_PERCEPTION] *= (1.0f - reduction);
+            th->fb_percept_searched = 0;
+        }
+        /* DMN：刚梦过 → 降速 */
+        if (th->fb_dmn_dreamed > 0) {
+            float reduction = th->fb_dmn_dreamed * 0.03f;
+            if (reduction > 0.3f) reduction = 0.3f;
+            th->throttle[THAL_DMN] *= (1.0f - reduction);
+            th->fb_dmn_dreamed = 0;
+        }
+    }
+
     /* ── 昼夜调制：沉睡期全局压降 ── */
     if (th->circadian < 0.3f) {
         float sleep_factor = th->circadian * 3.0f;  /* 0.3→1.0 */

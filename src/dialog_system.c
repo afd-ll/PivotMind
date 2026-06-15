@@ -1661,12 +1661,10 @@ char* dialog_process(DialogSystem* sys, const char* user_input, DialogReasoning*
                     draft.score = (draft.length > 0) ? draft.act_sum / draft.length : 0.0f;
                 }
 
-                // --- 内感受评估（暂时跳过调试crash） ---
-                float satisfaction = 0.65f;  // 默认满意，先让输出通路
-                // float satisfaction = evaluate_draft(sys->controller, &draft, draft.length);
+                // --- 内感受评估 ---
+                float satisfaction = evaluate_draft(sys->controller, &draft, draft.length);
                 
                 RetryStatus retry_status = revise_and_retry(sys->controller, &draft, satisfaction);
-                if (retry_status != RETRY_OK) retry_status = RETRY_OK;  // 强制成功
                 
                 fprintf(stderr, "[proc] retry_status=%d satisfaction=%.2f\n", retry_status, satisfaction); fflush(stderr);
 

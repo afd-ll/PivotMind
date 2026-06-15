@@ -167,6 +167,9 @@ typedef struct MasterTopology {
     // ========== 外部词典（词→词性标注） ==========
     void* ext_dict;                           // DictTable* 指针，外部管理生命周期
 
+    // ========== 认知调度中心 ==========
+    void* cognitive_controller;               // CognitiveController* 指针，运行时注入，不持久化
+
     // ========== 上下文拓扑追踪 ==========
     int last_context_node;                    // 上一轮上下文节点ID（串联多轮对话）
 } MasterTopology;

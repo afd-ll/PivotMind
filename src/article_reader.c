@@ -1,20 +1,20 @@
 /**
  * @file article_reader.c
- * @brief 文章阅读模式实现 — 字符级统计合并词发现
+ * @brief 文章阅读模式实现 — 字符级统计 + 序列正向扫描词发现
  *
  * 算法流程：
- *   1. 逐字符遍历文章，统计字符频率 + 滑动窗口共现
+ *   1. 逐字符遍历文章，统计字符频率 + 滑动窗口共现，同时累积字符序列到 seq[]
  *   2. 每 batch_size 行或 flush 时运行词发现：
- *      a. 计算相邻字符对的 PMI
- *      b. 计算分层合评分: score = α·PMI + β·freq_bonus + γ·conn_bonus
- *      c. 高于阈值的字符对合并为词
- *      d. 长词扩展：已合并的词尝试与相邻词扩展
+ *      a. 预计算 seq[] 相邻字符对的合并评分: score = α·PMI + β·freq_bonus + γ·conn_bonus
+ *      b. 沿 seq[] 正向贪婪扫描，高评分连续段合并为一个词
+ *      c. 一轮三字扩展：首尾字相同的词对合并
  *   3. 发现词 → 创建概念节点（词汇拓扑）
- *   4. 相邻词之间建边
+ *   4. 清空 seq 缓冲区，下一轮重新累积
  */
 
 #include "article_reader.h"
 #include "huarong_topology.h"
+#include "common.h"
 #include "chinese.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -54,6 +54,13 @@ typedef struct {
     int    used;
 } PairEntry;
 
+/** 词哈希表条目（声明在主结构之前） */
+typedef struct {
+    char   text[AR_WORD_MAX_LEN * 4 + 1];
+    int    word_index;
+    int    used;
+} WordHashEntry;
+
 /** 发现的词 */
 typedef struct {
     char   text[AR_WORD_MAX_LEN * 4 + 1];  // UTF-8 文本
@@ -81,6 +88,10 @@ struct ArticleReader {
     int         word_count;
     int         word_capacity;
 
+    // 词哈希表（加速查找，创建时动态分配）
+    WordHashEntry* word_hash;
+    unsigned int   word_hash_mask;
+
     // 当前缓冲行
     int         lines_buffered;
 
@@ -91,6 +102,16 @@ struct ArticleReader {
     // 内部工作缓冲区
     char        line_chars[4096][8];    // 当前行字符序列（UTF-8 字符串）
     int         line_char_count;         // 当前行有效字符数
+
+    // 全局字符序列缓冲区（跨行累积，用于正向扫描词发现）
+    char        seq[131072][8];          // 累积字符序列
+    int         seq_len;                 // 有效长度
+
+    // 缓存词汇拓扑指针（article_reader_create 时初始化）
+    SubTopology* vocab_topo;
+
+    // 上次 flush 新增词数（供外部查询）
+    int         last_flush_added;
 };
 
 // ==================== 哈希工具 ====================
@@ -148,26 +169,49 @@ static PairEntry* _ar_find_pair(ArticleReader* ar, const char* a, const char* b)
     return NULL;
 }
 
-/** 查找或添加词到词表 */
+/** 查找或添加词到词表（哈希加速 O(1)） */
 static WordEntry* _ar_find_or_add_word(ArticleReader* ar, const char* text) {
-    for (int i = 0; i < ar->word_count; i++) {
-        if (strcmp(ar->words[i].text, text) == 0)
-            return &ar->words[i];
+    if (!ar->word_hash) return NULL;
+    unsigned int mask = ar->word_hash_mask;
+    unsigned int h = _ar_hash(text) & mask;
+    for (int i = 0; i < (int)(mask + 1); i++) {
+        int idx = (h + i) & mask;
+        if (!ar->word_hash[idx].used) {
+            // 新增
+            if (ar->word_count >= ar->word_capacity) {
+                int new_cap = ar->word_capacity ? ar->word_capacity * 2 : AR_MAX_WORDS;
+                WordEntry* tmp = (WordEntry*)realloc(ar->words, new_cap * sizeof(WordEntry));
+                if (!tmp) return NULL;
+                ar->words = tmp;
+                ar->word_capacity = new_cap;
+            }
+            WordEntry* we = &ar->words[ar->word_count];
+            snprintf(we->text, sizeof(we->text), "%s", text);
+            we->char_len = (int)utf8_strlen(text);
+            we->freq = 0;
+            // 写哈希表
+            snprintf(ar->word_hash[idx].text, sizeof(ar->word_hash[idx].text), "%s", text);
+            ar->word_hash[idx].word_index = ar->word_count;
+            ar->word_hash[idx].used = 1;
+            ar->word_count++;
+            return we;
+        }
+        if (strcmp(ar->word_hash[idx].text, text) == 0) {
+            return &ar->words[ar->word_hash[idx].word_index];
+        }
     }
-    // 新增
-    if (ar->word_count >= ar->word_capacity) {
-        int new_cap = ar->word_capacity ? ar->word_capacity * 2 : AR_MAX_WORDS;
-        WordEntry* tmp = (WordEntry*)realloc(ar->words, new_cap * sizeof(WordEntry));
-        if (!tmp) return NULL;
-        ar->words = tmp;
-        ar->word_capacity = new_cap;
+    // 表满 — 限频 warning
+    {
+        static int warn_printed = 0;
+        if (!warn_printed) {
+            char buf[24];
+            snprintf(buf, sizeof(buf), "%s", text);
+            fprintf(stderr, "Warning: article_reader word hash table full, "
+                    "word '%s' discarded\n", buf);
+            warn_printed = 1;
+        }
     }
-    WordEntry* we = &ar->words[ar->word_count++];
-    strncpy(we->text, text, sizeof(we->text) - 1);
-    we->text[sizeof(we->text) - 1] = 0;
-    we->char_len = (int)utf8_strlen(text);
-    we->freq = 0;
-    return we;
+    return NULL;
 }
 
 // ==================== 获取字符序列 ====================
@@ -191,15 +235,13 @@ static int _ar_extract_chars(ArticleReader* ar, const char* line) {
         if (bytes <= 0 || bytes > 4) { p++; continue; }
         if (bytes == 1 && (*p < 32 || *p > 126)) { p++; continue; }
 
-        char buf[8];
-        strncpy(buf, p, bytes);
-        buf[bytes] = 0;
-
         // 跳过纯数字
         if (bytes == 1 && *p >= '0' && *p <= '9') { p++; continue; }
 
-        strncpy(ar->line_chars[count], buf, sizeof(ar->line_chars[count]) - 1);
-        ar->line_chars[count][sizeof(ar->line_chars[count]) - 1] = 0;
+        char* dest = ar->line_chars[count];
+        size_t cp_len = (size_t)(bytes < 7 ? bytes : 7);
+        memcpy(dest, p, cp_len);
+        dest[cp_len] = 0;
         count++;
         p += bytes;
     }
@@ -235,20 +277,32 @@ static int _ar_build_topo(ArticleReader* ar, SubTopology* topo) {
     HuarongTopologyNet* net = topo->net;
     int created = 0;
 
-    // 扫描词表，每个词尝试创建节点
+    // 扫描词表，每个词尝试创建节点（仅建节点，边缘由后续训练自动形成）
     for (int i = 0; i < ar->word_count; i++) {
         WordEntry* we = &ar->words[i];
         if (!we->text[0]) continue;
 
-        // 检查节点是否已存在
         int nid = huarong_net_find_concept(net, we->text);
         if (nid < 0 && net->node_count < net->max_nodes) {
             nid = huarong_net_dynamic_add_node(net, we->text, NULL, 0);
-            if (nid >= 0) {
+            if (nid >= 0 && net->nodes[nid]) {
                 created++;
                 if (ar->p_added_nodes) (*ar->p_added_nodes)++;
-                // 激活值基于频次
-                net->nodes[nid]->activation = we->freq > 5 ? 0.5f : 0.2f;
+
+                // 基于词文本的确定性特征向量初始化
+                ReasoningNode* node = net->nodes[nid];
+                if (!node->features) {
+                    node->features = (float*)malloc(NODE_FEATURE_DIM * sizeof(float));
+                    node->feature_dim = NODE_FEATURE_DIM;
+                }
+                if (node->features) {
+                    unsigned int seed = _ar_hash(we->text);
+                    for (int d = 0; d < NODE_FEATURE_DIM; d++) {
+                        int val = (seed * (d + 1) * 7 + 13) % 20001;
+                        node->features[d] = ((float)val / 100000.0f) - 0.1f;
+                    }
+                }
+                node->activation = we->freq > 5 ? 0.5f : 0.2f;
             }
         }
     }
@@ -289,6 +343,24 @@ ArticleReader* article_reader_create(MasterTopology* master,
     ar->words = (WordEntry*)calloc(ar->word_capacity, sizeof(WordEntry));
     ar->word_count = 0;
 
+    // 初始化词哈希表（用于 O(1) 词查找）
+    ar->word_hash = (WordHashEntry*)calloc(AR_WORD_HASH_SIZE, sizeof(WordHashEntry));
+    ar->word_hash_mask = AR_WORD_HASH_SIZE - 1;
+
+    // 初始化序列缓冲区
+    ar->seq_len = 0;
+    ar->last_flush_added = 0;
+
+    // 缓存词汇拓扑指针（避免每次 flush 遍历查找）
+    ar->vocab_topo = NULL;
+    for (int t = 0; t < ar->master->sub_topo_count; t++) {
+        if (ar->master->sub_topologies[t] &&
+            ar->master->sub_topologies[t]->type == TOPO_VOCABULARY) {
+            ar->vocab_topo = ar->master->sub_topologies[t];
+            break;
+        }
+    }
+
     if (ar->cfg.verbose) {
         printf("[文章阅读] 初始化: 窗口=%d PMI阈值=%.2f "
                "α=%.2f β=%.2f γ=%.2f batch=%d\n",
@@ -303,15 +375,24 @@ ArticleReader* article_reader_create(MasterTopology* master,
 void article_reader_destroy(ArticleReader* ar) {
     if (!ar) return;
     free(ar->words);
+    free(ar->word_hash);
     free(ar);
 }
 
 int article_process_line(ArticleReader* ar, const char* line) {
-    if (!ar || !line) return 0;
+    if (!ar || !line) return -1;
 
     // 提取有效字符序列
     int n = _ar_extract_chars(ar, line);
     if (n < 2) return 0;
+
+    // 追加到全局序列缓冲区（供 flush 时正向扫描）
+    int remain = (int)(sizeof(ar->seq) / sizeof(ar->seq[0])) - ar->seq_len;
+    if (remain > n) remain = n;
+    for (int i = 0; i < remain; i++) {
+        memcpy(ar->seq[ar->seq_len + i], ar->line_chars[i], 8);
+    }
+    ar->seq_len += remain;
 
     // 更新字符频率和共现统计
     for (int i = 0; i < n; i++) {
@@ -333,7 +414,8 @@ int article_process_line(ArticleReader* ar, const char* line) {
     if (ar->lines_buffered >= ar->cfg.batch_size) {
         int found = article_flush(ar, NULL);
         ar->lines_buffered = 0;
-        return found > 0 ? found : 1;
+        ar->last_flush_added = found > 0 ? found : 0;
+        return found > 0 ? found : 0;  // 返回实际新增词数
     }
 
     return 0;
@@ -342,155 +424,223 @@ int article_process_line(ArticleReader* ar, const char* line) {
 int article_flush(ArticleReader* ar, SubTopology* topo) {
     if (!ar) return -1;
 
-    // 如果没有传入 topo，从 master 获取词汇拓扑
-    SubTopology* vocab = topo;
-    if (!vocab && ar->master) {
-        for (int t = 0; t < ar->master->sub_topo_count; t++) {
-            if (ar->master->sub_topologies[t] &&
-                ar->master->sub_topologies[t]->type == TOPO_VOCABULARY) {
-                vocab = ar->master->sub_topologies[t];
-                break;
-            }
-        }
-    }
+    // 使用缓存词汇拓扑（避免每次遍历 master）
+    SubTopology* vocab = topo ? topo : ar->vocab_topo;
     if (!vocab || !vocab->net) return -1;
 
     // 数据不足时不处理
-    if (ar->total_chars < 10) return 0;
-
-    // — 行缓冲中的字符未在 words 中保留，直接使用统计表跑一次词发现 —
-    // 注意：flush 时 line_chars 为空，因为我们每行处理后就丢弃了
-    // 正确的做法是从统计表中提取出高频相邻对，重建序列
-    // 简化版：遍历所有共现对，找高频强关联组合
+    if (ar->total_chars < 10 || ar->seq_len < 2) {
+        ar->seq_len = 0;
+        return 0;
+    }
 
     int old_word_count = ar->word_count;
 
-    // 简化词发现：遍历所有共现对，评分高的视为词
-    for (int i = 0; i < AR_PAIR_HASH_SIZE; i++) {
-        if (!ar->pair_table[i].used) continue;
-        PairEntry* pe = &ar->pair_table[i];
-        if (pe->co_count < ar->cfg.min_freq) continue;
+    // ============ 正向扫描：沿 seq[] 序列顺序，贪婪合并高评分相邻字符对 ============
 
-        // 计算 PMI
-        CharEntry* ce_a = _ar_find_char(ar, pe->a);
-        CharEntry* ce_b = _ar_find_char(ar, pe->b);
+    // 预计算相邻对的合并评分
+    // pair_scores[i] = score(seq[i], seq[i+1]), 0 = 阈值以下/无效
+    float* pair_scores = (float*)malloc((ar->seq_len - 1) * sizeof(float));
+    if (!pair_scores) return -1;
+
+    for (int i = 0; i < ar->seq_len - 1; i++) {
+        pair_scores[i] = 0;
+
+        PairEntry* pe = _ar_find_pair(ar, ar->seq[i], ar->seq[i + 1]);
+        if (!pe || pe->co_count < ar->cfg.min_freq) continue;
+
+        CharEntry* ce_a = _ar_find_char(ar, ar->seq[i]);
+        CharEntry* ce_b = _ar_find_char(ar, ar->seq[i + 1]);
         if (!ce_a || !ce_b || ce_a->count == 0 || ce_b->count == 0) continue;
 
+        // PMI
         float p_a  = (float)ce_a->count / ar->total_chars;
         float p_b  = (float)ce_b->count / ar->total_chars;
         float p_ab = (float)pe->co_count / (ar->total_chars - 1);
-
         float pmi = 0.0f;
         if (p_a > 0 && p_b > 0 && p_ab > 0) {
             pmi = logf(p_ab / (p_a * p_b));
             if (pmi < 0) pmi = 0;
         }
 
+        // 频次奖励
         float freq_bonus = (float)pe->co_count / (pe->co_count + 5.0f);
+
+        // 计算综合评分
         float score = ar->cfg.alpha * pmi + ar->cfg.beta * freq_bonus;
 
-        if (score > ar->cfg.pmi_threshold) {
-            // 构建双字符词
-            char word_buf[20] = {0};
-            strncat(word_buf, pe->a, sizeof(word_buf) - strlen(word_buf) - 1);
-            strncat(word_buf, pe->b, sizeof(word_buf) - strlen(word_buf) - 1);
+        // 连接奖励：如果附近也有高评分对（该字符对处于更长的上下文中）
+        // 向前看一步：检查 seq[i+1] 与 seq[i+2] 是否也有有效 pair
+        float conn_bonus = 0.0f;
+        if (i + 2 < ar->seq_len) {
+            PairEntry* next_pe = _ar_find_pair(ar, ar->seq[i + 1], ar->seq[i + 2]);
+            if (next_pe && next_pe->co_count >= ar->cfg.min_freq) {
+                conn_bonus = 1.0f;
+            }
+        }
+        // 向后看一步：检查 seq[i-1] 与 seq[i] 是否也有有效 pair
+        if (conn_bonus < 1.0f && i > 0) {
+            PairEntry* prev_pe = _ar_find_pair(ar, ar->seq[i - 1], ar->seq[i]);
+            if (prev_pe && prev_pe->co_count >= ar->cfg.min_freq) {
+                conn_bonus = 1.0f;
+            }
+        }
 
-            WordEntry* we = _ar_find_or_add_word(ar, word_buf);
-            if (we) we->freq += pe->co_count;
+        score += ar->cfg.gamma * conn_bonus;
+
+        if (score > ar->cfg.pmi_threshold) {
+            pair_scores[i] = score;
         }
     }
 
-    // 尝试三字扩展：检查发现的二字词与相邻字符的组合
-    int extended = 1;
-    while (extended) {
-        extended = 0;
-        for (int i = 0; i < ar->word_count && !extended; i++) {
-            WordEntry* w1 = &ar->words[i];
-            if (w1->char_len < 1) continue;
+    // 正向贪婪合并
+    int i = 0;
+    while (i < ar->seq_len - 1) {
+        if (pair_scores[i] <= 0) {
+            i++;
+            continue;
+        }
 
-            for (int j = 0; j < ar->word_count; j++) {
-                if (i == j) continue;
-                WordEntry* w2 = &ar->words[j];
-                if (w2->char_len < 1) continue;
+        // 贪婪扩展至最长连续高评分段
+        int end = i;
+        while (end + 1 < ar->seq_len - 1 && pair_scores[end + 1] > 0) {
+            end++;
+        }
 
-                // 检查 w1 最后一个字 和 w2 第一个字是否有强共现
-                // 如果是同一个词被拆成两半，尝试合并
-                char last_char_of_w1[8] = {0};
-                const char* p = w1->text;
-                int char_pos = 0;
-                while (*p && char_pos < w1->char_len - 1) {
-                    int blen = get_char_bytes(p);
-                    if (blen <= 0) break;
-                    p += blen;
-                    char_pos++;
-                }
-                if (*p) {
-                    int blen = get_char_bytes(p);
-                    if (blen > 0 && blen <= 4) {
-                        strncpy(last_char_of_w1, p, blen);
-                        last_char_of_w1[blen] = 0;
-                    }
-                }
+        // 从 seq[i] 构建词到 seq[end+1]（end 是最后一个高评分对的起始位置）
+        char word_buf[AR_WORD_MAX_LEN * 4 + 1] = {0};
+        int total_bytes = 0;
+        for (int k = i; k <= end + 1 && k < ar->seq_len; k++) {
+            size_t blen = strlen(ar->seq[k]);
+            if (blen == 0 || total_bytes + (int)blen >= (int)sizeof(word_buf) - 1) break;
+            memcpy(word_buf + total_bytes, ar->seq[k], blen);
+            total_bytes += (int)blen;
+        }
+        word_buf[total_bytes] = 0;
 
-                char first_char_of_w2[8] = {0};
-                if (w2->text[0]) {
-                    int blen = get_char_bytes(w2->text);
-                    if (blen > 0 && blen <= 4) {
-                        strncpy(first_char_of_w2, w2->text, blen);
-                        first_char_of_w2[blen] = 0;
-                    }
-                }
+        if ((int)utf8_strlen(word_buf) >= 2) {
+            // 使用首个 pair 的共现次数作为词频基准
+            PairEntry* first_pe = _ar_find_pair(ar, ar->seq[i], ar->seq[i + 1]);
+            WordEntry* we = _ar_find_or_add_word(ar, word_buf);
+            if (we && first_pe) {
+                we->freq += first_pe->co_count;
+            }
+        }
 
-                if (!last_char_of_w1[0] || !first_char_of_w2[0]) continue;
+        i = end + 1;
+    }
 
-                // 检查共现
-                char key[16];
-                snprintf(key, sizeof(key), "%s|%s", last_char_of_w1, first_char_of_w2);
-                unsigned int h = _ar_hash(key) & AR_PAIR_HASH_MASK;
-                for (int k = 0; k < AR_PAIR_HASH_SIZE; k++) {
-                    int idx = (h + k) & AR_PAIR_HASH_MASK;
-                    if (!ar->pair_table[idx].used) break;
-                    if (strcmp(ar->pair_table[idx].a, last_char_of_w1) == 0 &&
-                        strcmp(ar->pair_table[idx].b, first_char_of_w2) == 0) {
-                        if (ar->pair_table[idx].co_count >= ar->cfg.min_freq * 2) {
-                            // 合并为三字/四字词
-                            char combined[AR_WORD_MAX_LEN * 4 + 1] = {0};
-                            strncat(combined, w1->text,
-                                    sizeof(combined) - strlen(combined) - 1);
-                            strncat(combined, w2->text,
-                                    sizeof(combined) - strlen(combined) - 1);
+    free(pair_scores);
 
-                            if ((int)utf8_strlen(combined) <= AR_WORD_MAX_LEN) {
-                                WordEntry* we = _ar_find_or_add_word(ar, combined);
-                                if (we) {
-                                    we->freq += w1->freq + w2->freq;
-                                    extended = 1;
-                                }
-                            }
-                        }
-                        break;
-                    }
-                }
+    // ============ 一轮三字扩展（无 while 循环） ============
+    // 查找首尾字相同的词对，合并为长词
+    for (int wi = 0; wi < ar->word_count; wi++) {
+        WordEntry* w1 = &ar->words[wi];
+        if (w1->char_len < 1) continue;
+
+        // 提取 w1 的最后一字
+        const char* p = w1->text;
+        for (int cp = 1; cp < w1->char_len; cp++) {
+            int blen = get_char_bytes(p);
+            if (blen <= 0) break;
+            p += blen;
+        }
+        char last_c[8] = {0};
+        int blen = get_char_bytes(p);
+        if (blen > 0 && blen <= 4) {
+            memcpy(last_c, p, blen);
+            last_c[blen] = 0;
+        }
+        if (!last_c[0]) continue;
+
+        for (int wj = 0; wj < ar->word_count; wj++) {
+            if (wi == wj) continue;
+            WordEntry* w2 = &ar->words[wj];
+            if (w2->char_len < 1) continue;
+
+            // w2 的首字
+            char first_c[8] = {0};
+            blen = get_char_bytes(w2->text);
+            if (blen > 0 && blen <= 4) {
+                memcpy(first_c, w2->text, blen);
+                first_c[blen] = 0;
+            }
+            if (!first_c[0]) continue;
+
+            // 如果 w1 的最后一字 == w2 的首字 → 可合并
+            if (strcmp(last_c, first_c) != 0) continue;
+
+            // 检查 pair_table 中该字对是否高频
+            PairEntry* pe = _ar_find_pair(ar, last_c, first_c);
+            if (!pe || pe->co_count < ar->cfg.min_freq) continue;
+
+            // 合并
+            size_t w1len = strlen(w1->text);
+            size_t w2len = strlen(w2->text);
+            if (w1len + w2len >= AR_WORD_MAX_LEN * 4 + 1) continue;
+
+            char combined[AR_WORD_MAX_LEN * 4 + 1] = {0};
+            memcpy(combined, w1->text, w1len);
+            memcpy(combined + w1len, w2->text, w2len);
+            combined[w1len + w2len] = 0;
+
+            if ((int)utf8_strlen(combined) <= AR_WORD_MAX_LEN) {
+                WordEntry* we = _ar_find_or_add_word(ar, combined);
+                if (we) we->freq += pe->co_count;
             }
         }
     }
+
+    // 清空序列缓冲区（下一轮重新累积）
+    ar->seq_len = 0;
 
     int new_words = ar->word_count - old_word_count;
 
     // 建图
     int built = _ar_build_topo(ar, vocab);
     if (built > 0) {
-        // 在相邻词之间建共现边
-        // 简化版：在同一篇文章中相邻出现的词之间建边
-        // 由于我们丢失了词序列信息，暂时只创建节点
-        // 后续版本可以在 process_line 阶段同步构建 seq 序列
-
         if (ar->cfg.verbose) {
             printf("[文章阅读] 刷新: %d 新词, 共 %d 词, 累计 %d 不同字符, "
                    "%d 字符对\n",
                    new_words, ar->word_count,
                    ar->char_count, ar->pair_count);
         }
+
+        // === 新词 → 模板反馈：为新词建立与已有模板的跨拓扑连接 ===
+        if (new_words > 0 && ar->master && ar->master->use_template_voting) {
+            HuarongTopologyNet* vnet = vocab->net;
+            int tpl_matched = 0;
+            for (int wi = 0; wi < ar->word_count; wi++) {
+                WordEntry* we = &ar->words[wi];
+                if (!we->text[0]) continue;
+                int nid_cur = huarong_net_find_concept(vnet, we->text);
+                if (nid_cur < 0) continue;
+                /* 与相邻前一个词配对匹配模板 */
+                if (wi > 0) {
+                    WordEntry* prev = &ar->words[wi - 1];
+                    if (prev->text[0]) {
+                        int nid_prev = huarong_net_find_concept(vnet, prev->text);
+                        if (nid_prev >= 0) {
+                            int tpl_id = master_find_template_for_pair(
+                                ar->master, vocab->topo_id, nid_prev, nid_cur);
+                            if (tpl_id >= 0) {
+                                master_add_cross_link(ar->master,
+                                    vocab->topo_id, nid_prev,
+                                    TOPO_TEMPLATE, tpl_id, 0.5f, "article_anchor_a");
+                                master_add_cross_link(ar->master,
+                                    vocab->topo_id, nid_cur,
+                                    TOPO_TEMPLATE, tpl_id, 0.4f, "article_anchor_b");
+                                tpl_matched++;
+                            }
+                        }
+                    }
+                }
+            }
+            if (ar->cfg.verbose && tpl_matched > 0) {
+                printf("[文章阅读] 模板匹配: %d 个新词关联到已有模板\n", tpl_matched);
+            }
+        }
+        // === 模板反馈结束 ===
     }
 
     return new_words;
@@ -510,4 +660,9 @@ void article_get_stats(ArticleReader* ar,
     if (out_chars) *out_chars = ar->char_count;
     if (out_pairs) *out_pairs = ar->pair_count;
     if (out_words) *out_words = ar->word_count;
+}
+
+int article_get_last_flush_added(ArticleReader* ar) {
+    if (!ar) return -1;
+    return ar->last_flush_added;
 }

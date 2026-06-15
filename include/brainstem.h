@@ -42,6 +42,8 @@ typedef struct Brainstem {
     void* perception;
     void* hippocampus;
     void* cerebellum;
+    void* cognitive_controller;   /* CognitiveController*, 供 health_monitor 干预 */
+    void* topo_brain;             /* TopologyBrain*, 脑区索引扫描 */
 } Brainstem;
 
 Brainstem* brainstem_create(MasterTopology* master, MemorySystem* memory,
@@ -60,5 +62,8 @@ void brainstem_set_thalamus(Brainstem* bs, void* th);
 void brainstem_set_perception(Brainstem* bs, void* p);
 void brainstem_set_hippocampus(Brainstem* bs, void* hc);
 void brainstem_set_cerebellum(Brainstem* bs, void* cb);
+void brainstem_set_cognitive_controller(Brainstem* bs, void* cc);
+void brainstem_set_self_learner(Brainstem* bs, void* sl);
+void brainstem_set_topo_brain(Brainstem* bs, void* tb);
 
 #endif

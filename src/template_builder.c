@@ -29,7 +29,7 @@ TemplateBuildConfig template_config_default(void) {
  *  辅助: 余弦相似度
  * ================================================================ */
 
-static float cosine_sim(const float* a, const float* b, int dim) {
+float template_cosine_sim(const float* a, const float* b, int dim) {
     if (!a || !b || dim <= 0) return 0.0f;
     float dot = 0.0f, na = 0.0f, nb = 0.0f;
     for (int i = 0; i < dim; i++) {
@@ -304,7 +304,7 @@ TemplateCluster* template_cluster_groups(
             if (!feats[i]) continue;
             for (int j = i + 1; j < sz; j++) {
                 if (!feats[j]) continue;
-                float sim = cosine_sim(feats[i], feats[j], NODE_FEATURE_DIM);
+                float sim = template_cosine_sim(feats[i], feats[j], NODE_FEATURE_DIM);
                 if (sim > cfg->similarity_threshold) {
                     uf_union(uf, i, j);
                 }
@@ -565,7 +565,7 @@ int template_build_concepts(MasterTopology* master, int max_concepts) {
 
     for (int i = 0; i < valid; i++) {
         for (int j = i + 1; j < valid; j++) {
-            float sim = cosine_sim(feats[i], feats[j], NODE_FEATURE_DIM);
+            float sim = template_cosine_sim(feats[i], feats[j], NODE_FEATURE_DIM);
             if (sim > CONCEPT_SIMILARITY_THRESHOLD) {
                 uf_union(uf, i, j);
             }

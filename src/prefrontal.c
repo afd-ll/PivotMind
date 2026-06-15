@@ -60,42 +60,67 @@ char* prefrontal_chat(Prefrontal* pf, const char* input) {
     DiffusionCtx dctx;
     if (diffusion_init(&dctx, pf->topology) != 0) return NULL;
 
-    const char* words[DIFF_MAX_SEQUENCE];
-    int n = diffusion_generate(&dctx, input, words, DIFF_MAX_SEQUENCE);
-    if (n < 2) return NULL;
+    /* 多候选生成 + ACC 门控回溯（最多尝试 3 次） */
+    for (int attempt = 0; attempt < 3; attempt++) {
+        /* 逐次提高温度扰动，探索不同候选 */
+        dctx.temperature = 0.15f + attempt * 0.12f;
 
-    /* 序列评分 */
-    GeneratedSequence seq = {0};
-    for (int i = 0; i < n && i < MAX_GENERATED_WORDS; i++) seq.words[i] = words[i];
-    seq.count = n < MAX_GENERATED_WORDS ? n : MAX_GENERATED_WORDS;
-    cingulate_evaluate(&seq, pf->topology, input, 5);
+        const char* words[DIFF_MAX_SEQUENCE];
+        int n = diffusion_generate(&dctx, input, words, DIFF_MAX_SEQUENCE);
+        if (n < 2) continue;
 
-    /* 硬阻断 */
-    if (seq.total_score < pf->block_threshold) return NULL;
+        /* 序列评分 */
+        GeneratedSequence seq = {0};
+        for (int i = 0; i < n && i < MAX_GENERATED_WORDS; i++) seq.words[i] = words[i];
+        seq.count = n < MAX_GENERATED_WORDS ? n : MAX_GENERATED_WORDS;
+        cingulate_evaluate(&seq, pf->topology, input, 5);
 
-    /* 拼合（扩散引擎已含模板连接词，直接拼接） */
-    char buf[2048];
-    int pos = 0;
-    for (int w = 0; w < n && pos < (int)sizeof(buf)-10; w++)
-        pos += snprintf(buf+pos, sizeof(buf)-pos, "%s", words[w]);
-    response = strdup(buf);
+        char gate_buf[128];
+        const char* summary = cingulate_summary(&seq, gate_buf, sizeof(gate_buf));
+        printf("[前额叶] 脊前扣带评分: %s\n", summary ? summary : "?");
 
-    pf->recent_scores[pf->recent_pos] = seq.total_score;
-    pf->recent_pos = (pf->recent_pos + 1) % 100;
-    if (pf->recent_pos % 10 == 0) {
-        float buf2[100]; memcpy(buf2, pf->recent_scores, sizeof(buf2));
-        int m = pf->recent_pos < 10 ? pf->recent_pos + 1 : 100;
-        for (int i = 0; i < m-1; i++)
-            for (int j = i+1; j < m; j++)
-                if (buf2[i] < buf2[j]) { float t = buf2[i]; buf2[i] = buf2[j]; buf2[j] = t; }
-        int p75 = (int)(m * 0.25f);
-        float new_th = p75 < m ? buf2[p75] : buf2[0];
-        if (new_th > pf->accept_threshold + 0.02f) pf->accept_threshold = new_th;
-        if (pf->accept_threshold < 0.10f) pf->accept_threshold = 0.10f;
+        /* ACC 门控决策 */
+        CingulateGate gate = cingulate_gate(&seq, pf->accept_threshold);
+
+        if (gate == CINGULATE_BACKTRACK || gate == CINGULATE_REWRITE) {
+            pf->total_retries++;
+            printf("[前额叶] ACC %s (总分=%.3f), 尝试 %d/3\n",
+                   gate == CINGULATE_BACKTRACK ? "BACKTRACK" : "REWRITE",
+                   seq.total_score, attempt + 1);
+            continue;  /* 回溯 → 尝试下一次 */
+        }
+
+        /* 硬阻断 */
+        if (seq.total_score < pf->block_threshold) continue;
+
+        /* 拼合（扩散引擎已含模板连接词，直接拼接） */
+        char buf[2048];
+        int pos = 0;
+        for (int w = 0; w < n && pos < (int)sizeof(buf)-10; w++)
+            pos += snprintf(buf+pos, sizeof(buf)-pos, "%s", words[w]);
+        response = strdup(buf);
+
+        /* 更新自适应阈值 */
+        pf->recent_scores[pf->recent_pos] = seq.total_score;
+        pf->recent_pos = (pf->recent_pos + 1) % 100;
+        if (pf->recent_pos % 10 == 0) {
+            float buf2[100]; memcpy(buf2, pf->recent_scores, sizeof(buf2));
+            int m = pf->recent_pos < 10 ? pf->recent_pos + 1 : 100;
+            for (int i = 0; i < m-1; i++)
+                for (int j = i+1; j < m; j++)
+                    if (buf2[i] < buf2[j]) { float t = buf2[i]; buf2[i] = buf2[j]; buf2[j] = t; }
+            int p75 = (int)(m * 0.25f);
+            float new_th = p75 < m ? buf2[p75] : buf2[0];
+            if (new_th > pf->accept_threshold + 0.02f) pf->accept_threshold = new_th;
+            if (pf->accept_threshold < 0.10f) pf->accept_threshold = 0.10f;
+        }
+
+        /* 传递 ACC 真实评分，替代硬编码 0.5 */
+        cognitive_controller_snapshot(pf->controller, seq.total_score);
+        return response;
     }
 
-    cognitive_controller_snapshot(pf->controller, 0.5f);
-    return response;
+    return NULL;
 }
 
 void prefrontal_feedback(Prefrontal* pf, const char* input,

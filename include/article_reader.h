@@ -6,6 +6,15 @@
  *   输入纯文本 → 字符级共现统计 → PMI 计算 → 分层合评分 → 发现词边界
  *   → 创建概念节点 + 相邻词之间建边
  *
+ * 算法：
+ *   1. 逐字符遍历，更新字符频率 + 滑动窗口共现
+ *   2. 累积字符序列到全局缓冲区 seq[]
+ *   3. 每 batch_size 行触发 flush：
+ *      a. 预计算 seq[] 相邻字符对的合并评分（α·PMI + β·freq_bonus + γ·conn_bonus）
+ *      b. 沿 seq[] 顺序正向贪婪扫描，合并高评分连续段为词
+ *      c. 一轮三字扩展（首尾字相同的词对合并）
+ *   4. 发现词 → 创建概念节点（词汇拓扑）
+ *
  * 设计理念：词性是涌现，不是标签。
  *   不依赖外部词典、不预定义词表、不标注词性。
  *   从字符共现模式中自然涌现出词语边界。
@@ -51,19 +60,24 @@ void article_reader_destroy(ArticleReader* ar);
 
 /**
  * 处理一行文章文本
- * 内部累积字符级共现统计
- * @return 累积行数达到 batch_size 时进行词发现并返回 >0
+ * 内部累积字符级共现统计，并追加到序列缓冲区
+ * @return -1 出错, 0 正常（未触发 flush）, >0 新增词数（触发 flush 时）
  */
 int article_process_line(ArticleReader* ar, const char* line);
 
 /**
  * 手动触发词发现 + 建图
- * 将累积的共现统计转换为拓扑节点和边
+ * 将累积的字符序列按正向扫描合并为词，创建拓扑节点
  * @param ar
- * @param topo 目标拓扑（一般传入词汇拓扑）
+ * @param topo 目标拓扑（NULL 则使用缓存词汇拓扑）
  * @return 新增词数量, -1 出错
  */
 int article_flush(ArticleReader* ar, SubTopology* topo);
+
+/**
+ * 获取上次 flush 的新增词数（无需再次调用 flush 即可查询）
+ */
+int article_get_last_flush_added(ArticleReader* ar);
 
 /**
  * 设置进度回调（给 train_mode 用）

@@ -15,6 +15,8 @@
 #include "hippocampus.h"
 #include "cerebellum.h"
 #include "reticular.h"
+#include "self_learner.h"
+#include "topology_brain.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -251,8 +253,8 @@ static void* brainstem_loop(void* arg) {
         static HealthMonitor* _hm = NULL;
         if (!_hm) _hm = health_monitor_create();
         if (_hm && bs->tick_count % 120 == 0) {
-            /* controller 通过 bs 间接访问不到，用全局 gw 传 */
-            health_monitor_tick(_hm, bs->master, NULL);
+            health_monitor_tick(_hm, bs->master,
+                (CognitiveController*)bs->cognitive_controller);
         }
 
         /* ── 网状结构注意力过滤 ── （每60 tick ≈ 1分钟） */
@@ -339,6 +341,30 @@ static void* brainstem_loop(void* arg) {
             float dmn_throttle = bs->thalamus ?
                 thalamus_get_throttle((Thalamus*)bs->thalamus, THAL_DMN) : 1.0f;
             dmn_cycle(bs->master, bs->memory, &dmn_cfg, dmn_throttle);
+        }
+
+        /* ── 自主学习器（每 selflearn_interval tick） ── */
+        if (bs->self_learner && bs->tick_count % selflearn_interval == 0) {
+            int mods = self_learner_cycle((SelfLearner*)bs->self_learner);
+            if (mods > 0 && bs->verbose)
+                printf("[自主学习] 本轮修改 %d 条边\n", mods);
+        }
+
+        /* ── 脑区索引扫描（每 600 tick ≈ 10min） ── */
+        if (bs->topo_brain && bs->tick_count % 600 == 0) {
+            int mig = topobrain_scan((TopologyBrain*)bs->topo_brain, bs->master);
+            if (mig > 0 && bs->verbose)
+                printf("[脑区索引] 本轮 %d 个节点发生脑区迁移\n", mig);
+        }
+
+        /* ── 子系统反馈上报 ── */
+        /* 移除外层 %30 守卫，让每个子系统独立判断自己的节拍；-1 表示不更新该字段 */
+        {
+            int hippo_work = (bs->tick_count % bs->consolidate_every_n_ticks == 0) ? 1 : -1;
+            int dmn_work   = (bs->tick_count % dream_interval == 0) ? 1 : -1;
+            int percept_work = (bs->tick_count % 30 == 0) ? 1 : -1;
+            if (bs->thalamus && (hippo_work != -1 || dmn_work != -1 || percept_work != -1))
+                thalamus_report((Thalamus*)bs->thalamus, hippo_work, percept_work, dmn_work);
         }
 
         /* 冷节点冻结 */
@@ -479,4 +505,16 @@ void brainstem_set_hippocampus(Brainstem* bs, void* hippocampus) {
 
 void brainstem_set_cerebellum(Brainstem* bs, void* cerebellum) {
     if (bs) bs->cerebellum = cerebellum;
+}
+
+void brainstem_set_cognitive_controller(Brainstem* bs, void* cc) {
+    if (bs) bs->cognitive_controller = cc;
+}
+
+void brainstem_set_self_learner(Brainstem* bs, void* sl) {
+    if (bs) bs->self_learner = sl;
+}
+
+void brainstem_set_topo_brain(Brainstem* bs, void* tb) {
+    if (bs) bs->topo_brain = tb;
 }

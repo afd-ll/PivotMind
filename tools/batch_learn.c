@@ -27,6 +27,7 @@
 #include "path_encoding.h"
 #include "node_hash.h"
 #include "dict_loader.h"
+#include "cognitive_controller.h"
 #include "pivotmind_version.h"
 
 // ==================== JSON 简易解析 ====================
@@ -535,6 +536,17 @@ int main(int argc, char* argv[]) {
                     }
                 }
                 if (merged > 0) printf("  → 词素合并: %d 个新词\n", merged);
+            }
+
+            /* POS 句式模板增量构建（基于认知控制器累积的句式模式） */
+            {
+                CognitiveController* cc = (CognitiveController*)master->cognitive_controller;
+                if (cc) {
+                    int pos_built = template_build_from_pos_patterns(master, cc, 3);
+                    if (pos_built > 0) {
+                        printf("  → POS 句式模板: %d 个\n", pos_built);
+                    }
+                }
             }
         }
 

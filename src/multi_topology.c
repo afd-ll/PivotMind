@@ -9,6 +9,7 @@
 #include "thread_pool.h"
 #include "path_encoding.h"
 #include "dict_loader.h"
+#include "template_builder.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -92,6 +93,9 @@ MasterTopology* master_topology_create(int max_sub_topos) {
 
     // 线程池初始化（懒创建，首次并行时再分配）
     master->thread_pool = NULL;
+
+    // 认知调度中心指针（运行时注入，不持久化）
+    master->cognitive_controller = NULL;
 
     // 初始化跨拓扑邻接表索引
     master->cross_adj = (CrossTopoAdjEntry**)calloc(
@@ -1431,6 +1435,19 @@ int master_get_node_pos_tag(MasterTopology* master,
         }
         entry = entry->next;
     }
+
+    /* 兜底：若跨拓扑没有 POS 标注，使用启发式词性标注 */
+    {
+        SubTopology* vocab = master_get_sub_topology_by_type(master, TOPO_VOCABULARY);
+        if (vocab && vocab->net && node_id >= 0 && node_id < vocab->net->node_count) {
+            ReasoningNode* node = vocab->net->nodes[node_id];
+            if (node && node->concept) {
+                POSTag tag = pos_tag_chinese(node->concept);
+                if (tag != POS_UNKNOWN) return (int)tag;
+            }
+        }
+    }
+
     return POS_UNKNOWN;
 }
 
@@ -1450,28 +1467,64 @@ int master_find_template_for_pair_nolock(MasterTopology* master,
     if (!master || !master->use_template_voting) return -1;
     if (node_a < 0 || node_b < 0) return -1;
 
-    POSTag pos_a = (POSTag)master_get_node_pos_tag(master, 0, node_a);
-    POSTag pos_b = (POSTag)master_get_node_pos_tag(master, 0, node_b);
-    if (pos_a == POS_UNKNOWN && pos_b == POS_UNKNOWN) return -1;
-
-    /* 扫描模板拓扑节点：匹配 POS 序列 */
     SubTopology* tpl = master_get_sub_topology_by_type(master, TOPO_TEMPLATE);
     if (!tpl || !tpl->net) return -1;
 
+    /* 第一阶段：POS 标签匹配 */
+    POSTag pos_a = (POSTag)master_get_node_pos_tag(master, 0, node_a);
+    POSTag pos_b = (POSTag)master_get_node_pos_tag(master, 0, node_b);
+
     int best_tpl = -1;
     float best_conf = 0.0f;
-    for (int i = 0; i < tpl->net->node_count; i++) {
-        ReasoningNode* tn = tpl->net->nodes[i];
-        if (!tn || tn->tpl_pos_len < 2) continue;
+    if (pos_a != POS_UNKNOWN || pos_b != POS_UNKNOWN) {
+        for (int i = 0; i < tpl->net->node_count; i++) {
+            ReasoningNode* tn = tpl->net->nodes[i];
+            if (!tn || tn->tpl_pos_len < 2) continue;
 
-        /* 匹配前两个 POS 槽位 */
-        if (tn->tpl_pos_seq[0] == (int)pos_a && tn->tpl_pos_seq[1] == (int)pos_b) {
-            if (tn->confidence > best_conf) {
-                best_conf = tn->confidence;
-                best_tpl = tn->node_id;
+            /* 匹配前两个 POS 槽位 */
+            if (tn->tpl_pos_seq[0] == (int)pos_a && tn->tpl_pos_seq[1] == (int)pos_b) {
+                if (tn->confidence > best_conf) {
+                    best_conf = tn->confidence;
+                    best_tpl = tn->node_id;
+                }
             }
         }
     }
+
+    /* 第二阶段（兜底）：若 POS 匹配失败，用特征向量余弦相似度 */
+    if (best_tpl < 0) {
+        /* 获取两个词汇节点的特征向量 */
+        SubTopology* vocab = master_get_sub_topology_by_type(master, TOPO_VOCABULARY);
+        if (vocab && vocab->net) {
+            ReasoningNode* rna = NULL;
+            ReasoningNode* rnb = NULL;
+            if (node_a >= 0 && node_a < vocab->net->node_count)
+                rna = vocab->net->nodes[node_a];
+            if (node_b >= 0 && node_b < vocab->net->node_count)
+                rnb = vocab->net->nodes[node_b];
+
+            if (rna && rna->features && rnb && rnb->features) {
+                /* 构建 pair 的组合特征向量：取两节点特征的均值 */
+                float pair_feat[NODE_FEATURE_DIM];
+                for (int d = 0; d < NODE_FEATURE_DIM; d++) {
+                    pair_feat[d] = (rna->features[d] + rnb->features[d]) * 0.5f;
+                }
+
+                float best_sim = 0.65f;  /* 最低相似度阈值 */
+                for (int i = 0; i < tpl->net->node_count; i++) {
+                    ReasoningNode* tn = tpl->net->nodes[i];
+                    if (!tn || !tn->features || tn->tpl_pos_len < 2) continue;
+
+                    float sim = template_cosine_sim(pair_feat, tn->features, NODE_FEATURE_DIM);
+                    if (sim > best_sim) {
+                        best_sim = sim;
+                        best_tpl = tn->node_id;
+                    }
+                }
+            }
+        }
+    }
+
     return best_tpl;
 }
 
