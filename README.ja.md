@@ -255,6 +255,8 @@ Issue と Pull Request を歓迎します。大きな変更を行う場合は、
 
 <div align="center">
 
+メンテナー：[陈道祥 (afd-ll)](https://github.com/afd-ll)
+
 [⭐ このリポジトリに Star](https://github.com/afd-ll/PivotMind) · [🐛 バグ報告](https://github.com/afd-ll/PivotMind/issues) · [📖 ドキュメントを読む](ARCHITECTURE.md)
 
 </div>

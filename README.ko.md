@@ -256,6 +256,8 @@ Issues and Pull Requests are welcome. For major changes, please open an issue fi
 
 <div align="center">
 
+메인테이너：[陈道祥 (afd-ll)](https://github.com/afd-ll)
+
 [⭐ Star this repo](https://github.com/afd-ll/PivotMind) · [Report a bug](https://github.com/afd-ll/PivotMind/issues) · [Read the docs](ARCHITECTURE.md)
 
 </div>

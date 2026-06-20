@@ -256,6 +256,8 @@ Issues и Pull Requests приветствуются. Для крупных из
 
 <div align="center">
 
+Мейнтейнер：[陈道祥 (afd-ll)](https://github.com/afd-ll)
+
 [⭐ Поставить звезду](https://github.com/afd-ll/PivotMind) · [Сообщить о баге](https://github.com/afd-ll/PivotMind/issues) · [Читать документацию](ARCHITECTURE.md)
 
 </div>
