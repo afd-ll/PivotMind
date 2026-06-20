@@ -3,7 +3,7 @@
 # 玄枢 PivotMind
 
 ### A Brain-Inspired Semantic Association Engine
-**Pure C · Zero AI Framework Dependencies · Runs on ARM Embedded Boards**
+**순수 C · AI 프레임워크 의존성 제로 · ARM 임베디드 보드에서 실행**
 
 [English](README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [Русский](README.ru.md)
 
@@ -22,40 +22,40 @@
 
 ## What is PivotMind
 
-PivotMind is a **brain-inspired cognitive engine** built on
-[HuarongTopologyNet](#huarongtopologynet) +
+PivotMind는 [HuarongTopologyNet](#huarongtopologynet) +
 [Hebbian Learning](#core-mechanisms) +
-[Multi-Layer Diffusion Reasoning](#multi-layer-diffusion-engine).
-No Transformers. No embedding vectors. No backpropagation.
-Just nodes, edges, activation, and decay — powered by a relentless background clock.
+[Multi-Layer Diffusion Reasoning](#multi-layer-diffusion-engine)을 기반으로 한
+**뇌에서 영감을 받은 인지 엔진**입니다.
+Transformer 없음. 임베딩 벡터 없음. 역전파 없음.
+노드, 엣지, 활성화, 감쇠 — 끊임없이 돌아가는 백그라운드 클록에 의해 구동됩니다.
 
-**Current Version: v0.4.0** — 10 brain regions, PFE reasoning, IdeaArena competition, online Hebbian learning.
+**현재 버전: v0.4.0** — 10개 뇌 영역, PFE 추론, IdeaArena 경쟁, 온라인 Hebbian 학습.
 
 ### HuarongTopologyNet
 
-Each concept is a node. Co-occurrence creates an edge. Edges carry a triple attribute:
-**weight × confidence × motivational bias**.
-Ten sub-topologies (vocabulary / semantic / emotion / syntax / context / domain / pragmatics / culture / concept / template)
-each form an independent reasoning network, interconnected through cross-topology links.
-Activation diffuses simultaneously across layers, with competition selecting the winner as output.
+각 개념은 노드입니다. 공기(co-occurrence)가 엣지를 생성합니다. 엣지는 세 가지 속성을 갖습니다:
+**가중치 × 신뢰도 × 동기적 편향**.
+10개의 하위 토폴로지(어휘 / 의미 / 감정 / 구문 / 문맥 / 도메인 / 화용 / 문화 / 개념 / 템플릿)
+각각이 독립적인 추론 네트워크를 형성하고, 토폴로지 간 링크를 통해 상호 연결됩니다.
+활성화는 계층 간 동시에 확산되며, 경쟁을 통해 승자가 출력으로 선택됩니다.
 
 ### Why This Approach
 
-| Traditional LLM       | PivotMind                                              |
-|-----------------------|--------------------------------------------------------|
-| Token prediction, stateless | Node activation, continuous internal state       |
-| Gradient-based offline batch training | Hebbian online real-time learning          |
-| Single embedding space | 10 independent sub-topologies                          |
-| Neural network black box | Explicit node-edge paths, fully traceable            |
-| Requires GPU + massive VRAM | pthread + OpenMP only, runs on ARM embedded     |
-| Inference separate from learning | Conversation IS learning                    |
-| No physiological awareness | Interoceptive self-monitoring, 3-tier health response |
+| 기존 LLM                       | PivotMind                                                  |
+|--------------------------------|------------------------------------------------------------|
+| 토큰 예측, 상태 비보존          | 노드 활성화, 지속적 내부 상태                              |
+| 경사하강 기반 오프라인 배치 학습 | Hebbian 온라인 실시간 학습                                 |
+| 단일 임베딩 공간                | 10개 독립 하위 토폴로지                                    |
+| 신경망 블랙박스                 | 명시적 노드-엣지 경로, 완전 추적 가능                      |
+| GPU + 대용량 VRAM 필요          | pthread + OpenMP만, ARM 임베디드에서 실행                   |
+| 추론과 학습이 분리              | 대화 자체가 곧 학습                                        |
+| 생리적 자각 없음                | 내수용적 자기 모니터링, 3단계 건강 대응                     |
 
 ---
 
 ## Brain Region Architecture
 
-PivotMind models mammalian cortical functional divisions — 10 brain regions, each with dedicated responsibilities, communicating through the Thalamus signal bus.
+PivotMind는 포유류 대뇌 피질의 기능적 분화를 모델링합니다 — 10개 뇌 영역, 각자 전담하는 책임이 있으며, Thalamus 신호 버스를 통해 통신합니다.
 
 ```
                           ┌──────────────────────┐
@@ -254,10 +254,8 @@ Issues and Pull Requests are welcome. For major changes, please open an issue fi
 *Currently running on **EAIDK-610** (RK3399 ARM Cortex-A72, 3.8GB RAM).*
 *Goal: A self-sustaining distributed cognitive engine deployable on embedded hardware.*
 
-|<div align="center">
-|
-|Maintained by [陈道祥 (afd-ll)](https://github.com/afd-ll)
-|
-|[⭐ Star this repo](https://github.com/afd-ll/PivotMind) · [Report a bug](https://github.com/afd-ll/PivotMind/issues) · [Read the docs](ARCHITECTURE.md)
-|
-|</div>
+<div align="center">
+
+[⭐ Star this repo](https://github.com/afd-ll/PivotMind) · [Report a bug](https://github.com/afd-ll/PivotMind/issues) · [Read the docs](ARCHITECTURE.md)
+
+</div>
