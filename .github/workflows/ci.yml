@@ -22,15 +22,40 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Enable ARM architecture
-        run: sudo dpkg --add-architecture armhf && sudo apt-get update
+
       - name: Install ARM cross-compiler
-        run: sudo apt-get install -y --no-install-recommends gcc-arm-linux-gnueabihf libc6-dev-armhf-cross
-      - name: Install ARM OpenSSL
-        run: sudo apt-get install -y --no-install-recommends libssl-dev:armhf
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc-arm-linux-gnueabihf \
+            libc6-dev-armhf-cross
+
+      - name: Build OpenSSL for ARM
+        run: |
+          curl -sL https://github.com/openssl/openssl/releases/download/openssl-3.0.15/openssl-3.0.15.tar.gz -o /tmp/openssl.tar.gz
+          tar xzf /tmp/openssl.tar.gz -C /tmp
+          cd /tmp/openssl-3.0.15
+          # OpenSSL 3.0 交叉编译标准流程
+          CROSS=arm-linux-gnueabihf
+          ./Configure linux-armv4 \
+            --prefix=/tmp/openssl-arm \
+            --cross-compile-prefix=${CROSS}- \
+            no-asm no-shared no-dso no-engine no-ui-console no-tests
+          make -j$(nproc)
+          make install_sw
+
       - name: Build ARM (no OpenMP — no libgomp for ARM target)
-        run: make linux CC=arm-linux-gnueabihf-gcc CFLAGS="-Wall -Wextra -O2 -Iinclude -I. -Ilibs -std=gnu99 -MD -MP -DHAS_OPENSSL" LDFLAGS="-lm -lssl -lcrypto -pthread"
+        run: |
+          make linux \
+            CC=arm-linux-gnueabihf-gcc \
+            CFLAGS="-Wall -Wextra -O2 -Iinclude -I. -Ilibs -I/tmp/openssl-arm/include -std=gnu99 -MD -MP -DHAS_OPENSSL" \
+            LDFLAGS="-L/tmp/openssl-arm/lib -lm -lssl -lcrypto -pthread -static-libstdc++"
+          # 将 ARM 库路径加入加载器搜索
+          export LD_LIBRARY_PATH=/tmp/openssl-arm/lib:$LD_LIBRARY_PATH
+
       - name: Verify ARM ELF
         run: |
           file build/bin/*
           readelf -h build/bin/pivotmind_gateway | grep 'Machine:'
+          # 验证链接的库
+          arm-linux-gnueabihf-readelf -d build/bin/pivotmind_gateway | grep NEEDED
