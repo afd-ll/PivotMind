@@ -12,7 +12,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libsqlite3-dev
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libsqlite3-dev libssl-dev
       - name: Build (x86_64, OpenMP)
         run: make linux
       - name: Show binaries
@@ -23,9 +23,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install ARM cross-compiler
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends gcc-arm-linux-gnueabihf libc6-dev-armhf-cross
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends gcc-arm-linux-gnueabihf libc6-dev-armhf-cross libssl-dev:armhf
       - name: Build ARM (no OpenMP — no libgomp for ARM target)
-        run: make linux CC=arm-linux-gnueabihf-gcc CFLAGS="-Wall -Wextra -O2 -Iinclude -I. -Ilibs -std=gnu99 -MD -MP" LDFLAGS="-lm -pthread"
+        run: make linux CC=arm-linux-gnueabihf-gcc CFLAGS="-Wall -Wextra -O2 -Iinclude -I. -Ilibs -std=gnu99 -MD -MP -DHAS_OPENSSL" LDFLAGS="-lm -lssl -lcrypto -pthread"
       - name: Verify ARM ELF
         run: |
           file build/bin/*
