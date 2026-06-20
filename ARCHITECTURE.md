@@ -1,6 +1,6 @@
 # 玄枢 PivotMind 架构文档
 
-> 当前版本: **v0.3.0** — 推理架构引入
+> 当前版本: **v0.4.0** — 10 脑区完整架构 + Broca 升级 + 下丘脑新脑区
 
 ## 整体架构
 
@@ -10,24 +10,31 @@
 
 | 层级 | 职责 | 核心文件 |
 |------|------|---------|
-| **多拓扑网络层** | 11层子拓扑接收输入，逐字分词后激活对应节点，跨拓扑传播 | `huarong_topology.c`, `multi_topology.c` |
+| **多拓扑网络层** | 11 层子拓扑接收输入，逐字分词后激活对应节点，跨拓扑传播 | `huarong_topology.c`, `multi_topology.c` |
 | **认知调度层** | 意图向量计算、满意度评估、retry 循环、在线学习调整 | `cognitive_controller.c` |
 | **对话学习层** | 联想推理、回复生成、赫布在线学习、状态持久化 | `dialog_system.c`, `autonomic_learner.c` |
-| **推理编排层** (v0.3) | 任务分解、子目标调度、多候选竞争、冲突检测 | `prefrontal_executive.c`, `idea_arena.c` |
+| **推理编排层** (v0.3) | 6 模式推理编排、任务分解、子目标调度、多候选竞争、冲突检测 | `prefrontal_executive.c`, `idea_arena.c` |
+| **脑干节律层** (v0.4) | 昼夜心跳、激活衰减、自发激活、存盘调度、堆监控 | `brainstem.c` |
 
-## 脑区划分 (v0.3)
+## 脑区划分 (v0.4)
 
-| 脑区 | 系统模块 | 子拓扑归属 | 状态 |
-|------|---------|----------|------|
-| 前额叶 (Prefrontal) | 对话/决策 | 词汇、语义、语用、概念 | 🟢 |
-| **前额叶执行器 (PFE)** | **推理编排** | **通过 CC 复用** | **🟢 Phase 2** |
-| 海马体 (Hippocampus) | 学习/记忆/巩固 | 上下文、领域 | 🟢 |
-| DMN | 梦境/联想 | — | 🟢 |
-| 感知系统 | 联网搜索/好奇探索 | — | 🟢 |
-| 布罗卡区 (Broca) | 句式生成 | 语法、模板 | 🟢 |
-| 小脑 (Cerebellum) | 微调/BPTT | — (全局监控) | 🟢 |
-| 杏仁核 (Amygdala) | 情绪/效价调控 | 情绪、文化 | 🟢 |
-| **想法竞技场 (Arena)** | **多候选竞争** | **通过 PFE 协作** | **🟢 Phase 2** |
+玄枢按哺乳动物大脑皮层的功能分区建模，13 个脑区/子系统各司其职，通过丘脑信号总线通信：
+
+| 脑区 | 系统模块 | 子拓扑归属 | 功能 | 状态 |
+|------|---------|----------|------|------|
+| **前额叶 (Prefrontal)** | 对话/决策 | 词汇、语义、语用、概念 | 对话生成，diffusion → ACC 评估 | 🟢 |
+| **前额叶执行器 (PFE)** | 推理编排 | 跨 CC 复用 | 6 模式推理编排、任务分解 | 🟢 |
+| **海马体 (Hippocampus)** | 学习/记忆/巩固 | 上下文、领域 | 记忆巩固、QA 重放、感知联动 | 🟢 |
+| **DMN** | 梦境/联想 | — | 默认模式网络：梦境联想、闲暇探索 | 🟢 |
+| **杏仁核 (Amygdala)** | 情绪/效价调控 | 情绪、文化 | 情绪效价采样、探索/利用平衡 | 🟢 |
+| **感知皮层 (Perception)** | 联网搜索/好奇探索 | — | 联网搜索、article_reader 语义管线 | 🟢 |
+| **布罗卡区 (Broca)** | 句式生成/模板 | 语法、模板(v0.4) | 模板自动构建与衰减调度(v0.4 升级) | 🟢 |
+| **小脑 (Cerebellum)** | 微调/BPTT | — (全局监控) | BPTT 微调、硬件资源保护 | 🟢 |
+| **下丘脑 (Hypothalamus)** | 需求驱动 | — | 需求动态调控(好奇/获取/社交/舒适)、昼夜耦合 | 🟢 (v0.4) |
+| **丘脑 (Thalamus)** | 信号总线 | — | 信号总线、资源门控、脑区间通信路由 | 🟢 |
+| **脑干 (Brainstem)** | 节律/心跳 | — | 昼夜节律、激活衰减、自发激活、堆监控 | 🟢 (v0.4) |
+| **扣带回 (ACC)** | 序列评估 | — | 四维序列评估(语义+模板+情绪+长度) | 🟢 |
+| **想法竞技场 (IdeaArena)** | 多候选竞争 | — | 多候选五维竞争选择 | 🟢 |
 
 ## 三大核心模块
 
@@ -167,6 +174,8 @@ typedef struct CrossTopologyLink {
 | TOPO_PRAGMA (6) | 语用拓扑 | 对话策略，如问答/闲聊/解释模式切换 |
 | TOPO_CULTURE (7) | 文化拓扑 | 文化背景关联，影响特定文化语境下的联想 |
 | TOPO_CONCEPT (8) | 概念拓扑 | 数值、规则、实体等高抽象概念 |
+| TOPO_MASTER (9) | 主拓扑 | 全局调度与优先级管理 |
+| TOPO_TEMPLATE (10) | 模板拓扑 | 句式模板，路径编码递归抽象 (v0.4) |
 
 ### 拓扑间关系
 
@@ -323,6 +332,83 @@ typedef struct {
 2. **拓扑驱动生成**：`master_generate_response()` → 跨拓扑走边 → 生成概念序列
 3. **联想兜底**：从 top-5 激活节点出发，`topology_walk_greedy()` 生成回复
 4. **自动学习**：`autonomic_learn_from_dialog(input, output)`
+
+---
+
+## v0.4.0 新增脑区
+
+### 下丘脑 (Hypothalamus) — 需求驱动系统
+
+**核心文件**: `src/hypothalamus.c`
+
+下丘脑管理四维基本需求，驱动系统的自主探索行为：
+
+| 需求 | 英文 | 默认值 | 作用 |
+|------|------|--------|------|
+| 好奇 | Curiosity | 0.50 | 探索新概念、主动检索 |
+| 获取 | Acquisition | 0.30 | 吸收语料、喂料学习 |
+| 社交 | Social | 0.40 | 触发对话、主动提问 |
+| 舒适 | Comfort | 0.50 | 节能模式、降低推理强度 |
+
+需求值受昼夜节律影响（夜间活跃度降低），各脑区行动按需求优先级排序。
+
+### 脑干 (Brainstem) — 昼夜节律与心跳
+
+**核心文件**: `src/brainstem.c`
+
+脑干提供全局后台时钟（`tick=1000ms`），驱动系统的生命节律：
+
+- **昼夜周期**: 24 小时映射为活跃度曲线，高峰段(09:00-12:00 / 15:00-18:00)和低谷段(01:00-06:00)
+- **激活衰减**: 每心跳轮次，所有节点的激活值按 `DECAY_RATE` 衰减（默认 0.7）
+- **自发激活**: 低活跃期自动触发低强度激活扩散（模拟'走神'）
+- **堆监控**: 每 30 tick 记录节点/连接数 + RSS/VSZ 内存，超阈值告警
+- **定期存档**: 配置存档间隔，自动保存状态
+
+### 丘脑 (Thalamus) — 信号总线
+
+**核心文件**: `src/thalamus.c`
+
+丘脑作为信号中枢，负责脑区间的通信路由与资源门控：
+
+- **信号总线**: 9 脑区通过丘脑注册通信槽位
+- **资源门控**: 根据当前负载限制高开销操作（如联网搜索）
+- **路由规则**: 跨脑区消息动态寻址，避免环回风暴
+- **5 工具槽**: 预分配推理/学习/搜索/模板/存档专用通道
+
+### 内感受自检 (Interoceptive Self-Monitoring)
+
+持续监测 RSS 内存、连接增速、推理延迟，三级响应机制：
+
+| 级别 | 条件 | 动作 |
+|------|------|------|
+| 🟢 GREEN | 正常 | 正常运行 |
+| 🟡 YELLOW | 预警 | 日志告警 + 提高学习门槛 |
+| 🔴 RED | 紧急 | 存档 + 批量修剪弱边 |
+
+### 布罗卡区升级 (Broca v0.4)
+
+**核心文件**: `src/broca.c`
+
+v0.4 对布罗卡区进行重写，从'被动句式匹配'升级为'主动模板生成'：
+
+- **模板自动构建**: 从句式槽位提取 POS 序列，构建 `TOPO_TEMPLATE` 节点
+- **衰减调度**: 低频模板自动降权回收，节省节点容量
+- **模板推理**: 跨拓扑连接将模板节点与词汇/语义关联，提升句式多样性
+
+### PFE 推理编排 (v0.4 更新)
+
+前额叶执行器自动判断问题复杂度，匹配 6 种推理模式：
+
+| 模式 | 触发关键词 | 策略 |
+|------|-----------|------|
+| DIRECT | 默认 | 单次扩散联想 |
+| DECOMPOSE | why / because / 为什么 | 定义 → 因果 → 综合 |
+| COMPARE | compare / difference / 比较 | 属性提取 → 对比 |
+| HOWTO | how to / 怎么/如何 | 前置条件 → 步骤序列 |
+| ABDUCE | what if / 如果/假设 | 基线 → 连锁反应 |
+| ANALOGY | analogy / similar / 类比 | 结构映射 |
+
+子目标递归分解（深度可配），冲突检测 + IdeaArena 竞争选出最佳路径，输出可解释推理链。
 
 ---
 
@@ -530,9 +616,9 @@ confidence = base_score × 0.4
 
 ## 代码组织
 
-```
+``` 
 PivotMind/
-├── src/                    # 核心源文件（57个 .c）
+├── src/                    # 核心源文件（82个 .c）
 │   ├── huarong_topology.c           # 底层拓扑网络：节点/边/哈希/拓扑排序
 │   ├── multi_topology.c             # 多拓扑管理：SubTopology/MasterTopology/走边
 │   ├── cognitive_controller.c       # 认知调度中心：意图向量/retry/满意度
@@ -555,20 +641,29 @@ PivotMind/
 │   ├── concept_processor.c          # 概念处理
 │   ├── enhanced_generator.c         # 增强生成
 │   ├── attention.c                  # 注意力机制
-│   ├── tensor.c / tensor_pool.c     # 张量计算
-│   ├── layer.c / layer_gru.c / layer_lstm.c / layer_rnn.c  # 神经网络层
-│   ├── model.c / model_io.c         # 模型管理
-│   ├── pretrain.c / trainer.c       # 预训练
-│   ├── optimizer.c / scheduler.c    # 优化器
-│   ├── pruning.c / quantization.c   # 裁剪/量化
-│   ├── network_tool.c               # 网络工具
 │   ├── thread_pool.c                # 线程池
 │   ├── metrics.c                    # 指标统计
-│   ├── gradient_ops.c / matrix_ops.c / string_pool.c  # 基础运算
+│   ├── string_pool.c                # 共享字符串池
 │   ├── chinese.c / vocab.c / utf8_tokenizer.c         # 中文处理
+│   │
+│   ├── 脑区模块 (v0.4):
+│   │   ├── prefrontal.c                # 前额叶：对话策略选择
+│   │   ├── prefrontal_executive.c      # 前额叶执行器：PFE 6模式推理
+│   │   ├── hippocampus.c               # 海马体：记忆巩固/重放
+│   │   ├── dmn.c                       # 默认模式网络：梦境/闲暇
+│   │   ├── amygdala.c                  # 杏仁核：情绪效价
+│   │   ├── perception.c                # 感知皮层：联网搜索
+│   │   ├── broca.c                     # 布罗卡区：模板生成 (v0.4升级)
+│   │   ├── cerebellum.c               # 小脑：BPTT/资源保护
+│   │   ├── hypothalamus.c              # 下丘脑：需求驱动 (v0.4新增)
+│   │   ├── thalamus.c                 # 丘脑：信号总线 (v0.4新增)
+│   │   ├── brainstem.c                # 脑干：昼夜节律 (v0.4新增)
+│   │   ├── cingulate.c                # 扣带回：ACC评估
+│   │   └── idea_arena.c              # 想法竞技场：候选竞争
+│   │
 │   └── ...                          # 其他辅助模块
 │
-├── include/                # 头文件（29个 .h）
+├── include/                # 头文件（86个 .h）
 │   ├── multi_topology.h          # MasterTopology / SubTopology / CrossTopologyLink
 │   ├── huarong_topology.h        # ReasoningNode / HuarongTopologyNet
 │   ├── cognitive_controller.h    # CognitiveController / intent_weights / retry
@@ -576,6 +671,10 @@ PivotMind/
 │   ├── memory_system.h           # MemoryEntry / STM / LTM
 │   ├── causal_reasoning.h        # CausalGraph / 因果置信度
 │   ├── cognitive_params.h        # CognitiveConfidence / EdgeWeightDual
+│   ├── brainstem.h               # 脑干：昼夜定义/节律接口
+│   ├── thalamus.h                # 丘脑：信号总线/路由
+│   ├── hypothalamus.h            # 下丘脑：需求驱动
+│   ├── template_builder.h        # 布罗卡区/模板构建
 │   ├── common.h                  # 全局常量/宏
 │   └── ...
 │
@@ -588,12 +687,13 @@ PivotMind/
 │   └── merge_states.py            # 多机训练结果合并脚本
 │
 ├── demos/                  # 演示程序
-│   └── digital_life.c             # 交互对话演示
+│   ├── pivotmind_gateway.c        # HTTP 网关 (推荐入口)
+│   └── digital_life.c             # 命令行交互演示
 │
-├── data/                   # 语料和 QA 数据
-├── tests/                  # 测试用例
-├── docs/                   # 补充文档
+├── scripts/                # 自动化脚本
+├── tests/                  # 测试用例 (23项PFE测试, 100%通过)
 ├── changelogs/             # 改动记录
+├── docs/                   # 补充文档
 ├── Makefile                # 构建系统
 └── ARCHITECTURE.md         # 本文档
 ```
