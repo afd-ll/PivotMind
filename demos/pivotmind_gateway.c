@@ -54,6 +54,7 @@
 #include "self_learner.h"
 #include "prefrontal_executive.h"  /* v0.3 前额叶执行器 — 推理编排 */
 #include "idea_arena.h"            /* v0.3 想法竞争竞技场 */
+#include "hypothalamus.h"          /* v0.4 下丘脑 — 需求/动机调控 */
 
 // ==================== 配置 ====================
 
@@ -84,6 +85,8 @@ typedef struct {
 
     PrefrontalExecutive* pfe;       /* v0.3 前额叶执行器 — 推理编排 */
     IdeaArena*          arena;      /* v0.3 想法竞争竞技场 */
+    Broca*              broca;      /* v0.4 布罗卡区 — 模板构建调度 */
+    Hypothalamus*       hypothalamus; /* v0.4 下丘脑 — 需求/动机调控 */
 
     // 运行控制
     volatile int shutdown_requested;
@@ -329,6 +332,19 @@ static int gw_system_init(GatewaySystem* gw) {
     if (!gw->arena) { fprintf(stderr, "[gateway] 想法竞技场创建失败\n"); return -1; }
     fprintf(stderr, "[gateway]   想法竞技场就绪 (max_candidates=%d)\n", ARENA_MAX_CANDIDATES);
 
+    /* ── v0.4 新脑区 ── */
+    // 布罗卡区（句式模板构建与衰减自调度）
+    fprintf(stderr, "[gateway]   创建布罗卡区 (v0.4)...\n");
+    gw->broca = broca_create(gw->topology);
+    if (!gw->broca) { fprintf(stderr, "[gateway] 布罗卡区创建失败\n"); return -1; }
+    fprintf(stderr, "[gateway]   布罗卡区就绪 (interval=%d ticks)\n", gw->broca->build_interval_ticks);
+
+    // 下丘脑（需求/动机调控 — 昼夜耦合 + 对话事件调制）
+    fprintf(stderr, "[gateway]   创建下丘脑 (v0.4)...\n");
+    gw->hypothalamus = hypothalamus_create(gw->dialog->cognitive_state);
+    if (!gw->hypothalamus) { fprintf(stderr, "[gateway] 下丘脑创建失败\n"); return -1; }
+    fprintf(stderr, "[gateway]   下丘脑就绪\n");
+
     // 加载持久化数据
     fprintf(stderr, "[gateway]   加载持久化状态...\n");
     if (access("pivotmind_state.dat", F_OK) == 0) {
@@ -378,9 +394,10 @@ static int gw_system_init(GatewaySystem* gw) {
     thalamus_register_region(gw->thalamus, THAL_PERCEPTION,  gw->perception);
     thalamus_register_region(gw->thalamus, THAL_CEREBELLUM,  gw->cerebellum);
     thalamus_register_region(gw->thalamus, THAL_AMYGDALA,    gw->amygdala);
-    thalamus_register_region(gw->thalamus, THAL_PREF_EXEC,  gw->pfe);      /* v0.3 前额叶执行器 */
-    thalamus_register_region(gw->thalamus, THAL_DMN,         NULL);  /* DMN 是无状态函数，无需实例 */
-    thalamus_register_region(gw->thalamus, THAL_BROCA,       NULL);  /* Broca 委托 template_builder */
+    thalamus_register_region(gw->thalamus, THAL_PREF_EXEC,  gw->pfe);           /* v0.3 前额叶执行器 */
+    thalamus_register_region(gw->thalamus, THAL_DMN,         NULL);              /* DMN 是无状态函数 */
+    thalamus_register_region(gw->thalamus, THAL_BROCA,       gw->broca);         /* v0.4 Broca 有状态 */
+    thalamus_register_region(gw->thalamus, THAL_HYPOTHALAMUS, gw->hypothalamus); /* v0.4 下丘脑 */
 
     // 注册工具组件
     thalamus_register_utility(gw->thalamus, THAL_UTIL_NODE_CACHE,      gw->brain_cache);
@@ -519,6 +536,8 @@ static void gw_system_shutdown(GatewaySystem* gw) {
     if (gw->brainstem)    brainstem_destroy(gw->brainstem);
     if (gw->pfe)         pfe_destroy(gw->pfe);              /* v0.3 */
     if (gw->arena)       idea_arena_destroy(gw->arena);          /* v0.3 */
+    if (gw->hypothalamus) hypothalamus_destroy(gw->hypothalamus); /* v0.4 */
+    if (gw->broca)       broca_destroy(gw->broca);               /* v0.4 */
     if (gw->learner)     active_learner_destroy(gw->learner);
     if (gw->prefrontal)  prefrontal_destroy(gw->prefrontal);
     if (gw->causal_graph) causal_graph_destroy(gw->causal_graph);
@@ -591,25 +610,8 @@ static void handle_chat(GatewaySystem* gw, int fd, const char* body) {
             arena_feedback_to_master(gw->arena, gw->topology);
         }
 
-        // 增量模板维护：每轮对话构建 2 条模板，逐步积累
-        {
-            SubTopology* _tpl = master_get_sub_topology_by_type(gw->topology, TOPO_TEMPLATE);
-            int _tpl_count = (_tpl && _tpl->net) ? _tpl->net->node_count : 0;
-            // 上限动态：总节点 / 10，最低 2000（随知识增长自然扩容）
-            int _all_nodes = 0;
-            for (int _ti = 0; _ti < gw->topology->sub_topo_count; _ti++) {
-                SubTopology* _st = gw->topology->sub_topologies[_ti];
-                if (_st && _st->net) _all_nodes += _st->net->node_count;
-            }
-            int _tpl_max = (_all_nodes > 20000) ? _all_nodes / 10 : 2000;
-            if (gw->total_dialogs % 5 == 0 && _tpl_count < _tpl_max) {
-                broca_build_templates(gw->topology, 2, 5);
-            }
-            // 每 200 轮对话做一次衰减清理
-            if (gw->total_dialogs % 200 == 0) {
-                broca_decay_templates(gw->topology, 20, 0.85f);
-            }
-        }
+        /* 模板构建已由 Broca 自主 tick 调度（brainstem → broca_tick），
+         * 对话路径不再重复调用 */
 
         free(response);
     } else {

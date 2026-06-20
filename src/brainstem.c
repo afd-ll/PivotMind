@@ -596,12 +596,7 @@ float brainstem_get_circadian(Brainstem* bs) {
 const char* brainstem_get_circadian_phase(Brainstem* bs) {
     if (!bs) return "unknown";
     int hour = current_hour(bs->current_time);
-    if (hour >= 0  && hour < 6)  return "sleep";
-    if (hour >= 6  && hour < 10) return "waking";
-    if (hour >= 10 && hour < 14) return "active";
-    if (hour >= 14 && hour < 18) return "afternoon";
-    if (hour >= 18 && hour < 22) return "evening";
-    return "winding";
+    return brainstem_circadian_phase_name(hour, 0);
 }
 
 void brainstem_set_thalamus(Brainstem* bs, Thalamus* th) {
