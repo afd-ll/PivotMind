@@ -229,6 +229,15 @@ static int deep_walk(SelfLearner* sl, int start_topo, int start_node,
                 if (r <= acc) { chosen = i; break; }
             }
             cur_node = node->edges[chosen].target->node_id;
+            /* 图平滑：走过边微量强化 (+0.01)，好路径被随机游走自然加强 */
+            {
+                int lk = node->node_id & (PM_NODE_LOCK_COUNT - 1);
+                pthread_mutex_lock(&sub->net->node_locks[lk]);
+                float* pw = &node->edges[chosen].weight;
+                *pw += 0.01f;
+                if (*pw > 1.0f) *pw = 1.0f;
+                pthread_mutex_unlock(&sub->net->node_locks[lk]);
+            }
             /* 30% 概率尝试跨拓扑跳转 */
             if (_sl_randf() < 0.3f && sl->master->cross_adj) {
                 int adj = cur_topo * MAX_NODES_PER_TOPO + cur_node;
@@ -255,14 +264,13 @@ static int deep_walk(SelfLearner* sl, int start_topo, int start_node,
 
 /**
  * 审查游走路径并执行自动修正：
- *   - 传递性：A→B→C 但没有 A→C → 新建 A→C（低权重）
- *   - 矛盾：暂简化实现（TODO: 需要否定概念检测）
- *   - 语义：相似节点无连接 → 建议连接
+ *   - 矛盾检测：弱边衰减
+ *   - 语义关联：跨拓扑特征相似节点建连接（需过余弦相似度闸门）
+ *
+ * 注意：同拓扑传递闭包（A→B→C → 建A→C）已移除。
+ * 随机游走路径的三元组缺乏语义依据，会造成 O(n²) 边爆炸。
+ * 图增长由联网搜索/文章阅读（真实语料）+ 跨拓扑语义链接（质量闸门）驱动。
  */
-static int _fuzzy_roll(void) {
-    return _sl_rand(100) < 15;  // 15% 模糊区
-}
-
 static int audit_path(SelfLearner* sl, WalkStep* steps, int len) {
     int mods = 0;
 
@@ -274,34 +282,6 @@ static int audit_path(SelfLearner* sl, WalkStep* steps, int len) {
             ReasoningNode* nb = steps[b].ptr;
             ReasoningNode* nc = steps[c].ptr;
             if (!na || !nb || !nc || na == nc || nb == nc) continue;
-
-            /* === 传递性检测 === */
-            /* A→B 存在 (在路径中) + B→C 存在 (在路径中) + A→C 不存在 → 创建 A→C */
-            if (steps[a].topo_id == steps[c].topo_id) {
-                /* 同拓扑内的传递检测 */
-                int a_to_c = 0;
-                for (int ci = 0; ci < na->edge_count; ci++) {
-                    if (na->edges[ci].target == nc) { a_to_c = 1; break; }
-                }
-                if (!a_to_c) {
-                    // 15% 模糊区：即使条件满足也随机跳过（防回音壁）
-                    if (_fuzzy_roll()) {
-                        LOG_DEBUG("[自学] 模糊跳过: %s→%s→%s",
-                                  na->concept, nb->concept, nc->concept);
-                    } else {
-                        SubTopology* sub = sl->master->sub_topologies[steps[a].topo_id];
-                        if (sub && sub->net) {
-                            huarong_net_add_connection(sub->net, na->node_id,
-                                nc->node_id, sl->cfg.transitive_boost);
-                            sl->total_transitive++;
-                            mods++;
-                            LOG_INFO("[自学] 传递性: %s→%s→%s → 新建 %s→%s",
-                                     na->concept, nb->concept, nc->concept,
-                                     na->concept, nc->concept);
-                        }
-                    }
-                }
-            }
 
             /* === 语义缺失检测 === */
             /* 跨拓扑：特征相似但无连接 → 创建跨拓扑连接 */

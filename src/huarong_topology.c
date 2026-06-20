@@ -391,14 +391,16 @@ int node_conn_hash_insert(HuarongTopologyNet* net, ReasoningNode* node,
         node->conn_hash = nht;
         node->conn_hash_mask = new_mask;
 
-        /* 旧哈希表延迟释放（与 Edge 数组同样策略） */
+        /* 旧哈希表延迟释放（与 Edge 数组同样策略，需持 retire_mutex 防竞态） */
         if (net) {
             RetiredArrays* ra = (RetiredArrays*)malloc(sizeof(RetiredArrays));
             if (ra) {
                 ra->old_edges = old_hash;  /* 复用 old_edges 字段存旧哈希 */
+                pthread_mutex_lock(&net->retire_mutex);
                 ra->next    = (RetiredArrays*)net->retired_conns;
                 net->retired_conns  = ra;
                 net->retired_pending = 1;
+                pthread_mutex_unlock(&net->retire_mutex);
             }
         }
     }
@@ -534,9 +536,11 @@ int huarong_net_add_connection(HuarongTopologyNet* net,
         RetiredArrays* ra = (RetiredArrays*)malloc(sizeof(RetiredArrays));
         if (ra) {
             ra->old_edges = from_node->edges;
+            pthread_mutex_lock(&net->retire_mutex);
             ra->next    = (RetiredArrays*)net->retired_conns;
             net->retired_conns  = ra;
             net->retired_pending = 1;
+            pthread_mutex_unlock(&net->retire_mutex);
         } else {
             /* 极端情况 malloc 失败：只能立即 free */
             free(from_node->edges);
