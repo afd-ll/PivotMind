@@ -141,9 +141,9 @@ typedef struct IdeaArena {
 /**
  * 创建竞技场
  */
-IdeaArena* arena_create(void);
+IdeaArena* idea_arena_create(void);
 
-void arena_destroy(IdeaArena* arena);
+void idea_arena_destroy(IdeaArena* arena);
 
 /* ── 上下文设置 ── */
 

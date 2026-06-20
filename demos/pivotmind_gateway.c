@@ -325,7 +325,7 @@ static int gw_system_init(GatewaySystem* gw) {
 
     // 想法竞争竞技场（IdeaArena — 多候选多维度竞争选择）
     fprintf(stderr, "[gateway]   创建想法竞技场 (v0.3)...\n");
-    gw->arena = arena_create();
+    gw->arena = idea_arena_create();
     if (!gw->arena) { fprintf(stderr, "[gateway] 想法竞技场创建失败\n"); return -1; }
     fprintf(stderr, "[gateway]   想法竞技场就绪 (max_candidates=%d)\n", ARENA_MAX_CANDIDATES);
 
@@ -518,7 +518,7 @@ static void gw_system_shutdown(GatewaySystem* gw) {
     if (gw->perception)   perception_destroy(gw->perception);
     if (gw->brainstem)    brainstem_destroy(gw->brainstem);
     if (gw->pfe)         pfe_destroy(gw->pfe);              /* v0.3 */
-    if (gw->arena)       arena_destroy(gw->arena);          /* v0.3 */
+    if (gw->arena)       idea_arena_destroy(gw->arena);          /* v0.3 */
     if (gw->learner)     active_learner_destroy(gw->learner);
     if (gw->prefrontal)  prefrontal_destroy(gw->prefrontal);
     if (gw->causal_graph) causal_graph_destroy(gw->causal_graph);

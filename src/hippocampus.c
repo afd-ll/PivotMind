@@ -114,7 +114,7 @@ int hippocampus_consolidate(Hippocampus* hc) {
                     sig.type     = THAL_SIG_CONSOLIDATE_NODE;
                     sig.source   = THAL_HIPPOCAMPUS;
                     sig.target   = THAL_PERCEPTION;
-                    sig.node_id  = best_id;
+                    sig.data.consolidate.node_id  = best_id;
                     thalamus_send_signal(hc->thalamus, THAL_PERCEPTION, &sig);
                     if (qr > 0) {
                         hc->web_queries++;

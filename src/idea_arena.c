@@ -33,7 +33,7 @@ const char* arena_dimension_name(int dim) {
  *  创建 / 销毁
  * ================================================================ */
 
-IdeaArena* arena_create(void) {
+IdeaArena* idea_arena_create(void) {
     IdeaArena* arena = (IdeaArena*)calloc(1, sizeof(IdeaArena));
     if (!arena) return NULL;
 
@@ -56,7 +56,7 @@ IdeaArena* arena_create(void) {
     return arena;
 }
 
-void arena_destroy(IdeaArena* arena) {
+void idea_arena_destroy(IdeaArena* arena) {
     if (!arena) return;
     pthread_mutex_destroy(&arena->lock);
     free(arena);
