@@ -220,21 +220,21 @@ static void collect_topo_health(MasterTopology* master,
             if (!node) continue;
             total_nodes_all++;
 
-            if (node->connection_count == 0) {
+            if (node->edge_count == 0) {
                 zero_deg_nodes++;
             }
 
-            for (int e = 0; e < node->connection_count; e++) {
+            for (int e = 0; e < node->edge_count; e++) {
                 te++;
                 total_edges_all++;
 
-                float c = node->connection_confidences[e];
+                float c = node->edges[e].confidence;
                 if (c < 0.3f) low_c++;
                 else if (c < 0.7f) med_c++;
                 else high_c++;
 
                 // 检查权重是否接近上限 (5.0)
-                if (node->connection_weights[e] >= 4.95f) {
+                if (node->edges[e].weight >= 4.95f) {
                     sat_edges++;
                 }
             }
@@ -361,7 +361,7 @@ int main(int argc, char* argv[]) {
         total_nodes += sub->net->node_count;
         for (int n = 0; n < sub->net->node_count; n++) {
             ReasoningNode* node = sub->net->nodes[n];
-            if (node) total_edges += node->connection_count;
+            if (node) total_edges += node->edge_count;
         }
     }
     printf("  当前: %d 节点, %d 条内部边\n", total_nodes, total_edges);
@@ -502,7 +502,7 @@ int main(int argc, char* argv[]) {
                 }
                 for (int n = 0; n < max_walks && n < vocab->net->node_count; n++) {
                     ReasoningNode* start = vocab->net->nodes[n];
-                    if (!start || start->connection_count < 1) continue;
+                    if (!start || start->edge_count < 1) continue;
                     int len = topology_walk_greedy(vocab, start->node_id,
                         path_buf, score_buf, 6,
                         visited, 0.3f, master, NULL, NULL);
@@ -517,12 +517,12 @@ int main(int argc, char* argv[]) {
                 DictTable* dict = (DictTable*)master->ext_dict;
                 for (int n = 0; n < vocab->net->node_count && merged < 200; n++) {
                     ReasoningNode* node = vocab->net->nodes[n];
-                    if (!node || !node->concept || !node->connection_confidences) continue;
+                    if (!node || !node->concept || !node->edges) continue;
                     int clen = (int)strlen(node->concept);
                     if (clen < 2 || clen > 6) continue;  /* 只处理2-6字节的单字 */
-                    for (int c = 0; c < node->connection_count; c++) {
-                        if (node->connection_confidences[c] < 0.75f) continue;
-                        ReasoningNode* nb = node->connections[c];
+                    for (int c = 0; c < node->edge_count; c++) {
+                        if (node->edges[c].confidence < 0.75f) continue;
+                        ReasoningNode* nb = node->edges[c].target;
                         if (!nb || !nb->concept || nb->node_id <= node->node_id) continue;
                         int nblen = (int)strlen(nb->concept);
                         if (nblen < 2 || nblen > 6) continue;
@@ -538,13 +538,21 @@ int main(int argc, char* argv[]) {
                 if (merged > 0) printf("  → 词素合并: %d 个新词\n", merged);
             }
 
-            /* POS 句式模板增量构建（基于认知控制器累积的句式模式） */
+            /* POS 句式模板增量构建（基于认知控制器累积的句式模式）
+             *
+             * 注意合并顺序：B 的 merge 在 A 的 merge 之后执行。
+             * B 的模板不会与 A 的被合并（已失活）成员合并，
+             * 只会与 A 的幸存者合并。这是有意为之——
+             * 失活节点 tpl_pos_len=0 不应再参与后续合并。 */
             {
                 CognitiveController* cc = (CognitiveController*)master->cognitive_controller;
                 if (cc) {
                     int pos_built = template_build_from_pos_patterns(master, cc, 3);
                     if (pos_built > 0) {
                         printf("  → POS 句式模板: %d 个\n", pos_built);
+                        /* 合并 Pipeline B 产出与已有模板（消除同 POS 冗余） */
+                        int mg = template_merge_by_pos_structure(master);
+                        if (mg > 0) printf("  → 模板合并: %d 组\n", mg);
                     }
                 }
             }
@@ -625,9 +633,9 @@ int main(int argc, char* argv[]) {
         for (int n = 0; n < vocab->net->node_count; n++) {
             ReasoningNode* node = vocab->net->nodes[n];
             if (!node) continue;
-            for (int ec = 0; ec < node->connection_count; ec++) {
+            for (int ec = 0; ec < node->edge_count; ec++) {
                 e++;
-                c += node->connection_confidences[ec];
+                c += node->edges[ec].confidence;
             }
         }
         vocab_edges = e;

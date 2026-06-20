@@ -74,4 +74,21 @@ float bptt_learn_from_dialog(BpttLearner* bl,
  */
 void bptt_learner_stats(BpttLearner* bl, float* out_avg_loss, int* out_steps);
 
+/* ── Phase 3: BPTT 辅助生成 — RNN 前向偏置词汇拓扑激活 ── */
+
+/**
+ * 使用训练好的 RNN 模型对输入文本做前向推理，
+ * 将 RNN 预测输出的特征向量与词汇拓扑节点做余弦相似度匹配，
+ * 给高相似度节点增加激活偏置。
+ *
+ * 这使 BPTT 的神经网络学习成果能参与生成管线：
+ * RNN "猜测"什么词汇可能出现在回复中 → 预激活这些词汇节点 →
+ * 后续拓扑走边时这些节点有更高概率被选中。
+ *
+ * @param bl         BPTT 学习器（需已训练若干步）
+ * @param input_text 当前用户输入文本
+ * @return 被偏置的节点数，<=0 表示未生效（数据不足或模型未训练）
+ */
+int bptt_bias_vocab_activation(BpttLearner* bl, const char* input_text);
+
 #endif // BPTT_LEARNER_H

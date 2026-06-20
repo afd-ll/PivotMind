@@ -6,6 +6,7 @@
 #include "cognitive_params.h"
 #include "cognitive_controller.h"
 #include "common.h"
+#include "error.h"
 #include "thread_pool.h"
 #include "path_encoding.h"
 #include "dict_loader.h"
@@ -120,7 +121,7 @@ MasterTopology* master_topology_create(int max_sub_topos) {
     master->freq_table = path_freq_table_create(PATH_TRIPLET_TABLE_SIZE);
     master->use_template_voting = 0;
     master->template_decay_round = 0;
-    master->last_context_node = -1;
+    master->_legacy_context_node = -1;
 
     pthread_rwlock_init(&master->rwlock, NULL);
 
@@ -139,6 +140,7 @@ void master_topology_destroy(MasterTopology* master) {
         if (sub) {
             if (sub->node_hash) node_hash_free(sub->node_hash);
             if (sub->net) huarong_net_destroy(sub->net);
+            pthread_rwlock_destroy(&sub->rwlock);
             free(sub);
         }
     }
@@ -232,7 +234,7 @@ int master_add_sub_topology(MasterTopology* master,
        所有调用方必须在添加拓扑时保持 TopologyType 枚举顺序(0,1,2,...,10)。
        若此处触发警告，说明调用顺序与枚举不匹配，跨拓扑邻接表索引将失效。 */
     if (sub->topo_id != (int)sub->type) {
-        fprintf(stderr, "WARNING: topology creation order mismatch: "
+        LOG_WARNING("topology creation order mismatch: "
                 "topo_id=%d type=%d (expected %d). Fix add order!\n",
                 sub->topo_id, (int)sub->type, sub->topo_id);
     }
@@ -267,7 +269,7 @@ int master_add_sub_topology(MasterTopology* master,
     // 批量添加现有节点到哈希表（加速后续 O(1) 查找）
     int nodes_added = node_hash_add_all_from_net(sub->node_hash, sub->net);
     if (nodes_added > 0) {
-        printf("[主拓扑] %s 哈希表已填充 %d 个节点\n", name, nodes_added);
+        LOG_INFO("[主拓扑] %s 哈希表已填充 %d 个节点", name, nodes_added);
         // P0-2: 打印哈希表详细信息
         node_hash_print_info(sub->node_hash);
     }
@@ -279,7 +281,10 @@ int master_add_sub_topology(MasterTopology* master,
     sub->avg_activation_value = 0.0f;
     sub->recent_activation = 0.0f;
     sub->last_used = time(NULL);
-    
+
+    /* 子拓扑级读写锁初始化 */
+    pthread_rwlock_init(&sub->rwlock, NULL);
+
     master->sub_topologies[master->sub_topo_count++] = sub;
     
     return sub->topo_id;
@@ -316,6 +321,22 @@ int master_add_cross_link(MasterTopology* master,
     pthread_rwlock_wrlock(&master->rwlock);
     
     int result = -1;
+
+    // TOCTOU 防护：wrlock 下检查是否已存在（调用方可能在无锁时做了检查）
+    if (cross_link_exists(master, from_topo_id, from_node_id,
+                          to_topo_id, to_node_id)) {
+        // 返回已有连接的 link_id（遍历查找）
+        for (int i = 0; i < master->cross_link_count; i++) {
+            CrossTopologyLink* l = master->cross_links[i];
+            if (l && l->from_topo_id == from_topo_id &&
+                l->from_node_id == from_node_id &&
+                l->to_topo_id == to_topo_id &&
+                l->to_node_id == to_node_id) {
+                result = l->link_id;
+                goto unlock;
+            }
+        }
+    }
     
     // 动态扩容
     if (master->cross_link_count >= master->cross_link_capacity) {
@@ -468,7 +489,7 @@ int master_prune_cross_links(MasterTopology* master, float min_weight, int min_u
     pthread_rwlock_unlock(&master->rwlock);
     
     if (pruned > 0)
-        printf("[跨拓扑剪枝] 移除 %d 条低质量跨拓扑连接 (min_weight=%.3f, min_use=%d)\n",
+        LOG_INFO("[跨拓扑剪枝] 移除 %d 条低质量跨拓扑连接 (min_weight=%.3f, min_use=%d)",
                pruned, min_weight, min_use_count);
     return pruned;
 }
@@ -732,14 +753,14 @@ int master_set_edge_confidence(MasterTopology* master,
     if (confidence < 0.0f) confidence = 0.0f;
     if (confidence > 1.0f) confidence = 1.0f;
     
-    for (int i = 0; i < from_node->connection_count; i++) {
-        if (from_node->connections[i] && 
-            from_node->connections[i]->node_id == to_node_id) {
-            from_node->connection_confidences[i] = confidence;
-            printf("[边置信度] 拓扑=%s, 边 %d(%s) → %d(%s), 置信度=%.2f\n",
+    for (int i = 0; i < from_node->edge_count; i++) {
+        if (from_node->edges[i].target && 
+            from_node->edges[i].target->node_id == to_node_id) {
+            from_node->edges[i].confidence = confidence;
+            LOG_INFO("[边置信度] 拓扑=%s, 边 %d(%s) → %d(%s), 置信度=%.2f",
                    sub->name,
                    from_node_id, from_node->concept ? from_node->concept : "?",
-                   to_node_id, from_node->connections[i]->concept ? from_node->connections[i]->concept : "?",
+                   to_node_id, from_node->edges[i].target->concept ? from_node->edges[i].target->concept : "?",
                    confidence);
             return 0;
         }
@@ -792,10 +813,10 @@ int master_propagate_activation(MasterTopology* master,
             // 激活 = 输入 × 逻辑权重 × 动机倾向 × (1 + 效价因子)
             // 从节点的 connection_motivational_bias 读取真实的动机倾向
             float motivation_factor = 0.5f;
-            if (source_node && source_node->connection_motivational_bias && 
-                source_node->connection_count > 0) {
-                int conn_idx = link->to_node_id % source_node->connection_count;
-                motivation_factor = source_node->connection_motivational_bias[conn_idx];
+            if (source_node && source_node->edges && 
+                source_node->edge_count > 0) {
+                int conn_idx = link->to_node_id % source_node->edge_count;
+                motivation_factor = source_node->edges[conn_idx].motivational_bias;
             }
             
             float valence_factor = 1.0f + source_valence * 0.5f;
@@ -843,7 +864,7 @@ void master_reset_activations(MasterTopology* master) {
     memset(master->activation_levels, 0, sizeof(float) * master->sub_topo_capacity);
     memset(master->active_node_ids, -1, sizeof(int) * master->sub_topo_capacity);
     
-    printf("[激活重置] 已清空所有拓扑的激活值\n");
+    LOG_INFO("[激活重置] 已清空所有拓扑的激活值");
 }
 
 void master_decay_activations(MasterTopology* master, float decay_rate) {
@@ -915,17 +936,17 @@ void knowledge_self_verify(MasterTopology* master, int topo_id, int node_id) {
     if (!node) return;
     
     float support_score = 0.0f;
-    int connection_count = 0;
+    int edge_count = 0;
     
-    for (int i = 0; i < node->connection_count; i++) {
-        if (!node->connections[i]) continue;
-        support_score += edge_conf_to_support(node->connection_confidences[i]);
-        connection_count++;
+    for (int i = 0; i < node->edge_count; i++) {
+        if (!node->edges[i].target) continue;
+        support_score += edge_conf_to_support(node->edges[i].confidence);
+        edge_count++;
     }
     
-    if (connection_count == 0) return;
+    if (edge_count == 0) return;
     
-    float consistency = support_score / connection_count;
+    float consistency = support_score / edge_count;
     
     float old_conf = node->confidence;
     
@@ -939,7 +960,7 @@ void knowledge_self_verify(MasterTopology* master, int topo_id, int node_id) {
     if (node->confidence < 0.05f) node->confidence = 0.05f;
     
     if (fabs(node->confidence - old_conf) > 0.01f) {
-        printf("[自验证] 节点 %s: 置信度 %.3f → %.3f (一致性: %.2f)\n",
+        LOG_INFO("[自验证] 节点 %s: 置信度 %.3f → %.3f (一致性: %.2f)",
                node->concept, old_conf, node->confidence, consistency);
     }
 }
@@ -955,22 +976,22 @@ void batch_self_verify(MasterTopology* master) {
         
         for (int n = 0; n < sub->net->node_count; n++) {
             ReasoningNode* node = sub->net->nodes[n];
-            if (!node || node->connection_count == 0) continue;
+            if (!node || node->edge_count == 0) continue;
             
             float old_conf = node->confidence;
             
             float support_score = 0.0f;
-            int connection_count = 0;
+            int edge_count = 0;
             
-            for (int i = 0; i < node->connection_count; i++) {
-                if (!node->connections[i]) continue;
-                support_score += edge_conf_to_support(node->connection_confidences[i]);
-                connection_count++;
+            for (int i = 0; i < node->edge_count; i++) {
+                if (!node->edges[i].target) continue;
+                support_score += edge_conf_to_support(node->edges[i].confidence);
+                edge_count++;
             }
             
-            if (connection_count == 0) continue;
+            if (edge_count == 0) continue;
             
-            float consistency = support_score / connection_count;
+            float consistency = support_score / edge_count;
             
             if (consistency > 0.3f) {
                 node->confidence += 0.01f;
@@ -1019,10 +1040,10 @@ static void topo_propagate_worker(void* arg) {
         ReasoningNode* node = sub->net->nodes[n];
         if (!node || node->activation < task->threshold) continue;
 
-        for (int c = 0; c < node->connection_count; c++) {
-            ReasoningNode* target = node->connections[c];
+        for (int c = 0; c < node->edge_count; c++) {
+            ReasoningNode* target = node->edges[c].target;
             if (!target) continue;
-            float transferred = node->activation * node->connection_weights[c];
+            float transferred = node->activation * node->edges[c].weight;
             if (transferred > 0.1f) {
                 /* 节点级锁：每个拓扑独占一线程，但后台时钟可能并发写同一节点 */
                 int tgt_lock = target->node_id & (PM_NODE_LOCK_COUNT - 1);
@@ -1082,7 +1103,7 @@ int master_propagate_parallel_topology(MasterTopology* master, float threshold) 
     if (!pool) return -1;
 
     int nworkers = thread_pool_num_workers(pool);
-    printf("[并行传播] %d 个活跃拓扑 → %d 个 worker\n", active_count, nworkers);
+    LOG_INFO("[并行传播] %d 个活跃拓扑 → %d 个 worker", active_count, nworkers);
 
     // 3. 构建任务数组（动态分配，匹配实际活跃拓扑数）
     TopoPropTask* tasks = (TopoPropTask*)calloc((size_t)active_count, sizeof(TopoPropTask));
@@ -1124,7 +1145,7 @@ int master_propagate_parallel_topology(MasterTopology* master, float threshold) 
     free(tasks);
     free(th_tasks);
 
-    printf("[并行传播] 完成，共传播 %d 个节点（%d 个拓扑并行）\n", total, task_idx);
+    LOG_INFO("[并行传播] 完成，共传播 %d 个节点（%d 个拓扑并行）", total, task_idx);
     return total;
 }
 
@@ -1155,7 +1176,7 @@ char* master_generate_response(MasterTopology* master,
         char dict_words[100][64] = {{0}};
         char dict_pos[100][8] = {{0}};
         int wc = dict_segment_text(dict, input_text, dict_words, dict_pos, 100);
-        fprintf(stderr, "[dict] segmented '%s' -> %d words\n", input_text, wc);
+        LOG_DEBUG("[dict] segmented '%s' -> %d words", input_text, wc);
         if (wc > 0) {
             SubTopology* vocab_sub = NULL;
             for (int t = 0; t < master->sub_topo_count; t++) {
@@ -1168,15 +1189,16 @@ char* master_generate_response(MasterTopology* master,
                 int found = 0;
                 for (int i = 0; i < wc && pos < max_output_len - 10; i++) {
                     ReasoningNode* node = node_hash_find(vocab_sub->node_hash, dict_words[i]);
-                    if (node && node->concept) {
+                    if (node && node->concept && concept_is_printable(node->concept)) {
                         if (pos > 0) pos += snprintf(response + pos, max_output_len - pos, "，");
                         pos += snprintf(response + pos, max_output_len - pos, "%s", node->concept);
                         found = 1;
-                        for (int c = 0; c < node->connection_count && c < 3 && pos < max_output_len - 20; c++) {
-                            if (node->connection_confidences && node->connection_confidences[c] > 0.6f
-                                && node->connections[c] && node->connections[c]->concept) {
+                        for (int c = 0; c < node->edge_count && c < 3 && pos < max_output_len - 20; c++) {
+                            if (node->edges && node->edges[c].confidence > 0.6f
+                                && node->edges[c].target && node->edges[c].target->concept
+                                && concept_is_printable(node->edges[c].target->concept)) {
                                 pos += snprintf(response + pos, max_output_len - pos,
-                                    " %s", node->connections[c]->concept);
+                                    " %s", node->edges[c].target->concept);
                             }
                         }
                     }
@@ -1240,9 +1262,9 @@ char* master_generate_response(MasterTopology* master,
             // 上下文拓扑 → 词汇激活传播：当前活跃上下文增强相关词汇节点
             {
                 SubTopology* ctx = master_get_sub_topology_by_type(master, TOPO_CONTEXT);
-                if (ctx && ctx->net && ctx->node_hash && master->last_context_node >= 0
-                    && master->last_context_node < ctx->net->node_count) {
-                    ReasoningNode* ctx_node = ctx->net->nodes[master->last_context_node];
+                if (ctx && ctx->net && ctx->node_hash && master->_legacy_context_node >= 0
+                    && master->_legacy_context_node < ctx->net->node_count) {
+                    ReasoningNode* ctx_node = ctx->net->nodes[master->_legacy_context_node];
                     if (ctx_node && ctx_node->activation > 0.1f) {
                         float boost = ctx_node->activation * 0.25f;
                         for (int si = 0; si < start_count; si++) {
@@ -1283,7 +1305,7 @@ char* master_generate_response(MasterTopology* master,
                         int sid = path_nodes[0];
                         if (sid >= 0 && sid < node_count) {
                             ReasoningNode* sn = vocab_sub->net->nodes[sid];
-                            if (sn && sn->concept)
+                            if (sn && sn->concept && concept_is_printable(sn->concept))
                                 pos += snprintf(response + pos, max_output_len - pos, "%s", sn->concept);
                         }
                     }
@@ -1292,7 +1314,7 @@ char* master_generate_response(MasterTopology* master,
                         int nid = path_nodes[p];
                         if (nid < 0 || nid >= node_count) continue;
                         ReasoningNode* node = vocab_sub->net->nodes[nid];
-                        if (!node || !node->concept) continue;
+                        if (!node || !node->concept || !concept_is_printable(node->concept)) continue;
 
                         // 模板衔接：查找 prev → cur 的语法连接词
                         const char* connector = NULL;
@@ -1368,6 +1390,7 @@ char* master_generate_response(MasterTopology* master,
 #define EDGE_WALK_W_NODE_CONF   0.10f   // 目标节点置信度
 // 效维已改为乘法因子，见 VALENCE_COEFF
 #define EDGE_WALK_W_SEMANTIC    0.20f   // 语义得分（原0.10→0.20：更强的主题约束）
+#define EDGE_WALK_W_GOAL_GRAVITY 0.12f  // 目标引力得分：候选节点与输入锚点的语义对齐
 
 /** 效价乘法系数 — 扩大否决范围，极端不匹配时产生3x差距 */
 #define EDGE_WALK_VALENCE_COEFF 0.85f   // 原0.6→0.85：modifier范围[0.15, 1.85]
@@ -1375,18 +1398,23 @@ char* master_generate_response(MasterTopology* master,
 /** 路径回溯权重 — 候选节点与已走路径中其他节点的连接强度 */
 #define EDGE_WALK_W_PATH_CTX    0.10f   // 路径回溯得分（原0.15→0.10：语义权重已提升，降低冗余）
 
-/** 走边基础加法得分 — 所有走边算法的共享评分核 */
+/** 走边基础加法得分 — 所有走边算法的共享评分核
+ *  七维全部 clamp 到 [0,1]，防止某维度（如 edge_weight 被学习推至 3+）主宰总分
+ *  第七维 goal_similarity：候选节点与输入锚点（query_anchor）的余弦相似度，
+ *  提供目标引力偏置，使走边不再是纯局部联想，而是向输入主题方向收敛 */
 static inline float walk_base_score(
     float edge_weight, float edge_conf, float edge_bias,
     float node_act, float node_conf, float semantic_score,
-    float semantic_weight)
+    float semantic_weight,
+    float goal_similarity)
 {
-    return EDGE_WALK_W_WEIGHT     * edge_weight +
-           EDGE_WALK_W_CONF       * edge_conf   +
-           EDGE_WALK_W_BIAS       * edge_bias   +
-           EDGE_WALK_W_ACTIVATION * node_act    +
-           EDGE_WALK_W_NODE_CONF  * node_conf   +
-           semantic_weight * (semantic_score + 1.0f) * 0.5f;
+    return EDGE_WALK_W_WEIGHT     * clamp(edge_weight, 0.0f, 1.0f) +
+           EDGE_WALK_W_CONF       * clamp(edge_conf,   0.0f, 1.0f) +
+           EDGE_WALK_W_BIAS       * clamp(edge_bias,   0.0f, 1.0f) +
+           EDGE_WALK_W_ACTIVATION * clamp(node_act,    0.0f, 1.0f) +
+           EDGE_WALK_W_NODE_CONF  * clamp(node_conf,   0.0f, 1.0f) +
+           semantic_weight * (semantic_score + 1.0f) * 0.5f +
+           EDGE_WALK_W_GOAL_GRAVITY * clamp(goal_similarity, -1.0f, 1.0f);
 }
 
 /** 走边最低得分阈值 — 低于此值停止继续走 */
@@ -1633,7 +1661,7 @@ int topology_walk_greedy(SubTopology* sub, int start_node_id,
     // 贪心走边循环
     while (path_len < max_len) {
         ReasoningNode* current = net->nodes[current_id];
-        if (!current || current->connection_count <= 0) break;
+        if (!current || current->edge_count <= 0) break;
 
         int best_next_id = -1;
         float best_score = -1.0f;
@@ -1656,12 +1684,12 @@ int topology_walk_greedy(SubTopology* sub, int start_node_id,
                 if (pid < 0 || pid >= node_count || pid == current_id) continue;
                 ReasoningNode* pn = net->nodes[pid];
                 if (!pn) continue;
-                for (int ej = 0; ej < pn->connection_count; ej++) {
-                    ReasoningNode* pt = pn->connections[ej];
+                for (int ej = 0; ej < pn->edge_count; ej++) {
+                    ReasoningNode* pt = pn->edges[ej].target;
                     if (!pt) continue;
                     int pt_id = pt->node_id;
                     if (pt_id < 0 || pt_id >= node_count) continue;
-                    float w = pn->connection_weights[ej];
+                    float w = pn->edges[ej].weight;
                     if (w > path_target_weights[pt_id])
                         path_target_weights[pt_id] = w;
                 }
@@ -1670,8 +1698,8 @@ int topology_walk_greedy(SubTopology* sub, int start_node_id,
 
         // (mean_features 增量维护，见步进更新)
 
-        for (int i = 0; i < current->connection_count; i++) {
-            ReasoningNode* target = current->connections[i];
+        for (int i = 0; i < current->edge_count; i++) {
+            ReasoningNode* target = current->edges[i].target;
             if (!target) continue;
             int tid = target->node_id;
             if (tid < 0 || tid >= node_count) continue;
@@ -1680,17 +1708,17 @@ int topology_walk_greedy(SubTopology* sub, int start_node_id,
             if (visited[tid / 8] & (unsigned char)(1 << (tid % 8))) continue;
 
             // --- 边三维 ---
-            float edge_weight = current->connection_weights[i];
+            float edge_weight = current->edges[i].weight;
 
             float edge_conf = 0.0f;
-            if (current->connection_confidences && i < current->connection_count)
-                edge_conf = current->connection_confidences[i];
+            if (current->edges && i < current->edge_count)
+                edge_conf = current->edges[i].confidence;
             else
                 edge_conf = edge_weight;  // 兜底
 
             float edge_bias = 0.0f;
-            if (current->connection_motivational_bias && i < current->connection_count)
-                edge_bias = current->connection_motivational_bias[i];
+            if (current->edges && i < current->edge_count)
+                edge_bias = current->edges[i].motivational_bias;
 
             // --- 目标节点 ---
             float node_act   = target->activation;
@@ -1760,11 +1788,18 @@ int topology_walk_greedy(SubTopology* sub, int start_node_id,
             float concept_cross_norm = (concept_hit_count > 0)
                 ? concept_cross_score / sqrtf((float)concept_hit_count) : 0.0f;
 
+            // --- 目标引力（第8维）：候选节点与输入锚点对齐 ---
+            float goal_similarity = 0.0f;
+            if (query_anchor && target->features && target->feature_dim == NODE_FEATURE_DIM) {
+                goal_similarity = cosine_similarity(
+                    target->features, query_anchor, NODE_FEATURE_DIM);
+            }
+
             // --- 混合评分 ---
             float semantic_weight = EDGE_WALK_W_SEMANTIC + (context_count > 5 ? 0.10f : 0.0f);
             float base_score = walk_base_score(
                 edge_weight, edge_conf, edge_bias, node_act, node_conf,
-                semantic_score, semantic_weight);
+                semantic_score, semantic_weight, goal_similarity);
             base_score +=
                 // 路径回溯：词汇 0.6 + 语义 0.4 + 模板 0.4 + 概念 0.3
                 EDGE_WALK_W_PATH_CTX * path_ctx_norm * 0.6f +
@@ -1813,9 +1848,9 @@ int topology_walk_greedy(SubTopology* sub, int start_node_id,
                 if (prev_id >= 0 && prev_id < node_count) {
                     ReasoningNode* prev = net->nodes[prev_id];
                     if (prev) {
-                        for (int ej = 0; ej < prev->connection_count; ej++) {
-                            if (prev->connections[ej] == current) {
-                                if (prev->connection_weights[ej] > 0.2f)
+                        for (int ej = 0; ej < prev->edge_count; ej++) {
+                            if (prev->edges[ej].target == current) {
+                                if (prev->edges[ej].weight > 0.2f)
                                     score += 0.05f;  // 三元组链式奖励
                                 break;
                             }
@@ -2015,12 +2050,12 @@ int competitive_queue_generate(
 
             // 意图调制：利用节点的 motivational_bias 均值作为受体敏感度
             float avg_bias = 0.0f;
-            if (node->connection_count > 0) {
-                for (int c = 0; c < node->connection_count && c < 10; c++) {
-                    if (node->connection_motivational_bias)
-                        avg_bias += node->connection_motivational_bias[c];
+            if (node->edge_count > 0) {
+                for (int c = 0; c < node->edge_count && c < 10; c++) {
+                    if (node->edges)
+                        avg_bias += node->edges[c].motivational_bias;
                 }
-                avg_bias /= (float)(node->connection_count < 10 ? node->connection_count : 10);
+                avg_bias /= (float)(node->edge_count < 10 ? node->edge_count : 10);
             }
             // 神经调质：高偏置节点对意图更敏感
             score *= (0.5f + 0.5f * intent_weight * (0.3f + 0.7f * avg_bias));
@@ -2090,13 +2125,13 @@ int competitive_queue_generate(
         }
 
         // ---- 6. 胜者广播：激活其邻居 ----
-        for (int c = 0; c < winner->connection_count; c++) {
-            ReasoningNode* neighbor = winner->connections[c];
+        for (int c = 0; c < winner->edge_count; c++) {
+            ReasoningNode* neighbor = winner->edges[c].target;
             if (!neighbor) continue;
             int nid = neighbor->node_id;
             if (nid < 0 || nid >= node_count) continue;
             if (visited[nid / 8] & (unsigned char)(1 << (nid % 8))) continue;
-            float boost = winner->connection_weights[c] * CQ_BROADCAST_GAIN * winner->activation;
+            float boost = winner->edges[c].weight * CQ_BROADCAST_GAIN * winner->activation;
             int nbr_lock = neighbor->node_id & (PM_NODE_LOCK_COUNT - 1);
             pthread_mutex_lock(&net->node_locks[nbr_lock]);
             if (neighbor->activation < boost) neighbor->activation = boost;
@@ -2159,8 +2194,7 @@ int topology_walk_beam(SubTopology* sub, int start_node_id,
                        MasterTopology* master,
                        const float* query_anchor,
                        void* cc_ptr) {
-    (void)master; (void)query_anchor;  /* 预留: 跨拓扑 beam search */
-    if (!sub || !sub->net || !path_out || max_len <= 0) return 0;
+    (void)master;     if (!sub || !sub->net || !path_out || max_len <= 0) return 0;
 
     HuarongTopologyNet* net = sub->net;
     int node_count = net->node_count;
@@ -2232,7 +2266,7 @@ int topology_walk_beam(SubTopology* sub, int start_node_id,
             if (beam->len >= max_len) continue;
 
             ReasoningNode* current = net->nodes[beam->current_id];
-            if (!current || current->connection_count <= 0) continue;
+            if (!current || current->edge_count <= 0) continue;
 
             // 预计算语义上下文均值
             float mean_features[NODE_FEATURE_DIM];
@@ -2243,19 +2277,19 @@ int topology_walk_beam(SubTopology* sub, int start_node_id,
                 has_mean = 1;
             }
 
-            for (int i = 0; i < current->connection_count; i++) {
-                ReasoningNode* target = current->connections[i];
+            for (int i = 0; i < current->edge_count; i++) {
+                ReasoningNode* target = current->edges[i].target;
                 if (!target) continue;
                 int tid = target->node_id;
                 if (tid < 0 || tid >= node_count) continue;
                 if (beam->vis[tid / 8] & (unsigned char)(1 << (tid % 8))) continue;
 
                 // 评分（简化版：边三维 + 节点二维 + 语义，跳过路径回溯）
-                float edge_weight = current->connection_weights[i];
-                float edge_conf = (current->connection_confidences && i < current->connection_count)
-                                  ? current->connection_confidences[i] : edge_weight;
-                float edge_bias = (current->connection_motivational_bias && i < current->connection_count)
-                                  ? current->connection_motivational_bias[i] : 0.0f;
+                float edge_weight = current->edges[i].weight;
+                float edge_conf = (current->edges && i < current->edge_count)
+                                  ? current->edges[i].confidence : edge_weight;
+                float edge_bias = (current->edges && i < current->edge_count)
+                                  ? current->edges[i].motivational_bias : 0.0f;
 
                 float node_act  = target->activation;
                 float node_conf = target->confidence;
@@ -2269,10 +2303,16 @@ int topology_walk_beam(SubTopology* sub, int start_node_id,
                 if (target->features && has_mean)
                     semantic_score = cosine_similarity(target->features, mean_features, NODE_FEATURE_DIM);
 
+                // --- 目标引力 ---
+                float goal_sim = 0.0f;
+                if (query_anchor && target->features && target->feature_dim == NODE_FEATURE_DIM)
+                    goal_sim = cosine_similarity(target->features, query_anchor, NODE_FEATURE_DIM);
+
                 float base_score = walk_base_score(
                     edge_weight, edge_conf, edge_bias, node_act, node_conf,
                     semantic_score,
-                    EDGE_WALK_W_SEMANTIC + (beam->context_count > 5 ? 0.10f : 0.0f));
+                    EDGE_WALK_W_SEMANTIC + (beam->context_count > 5 ? 0.10f : 0.0f),
+                    goal_sim);
 
                 float valence_match = 1.0f - fabsf(beam->context_valence - target->valence) * 0.5f;
                 float valence_mod = 0.5f + 0.5f * valence_match;
@@ -2285,9 +2325,9 @@ int topology_walk_beam(SubTopology* sub, int start_node_id,
                     if (prev_id >= 0 && prev_id < node_count) {
                         ReasoningNode* prev = net->nodes[prev_id];
                         if (prev) {
-                            for (int ej = 0; ej < prev->connection_count; ej++) {
-                                if (prev->connections[ej] == current) {
-                                    if (prev->connection_weights[ej] > 0.2f)
+                            for (int ej = 0; ej < prev->edge_count; ej++) {
+                                if (prev->edges[ej].target == current) {
+                                    if (prev->edges[ej].weight > 0.2f)
                                         score += 0.05f;
                                     break;
                                 }
@@ -2478,7 +2518,7 @@ int topology_walk_cross(MasterTopology* master,
                         const float* topo_act,
                         const float* query_anchor,
                         void* cc_ptr) {
-    (void)query_anchor;  /* 预留: 跨拓扑锚点引导 */
+    (void)query_anchor;  /* 预留: 跨拓扑锚点引导 — 已启用目标引力（walk_base_score 第7维） */
     if (!master || !path_topos_out || !path_nodes_out || max_len <= 0) return 0;
     if (start_topo_id < 0 || start_topo_id >= master->sub_topo_count) return 0;
 
@@ -2572,8 +2612,8 @@ int topology_walk_cross(MasterTopology* master,
         }
 
         // --- 评估本拓扑内的连接 ---
-        for (int i = 0; i < cur_ra->connection_count; i++) {
-            ReasoningNode* target = cur_ra->connections[i];
+        for (int i = 0; i < cur_ra->edge_count; i++) {
+            ReasoningNode* target = cur_ra->edges[i].target;
             if (!target) continue;
             int tid = target->node_id;
             if (tid < 0 || tid >= cur_sub->net->node_count) continue;
@@ -2590,12 +2630,12 @@ int topology_walk_cross(MasterTopology* master,
             if (used_len > 0 && target->concept && char_in_set(target->concept, used_chars))
                 continue;
 
-            float edge_weight = (cur_ra->connection_weights && i < cur_ra->connection_count)
-                                ? cur_ra->connection_weights[i] : 0.0f;
-            float edge_conf = (cur_ra->connection_confidences && i < cur_ra->connection_count)
-                              ? cur_ra->connection_confidences[i] : edge_weight;
-            float edge_bias = (cur_ra->connection_motivational_bias && i < cur_ra->connection_count)
-                              ? cur_ra->connection_motivational_bias[i] : 0.0f;
+            float edge_weight = (cur_ra->edges && i < cur_ra->edge_count)
+                                ? cur_ra->edges[i].weight : 0.0f;
+            float edge_conf = (cur_ra->edges && i < cur_ra->edge_count)
+                              ? cur_ra->edges[i].confidence : edge_weight;
+            float edge_bias = (cur_ra->edges && i < cur_ra->edge_count)
+                              ? cur_ra->edges[i].motivational_bias : 0.0f;
             float node_act = target->activation;
             float node_conf = target->confidence;
             // 回路3b: 混入cognitive_confidence三维综合置信度
@@ -2605,16 +2645,23 @@ int topology_walk_cross(MasterTopology* master,
             }
             float raw_val = target->valence;
 
-            // --- 语义得分（第7维）---
+            // --- 语义得分 ---
             float semantic_score = 0.0f;
             if (target->features && has_mean) {
                 semantic_score = cosine_similarity(target->features, mean_features, NODE_FEATURE_DIM);
             }
 
+            // --- 目标引力 ---
+            float goal_sim = 0.0f;
+            if (query_anchor && target->features && target->feature_dim == NODE_FEATURE_DIM) {
+                goal_sim = cosine_similarity(target->features, query_anchor, NODE_FEATURE_DIM);
+            }
+
             float base_score = walk_base_score(
                 edge_weight, edge_conf, edge_bias, node_act, node_conf,
                 semantic_score,
-                EDGE_WALK_W_SEMANTIC + (context_count > 5 ? 0.10f : 0.0f));
+                EDGE_WALK_W_SEMANTIC + (context_count > 5 ? 0.10f : 0.0f),
+                goal_sim);
 
             float valence_mod = 1.0f + EDGE_WALK_VALENCE_COEFF * raw_val;
             // 意图权重乘数：当前拓扑的 topo_act
@@ -2679,15 +2726,23 @@ int topology_walk_cross(MasterTopology* master,
                         }
                         float raw_val = tgt_node ? tgt_node->valence : 0.0f;
 
-                        // --- 语义得分（第7维） ---
+                        // --- 语义得分 ---
                         float semantic_score = 0.0f;
                         if (tgt_node && tgt_node->features && has_mean) {
                             semantic_score = cosine_similarity(tgt_node->features, mean_features, NODE_FEATURE_DIM);
                         }
 
+                        // --- 目标引力 ---
+                        float goal_sim = 0.0f;
+                        if (query_anchor && tgt_node && tgt_node->features
+                            && tgt_node->feature_dim == NODE_FEATURE_DIM) {
+                            goal_sim = cosine_similarity(
+                                tgt_node->features, query_anchor, NODE_FEATURE_DIM);
+                        }
+
                         float base_score = walk_base_score(
                             cross_weight, cross_weight, 0.0f, node_act, node_conf,
-                            semantic_score, EDGE_WALK_W_SEMANTIC);
+                            semantic_score, EDGE_WALK_W_SEMANTIC, goal_sim);
 
                         float valence_mod = 1.0f + EDGE_WALK_VALENCE_COEFF * raw_val;
                         // 意图权重乘数：目标拓扑的 topo_act
@@ -2834,19 +2889,19 @@ void master_visualize_topology(MasterTopology* master, int topo_id) {
     SubTopology* sub = master->sub_topologies[topo_id];
     if (!sub) return;
     
-    printf("\n========== %s ==========\n", sub->name);
-    printf("类型: %s\n", TOPOLOGY_TYPE_NAMES[sub->type]);
-    printf("节点数: %d\n", sub->net->node_count);
-    printf("优先级: %d\n", sub->priority);
-    printf("权重: %.2f\n", sub->weight);
-    printf("总激活次数: %d\n", sub->total_activations);
-    printf("平均激活值: %.4f\n", sub->avg_activation_value);
+    LOG_INFO("\n========== %s ==========", sub->name);
+    LOG_INFO("类型: %s", TOPOLOGY_TYPE_NAMES[sub->type]);
+    LOG_INFO("节点数: %d", sub->net->node_count);
+    LOG_INFO("优先级: %d", sub->priority);
+    LOG_INFO("权重: %.2f", sub->weight);
+    LOG_INFO("总激活次数: %d", sub->total_activations);
+    LOG_INFO("平均激活值: %.4f", sub->avg_activation_value);
     
-    printf("\n节点列表:\n");
+    LOG_INFO("\n节点列表:");
     for (int i = 0; i < sub->net->node_count && i < 20; i++) {
         ReasoningNode* node = sub->net->nodes[i];
         if (node) {
-            printf("  [%d] %s (激活=%.3f)\n",
+            LOG_INFO("  [%d] %s (激活=%.3f)",
                    node->node_id, 
                    node->concept ? node->concept : "?",
                    node->activation);
@@ -2854,24 +2909,24 @@ void master_visualize_topology(MasterTopology* master, int topo_id) {
     }
     
     if (sub->net->node_count > 20) {
-        printf("  ... 还有 %d 个节点\n", sub->net->node_count - 20);
+        LOG_INFO("  ... 还有 %d 个节点", sub->net->node_count - 20);
     }
     
-    printf("==============================\n\n");
+    LOG_INFO("==============================");
 }
 
 void master_visualize_cross_links(MasterTopology* master) {
     if (!master) return;
     
-    printf("\n===== 跨拓扑连接 =====\n");
-    printf("总数: %d\n\n", master->cross_link_count);
+    LOG_INFO("\n===== 跨拓扑连接 =====");
+    LOG_INFO("总数: %d", master->cross_link_count);
     
     for (int i = 0; i < master->cross_link_count && i < 30; i++) {
         CrossTopologyLink* link = master->cross_links[i];
         SubTopology* from = master_get_sub_topology(master, link->from_topo_id);
         SubTopology* to = master_get_sub_topology(master, link->to_topo_id);
         
-        printf("[%d] %s(节点%d) --[%s]--> %s(节点%d) 权重=%.2f\n",
+        LOG_INFO("[%d] %s(节点%d) --[%s]--> %s(节点%d) 权重=%.2f",
                link->link_id,
                from ? from->name : "?", link->from_node_id,
                link->relation,
@@ -2880,10 +2935,10 @@ void master_visualize_cross_links(MasterTopology* master) {
     }
     
     if (master->cross_link_count > 30) {
-        printf("... 还有 %d 个连接\n", master->cross_link_count - 30);
+        LOG_INFO("... 还有 %d 个连接", master->cross_link_count - 30);
     }
     
-    printf("======================\n\n");
+    LOG_INFO("======================");
 }
 
 void master_get_system_status(MasterTopology* master,
@@ -2919,7 +2974,7 @@ int master_add_training_data(MasterTopology* master, const char* input_text,
                             const char* response_text, float reward) {
     if (!master || !input_text || !response_text) return -1;
     
-    printf("[增量训练] 添加训练数据: 输入='%s', 输出='%s', 奖励=%.2f\n",
+    LOG_INFO("[增量训练] 添加训练数据: 输入='%s', 输出='%s', 奖励=%.2f",
            input_text, response_text, reward);
     
     char** tokens = NULL;
@@ -2963,7 +3018,7 @@ int master_batch_train(MasterTopology* master, const char* train_file_path) {
     
     FILE* fp = fopen(train_file_path, "r");
     if (!fp) {
-        printf("[增量训练] 无法打开训练文件: %s\n", train_file_path);
+        LOG_ERROR("[增量训练] 无法打开训练文件: %s", train_file_path);
         return -1;
     }
     
@@ -3002,7 +3057,7 @@ int master_batch_train(MasterTopology* master, const char* train_file_path) {
     }
     
     fclose(fp);
-    printf("[增量训练] 从文件 %s 加载了 %d 条训练数据\n", train_file_path, added_count);
+    LOG_INFO("[增量训练] 从文件 %s 加载了 %d 条训练数据", train_file_path, added_count);
     
     return added_count;
 }
@@ -3068,7 +3123,7 @@ int master_rebuild_edges_by_similarity(MasterTopology* master, float threshold, 
         }
     }
 
-    printf("[边重建] 基于特征相似度重建 %d 条边\n", total_edges);
+    LOG_INFO("[边重建] 基于特征相似度重建 %d 条边", total_edges);
     return total_edges;
 }
 
@@ -3089,7 +3144,7 @@ int master_save_state(MasterTopology* master, const char* file_path) {
     
     FILE* fp = fopen(file_path, "wb");
     if (!fp) {
-        printf("[状态持久化] 无法创建文件: %s\n", file_path);
+        LOG_ERROR("[状态持久化] 无法创建文件: %s", file_path);
         return -1;
     }
     
@@ -3145,21 +3200,21 @@ int master_save_state(MasterTopology* master, const char* file_path) {
             }
             
             // [v3] 写连接数 + 连接数据 (target_concept_len, target_concept, weight, bias, confidence)
-            int safe_conn_count = node->connection_count;
-            if (!node->connections) safe_conn_count = 0;
+            int safe_conn_count = node->edge_count;
+            if (!node->edges) safe_conn_count = 0;
             fwrite(&safe_conn_count, sizeof(int), 1, fp);
             for (int c = 0; c < safe_conn_count; c++) {
-                if (node->connections[c] && node->connections[c]->concept) {
-                    int tgt_len = strlen(node->connections[c]->concept) + 1;
+                if (node->edges[c].target && node->edges[c].target->concept) {
+                    int tgt_len = strlen(node->edges[c].target->concept) + 1;
                     fwrite(&tgt_len, sizeof(int), 1, fp);
-                    fwrite(node->connections[c]->concept, 1, tgt_len, fp);
+                    fwrite(node->edges[c].target->concept, 1, tgt_len, fp);
                 } else {
                     int tgt_len = 0;
                     fwrite(&tgt_len, sizeof(int), 1, fp);
                 }
-                float w = node->connection_weights ? node->connection_weights[c] : 0.0f;
-                float b = node->connection_motivational_bias ? node->connection_motivational_bias[c] : 0.0f;
-                float c2 = node->connection_confidences ? node->connection_confidences[c] : 0.0f;
+                float w = (node->edges ? node->edges[c].weight : 0.0f);
+                float b = (node->edges ? node->edges[c].motivational_bias : 0.0f);
+                float c2 = (node->edges ? node->edges[c].confidence : 0.0f);
                 fwrite(&w, sizeof(float), 1, fp);
                 fwrite(&b, sizeof(float), 1, fp);
                 fwrite(&c2, sizeof(float), 1, fp);
@@ -3226,7 +3281,7 @@ int master_save_state(MasterTopology* master, const char* file_path) {
     }
     
     fclose(fp);
-    printf("[状态持久化] 已保存到 %s (节点=%d, 链接=%d)\n", 
+    LOG_INFO("[状态持久化] 已保存到 %s (节点=%d, 链接=%d)", 
            file_path, saved_nodes, saved_links);
     
     return saved_nodes;
@@ -3234,91 +3289,119 @@ int master_save_state(MasterTopology* master, const char* file_path) {
 
 int master_load_state(MasterTopology* master, const char* file_path) {
     if (!master || !file_path) return -1;
-    
+
+    time_t t0 = time(NULL);
+    fprintf(stderr, "[状态加载] 开始加载 %s ...\n", file_path);
+
+    /* === 阶段1: 一次性将整个文件读入内存（消除数百万次 syscall） === */
     FILE* fp = fopen(file_path, "rb");
     if (!fp) {
-        printf("[状态持久化] 无法打开文件: %s\n", file_path);
+        LOG_ERROR("[状态持久化] 无法打开文件: %s", file_path);
         return -1;
     }
-    
+    fseek(fp, 0, SEEK_END);
+    long file_size = ftell(fp);
+    fseek(fp, 0, SEEK_SET);
+    if (file_size <= 0) { fclose(fp); return -1; }
+
+    uint8_t* buf = (uint8_t*)malloc((size_t)file_size);
+    if (!buf) { fclose(fp); return -1; }
+    size_t nread = fread(buf, 1, (size_t)file_size, fp);
+    fclose(fp);
+    if (nread != (size_t)file_size) { free(buf); return -1; }
+
+    const uint8_t* p   = buf;
+    const uint8_t* end = buf + file_size;
+
+    /* 内存读取宏：每次读取前检查边界，不足则跳到清理 */
+    #define READ(dst, sz) do { \
+        if ((p) + (sz) > (end)) goto buffer_exhausted; \
+        memcpy((dst), (p), (sz)); (p) += (sz); \
+    } while(0)
+    #define SKIP(sz) do { \
+        if ((p) + (sz) > (end)) goto buffer_exhausted; \
+        (p) += (sz); \
+    } while(0)
+
+    /* === 阶段2: 解析（纯内存操作，零 I/O） === */
+
     // 读文件头: 格式版本
     int fmt_ver = 1;
-    if (fread(&fmt_ver, sizeof(int), 1, fp) != 1) {
-        fclose(fp);
-        return -1;
-    }
+    READ(&fmt_ver, sizeof(int));
     // fmt_ver ∈ {2,3,4,5} = 带版本头的格式化文件
-    // fmt_ver 为其他值 = v1 格式（文件头就是节点数据，回退重读）
     if (fmt_ver != 2 && fmt_ver != 3 && fmt_ver != 4 && fmt_ver != 5) {
-        fseek(fp, 0, SEEK_SET);
+        p = buf;       // 回退到文件头
         fmt_ver = 1;
     }
 
-    // v5+: 读取特征维度校验
+    // v5+: 特征维度校验
     int file_feat_dim = -1;
     if (fmt_ver >= 5) {
-        if (fread(&file_feat_dim, sizeof(int), 1, fp) == 1) {
-            if (file_feat_dim != NODE_FEATURE_DIM) {
-                fprintf(stderr, "[状态持久化] 特征维度不匹配: 文件=%d 当前=%d\n",
-                        file_feat_dim, NODE_FEATURE_DIM);
-                fclose(fp);
-                return -1;
-            }
-        } else {
-            fclose(fp);
+        READ(&file_feat_dim, sizeof(int));
+        if (file_feat_dim != NODE_FEATURE_DIM) {
+            LOG_ERROR("[状态持久化] 特征维度不匹配: 文件=%d 当前=%d",
+                    file_feat_dim, NODE_FEATURE_DIM);
+            free(buf);
             return -1;
         }
     }
     (void)file_feat_dim;
-    
+
     int loaded_nodes = 0;
     int loaded_links = 0;
-    
+    time_t last_report = t0;
+
+    /* === 节点加载循环 === */
     while (1) {
         int topo_type;
         if (fmt_ver >= 2) {
-            if (fread(&topo_type, sizeof(int), 1, fp) != 1) break;
+            if (p + (int)sizeof(int) > end) break;
+            READ(&topo_type, sizeof(int));
+            /* 哨兵检测: 跨拓扑连接段以 0xDEADBEEF 开头，拓扑类型不会 >255 */
+            if (topo_type < 0 || topo_type > 255) {
+                p -= sizeof(int);  /* 回退，让后续跨拓扑段从正确位置开始 */
+                break;
+            }
         } else {
-            topo_type = TOPO_VOCABULARY; // v1: 全部塞进词汇拓扑
+            topo_type = TOPO_VOCABULARY;
         }
-        
+
         int node_id;
-        if (fread(&node_id, sizeof(int), 1, fp) != 1) break;
-        
+        if (p + (int)sizeof(int) > end) break;
+        READ(&node_id, sizeof(int));
+
         int concept_len;
-        if (fread(&concept_len, sizeof(int), 1, fp) != 1) break;
+        if (p + (int)sizeof(int) > end) break;
+        READ(&concept_len, sizeof(int));
         if (concept_len <= 0 || concept_len > 4096) break;
-        
+
         char concept[4096];
-        if (fread(concept, 1, concept_len, fp) != (size_t)concept_len) break;
+        if (p + concept_len > end) break;
+        READ(concept, concept_len);
         concept[concept_len - 1] = '\0';
-        
+
         float activation;
-        if (fread(&activation, sizeof(float), 1, fp) != 1) break;
-        
-        // [v4] 读特征向量 — 临时缓冲区, 创建节点后再赋值
+        if (p + (int)sizeof(float) > end) break;
+        READ(&activation, sizeof(float));
+
+        // [v4] 特征向量 — 临时缓冲区
         float feat_buf[NODE_FEATURE_DIM];
         int has_v4_features = 0;
         if (fmt_ver >= 4) {
             int feat_dim;
-            if (fread(&feat_dim, sizeof(int), 1, fp) != 1) break;
+            if (p + (int)sizeof(int) > end) break;
+            READ(&feat_dim, sizeof(int));
             if (feat_dim > 0) {
                 int read_dim = feat_dim < NODE_FEATURE_DIM ? feat_dim : NODE_FEATURE_DIM;
-                if (fread(feat_buf, sizeof(float), read_dim, fp) != (size_t)read_dim) break;
+                if (p + read_dim * (int)sizeof(float) > end) break;
+                READ(feat_buf, read_dim * (int)sizeof(float));
                 // 跳过补零部分
-                if (read_dim < NODE_FEATURE_DIM) {
-                    float skip;
-                    for (int p = read_dim; p < NODE_FEATURE_DIM; p++) {
-                        if (fread(&skip, sizeof(float), 1, fp) != 1) break;
-                    }
-                }
+                if (read_dim < NODE_FEATURE_DIM)
+                    SKIP((NODE_FEATURE_DIM - read_dim) * (int)sizeof(float));
             } else {
                 // feat_dim == 0: 跳过 NODE_FEATURE_DIM 个零
-                float skip;
-                for (int p = 0; p < NODE_FEATURE_DIM; p++) {
-                    if (fread(&skip, sizeof(float), 1, fp) != 1) break;
-                }
-                /* FNV-1a 种子: 从概念文本生成特征（与 create_reasoning_node 一致） */
+                SKIP(NODE_FEATURE_DIM * (int)sizeof(float));
+                /* FNV-1a: 从概念文本生成特征 */
                 unsigned h = 2166136261u;
                 for (const char* cp = concept; *cp; cp++) {
                     h ^= (unsigned char)*cp; h *= 16777619u;
@@ -3333,10 +3416,11 @@ int master_load_state(MasterTopology* master, const char* file_path) {
             }
             has_v4_features = 1;
         }
-        
+
         int conn_count;
-        if (fread(&conn_count, sizeof(int), 1, fp) != 1) break;
-        
+        if (p + (int)sizeof(int) > end) break;
+        READ(&conn_count, sizeof(int));
+
         // 找到目标拓扑
         SubTopology* target_topo = NULL;
         for (int t = 0; t < master->sub_topo_count; t++) {
@@ -3349,25 +3433,17 @@ int master_load_state(MasterTopology* master, const char* file_path) {
         if (!target_topo) {
             loaded_nodes++;
             if (fmt_ver == 1) continue;
-            // v2: 跳过连接数据
-            for (int c = 0; c < conn_count && conn_count > 0; c++) {
-                int skip_id; float skip_w, skip_b, skip_c;
-                if (fread(&skip_id, sizeof(int), 1, fp) != 1) break;
-                if (fread(&skip_w, sizeof(float), 1, fp) != 1) break;
-                if (fread(&skip_b, sizeof(float), 1, fp) != 1) break;
-                if (fread(&skip_c, sizeof(float), 1, fp) != 1) break;
-            }
+            // v2: 跳过连接数据 (每连接: int+3float = 16 bytes)
+            if (conn_count > 0) SKIP(conn_count * (int)(sizeof(int) + 3 * sizeof(float)));
             continue;
         }
-        
+
         // 添加或查找节点
         ReasoningNode* node = node_hash_find(target_topo->node_hash, concept);
         if (!node) {
             node = huarong_net_add_node(target_topo->net, concept, NULL, 0);
             if (node) {
                 node_hash_add(target_topo->node_hash, node);
-                // v3: 跳过自动连接—边数据随后从文件中恢复
-                // v2/v1: 自动连接（因为没有边数据可恢复）
                 if (fmt_ver < 3) {
                     auto_connect_new_node(master, target_topo, node);
                 }
@@ -3375,9 +3451,8 @@ int master_load_state(MasterTopology* master, const char* file_path) {
         }
         if (node) {
             node->activation = activation;
-            
             // [v4] 恢复特征向量
-            if (has_v4_features && node) {
+            if (has_v4_features) {
                 if (!node->features) {
                     node->features = (float*)malloc(NODE_FEATURE_DIM * sizeof(float));
                     node->feature_dim = NODE_FEATURE_DIM;
@@ -3394,16 +3469,19 @@ int master_load_state(MasterTopology* master, const char* file_path) {
             // [v3] 按概念名恢复连接
             for (int c = 0; c < conn_count && conn_count > 0; c++) {
                 int tgt_concept_len;
-                if (fread(&tgt_concept_len, sizeof(int), 1, fp) != 1) break;
+                if (p + (int)sizeof(int) > end) break;
+                READ(&tgt_concept_len, sizeof(int));
                 if (tgt_concept_len > 0 && tgt_concept_len <= 4096) {
                     char tgt_concept[4096];
-                    if (fread(tgt_concept, 1, tgt_concept_len, fp) != (size_t)tgt_concept_len) break;
+                    if (p + tgt_concept_len > end) break;
+                    READ(tgt_concept, tgt_concept_len);
                     tgt_concept[tgt_concept_len - 1] = '\0';
 
                     float conn_w, conn_b, conn_c;
-                    if (fread(&conn_w, sizeof(float), 1, fp) != 1) break;
-                    if (fread(&conn_b, sizeof(float), 1, fp) != 1) break;
-                    if (fread(&conn_c, sizeof(float), 1, fp) != 1) break;
+                    if (p + 3 * (int)sizeof(float) > end) break;
+                    READ(&conn_w, sizeof(float));
+                    READ(&conn_b, sizeof(float));
+                    READ(&conn_c, sizeof(float));
 
                     if (node && target_topo->net) {
                         ReasoningNode* tgt = node_hash_find(target_topo->node_hash, tgt_concept);
@@ -3411,108 +3489,105 @@ int master_load_state(MasterTopology* master, const char* file_path) {
                             int ret = huarong_net_add_connection(target_topo->net,
                                 node->node_id, tgt->node_id, conn_w);
                             if (ret == 0) {
-                                // 覆盖默认的 bias/confidence 为保存的值
-                                int idx = node->connection_count - 1;
-                                if (idx >= 0) {
-                                    if (node->connection_motivational_bias)
-                                        node->connection_motivational_bias[idx] = conn_b;
-                                    if (node->connection_confidences)
-                                        node->connection_confidences[idx] = conn_c;
+                                int idx = node->edge_count - 1;
+                                if (idx >= 0 && node->edges) {
+                                    node->edges[idx].motivational_bias = conn_b;
+                                    node->edges[idx].confidence = conn_c;
                                 }
                             }
                         }
                     }
                 } else {
-                    // tgt_concept_len == 0: 空连接，跳过 weight/bias/confidence
-                    float skip_w, skip_b, skip_c;
-                    if (fread(&skip_w, sizeof(float), 1, fp) != 1) break;
-                    if (fread(&skip_b, sizeof(float), 1, fp) != 1) break;
-                    if (fread(&skip_c, sizeof(float), 1, fp) != 1) break;
+                    // tgt_concept_len == 0: 跳过
+                    SKIP(3 * (int)sizeof(float));
                 }
             }
         } else if (fmt_ver >= 2) {
-            // [v2] 读取并丢弃连接数据（目标用 node_id 存储，加载后无效）
-            for (int c = 0; c < conn_count && conn_count > 0; c++) {
-                int skip_id; float skip_w, skip_b, skip_c;
-                if (fread(&skip_id, sizeof(int), 1, fp) != 1) break;
-                if (fread(&skip_w, sizeof(float), 1, fp) != 1) break;
-                if (fread(&skip_b, sizeof(float), 1, fp) != 1) break;
-                if (fread(&skip_c, sizeof(float), 1, fp) != 1) break;
-            }
+            // [v2] 跳过连接数据
+            if (conn_count > 0) SKIP(conn_count * (int)(sizeof(int) + 3 * sizeof(float)));
         }
-        
+
         loaded_nodes++;
+
+        /* 每 5000 个节点报告进度 */
+        if (loaded_nodes % 5000 == 0) {
+            time_t now = time(NULL);
+            fprintf(stderr, "[状态加载] 进度: %d 节点, +%lds\n",
+                    loaded_nodes, (long)(now - last_report));
+            last_report = now;
+        }
     }
-    
-    // 加载跨拓扑连接（v1和v2通用）
-    // Read sentinel between node and cross-link sections
+
+    /* === 跨拓扑连接加载 === */
     uint32_t sentinel = 0;
     int expected_cross_count = 0;
-    if (fread(&sentinel, sizeof(uint32_t), 1, fp) == 1) {
+    if (p + (int)sizeof(uint32_t) <= end) {
+        READ(&sentinel, sizeof(uint32_t));
         if (sentinel == 0xDEADBEEF) {
-            // 新格式：有 sentinel，读取 cross_link_count
-            if (fread(&expected_cross_count, sizeof(int), 1, fp) != 1) {
+            if (p + (int)sizeof(int) <= end)
+                READ(&expected_cross_count, sizeof(int));
+            else
                 expected_cross_count = 0;
-            }
         } else {
-            // 旧格式：回退 4 字节，以原始格式读取跨链接
-            fseek(fp, -(long)sizeof(uint32_t), SEEK_CUR);
+            p -= sizeof(uint32_t);  // 回退，旧格式直接开始
             expected_cross_count = 0;
         }
     }
-    
+
     int from_topo = 0, from_node = 0, to_topo = 0, to_node = 0;
     while (1) {
         float weight;
         int use_count;
-        
-        if (fread(&from_topo, sizeof(int), 1, fp) != 1) break;
-        if (fread(&from_node, sizeof(int), 1, fp) != 1) break;
-        if (fread(&to_topo, sizeof(int), 1, fp) != 1) break;
-        if (fread(&to_node, sizeof(int), 1, fp) != 1) break;
-        if (fread(&weight, sizeof(float), 1, fp) != 1) break;
-        if (fread(&use_count, sizeof(int), 1, fp) != 1) break;
-        
-        // Validate topology indices dynamically
+        int record_size = 4 * (int)sizeof(int) + (int)sizeof(float) + (int)sizeof(int);
+        if (p + record_size > end) break;
+
+        READ(&from_topo, sizeof(int));
+        READ(&from_node, sizeof(int));
+        READ(&to_topo, sizeof(int));
+        READ(&to_node, sizeof(int));
+        READ(&weight, sizeof(float));
+        READ(&use_count, sizeof(int));
+
         int max_topo = master->sub_topo_count;
         if (from_topo < 0 || from_topo >= max_topo ||
             to_topo < 0 || to_topo >= max_topo) {
             break;
         }
-        
+
         int link_result = master_add_cross_link(master, from_topo, from_node,
-                                                       to_topo, to_node, 
+                                                       to_topo, to_node,
                                                        weight, "seed");
         if (link_result >= 0) {
             for (int i = 0; i < master->cross_link_count; i++) {
                 CrossTopologyLink* link = master->cross_links[i];
-                if (link && link->from_topo_id == from_topo && 
+                if (link && link->from_topo_id == from_topo &&
                     link->from_node_id == from_node &&
-                    link->to_topo_id == to_topo && 
+                    link->to_topo_id == to_topo &&
                     link->to_node_id == to_node) {
                     link->use_count = use_count;
                     break;
                 }
             }
         }
-        
+
         loaded_links++;
     }
 
-    // ========== 频率表扩展加载 ==========
-    // 哨兵记录 [-1,0,0,0,0,0] 已在跨拓扑循环中消耗(from_topo=-1触发break)
+    /* === 频率表扩展加载 === */
     if (from_topo == -1) {
         int tpl_voting = 0;
-        if (fread(&tpl_voting, sizeof(int), 1, fp) != 1) goto load_error;
+        if (p + 2 * (int)sizeof(int) > end) goto buffer_exhausted;
+        READ(&tpl_voting, sizeof(int));
         master->use_template_voting = tpl_voting;
-        if (fread(&master->template_decay_round, sizeof(int), 1, fp) != 1) goto load_error;
+        READ(&master->template_decay_round, sizeof(int));
 
         int freq_entry_count = 0;
         int64_t freq_total = 0;
         int freq_round = 0;
-        if (fread(&freq_entry_count, sizeof(int), 1, fp) == 1 &&
-            fread(&freq_total, sizeof(int64_t), 1, fp) == 1 &&
-            fread(&freq_round, sizeof(int), 1, fp) == 1) {
+        if (p + (int)sizeof(int) + (int)sizeof(int64_t) + (int)sizeof(int) <= end) {
+            READ(&freq_entry_count, sizeof(int));
+            READ(&freq_total, sizeof(int64_t));
+            READ(&freq_round, sizeof(int));
 
             if (freq_entry_count > 0 && master->freq_table) {
                 master->freq_table->total_triplets = freq_total;
@@ -3520,7 +3595,8 @@ int master_load_state(MasterTopology* master, const char* file_path) {
 
                 for (int i = 0; i < freq_entry_count; i++) {
                     PathTripletRecord rec;
-                    if (fread(&rec, sizeof(PathTripletRecord), 1, fp) != 1) break;
+                    if (p + (int)sizeof(PathTripletRecord) > end) break;
+                    READ(&rec, sizeof(PathTripletRecord));
                     if (!rec.is_active) continue;
                     path_freq_table_set(master->freq_table,
                                         rec.topo_id, rec.node_a, rec.node_b, rec.node_c,
@@ -3530,15 +3606,23 @@ int master_load_state(MasterTopology* master, const char* file_path) {
         }
     }
 
-    fclose(fp);
-    printf("[状态持久化] 已从 %s 加载 (节点=%d, 链接=%d)\n", 
+    #undef READ
+    #undef SKIP
+
+    free(buf);
+    time_t t1 = time(NULL);
+    fprintf(stderr, "[状态加载] 完成: %d 节点, %d 链接, 耗时 %ld 秒\n",
+            loaded_nodes, loaded_links, (long)(t1 - t0));
+    LOG_INFO("[状态持久化] 已从 %s 加载 (节点=%d, 链接=%d)",
            file_path, loaded_nodes, loaded_links);
-    
+
     return loaded_nodes;
 
-load_error:
-    fprintf(stderr, "[状态持久化] 错误: 从 %s 读取失败\n", file_path);
-    fclose(fp);
+buffer_exhausted:
+    #undef READ
+    #undef SKIP
+    free(buf);
+    LOG_ERROR("[状态持久化] 错误: 从 %s 读取失败（数据不完整）", file_path);
     return -1;
 }
 
@@ -3547,12 +3631,12 @@ load_error:
 void master_print_stats(MasterTopology* master) {
     if (!master) return;
     
-    printf("\n========== 拓扑网络统计 ==========\n");
-    printf("子拓扑数量: %d\n", master->sub_topo_count);
-    printf("跨拓扑连接: %d\n", master->cross_link_count);
-    printf("训练数据: %d\n", master->training_data_count);
-    printf("总推理次数: %ld\n", master->total_inferences);
-    printf("成功推理: %ld\n", master->successful_inferences);
+    LOG_INFO("\n========== 拓扑网络统计 ==========");
+    LOG_INFO("子拓扑数量: %d", master->sub_topo_count);
+    LOG_INFO("跨拓扑连接: %d", master->cross_link_count);
+    LOG_INFO("训练数据: %d", master->training_data_count);
+    LOG_INFO("总推理次数: %ld", master->total_inferences);
+    LOG_INFO("成功推理: %ld", master->successful_inferences);
     
     int total_nodes = 0;
     int total_links = 0;
@@ -3568,7 +3652,7 @@ void master_print_stats(MasterTopology* master) {
             }
         }
         
-        printf("  %s: %d 节点, %d 活跃\n", 
+        LOG_INFO("  %s: %d 节点, %d 活跃", 
                sub->name ? sub->name : "?",
                sub->net->node_count, active_count);
         
@@ -3576,7 +3660,7 @@ void master_print_stats(MasterTopology* master) {
         total_links += sub->net->node_count * 2;
     }
     
-    printf("总节点: %d\n", total_nodes);
-    printf("估计连接: %d\n", total_links);
-    printf("====================================\n\n");
+    LOG_INFO("总节点: %d", total_nodes);
+    LOG_INFO("估计连接: %d", total_links);
+    LOG_INFO("====================================");
 }

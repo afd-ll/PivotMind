@@ -215,4 +215,34 @@ int template_build_from_pos_patterns(MasterTopology* master,
                                       CognitiveController* cc,
                                       int min_count);
 
+/* ================================================================
+ *  POS 槽位化诊断 — 验证"相同 POS = 相同推理角色"假设
+ *
+ *  扫描 TOPO_TEMPLATE 中所有模板节点，按 (pos_seq[0], pos_seq[1])
+ *  分组，测量组内特征离异度和连接词一致性。
+ *
+ *  返回值（建议）：
+ *     0 — 数据不足
+ *     1 — 建议纯 POS 合并（组内方差低、连接词一致）
+ *     2 — 建议 POS + 特征子聚类（组内存在多峰）
+ *     3 — POS 粒度不够，需额外信号
+ * ================================================================ */
+
+#define DIAG_POS_SAFE_MERGE      1
+#define DIAG_POS_WITH_SUBCLUSTER 2
+#define DIAG_POS_INSUFFICIENT    3
+
+int template_diagnose_pos_coherence(MasterTopology* master);
+
+/* ================================================================
+ *  模板 POS 结构合并 — 统一 Pipeline A/B 的模板产出
+ *
+ *  按合并键 (tpl_pos_len, tpl_pos_seq, 归一化 tpl_connectors) 分组，
+ *  组内保留最高 confidence 者为 survivor，重算特征向量和置信度，
+ *  其余软删除 (tpl_pos_len=0)。
+ *
+ *  @return 合并的组数
+ * ================================================================ */
+int template_merge_by_pos_structure(MasterTopology* master);
+
 #endif /* TEMPLATE_BUILDER_H */

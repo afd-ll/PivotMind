@@ -268,12 +268,12 @@ int topobrain_scan(TopologyBrain* tb, MasterTopology* master) {
         }
 
         // 只处理有连接的节点
-        if (node->connection_count == 0) continue;
+        if (node->edge_count == 0) continue;
 
         // 对每条连接，更新隶属度
-        for (int c = 0; c < node->connection_count; c++) {
-            if (node->connections[c]) {
-                int target_id = node->connections[c]->node_id;
+        for (int c = 0; c < node->edge_count; c++) {
+            if (node->edges[c].target) {
+                int target_id = node->edges[c].target->node_id;
                 if (target_id >= 0) {
                     TopoBrainRegion tr = topobrain_query(tb, target_id);
                     topobrain_update_by_region(tb, i, tr);

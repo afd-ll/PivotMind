@@ -1,17 +1,53 @@
-BasedOnStyle: GNU
+# PivotMind 代码风格配置
+# 基于 LLVM 风格微调
+BasedOnStyle: LLVM
+
+# 缩进宽度
 IndentWidth: 4
+ContinuationIndentWidth: 4
 TabWidth: 4
 UseTab: Never
+
+# 列宽限制
 ColumnLimit: 100
-BreakBeforeBraces: Allman
-AllowShortFunctionsOnASingleLine: None
-AllowShortIfStatementsOnASingleLine: false
-AllowShortLoopsOnASingleLine: false
-PointerAlignment: Right
-AlignConsecutiveAssignments: false
-AlignConsecutiveDeclarations: false
+
+# 大括号换行
+BreakBeforeBraces: Attach
+
+# 空格
 SpaceAfterCStyleCast: true
-MaxEmptyLinesToKeep: 1
-SortIncludes: true
-IncludeBlocks: Preserve
-IndentCaseLabels: true
+SpacesInContainerLiterals: false
+SpacesInParentheses: false
+SpaceInEmptyParentheses: false
+SpacesBeforeTrailingComments: 1
+
+# 指针/引用
+PointerAlignment: Right
+ReferenceAlignment: Right
+
+# 函数声明/定义
+AlwaysBreakAfterDefinitionReturnType: None
+AlwaysBreakAfterReturnType: None
+
+# 注释
+ReflowComments: true
+MaxEmptyLinesToKeep: 2
+
+# 排序包含
+SortIncludes: false
+
+# 允许单行函数
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+
+# 二进制/三元运算符换行
+BreakBeforeBinaryOperators: NonAssignment
+BreakBeforeTernaryOperators: true
+
+# 空行
+KeepEmptyLinesAtTheStartOfBlocks: false
+
+# 命名空间
+FixNamespaceComments: true
+NamespaceIndentation: None

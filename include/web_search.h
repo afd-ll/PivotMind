@@ -24,6 +24,7 @@ typedef struct {
     char*   title;         /* <title> 标签内容 */
     char**  keywords;      /* 提取的关键词 */
     int     keyword_count; /* 关键词数量 */
+    char*   content_type;  /* Content-Type 响应头 (如 "text/html; charset=utf-8") */
 } WebResult;
 
 /**
@@ -40,13 +41,32 @@ WebResult* web_search(const char* url, int timeout_ms, int max_body);
 void web_result_free(WebResult* r);
 
 /**
- * 从 HTML 文本中提取可见文本
+ * 从 HTML 文本中提取可见文本（增强版：结构化分层提取）
  * @param html   HTML 字符串
  * @param out    输出缓冲区（调用方分配）
  * @param out_sz 缓冲区大小
  * @return       写入的字节数
  */
 int web_extract_text(const char* html, char* out, int out_sz);
+
+/**
+ * 从 HTML 中提取 &lt;meta name="description"&gt; 内容
+ * @return 写入的字节数，0=未找到
+ */
+int web_extract_meta_description(const char* html, char* out, int out_sz);
+
+/**
+ * 从 HTML 中提取所有 &lt;h1&gt;/&lt;h2&gt; 标题文本
+ * @return 写入的字节数
+ */
+int web_extract_headings(const char* html, char* out, int out_sz);
+
+/**
+ * 从 HTML 中提取前 N 个 &lt;p&gt; 段落文本
+ * @param max_paragraphs  最多提取段落数
+ * @return 写入的字节数
+ */
+int web_extract_paragraphs(const char* html, char* out, int out_sz, int max_paragraphs);
 
 #ifdef __cplusplus
 }

@@ -561,9 +561,9 @@ CausalGraph* infer_causal_graph_from_topology(HuarongTopologyNet* topo_net,
         ReasoningNode* node = topo_net->nodes[i];
         if (!node) continue;
 
-        for (int j = 0; j < node->connection_count; j++) {
-            int target_id = node->connections[j]->node_id;
-            float weight = node->connection_weights[j];
+        for (int j = 0; j < node->edge_count; j++) {
+            int target_id = node->edges[j].target->node_id;
+            float weight = node->edges[j].weight;
 
             if (weight >= min_strength) {
                 add_causal_edge(graph, i, target_id, CAUSAL_DIRECT, weight);
@@ -2274,13 +2274,13 @@ CausalGraph* infer_causal_graph_from_master_topology(MasterTopology* master,
             if (cause_cg_id < 0) continue;
 
             // 遍历连接边
-            for (int c = 0; c < node->connection_count; c++) {
-                if (!node->connections[c]) continue;
-                ReasoningNode* target = node->connections[c];
+            for (int c = 0; c < node->edge_count; c++) {
+                if (!node->edges[c].target) continue;
+                ReasoningNode* target = node->edges[c].target;
                 if (!target || !target->concept) continue;
 
-                float weight = (c < node->connection_count) ?
-                               node->connection_weights[c] : 0.5f;
+                float weight = (c < node->edge_count) ?
+                               node->edges[c].weight : 0.5f;
                 if (weight < min_strength) continue;
 
                 int effect_cg_id = -1;

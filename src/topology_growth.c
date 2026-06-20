@@ -29,7 +29,7 @@ static float compute_topology_density(HuarongTopologyNet* net) {
     
     for (int i = 0; i < net->node_count; i++) {
         if (net->nodes[i]) {
-            actual_edges += net->nodes[i]->connection_count;
+            actual_edges += net->nodes[i]->edge_count;
         }
     }
     
@@ -80,7 +80,7 @@ TopologyGrowthConfig* topology_growth_config_create_custom(
 
     // 节点数量触发器
     config->node_count_trigger.type = GROWTH_TRIGGER_NODE_COUNT;
-    config->node_count_trigger.threshold = 0.8f;  // 80% 容量
+    config->node_count_trigger.threshold = 0.6f;  // 60% 容量即扩容，给增长留余量
     config->node_count_trigger.hysteresis = 0.1f;
     config->node_count_trigger.cooldown_ticks = 60;
     config->node_count_trigger.last_triggered = 0;
@@ -143,10 +143,8 @@ int insert_node_dynamic(MasterTopology* master, int topo_id,
     SubTopology* sub = master_get_sub_topology(master, topo_id);
     if (!sub || !sub->net) return -1;
 
-    TopologyGrowthConfig* config = topology_growth_get_default_config();
-
-    // 检查容量
-    if (sub->net->node_count >= config->max_nodes_per_topology) {
+    // 检查容量（用实际容量，不是全局上限）
+    if (sub->net->node_count >= sub->net->max_nodes) {
         // 尝试自动扩展
         if (check_growth_needed(master, topo_id)) {
             auto_extend_topology(master, topo_id);
@@ -186,40 +184,34 @@ int remove_node_dynamic(MasterTopology* master, int topo_id,
     if (!node) return -1;
 
     // 检查连接
-    if (!force && node->connection_count > 0) {
+    if (!force && node->edge_count > 0) {
         return -1;  // 有连接，不能删除
     }
 
     // 移除连接
-    if (node->connection_count > 0) {
-        for (int i = 0; i < node->connection_count; i++) {
-            if (node->connections[i]) {
+    if (node->edge_count > 0) {
+        for (int i = 0; i < node->edge_count; i++) {
+            if (node->edges[i].target) {
                 // 从目标节点移除反向连接
-                ReasoningNode* target = node->connections[i];
-                for (int j = 0; j < target->connection_count; j++) {
-                    if (target->connections[j] && target->connections[j]->node_id == node_id) {
+                ReasoningNode* target = node->edges[i].target;
+                for (int j = 0; j < target->edge_count; j++) {
+                    if (target->edges[j].target && target->edges[j].target->node_id == node_id) {
                         // 移除
-                        for (int k = j; k < target->connection_count - 1; k++) {
-                            target->connections[k] = target->connections[k + 1];
-                            target->connection_weights[k] = target->connection_weights[k + 1];
-                            target->connection_motivational_bias[k] = target->connection_motivational_bias[k + 1];
-                            target->connection_confidences[k] = target->connection_confidences[k + 1];
+                        for (int k = j; k < target->edge_count - 1; k++) {
+                            target->edges[k].target = target->edges[k + 1].target;
+                            target->edges[k].weight = target->edges[k + 1].weight;
+                            target->edges[k].motivational_bias = target->edges[k + 1].motivational_bias;
+                            target->edges[k].confidence = target->edges[k + 1].confidence;
                         }
-                        target->connection_count--;
+                        target->edge_count--;
                         break;
                     }
                 }
             }
         }
-        free(node->connections);
-        free(node->connection_weights);
-        free(node->connection_motivational_bias);
-        free(node->connection_confidences);
-        node->connections = NULL;
-        node->connection_weights = NULL;
-        node->connection_motivational_bias = NULL;
-        node->connection_confidences = NULL;
-        node->connection_count = 0;
+        free(node->edges);
+        node->edges = NULL;
+        node->edge_count = 0;
     }
 
     // 从哈希表移除
@@ -287,29 +279,29 @@ int remove_edge_dynamic(MasterTopology* master, int topo_id,
     if (!from_node) return -1;
 
     // 查找并移除连接
-    for (int i = 0; i < from_node->connection_count; i++) {
-        if (from_node->connections[i]->node_id == to_node_id) {
+    for (int i = 0; i < from_node->edge_count; i++) {
+        if (from_node->edges[i].target->node_id == to_node_id) {
             // 找到，移除
-            for (int j = i; j < from_node->connection_count - 1; j++) {
-                from_node->connections[j] = from_node->connections[j + 1];
-                from_node->connection_weights[j] = from_node->connection_weights[j + 1];
-                from_node->connection_motivational_bias[j] = from_node->connection_motivational_bias[j + 1];
-                from_node->connection_confidences[j] = from_node->connection_confidences[j + 1];
+            for (int j = i; j < from_node->edge_count - 1; j++) {
+                from_node->edges[j].target = from_node->edges[j + 1].target;
+                from_node->edges[j].weight = from_node->edges[j + 1].weight;
+                from_node->edges[j].motivational_bias = from_node->edges[j + 1].motivational_bias;
+                from_node->edges[j].confidence = from_node->edges[j + 1].confidence;
             }
-            from_node->connection_count--;
+            from_node->edge_count--;
 
             // 从目标节点也移除反向连接
             ReasoningNode* to_node = sub->net->nodes[to_node_id];
             if (to_node) {
-                for (int j = 0; j < to_node->connection_count; j++) {
-                    if (to_node->connections[j]->node_id == from_node_id) {
-                        for (int k = j; k < to_node->connection_count - 1; k++) {
-                            to_node->connections[k] = to_node->connections[k + 1];
-                            to_node->connection_weights[k] = to_node->connection_weights[k + 1];
-                            to_node->connection_motivational_bias[k] = to_node->connection_motivational_bias[k + 1];
-                            to_node->connection_confidences[k] = to_node->connection_confidences[k + 1];
+                for (int j = 0; j < to_node->edge_count; j++) {
+                    if (to_node->edges[j].target->node_id == from_node_id) {
+                        for (int k = j; k < to_node->edge_count - 1; k++) {
+                            to_node->edges[k].target = to_node->edges[k + 1].target;
+                            to_node->edges[k].weight = to_node->edges[k + 1].weight;
+                            to_node->edges[k].motivational_bias = to_node->edges[k + 1].motivational_bias;
+                            to_node->edges[k].confidence = to_node->edges[k + 1].confidence;
                         }
-                        to_node->connection_count--;
+                        to_node->edge_count--;
                         break;
                     }
                 }
@@ -334,9 +326,9 @@ int update_edge_weight(MasterTopology* master, int topo_id,
     if (!from_node) return -1;
 
     // 查找连接
-    for (int i = 0; i < from_node->connection_count; i++) {
-        if (from_node->connections[i]->node_id == to_node_id) {
-            from_node->connection_weights[i] = CLAMP(new_weight, 0.0f, 1.0f);
+    for (int i = 0; i < from_node->edge_count; i++) {
+        if (from_node->edges[i].target->node_id == to_node_id) {
+            from_node->edges[i].weight = CLAMP(new_weight, 0.0f, 1.0f);
             return 0;
         }
     }
@@ -356,9 +348,9 @@ bool check_growth_needed(MasterTopology* master, int topo_id) {
     if (sub && sub->net) {
         HuarongTopologyNet* net = sub->net;
 
-        // 检查节点数量
+        // 检查节点数量（用实际容量而非全局上限，否则动态扩容形同虚设）
         if (check_cooldown(&config->node_count_trigger)) {
-            float usage = (float)net->node_count / config->max_nodes_per_topology;
+            float usage = (float)net->node_count / net->max_nodes;
             if (usage > config->node_count_trigger.threshold) {
                 return true;
             }
@@ -372,9 +364,9 @@ bool check_growth_needed(MasterTopology* master, int topo_id) {
             }
         }
 
-        // 检查负载
+        // 检查负载（用实际容量）
         if (check_cooldown(&config->load_trigger)) {
-            float load = compute_load_factor(net, config->max_nodes_per_topology);
+            float load = compute_load_factor(net, net->max_nodes);
             if (load > config->load_trigger.threshold) {
                 return true;
             }
@@ -537,8 +529,8 @@ int topology_load_balancing(MasterTopology* master) {
             int min_degree = INT_MAX;
             for (int n = 0; n < src->net->node_count; n++) {
                 ReasoningNode* node = src->net->nodes[n];
-                if (node && node->connection_count < min_degree) {
-                    min_degree = node->connection_count;
+                if (node && node->edge_count < min_degree) {
+                    min_degree = node->edge_count;
                     min_degree_node = n;
                 }
             }
@@ -629,7 +621,7 @@ int prune_node_importance(MasterTopology* master, int topo_id,
             if (!dry_run) {
                 // 只移除无连接的节点
                 ReasoningNode* node = sub->net->nodes[metrics[i]->node_id];
-                if (node && node->connection_count == 0) {
+                if (node && node->edge_count == 0) {
                     if (remove_node_dynamic(master, topo_id, metrics[i]->node_id, false) == 0) {
                         removed++;
                     }
@@ -660,7 +652,7 @@ int prune_low_connectivity(MasterTopology* master, int topo_id,
     int removed = 0;
     for (int i = 0; i < sub->net->node_count; i++) {
         ReasoningNode* node = sub->net->nodes[i];
-        if (node && node->connection_count < min_connections) {
+        if (node && node->edge_count < min_connections) {
             if (remove_node_dynamic(master, topo_id, i, false) == 0) {
                 removed++;
             }
@@ -692,11 +684,11 @@ int dynamic_weight_update(MasterTopology* master, int topo_id,
                 ReasoningNode* node = sub->net->nodes[i];
                 if (!node) continue;
 
-                for (int j = 0; j < node->connection_count; j++) {
+                for (int j = 0; j < node->edge_count; j++) {
                     float delta = config->learning_rate * node->activation * 
-                                  node->connections[j]->activation;
-                    node->connection_weights[j] += delta;
-                    node->connection_weights[j] = CLAMP(node->connection_weights[j], 0.0f, 1.0f);
+                                  node->edges[j].target->activation;
+                    node->edges[j].weight += delta;
+                    node->edges[j].weight = CLAMP(node->edges[j].weight, 0.0f, 1.0f);
                 }
             }
             break;
@@ -708,11 +700,11 @@ int dynamic_weight_update(MasterTopology* master, int topo_id,
                 ReasoningNode* node = sub->net->nodes[i];
                 if (!node) continue;
 
-                for (int j = 0; j < node->connection_count; j++) {
+                for (int j = 0; j < node->edge_count; j++) {
                     // 简化梯度更新
-                    float gradient = node->activation - node->connection_weights[j];
-                    node->connection_weights[j] -= config->learning_rate * gradient;
-                    node->connection_weights[j] = CLAMP(node->connection_weights[j], 0.0f, 1.0f);
+                    float gradient = node->activation - node->edges[j].weight;
+                    node->edges[j].weight -= config->learning_rate * gradient;
+                    node->edges[j].weight = CLAMP(node->edges[j].weight, 0.0f, 1.0f);
                 }
             }
             break;
@@ -724,13 +716,13 @@ int dynamic_weight_update(MasterTopology* master, int topo_id,
                 ReasoningNode* node = sub->net->nodes[i];
                 if (!node) continue;
 
-                for (int j = 0; j < node->connection_count; j++) {
+                for (int j = 0; j < node->edge_count; j++) {
                     // 激活高的连接增强，低的衰减
                     float target_weight = node->activation * 
-                                         node->connections[j]->activation;
-                    float diff = target_weight - node->connection_weights[j];
-                    node->connection_weights[j] += config->learning_rate * diff;
-                    node->connection_weights[j] = CLAMP(node->connection_weights[j], 0.0f, 1.0f);
+                                         node->edges[j].target->activation;
+                    float diff = target_weight - node->edges[j].weight;
+                    node->edges[j].weight += config->learning_rate * diff;
+                    node->edges[j].weight = CLAMP(node->edges[j].weight, 0.0f, 1.0f);
                 }
             }
             break;
@@ -744,13 +736,13 @@ int dynamic_weight_update(MasterTopology* master, int topo_id,
                 ReasoningNode* node = sub->net->nodes[i];
                 if (!node) continue;
 
-                for (int j = 0; j < node->connection_count; j++) {
+                for (int j = 0; j < node->edge_count; j++) {
                     float hebbian = config->learning_rate * node->activation * 
-                                   node->connections[j]->activation;
-                    float gradient = node->activation - node->connection_weights[j];
+                                   node->edges[j].target->activation;
+                    float gradient = node->activation - node->edges[j].weight;
                     float update = alpha * hebbian + (1 - alpha) * gradient;
-                    node->connection_weights[j] -= config->learning_rate * update;
-                    node->connection_weights[j] = CLAMP(node->connection_weights[j], 0.0f, 1.0f);
+                    node->edges[j].weight -= config->learning_rate * update;
+                    node->edges[j].weight = CLAMP(node->edges[j].weight, 0.0f, 1.0f);
                 }
             }
             break;
@@ -786,23 +778,23 @@ float connection_strength_decay(MasterTopology* master, int topo_id,
 
     TopologyGrowthConfig* config = topology_growth_get_default_config();
     float total_strength = 0.0f;
-    int connection_count = 0;
+    int edge_count = 0;
 
     for (int i = 0; i < sub->net->node_count; i++) {
         ReasoningNode* node = sub->net->nodes[i];
         if (!node) continue;
 
-        for (int j = 0; j < node->connection_count; j++) {
-            node->connection_weights[j] *= decay_factor;
-            if (node->connection_weights[j] < config->min_connection_weight) {
-                node->connection_weights[j] = 0.0f;
+        for (int j = 0; j < node->edge_count; j++) {
+            node->edges[j].weight *= decay_factor;
+            if (node->edges[j].weight < config->min_connection_weight) {
+                node->edges[j].weight = 0.0f;
             }
-            total_strength += node->connection_weights[j];
-            connection_count++;
+            total_strength += node->edges[j].weight;
+            edge_count++;
         }
     }
 
-    return (connection_count > 0) ? total_strength / connection_count : 0.0f;
+    return (edge_count > 0) ? total_strength / edge_count : 0.0f;
 }
 
 // ==================== 跨拓扑动态操作 ====================

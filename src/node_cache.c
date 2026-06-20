@@ -138,7 +138,7 @@ static int nc_node_data_size(ReasoningNode* node) {
     sz += (int)strlen(node->concept ? node->concept : "") + 1;  /* concept string */
     sz += node->feature_dim * (int)sizeof(float);              /* features */
     /* connections: target_id(4) + weight(4) + bias(4) + conf(4) = 16B each */
-    sz += node->connection_count * 16;
+    sz += node->edge_count * 16;
     return sz;
 }
 
@@ -150,7 +150,7 @@ static int nc_serialize_node(ReasoningNode* node, uint8_t* buf, int buf_sz) {
     int concept_len = (int)strlen(concept);
     int needed = NC_NODE_HDR_SZ + concept_len + 1
                + node->feature_dim * (int)sizeof(float)
-               + node->connection_count * 16;
+               + node->edge_count * 16;
 
     if (needed > buf_sz) return -1;
 
@@ -159,7 +159,7 @@ static int nc_serialize_node(ReasoningNode* node, uint8_t* buf, int buf_sz) {
     /* 写入 header */
     memcpy(p, &concept_len, 4);                   p += 4;
     memcpy(p, &node->feature_dim, 4);             p += 4;
-    memcpy(p, &node->connection_count, 4);        p += 4;
+    memcpy(p, &node->edge_count, 4);        p += 4;
 
     /* concept 字符串 */
     memcpy(p, concept, concept_len + 1);          p += concept_len + 1;
@@ -171,13 +171,13 @@ static int nc_serialize_node(ReasoningNode* node, uint8_t* buf, int buf_sz) {
     p += node->feature_dim * sizeof(float);
 
     /* connections: 每条边保存 target 的 node_id + weight + bias + confidence */
-    for (int i = 0; i < node->connection_count; i++) {
+    for (int i = 0; i < node->edge_count; i++) {
         int target_id = 0;
-        if (node->connections && node->connections[i])
-            target_id = node->connections[i]->node_id;
-        float w  = (node->connection_weights && i < node->connection_capacity) ? node->connection_weights[i] : 0.0f;
-        float mb = (node->connection_motivational_bias && i < node->connection_capacity) ? node->connection_motivational_bias[i] : 0.0f;
-        float cf = (node->connection_confidences && i < node->connection_capacity) ? node->connection_confidences[i] : 0.0f;
+        if (node->edges && node->edges[i].target)
+            target_id = node->edges[i].target->node_id;
+        float w  = (node->edges && i < node->edge_capacity) ? node->edges[i].weight : 0.0f;
+        float mb = (node->edges && i < node->edge_capacity) ? node->edges[i].motivational_bias : 0.0f;
+        float cf = (node->edges && i < node->edge_capacity) ? node->edges[i].confidence : 0.0f;
 
         memcpy(p, &target_id, 4);  p += 4;
         memcpy(p, &w, 4);          p += 4;
@@ -249,24 +249,20 @@ int node_cache_freeze(NodeCache* nc, HuarongTopologyNet* net, ReasoningNode* nod
     int lock_idx = node->node_id & (PM_NODE_LOCK_COUNT - 1);
     pthread_mutex_lock(&net->node_locks[lock_idx]);
 
-    /* 2. 释放连接相关内存 */
-    free(node->connections);
-    free(node->connection_weights);
-    free(node->connection_motivational_bias);
-    free(node->connection_confidences);
+    /* 2. 释放连接相关内存（Edges 和 conn_hash 都走延迟释放防 use-after-free） */
+    if (node->edges) {
+        huarong_net_retire_blob(net, node->edges);
+    }
     if (node->conn_hash) {
-        free(node->conn_hash);
+        huarong_net_retire_blob(net, node->conn_hash);
         node->conn_hash = NULL;
-        node->conn_hash_mask = 0;
+        node->conn_hash_mask = -1;
         node->conn_hash_entries = 0;
     }
 
-    node->connections = NULL;
-    node->connection_weights = NULL;
-    node->connection_motivational_bias = NULL;
-    node->connection_confidences = NULL;
-    node->connection_count = 0;
-    node->connection_capacity = 0;
+    node->edges = NULL;
+    node->edge_count = 0;
+    node->edge_capacity = 0;
     node->is_cooled = 1;
 
     __sync_fetch_and_add(&nc->total_freezes, 1);
@@ -325,17 +321,14 @@ int node_cache_thaw(NodeCache* nc, HuarongTopologyNet* net, ReasoningNode* node)
     /* 重建 connections 数组 */
     if (conn_count > 0) {
         int cap = conn_count + 4;  /* 留一点扩容空间 */
-        node->connections = (ReasoningNode**)calloc(cap, sizeof(ReasoningNode*));
-        node->connection_weights = (float*)calloc(cap, sizeof(float));
-        node->connection_motivational_bias = (float*)calloc(cap, sizeof(float));
-        node->connection_confidences = (float*)calloc(cap, sizeof(float));
-
-        if (!node->connections || !node->connection_weights) {
+        node->edges = (Edge*)calloc(cap, sizeof(Edge));
+            
+        if (!node->edges) {
             free(buf);
             return -1;
         }
-        node->connection_capacity = cap;
-        node->connection_count = conn_count;
+        node->edge_capacity = cap;
+        node->edge_count = conn_count;
 
         for (int i = 0; i < conn_count; i++) {
             int target_id;
@@ -345,22 +338,22 @@ int node_cache_thaw(NodeCache* nc, HuarongTopologyNet* net, ReasoningNode* node)
             memcpy(&mb, p, 4);         p += 4;
             memcpy(&cf, p, 4);         p += 4;
 
-            node->connections[i] = nc_lookup_node(net, target_id);
-            node->connection_weights[i] = w;
-            if (node->connection_motivational_bias) node->connection_motivational_bias[i] = mb;
-            if (node->connection_confidences) node->connection_confidences[i] = cf;
+            node->edges[i].target = nc_lookup_node(net, target_id);
+            node->edges[i].weight = w;
+            if (node->edges) node->edges[i].motivational_bias = mb;
+            if (node->edges) node->edges[i].confidence = cf;
         }
 
         /* 重建连接哈希表 */
-        if (node->connections[0]) {
+        if (node->edges[0].target) {
             int hash_cap = 16;
             while (hash_cap < conn_count * 2) hash_cap *= 2;
             node->conn_hash = (ConnHashEntry*)calloc(hash_cap, sizeof(ConnHashEntry));
             if (node->conn_hash) {
                 node->conn_hash_mask = hash_cap - 1;
                 for (int i = 0; i < conn_count; i++) {
-                    if (node->connections[i]) {
-                        node_conn_hash_insert(NULL, node, node->connections[i], i);
+                    if (node->edges[i].target) {
+                        node_conn_hash_insert(NULL, node, node->edges[i].target, i);
                     }
                 }
             }

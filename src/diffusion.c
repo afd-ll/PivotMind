@@ -66,10 +66,10 @@ int diffusion_spread(SubTopology* layer,
         ReasoningNode* node = layer->net->nodes[nid];
         if (!node) continue;
 
-        for (int c = 0; c < node->connection_count; c++) {
-            int tid = node->connections[c] ? node->connections[c]->node_id : -1;
+        for (int c = 0; c < node->edge_count; c++) {
+            int tid = node->edges[c].target ? node->edges[c].target->node_id : -1;
             if (tid < 0 || tid >= layer->net->node_count) continue;
-            float w = node->connection_weights[c] * decay;
+            float w = node->edges[c].weight * decay;
             // 温度扰动：如果 temperature > 0，添加随机噪声
             if (temperature > 0.0f) {
                 float noise = ((float)(rand() % 201) - 100.0f) / 100.0f;  // -1.0 ~ 1.0

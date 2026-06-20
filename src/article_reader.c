@@ -14,8 +14,11 @@
 
 #include "article_reader.h"
 #include "huarong_topology.h"
+#include "topology_growth.h"
 #include "common.h"
 #include "chinese.h"
+#include "thalamus.h"
+#include "error.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -88,9 +91,11 @@ struct ArticleReader {
     int         word_count;
     int         word_capacity;
 
-    // 词哈希表（加速查找，创建时动态分配）
+    // 词哈希表（加速查找，创建时动态分配，支持扩容）
     WordHashEntry* word_hash;
+    unsigned int   word_hash_size;   // 当前哈希表大小（槽数）
     unsigned int   word_hash_mask;
+    int            word_hash_entries; // 已占用槽数（用于扩容判定）
 
     // 当前缓冲行
     int         lines_buffered;
@@ -99,19 +104,24 @@ struct ArticleReader {
     long*       p_added_nodes;
     long*       p_added_edges;
 
-    // 内部工作缓冲区
-    char        line_chars[4096][8];    // 当前行字符序列（UTF-8 字符串）
-    int         line_char_count;         // 当前行有效字符数
+    // 全局字符序列缓冲区（跨行累积，由 calloc 分配，避免栈溢出）
+    char        (*seq)[8];       // [seq_capacity][8] 堆分配
+    int         seq_len;         // 有效长度
+    int         seq_capacity;    // 当前容量
 
-    // 全局字符序列缓冲区（跨行累积，用于正向扫描词发现）
-    char        seq[131072][8];          // 累积字符序列
-    int         seq_len;                 // 有效长度
+    // 当前行字符缓冲区（堆分配）
+    char        (*line_chars)[8]; // [line_chars_capacity][8] 堆分配
+    int         line_char_count;
+    int         line_chars_capacity;
 
     // 缓存词汇拓扑指针（article_reader_create 时初始化）
     SubTopology* vocab_topo;
 
     // 上次 flush 新增词数（供外部查询）
     int         last_flush_added;
+
+    // 丘脑信号总线（可选，NULL = 不发送反馈）
+    Thalamus*   thalamus;
 };
 
 // ==================== 哈希工具 ====================
@@ -169,7 +179,37 @@ static PairEntry* _ar_find_pair(ArticleReader* ar, const char* a, const char* b)
     return NULL;
 }
 
-/** 查找或添加词到词表（哈希加速 O(1)） */
+/** 词哈希表扩容 — 双倍容量 + rehash */
+static int _ar_expand_word_hash(ArticleReader* ar) {
+    unsigned int new_size = ar->word_hash_size * 2;
+    if (new_size > 131072) return -1; // 上限保护
+    WordHashEntry* new_tab = (WordHashEntry*)calloc(new_size, sizeof(WordHashEntry));
+    if (!new_tab) return -1;
+    unsigned int new_mask = new_size - 1;
+
+    for (unsigned int i = 0; i < ar->word_hash_size; i++) {
+        if (!ar->word_hash[i].used) continue;
+        unsigned int h = _ar_hash(ar->word_hash[i].text) & new_mask;
+        for (unsigned int p = 0; p < new_size; p++) {
+            int idx = (h + p) & new_mask;
+            if (!new_tab[idx].used) {
+                new_tab[idx] = ar->word_hash[i];
+                break;
+            }
+        }
+    }
+
+    free(ar->word_hash);
+    ar->word_hash = new_tab;
+    ar->word_hash_size = new_size;
+    ar->word_hash_mask = new_mask;
+    ar->word_hash_entries = 0; // 后面重新计数
+    for (unsigned int i = 0; i < new_size; i++)
+        if (ar->word_hash[i].used) ar->word_hash_entries++;
+    return 0;
+}
+
+/** 查找或添加词到词表（哈希加速 O(1)），哈希满时自动扩容 */
 static WordEntry* _ar_find_or_add_word(ArticleReader* ar, const char* text) {
     if (!ar->word_hash) return NULL;
     unsigned int mask = ar->word_hash_mask;
@@ -193,24 +233,21 @@ static WordEntry* _ar_find_or_add_word(ArticleReader* ar, const char* text) {
             snprintf(ar->word_hash[idx].text, sizeof(ar->word_hash[idx].text), "%s", text);
             ar->word_hash[idx].word_index = ar->word_count;
             ar->word_hash[idx].used = 1;
+            ar->word_hash_entries++;
             ar->word_count++;
+
+            // 哈希表负载 > 70% 时自动扩容
+            if (ar->word_hash_entries * 10 > (int)(ar->word_hash_size * 7)) {
+                _ar_expand_word_hash(ar);
+            }
             return we;
         }
         if (strcmp(ar->word_hash[idx].text, text) == 0) {
             return &ar->words[ar->word_hash[idx].word_index];
         }
     }
-    // 表满 — 限频 warning
-    {
-        static int warn_printed = 0;
-        if (!warn_printed) {
-            char buf[24];
-            snprintf(buf, sizeof(buf), "%s", text);
-            fprintf(stderr, "Warning: article_reader word hash table full, "
-                    "word '%s' discarded\n", buf);
-            warn_printed = 1;
-        }
-    }
+    // 理论上不会到这里（扩容机制确保了空闲槽）
+    LOG_WARNING("article_reader: word hash completely full after rehash, discarding '%s'", text);
     return NULL;
 }
 
@@ -225,18 +262,20 @@ static int _ar_extract_chars(ArticleReader* ar, const char* line) {
     int count = 0;
 
     while (*p && count < 4096) {
-        if (is_punctuation(p)) {
-            int skip = get_char_bytes(p);
-            if (skip <= 0) skip = 1;
-            p += skip;
-            continue;
-        }
         int bytes = get_char_bytes(p);
         if (bytes <= 0 || bytes > 4) { p++; continue; }
+        // 跳过空白
+        if (bytes == 1 && (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')) {
+            p++; continue;
+        }
+        // 跳过不可打印字符
         if (bytes == 1 && (*p < 32 || *p > 126)) { p++; continue; }
 
         // 跳过纯数字
         if (bytes == 1 && *p >= '0' && *p <= '9') { p++; continue; }
+
+        // 跳过ASCII标点（不参与PMI词发现，减少噪声计算）
+        if (bytes == 1 && is_punctuation(*p)) { p++; continue; }
 
         char* dest = ar->line_chars[count];
         size_t cp_len = (size_t)(bytes < 7 ? bytes : 7);
@@ -283,14 +322,26 @@ static int _ar_build_topo(ArticleReader* ar, SubTopology* topo) {
         if (!we->text[0]) continue;
 
         int nid = huarong_net_find_concept(net, we->text);
-        if (nid < 0 && net->node_count < net->max_nodes) {
-            nid = huarong_net_dynamic_add_node(net, we->text, NULL, 0);
-            if (nid >= 0 && net->nodes[nid]) {
+        if (nid < 0) {
+            // 拒绝含有标点的脏词（如 "A@yuan" 不会作为词节点）
+            int has_punct = 0;
+            for (const char* cp = we->text; *cp && !has_punct; ) {
+                if (is_punctuation(cp)) has_punct = 1;
+                int b = get_char_bytes(cp);
+                if (b <= 0) b = 1;
+                cp += b;
+            }
+            if (has_punct) continue;
+
+            // insert_node_dynamic：具备自动扩容 + 全局统计
+            nid = insert_node_dynamic(ar->master, topo->topo_id,
+                                       we->text, NULL, 0);
+            if (nid >= 0 && nid < topo->net->node_count && topo->net->nodes[nid]) {
                 created++;
                 if (ar->p_added_nodes) (*ar->p_added_nodes)++;
 
                 // 基于词文本的确定性特征向量初始化
-                ReasoningNode* node = net->nodes[nid];
+                ReasoningNode* node = topo->net->nodes[nid];
                 if (!node->features) {
                     node->features = (float*)malloc(NODE_FEATURE_DIM * sizeof(float));
                     node->feature_dim = NODE_FEATURE_DIM;
@@ -343,13 +394,22 @@ ArticleReader* article_reader_create(MasterTopology* master,
     ar->words = (WordEntry*)calloc(ar->word_capacity, sizeof(WordEntry));
     ar->word_count = 0;
 
-    // 初始化词哈希表（用于 O(1) 词查找）
-    ar->word_hash = (WordHashEntry*)calloc(AR_WORD_HASH_SIZE, sizeof(WordHashEntry));
-    ar->word_hash_mask = AR_WORD_HASH_SIZE - 1;
+    // 初始化词哈希表（动态扩容起始大小）
+    ar->word_hash_size = AR_WORD_HASH_SIZE;
+    ar->word_hash = (WordHashEntry*)calloc(ar->word_hash_size, sizeof(WordHashEntry));
+    ar->word_hash_mask = ar->word_hash_size - 1;
+    ar->word_hash_entries = 0;
 
-    // 初始化序列缓冲区
+    // 堆分配字符序列缓冲区（避免栈上 1MB + 32KB）
+    ar->seq_capacity = 131072;
+    ar->seq = (char(*)[8])calloc(ar->seq_capacity, 8);
     ar->seq_len = 0;
+
+    ar->line_chars_capacity = 4096;
+    ar->line_chars = (char(*)[8])calloc(ar->line_chars_capacity, 8);
+    ar->line_char_count = 0;
     ar->last_flush_added = 0;
+    ar->thalamus = NULL;
 
     // 缓存词汇拓扑指针（避免每次 flush 遍历查找）
     ar->vocab_topo = NULL;
@@ -362,8 +422,7 @@ ArticleReader* article_reader_create(MasterTopology* master,
     }
 
     if (ar->cfg.verbose) {
-        printf("[文章阅读] 初始化: 窗口=%d PMI阈值=%.2f "
-               "α=%.2f β=%.2f γ=%.2f batch=%d\n",
+        LOG_INFO("[文章阅读] 初始化: 窗口=%d PMI阈值=%.2f α=%.2f β=%.2f γ=%.2f batch=%d",
                ar->cfg.window_size, ar->cfg.pmi_threshold,
                ar->cfg.alpha, ar->cfg.beta, ar->cfg.gamma,
                ar->cfg.batch_size);
@@ -376,6 +435,8 @@ void article_reader_destroy(ArticleReader* ar) {
     if (!ar) return;
     free(ar->words);
     free(ar->word_hash);
+    free(ar->seq);       // 堆分配的字符序列缓冲区
+    free(ar->line_chars); // 堆分配的行缓冲区
     free(ar);
 }
 
@@ -387,7 +448,7 @@ int article_process_line(ArticleReader* ar, const char* line) {
     if (n < 2) return 0;
 
     // 追加到全局序列缓冲区（供 flush 时正向扫描）
-    int remain = (int)(sizeof(ar->seq) / sizeof(ar->seq[0])) - ar->seq_len;
+    int remain = ar->seq_capacity - ar->seq_len;
     if (remain > n) remain = n;
     for (int i = 0; i < remain; i++) {
         memcpy(ar->seq[ar->seq_len + i], ar->line_chars[i], 8);
@@ -532,8 +593,26 @@ int article_flush(ArticleReader* ar, SubTopology* topo) {
 
     free(pair_scores);
 
-    // ============ 一轮三字扩展（无 while 循环） ============
-    // 查找首尾字相同的词对，合并为长词
+    // ============ 一轮三字扩展（首字哈希索引 O(n)） ============
+    // 构建首字→词列表哈希索引
+    typedef struct { WordEntry** list; int count; int cap; } CharWordList;
+    CharWordList first_char_map[256];  // 仅索引首个字节
+    memset(first_char_map, 0, sizeof(first_char_map));
+    for (int wi = 0; wi < ar->word_count; wi++) {
+        WordEntry* w = &ar->words[wi];
+        if (w->char_len < 1) continue;
+        unsigned char first_byte = (unsigned char)w->text[0];
+        CharWordList* cwl = &first_char_map[first_byte];
+        if (cwl->count >= cwl->cap) {
+            int new_cap = cwl->cap ? cwl->cap * 2 : 8;
+            WordEntry** tmp = (WordEntry**)realloc(cwl->list, new_cap * sizeof(WordEntry*));
+            if (!tmp) continue;
+            cwl->list = tmp;
+            cwl->cap = new_cap;
+        }
+        cwl->list[cwl->count++] = w;
+    }
+
     for (int wi = 0; wi < ar->word_count; wi++) {
         WordEntry* w1 = &ar->words[wi];
         if (w1->char_len < 1) continue;
@@ -553,25 +632,15 @@ int article_flush(ArticleReader* ar, SubTopology* topo) {
         }
         if (!last_c[0]) continue;
 
-        for (int wj = 0; wj < ar->word_count; wj++) {
-            if (wi == wj) continue;
-            WordEntry* w2 = &ar->words[wj];
-            if (w2->char_len < 1) continue;
-
-            // w2 的首字
-            char first_c[8] = {0};
-            blen = get_char_bytes(w2->text);
-            if (blen > 0 && blen <= 4) {
-                memcpy(first_c, w2->text, blen);
-                first_c[blen] = 0;
-            }
-            if (!first_c[0]) continue;
-
-            // 如果 w1 的最后一字 == w2 的首字 → 可合并
-            if (strcmp(last_c, first_c) != 0) continue;
+        // 用首字哈希快速查找
+        unsigned char first_byte = (unsigned char)last_c[0];
+        CharWordList* cwl = &first_char_map[first_byte];
+        for (int wi2 = 0; wi2 < cwl->count; wi2++) {
+            WordEntry* w2 = cwl->list[wi2];
+            if (w1 == w2 || w2->char_len < 1) continue;
 
             // 检查 pair_table 中该字对是否高频
-            PairEntry* pe = _ar_find_pair(ar, last_c, first_c);
+            PairEntry* pe = _ar_find_pair(ar, last_c, w2->text);
             if (!pe || pe->co_count < ar->cfg.min_freq) continue;
 
             // 合并
@@ -591,6 +660,11 @@ int article_flush(ArticleReader* ar, SubTopology* topo) {
         }
     }
 
+    // 释放首字索引
+    for (int i = 0; i < 256; i++) {
+        free(first_char_map[i].list);
+    }
+
     // 清空序列缓冲区（下一轮重新累积）
     ar->seq_len = 0;
 
@@ -600,8 +674,7 @@ int article_flush(ArticleReader* ar, SubTopology* topo) {
     int built = _ar_build_topo(ar, vocab);
     if (built > 0) {
         if (ar->cfg.verbose) {
-            printf("[文章阅读] 刷新: %d 新词, 共 %d 词, 累计 %d 不同字符, "
-                   "%d 字符对\n",
+            LOG_INFO("[文章阅读] 刷新: %d 新词, 共 %d 词, 累计 %d 不同字符, %d 字符对",
                    new_words, ar->word_count,
                    ar->char_count, ar->pair_count);
         }
@@ -637,10 +710,17 @@ int article_flush(ArticleReader* ar, SubTopology* topo) {
                 }
             }
             if (ar->cfg.verbose && tpl_matched > 0) {
-                printf("[文章阅读] 模板匹配: %d 个新词关联到已有模板\n", tpl_matched);
+                LOG_INFO("[文章阅读] 模板匹配: %d 个新词关联到已有模板", tpl_matched);
             }
         }
         // === 模板反馈结束 ===
+
+        // === 通过丘脑信号总线报告工作量（让调度系统感知认知负载） ===
+        if (ar->thalamus) {
+            thalamus_send_feedback(ar->thalamus, THAL_HIPPOCAMPUS,
+                                   built, 0, 0);
+        }
+        // === 丘脑反馈结束 ===
     }
 
     return new_words;
@@ -652,6 +732,10 @@ void article_set_progress_ptr(ArticleReader* ar,
     if (!ar) return;
     ar->p_added_nodes = total_added_nodes_ptr;
     ar->p_added_edges = total_added_edges_ptr;
+}
+
+void article_reader_set_thalamus(ArticleReader* ar, Thalamus* th) {
+    if (ar) ar->thalamus = th;
 }
 
 void article_get_stats(ArticleReader* ar,

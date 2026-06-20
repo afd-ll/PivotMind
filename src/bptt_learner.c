@@ -235,3 +235,108 @@ void bptt_learner_stats(BpttLearner* bl, float* out_avg_loss, int* out_steps) {
     }
     if (out_steps) *out_steps = bl->steps;
 }
+
+/* ================================================================
+ *  Phase 3: BPTT 辅助生成 — RNN 前向偏置词汇拓扑激活
+ * ================================================================ */
+
+#define BPTT_BIAS_MIN_STEPS   5       /* 至少训练 N 步才参与生成偏置 */
+#define BPTT_BIAS_TOP_K       8       /* 最多偏置 K 个节点 */
+#define BPTT_BIAS_STRENGTH    0.25f   /* 最大偏置增量 */
+
+int bptt_bias_vocab_activation(BpttLearner* bl, const char* input_text) {
+    if (!bl || !bl->model || !bl->master || !input_text) return 0;
+    if (bl->steps < BPTT_BIAS_MIN_STEPS) return 0;  /* 训练不足，不参与 */
+
+    SubTopology* vocab = NULL;
+    for (int t = 0; t < bl->master->sub_topo_count; t++) {
+        SubTopology* sub = bl->master->sub_topologies[t];
+        if (sub && sub->type == TOPO_VOCABULARY) { vocab = sub; break; }
+    }
+    if (!vocab || !vocab->net || vocab->net->node_count == 0) return 0;
+
+    int feat_dim = bl->input_dim;
+    int max_seq  = bl->max_seq;
+
+    /* 1. 文本 → 特征序列 */
+    int in_len = text_to_features(bl->master, input_text,
+                                  bl->feat_buf_in, max_seq, feat_dim);
+    if (in_len < 1) return 0;
+
+    /* 2. RNN 推理模式前向传播 */
+    size_t in_shape[] = { (size_t)in_len, (size_t)feat_dim };
+    Tensor* input = tensor_create_from_data(DT_FLOAT32, 2, in_shape, bl->feat_buf_in);
+    if (!input) return 0;
+
+    model_set_mode((void*)bl->model, MODE_INFERENCE);
+    Tensor* output = model_forward(bl->model, input);
+    tensor_destroy(input);
+    if (!output) return 0;
+
+    /* 3. 取最后一个时间步的输出作为"预测回复首向量" */
+    float* out_data = (float*)output->data;
+    size_t last_offset = (size_t)(in_len - 1) * (size_t)feat_dim;
+    float* pred_vec = out_data + last_offset;
+
+    /* 计算预测向量的 L2 范数 */
+    float pred_norm = 0.0f;
+    for (int d = 0; d < feat_dim; d++)
+        pred_norm += pred_vec[d] * pred_vec[d];
+    pred_norm = sqrtf(pred_norm);
+    if (pred_norm < 1e-6f) { tensor_destroy(output); return 0; }
+
+    /* 4. 计算 RNN 预测向量与每个词汇节点的余弦相似度 */
+    int     best_ids[BPTT_BIAS_TOP_K];
+    float  best_sims[BPTT_BIAS_TOP_K];
+    int    best_count = 0;
+
+    for (int n = 0; n < vocab->net->node_count; n++) {
+        ReasoningNode* node = vocab->net->nodes[n];
+        if (!node || !node->features) continue;
+
+        float dot = 0.0f, node_norm = 0.0f;
+        for (int d = 0; d < feat_dim; d++) {
+            dot      += pred_vec[d] * node->features[d];
+            node_norm += node->features[d] * node->features[d];
+        }
+        node_norm = sqrtf(node_norm);
+        if (node_norm < 1e-6f) continue;
+
+        float sim = dot / (pred_norm * node_norm);
+
+        /* 插入排序 —— 维护 top-K */
+        int pos = best_count;
+        while (pos > 0 && sim > best_sims[pos - 1]) pos--;
+
+        if (pos < BPTT_BIAS_TOP_K) {
+            /* 向后移动 */
+            for (int j = (best_count < BPTT_BIAS_TOP_K ? best_count : BPTT_BIAS_TOP_K - 1);
+                 j > pos; j--) {
+                best_ids[j] = best_ids[j - 1];
+                best_sims[j] = best_sims[j - 1];
+            }
+            best_ids[pos] = n;
+            best_sims[pos] = sim;
+            if (best_count < BPTT_BIAS_TOP_K) best_count++;
+        }
+    }
+
+    tensor_destroy(output);
+
+    /* 5. 对 top-K 节点增加激活偏置 */
+    int biased = 0;
+    for (int k = 0; k < best_count; k++) {
+        if (best_sims[k] < 0.15f) continue;  /* 相似度过低不偏置 */
+
+        ReasoningNode* node = vocab->net->nodes[best_ids[k]];
+        if (!node) continue;
+
+        /* 偏置强度 = 相似度 × 最大偏置 */
+        float boost = best_sims[k] * BPTT_BIAS_STRENGTH;
+        node->activation += boost;
+        if (node->activation > 1.0f) node->activation = 1.0f;
+        biased++;
+    }
+
+    return biased;
+}

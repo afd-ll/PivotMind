@@ -240,10 +240,10 @@ const PathTripletRecord* path_freq_table_iter(
 /* 辅助: 在 ReasoningNode 的边中查找目标节点并返回边权重 */
 static float find_edge_weight(ReasoningNode* node, int target_id) {
     if (!node) return 0.0f;
-    for (int i = 0; i < node->connection_count; i++) {
-        ReasoningNode* conn = node->connections[i];
+    for (int i = 0; i < node->edge_count; i++) {
+        ReasoningNode* conn = node->edges[i].target;
         if (conn && conn->node_id == target_id) {
-            return node->connection_weights[i];
+            return node->edges[i].weight;
         }
     }
     return 0.0f;
@@ -253,8 +253,8 @@ static float find_edge_weight(ReasoningNode* node, int target_id) {
 static float sum_outgoing_weights(ReasoningNode* node) {
     if (!node) return 0.0f;
     float sum = 0.0f;
-    for (int i = 0; i < node->connection_count; i++) {
-        sum += node->connection_weights[i];
+    for (int i = 0; i < node->edge_count; i++) {
+        sum += node->edges[i].weight;
     }
     return sum;
 }

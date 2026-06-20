@@ -74,13 +74,14 @@ static int run_batch_learn_phase(LearningScheduler* ls) {
     }
 
     // 创建 TrainMode，配置为增量训练 (rounds=1, 高速)
+    // 创建 TrainMode，配置为增量训练 (多轮复用同一语料加深网络)
     TrainConfig tcfg = {
         .corpus_path = ls->cfg.batch_corpus_path,
         .format      = CORPUS_JSON_QA,
-        .rounds      = 1,
-        .speed       = 50,
-        .batch_learn_interval = 200,
-        .save_interval      = 50000,
+        .rounds      = 5,
+        .speed       = 30,
+        .batch_learn_interval = 500,
+        .save_interval      = 2000,
         .verbose     = ls->cfg.verbose,
     };
 
@@ -107,7 +108,7 @@ static int run_batch_learn_phase(LearningScheduler* ls) {
         if (!sub || !sub->net) continue;
         for (int n = 0; n < sub->net->node_count; n++) {
             if (sub->net->nodes[n])
-                edges_before += sub->net->nodes[n]->connection_count;
+                edges_before += sub->net->nodes[n]->edge_count;
         }
     }
 
@@ -146,7 +147,7 @@ static int run_batch_learn_phase(LearningScheduler* ls) {
         if (!sub || !sub->net) continue;
         for (int n = 0; n < sub->net->node_count; n++) {
             if (sub->net->nodes[n])
-                edges_after += sub->net->nodes[n]->connection_count;
+                edges_after += sub->net->nodes[n]->edge_count;
         }
     }
 
@@ -214,15 +215,15 @@ static int run_evaluate_phase(LearningScheduler* ls) {
             if (!node) continue;
             // 置信度：取连接平均置信度，若无连接则 = 0.1
             float avg_conf = 0.1f;
-            if (node->connection_count > 0 && node->connection_confidences) {
+            if (node->edge_count > 0 && node->edges) {
                 float sum = 0;
-                for (int c = 0; c < node->connection_count; c++)
-                    sum += node->connection_confidences[c];
-                avg_conf = sum / node->connection_count;
+                for (int c = 0; c < node->edge_count; c++)
+                    sum += node->edges[c].confidence;
+                avg_conf = sum / node->edge_count;
             }
             evals[idx].node_id    = node->node_id;
             evals[idx].confidence = avg_conf;
-            evals[idx].conn_count = node->connection_count;
+            evals[idx].conn_count = node->edge_count;
             idx++;
         }
 

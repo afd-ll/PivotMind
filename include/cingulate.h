@@ -14,6 +14,7 @@
 #define CINGULATE_H
 
 #include "multi_topology.h"
+#include "diffusion.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -67,6 +68,23 @@ CingulateGate cingulate_gate(GeneratedSequence* seq, float threshold);
  * 获取评分摘要（调试用）
  */
 const char* cingulate_summary(GeneratedSequence* seq, char* buf, int size);
+
+/**
+ * 公共函数：扩散生成 + ACC 评估管线
+ *
+ * 对输入文本进行一次完整的 diffusion → cingulate_evaluate 流程，
+ * 返回评估后的 GeneratedSequence。PFC/PFE/DMN 等脑区均可复用。
+ *
+ * @param topo       多拓扑网络
+ * @param input      输入文本
+ * @param temperature 扩散温度扰动 (0=关闭)
+ * @param out_seq    输出：评估后的序列（调用者分配）
+ * @return 生成词数，<2 表示生成失败
+ */
+int cingulate_diffusion_evaluate(MasterTopology* topo,
+                                  const char* input,
+                                  float temperature,
+                                  GeneratedSequence* out_seq);
 
 #ifdef __cplusplus
 }

@@ -202,11 +202,11 @@ void propagate_association(AssociativeEngine* engine,
     }
 
     // 通过拓扑内部连接传播
-    if (topo->net && node->connections) {
-        for (int i = 0; i < node->connection_count; i++) {
-            if (node->connections[i]) {
-                float new_activation = activation * node->connection_weights[i];
-                propagate_association(engine, topo_id, node->connections[i]->node_id,
+    if (topo->net && node->edges) {
+        for (int i = 0; i < node->edge_count; i++) {
+            if (node->edges[i].target) {
+                float new_activation = activation * node->edges[i].weight;
+                propagate_association(engine, topo_id, node->edges[i].target->node_id,
                                      new_activation * DECAY_RATE,
                                      hop_count + 1, max_hops);
             }

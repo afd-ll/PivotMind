@@ -5,7 +5,7 @@
 #include "metrics.h"
 #include "error.h"
 
-// 准确率
+// 准确率 — 回归模式：逐元素比较，差值 < EPS 算正确
 float compute_accuracy(Tensor* predictions, Tensor* targets) {
     if (!predictions || !targets) return 0.0f;
 
@@ -19,13 +19,8 @@ float compute_accuracy(Tensor* predictions, Tensor* targets) {
 
     size_t correct = 0;
     for (size_t i = 0; i < predictions->size; i++) {
-        // 对于分类问题:比较预测的类别
-        int pred_class = pred_data[i] > 0.5f ? 1 : 0;
-        int target_class = target_data[i] > 0.5f ? 1 : 0;
-
-        if (pred_class == target_class) {
+        if (fabsf(pred_data[i] - target_data[i]) < 1e-6f)
             correct++;
-        }
     }
 
     return (float)correct / predictions->size;

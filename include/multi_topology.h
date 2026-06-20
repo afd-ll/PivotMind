@@ -10,6 +10,15 @@
 
 /* 前向声明 (避免头文件循环依赖) */
 struct PathFrequencyTable;
+struct CognitiveController;         /* 不透明指针 — 替代 void* */
+struct ExternalDict;                /* 不透明指针 — 替代 void* */
+
+/** 推理会话上下文 — 每线程/每次推理独立 */
+typedef struct InferenceContext {
+    int   last_context_node;          /* 上一轮上下文节点ID（串联多轮对话） */
+    float intent_weights[16];         /* 本会话的意图权重（避免写入共享对象） */
+    int   inference_id;               /* 推理轮次标识 */
+} InferenceContext;
 
 // ==================== 多拓扑嵌套架构 ====================
 
@@ -57,6 +66,10 @@ typedef struct SubTopology {
     float avg_activation_value;
     float recent_activation;     // leaky integrator for recency-based novelty (0.0-1.0)
     time_t last_used;
+
+    /* 子拓扑级读写锁 — 替代全局 MasterTopology.rwlock
+     * 仅保护本拓扑内部节点/边读写。跨拓扑操作继续使用 MasterTopology.rwlock */
+    pthread_rwlock_t rwlock;
 } SubTopology;
 
 /**
@@ -109,6 +122,17 @@ typedef struct {
 
 /**
  * 主拓扑结构
+ *
+ * ========== 线程安全锁序（严格遵循，违者死锁）==========
+ * 加锁层级（从全局到局部）：
+ *   Level 1: MasterTopology.rwlock    — 全局读写锁
+ *      推理线程只拿读锁（RLock），写操作（学习/修改拓扑）拿写锁（WLock）
+ *   Level 2: HuarongTopologyNet.mutex — 网络级互斥锁
+ *   Level 3: HuarongTopologyNet.node_locks[] — 节点级锁池
+ *      多节点加锁时按 node_id 升序（见 lock_two_nodes_by_id）
+ *
+ * 禁止反向加锁（如持节点锁后再请求网络锁）！
+ * ============================================================
  */
 typedef struct MasterTopology {
     // 字符串池（共享）
@@ -165,13 +189,15 @@ typedef struct MasterTopology {
     int template_decay_round;                 // 冷路径稀释轮次计数
 
     // ========== 外部词典（词→词性标注） ==========
-    void* ext_dict;                           // DictTable* 指针，外部管理生命周期
+    struct ExternalDict* ext_dict;              // 不透明指针，外部管理生命周期
 
     // ========== 认知调度中心 ==========
-    void* cognitive_controller;               // CognitiveController* 指针，运行时注入，不持久化
+    struct CognitiveController* cognitive_controller; // 运行时注入，不持久化
 
     // ========== 上下文拓扑追踪 ==========
-    int last_context_node;                    // 上一轮上下文节点ID（串联多轮对话）
+    // 已迁移至 InferenceContext.last_context_node（每会话独立，多线程安全）
+    // 保留字段用于二进制兼容，不再直接使用
+    int _legacy_context_node;
 } MasterTopology;
 
 // ==================== API函数声明 ====================

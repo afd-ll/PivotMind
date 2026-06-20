@@ -113,7 +113,8 @@ typedef struct {
     float context_bias;      // 上下文记忆给出的偏向强度 (0.0-1.0)
     float novelty_bias;      // 短时记忆给出的求新强度 (0.0-1.0)
     float valence_bias;      // 效价(用户反馈)的整体调节强度 (0.0-1.0)
-    float coherence_target;  // 语义连贯性目标 (0.0-1.0)
+    float coherence_target;      // 语义连贯性目标 (0.0-1.0)
+    float coherence_influence_scale;  // 连贯性因子缩放系数 (默认0.5，替代硬编码魔法数字)
 
     // ========== 3. 负反馈调节状态 ==========
     float satisfaction_threshold;  // 多高的内感受评分才算通过 (0.0-1.0)
@@ -216,6 +217,29 @@ void calc_context_activations(CognitiveController* cc, float* ctx_activations);
  * @param ctx_activations 各个子拓扑的当前上下文激活度（可为NULL，退化到无上下文模式）
  */
 void compute_intent(CognitiveController* cc, const float* ctx_activations);
+
+/**
+ * 新颖性衰减 — 每轮结束后对子拓扑 recent_activation 做指数衰减。
+ *
+ * 从 calc_novelty_factors（纯读取）中分离，确保 compute_intent_local
+ * 线程安全版本不会意外修改共享状态。
+ * 仅在单线程路径 (compute_intent) 末尾调用。
+ */
+void cognitive_controller_decay_novelty(CognitiveController* cc);
+
+/**
+ * 计算意图向量 — 线程安全版本，输出到调用者提供的 buffer
+ *
+ * 与 compute_intent 算法完全相同，但结果写入 output_weights 而非 cc->intent_weights。
+ * 适用于多线程推理场景，避免竞态写入共享状态。
+ *
+ * @param cc        认知调度中心（只读引用）
+ * @param ctx_activations 上下文激活度（可为NULL）
+ * @param output_weights  输出缓冲区 [MAX_SUBTOPOS]，调用者分配
+ */
+void compute_intent_local(CognitiveController* cc,
+                          const float* ctx_activations,
+                          float* output_weights);
 
 /**
  * 内感受评估 —— 检查生成的草案是否满意
@@ -404,6 +428,13 @@ int cc_get_selected_pattern(CognitiveController* cc, POSTag* seq_out);
  * 获取所有已知句式模式（用于外部统计）
  */
 int cc_get_all_patterns(CognitiveController* cc,
-                         POSPattern* patterns_out, int max_count);
+                        POSPattern* patterns_out, int max_count);
+
+/**
+ * 概念文本输出消毒 — 检查概念是否适合输出到回复中
+ * 允许中文、字母数字、合法标点；拒绝 @#$%^&*+=|~` 空格等纯噪音符号
+ * @return 1=可输出, 0=应静默跳过
+ */
+int concept_is_printable(const char* concept);
 
 #endif // COGNITIVE_CONTROLLER_H

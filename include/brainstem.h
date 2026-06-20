@@ -4,6 +4,10 @@
  *
  * 大脑类比：脑干控制心跳、呼吸、睡眠-觉醒周期。
  * 系统映射：心跳节律、昼夜周期、稀疏衰减、节点冻结、自主子系统调度。
+ *
+ * 通信原则：
+ *   脑干不直接持有其他脑区的指针，所有跨脑区通信通过丘脑(Thalamus)信号总线。
+ *   通过 thalamus_get_region() 获取脑区实例，通过 thalamus_get_utility() 获取工具组件。
  */
 
 #ifndef BRAINSTEM_H
@@ -13,6 +17,8 @@
 #include "memory_system.h"
 #include "cognitive_params.h"
 #include "constants.h"
+#include "thalamus.h"
+#include "health_monitor.h"
 #include <pthread.h>
 #include <time.h>
 
@@ -20,6 +26,9 @@ typedef struct Brainstem {
     MasterTopology* master;
     MemorySystem*   memory;
     CognitiveState* cognitive_state;
+
+    /* ── 统一信号总线（替代所有 void* 指针） ── */
+    Thalamus* thalamus;
 
     pthread_t thread;
     volatile int is_running;
@@ -36,14 +45,12 @@ typedef struct Brainstem {
 
     int   verbose;
     unsigned int _rng_seed;
-    void* self_learner;
-    void* node_cache;
-    void* thalamus;
-    void* perception;
-    void* hippocampus;
-    void* cerebellum;
-    void* cognitive_controller;   /* CognitiveController*, 供 health_monitor 干预 */
-    void* topo_brain;             /* TopologyBrain*, 脑区索引扫描 */
+
+    /* 内感受自检（替代 brainstem_loop 中的 static 变量） */
+    HealthMonitor* health_monitor;
+
+    /* 不再持有 self_learner/node_cache/perception/hippocampus/cerebellum/
+     * cognitive_controller/topo_brain 等 void* 字段 —— 全部通过 thalamus 访问 */
 } Brainstem;
 
 Brainstem* brainstem_create(MasterTopology* master, MemorySystem* memory,
@@ -57,13 +64,16 @@ const char* brainstem_get_real_time(Brainstem* bs, char* buf, int size);
 long brainstem_get_uptime(Brainstem* bs);
 float brainstem_get_circadian(Brainstem* bs);
 const char* brainstem_get_circadian_phase(Brainstem* bs);
-void brainstem_set_node_cache(Brainstem* bs, void* nc);
-void brainstem_set_thalamus(Brainstem* bs, void* th);
-void brainstem_set_perception(Brainstem* bs, void* p);
-void brainstem_set_hippocampus(Brainstem* bs, void* hc);
-void brainstem_set_cerebellum(Brainstem* bs, void* cb);
-void brainstem_set_cognitive_controller(Brainstem* bs, void* cc);
-void brainstem_set_self_learner(Brainstem* bs, void* sl);
-void brainstem_set_topo_brain(Brainstem* bs, void* tb);
+
+/* ── 丘脑绑定（初始化时调用一次，替代 brainstem_set_* 系列函数） ── */
+void brainstem_set_thalamus(Brainstem* bs, Thalamus* th);
+
+/* 已删除：brainstem_set_node_cache / brainstem_set_perception /
+ * brainstem_set_hippocampus / brainstem_set_cerebellum /
+ * brainstem_set_cognitive_controller / brainstem_set_self_learner /
+ * brainstem_set_topo_brain
+ * — 以上全部通过 thalamus_register_region /
+ * thalamus_register_utility 处理，brainstem 通过
+ * thalamus_get_region / thalamus_get_utility 查询 */
 
 #endif

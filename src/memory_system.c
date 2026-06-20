@@ -486,7 +486,11 @@ MemoryEntry* memory_retrieve(MemorySystem* memory, const char* key) {
 /* 数组压缩后重建 STM 哈希表 */
 static void rebuild_stm_hash(ShortTermMemory* mem) {
     if (!mem || !mem->hash_table) return;
-    memset(mem->hash_table, 0, mem->capacity * sizeof(MemHashEntry));
+    /* 必须初始化为 HASH_EMPTY(-1)，memset(0) 会令 entry_index = 0 ≠ -1，导致插入永久找不到空槽 */
+    for (int i = 0; i < mem->capacity; i++) {
+        mem->hash_table[i].key = NULL;
+        mem->hash_table[i].entry_index = HASH_EMPTY;
+    }
     for (int i = 0; i < mem->size; i++) {
         MemoryEntry* e = mem->entries[i];
         if (!e || !e->key) continue;
@@ -497,7 +501,11 @@ static void rebuild_stm_hash(ShortTermMemory* mem) {
 /* 数组压缩后重建 LTM 哈希表 */
 static void rebuild_ltm_hash(LongTermMemory* mem) {
     if (!mem || !mem->hash_table) return;
-    memset(mem->hash_table, 0, mem->max_entries * sizeof(MemHashEntry));
+    /* 必须初始化为 HASH_EMPTY(-1) */
+    for (int i = 0; i < mem->max_entries; i++) {
+        mem->hash_table[i].key = NULL;
+        mem->hash_table[i].entry_index = HASH_EMPTY;
+    }
     for (int i = 0; i < mem->size; i++) {
         MemoryEntry* e = mem->entries[i];
         if (!e || !e->key) continue;

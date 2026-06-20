@@ -53,18 +53,29 @@ int utf8_tokenize(const char* text, char** tokens, int max_tokens) {
             if (tokens[count]) count++;
             p += len;
         }
-        // ASCII：连续字符作为一个token
+        // ASCII：字母数字连续成词，标点/特殊符号独立为单字 token
         else {
-            const char* start = p;
-            while (*p && !isspace(*p) && !is_chinese(p)) {
+            // 标点/特殊符号：独立为一个 token
+            if (ispunct(c)) {
+                tokens[count] = utf8_get_char(p);
+                if (tokens[count]) count++;
                 p++;
             }
-            int token_len = p - start;
-            tokens[count] = (char*)malloc(token_len + 1);
-            if (tokens[count]) {
-                strncpy(tokens[count], start, token_len);
-                tokens[count][token_len] = '\0';
-                count++;
+            // 字母/数字：连续收集作为一个 token（如 "agent""GPT4"）
+            else {
+                const char* start = p;
+                while (*p && !isspace(*p) && !is_chinese(p) && !ispunct((unsigned char)*p)) {
+                    p++;
+                }
+                int token_len = p - start;
+                if (token_len > 0) {
+                    tokens[count] = (char*)malloc(token_len + 1);
+                    if (tokens[count]) {
+                        strncpy(tokens[count], start, token_len);
+                        tokens[count][token_len] = '\0';
+                        count++;
+                    }
+                }
             }
         }
     }

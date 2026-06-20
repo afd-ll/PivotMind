@@ -269,8 +269,8 @@ int find_common_patterns(HuarongTopologyNet* net, int* node_ids, int count,
     if (!net || !node_ids || count < 2) return 0;
 
     // 统计每个节点与其他节点的连接
-    int* connection_counts = (int*)calloc(net->node_count, sizeof(int));
-    if (!connection_counts) return 0;
+    int* edge_counts = (int*)calloc(net->node_count, sizeof(int));
+    if (!edge_counts) return 0;
 
     for (int i = 0; i < count; i++) {
         int node_id = node_ids[i];
@@ -279,10 +279,10 @@ int find_common_patterns(HuarongTopologyNet* net, int* node_ids, int count,
         ReasoningNode* node = net->nodes[node_id];
         if (!node) continue;
 
-        for (int j = 0; j < node->connection_count; j++) {
-            int target_id = node->connections[j]->node_id;
+        for (int j = 0; j < node->edge_count; j++) {
+            int target_id = node->edges[j].target->node_id;
             if (target_id >= 0 && target_id < net->node_count) {
-                connection_counts[target_id]++;
+                edge_counts[target_id]++;
             }
         }
     }
@@ -290,18 +290,18 @@ int find_common_patterns(HuarongTopologyNet* net, int* node_ids, int count,
     // 找出被多个节点连接的共同目标
     int* pattern_node_ids = (int*)malloc(net->node_count * sizeof(int));
     if (!pattern_node_ids) {
-        free(connection_counts);
+        free(edge_counts);
         return 0;
     }
 
     int pattern_count = 0;
     for (int i = 0; i < net->node_count; i++) {
-        if (connection_counts[i] >= 2) {  // 被至少两个节点连接
+        if (edge_counts[i] >= 2) {  // 被至少两个节点连接
             pattern_node_ids[pattern_count++] = i;
         }
     }
 
-    free(connection_counts);
+    free(edge_counts);
 
     if (output_patterns && pattern_count > 0) {
         // 限制输出数量避免内存问题
@@ -375,9 +375,9 @@ int recognize_hierarchical_patterns(HuarongTopologyNet* net, ConceptLevel /*leve
         if (!node) continue;
 
         // 根据连接数大致分类
-        if (node->connection_count < 3) {
+        if (node->edge_count < 3) {
             level_node_count[CONCRETE]++;
-        } else if (node->connection_count < 6) {
+        } else if (node->edge_count < 6) {
             level_node_count[CATEGORICAL]++;
         } else {
             level_node_count[CAUSAL]++;
@@ -411,16 +411,16 @@ static ConceptLevel determine_concept_level(ReasoningNode* node, int net_node_co
 
     // 因素1：连接数占总节点的比例（0-30分）
     float connection_ratio = (net_node_count > 0)
-        ? (float)node->connection_count / (float)net_node_count
+        ? (float)node->edge_count / (float)net_node_count
         : 0.0f;
     score += CLAMP(connection_ratio * 30.0f, 0.0f, 30.0f);
 
     // 因素2：绝对连接数（0-25分）
     // 0连接=0分, 1-2连接=5分, 3-5=12分, 6-9=20分, 10+=25分
-    if (node->connection_count >= 10) score += 25.0f;
-    else if (node->connection_count >= 6) score += 20.0f;
-    else if (node->connection_count >= 3) score += 12.0f;
-    else if (node->connection_count >= 1) score += 5.0f;
+    if (node->edge_count >= 10) score += 25.0f;
+    else if (node->edge_count >= 6) score += 20.0f;
+    else if (node->edge_count >= 3) score += 12.0f;
+    else if (node->edge_count >= 1) score += 5.0f;
 
     // 因素3：激活值（0-25分）
     // 高激活值说明节点频繁被访问，可能是重要概念
@@ -429,12 +429,12 @@ static ConceptLevel determine_concept_level(ReasoningNode* node, int net_node_co
     // 因素4：连接目标多样性（0-20分）
     // 连接到不同节点的比例越高，抽象程度越高
     int unique_targets = 0;
-    if (node->connection_count > 0) {
+    if (node->edge_count > 0) {
         // 简化：连接数本身就是目标数量的代理
-        unique_targets = node->connection_count;
+        unique_targets = node->edge_count;
     }
-    float diversity = (node->connection_count > 0)
-        ? (float)unique_targets / (float)node->connection_count
+    float diversity = (node->edge_count > 0)
+        ? (float)unique_targets / (float)node->edge_count
         : 0.0f;
     score += diversity * 20.0f;
 
@@ -470,19 +470,19 @@ int build_concept_hierarchy(HuarongTopologyNet* net, ConceptHierarchy* hierarchy
         concept_hierarchy_add(hierarchy, concept);
 
         // 如果是具体节点，查找更抽象的父概念候选
-        if (level < CATEGORICAL && node->connection_count > 0) {
+        if (level < CATEGORICAL && node->edge_count > 0) {
             // 选择连接最多且层级比自己高的节点作为父概念
             float best_score = -1.0f;
             int parent_node_id = -1;
-            for (int j = 0; j < node->connection_count; j++) {
-                int target_id = node->connections[j]->node_id;
+            for (int j = 0; j < node->edge_count; j++) {
+                int target_id = node->edges[j].target->node_id;
                 if (target_id >= 0 && target_id < net->node_count) {
                     ReasoningNode* target = net->nodes[target_id];
                     if (!target) continue;
 
                     // 只考虑比自己连接数更多的目标作为父概念
-                    if (target->connection_count > node->connection_count) {
-                        float target_score = target->connection_count + target->activation * 5.0f;
+                    if (target->edge_count > node->edge_count) {
+                        float target_score = target->edge_count + target->activation * 5.0f;
                         if (target_score > best_score) {
                             best_score = target_score;
                             parent_node_id = target_id;

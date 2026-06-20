@@ -132,15 +132,15 @@ int feature_learn_graph_smooth(HuarongTopologyNet* net, int iterations) {
             /* 单线程快速路径 */
             for (int i = 0; i < total_nodes; i++) {
                 ReasoningNode* node = net->nodes[i];
-                if (!node || !node->features || node->connection_count <= 0) continue;
+                if (!node || !node->features || node->edge_count <= 0) continue;
                 float* src_feat = node->features;
-                for (int c = 0; c < node->connection_count; c++) {
-                    ReasoningNode* nb = node->connections[c];
+                for (int c = 0; c < node->edge_count; c++) {
+                    ReasoningNode* nb = node->edges[c].target;
                     if (!nb || !nb->features || nb->node_id < 0 || nb->node_id >= total_nodes) continue;
                     int nb_id = nb->node_id;
-                    float w = node->connection_weights[c];
-                    float conf = (node->connection_confidences && c < node->connection_count)
-                                 ? node->connection_confidences[c] : 0.5f;
+                    float w = node->edges[c].weight;
+                    float conf = (node->edges && c < node->edge_count)
+                                 ? node->edges[c].confidence : 0.5f;
                     float tw = w * conf;
                     if (tw < 0.01f) continue;
                     float* dst_nb = merged_feats + nb_id * dim;
@@ -167,18 +167,18 @@ int feature_learn_graph_smooth(HuarongTopologyNet* net, int iterations) {
             for (int i = 0; i < total_nodes; i++) {
                 int tid = omp_get_thread_num();
                 ReasoningNode* node = net->nodes[i];
-                if (!node || !node->features || node->connection_count <= 0) continue;
+                if (!node || !node->features || node->edge_count <= 0) continue;
                 float* src_feat = node->features;
                 float* loc_f = thread_feats[tid];
                 float* loc_w = thread_ws[tid];
 
-                for (int c = 0; c < node->connection_count; c++) {
-                    ReasoningNode* nb = node->connections[c];
+                for (int c = 0; c < node->edge_count; c++) {
+                    ReasoningNode* nb = node->edges[c].target;
                     if (!nb || !nb->features || nb->node_id < 0 || nb->node_id >= total_nodes) continue;
                     int nb_id = nb->node_id;
-                    float w = node->connection_weights[c];
-                    float conf = (node->connection_confidences && c < node->connection_count)
-                                 ? node->connection_confidences[c] : 0.5f;
+                    float w = node->edges[c].weight;
+                    float conf = (node->edges && c < node->edge_count)
+                                 ? node->edges[c].confidence : 0.5f;
                     float tw = w * conf;
                     if (tw < 0.01f) continue;
 

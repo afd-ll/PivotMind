@@ -29,14 +29,14 @@ static float compute_node_importance_simple(HuarongTopologyNet* net, int node_id
     if (!node) return 0.0f;
 
     // 综合度中心性、激活值、连接权重
-    float degree_centrality = (float)node->connection_count / MAX(net->node_count - 1, 1);
+    float degree_centrality = (float)node->edge_count / MAX(net->node_count - 1, 1);
     float activation_factor = node->activation;
     float weight_factor = 0.0f;
 
-    for (int i = 0; i < node->connection_count; i++) {
-        weight_factor += fabsf(node->connection_weights[i]);
+    for (int i = 0; i < node->edge_count; i++) {
+        weight_factor += fabsf(node->edges[i].weight);
     }
-    weight_factor /= MAX(node->connection_count, 1);
+    weight_factor /= MAX(node->edge_count, 1);
 
     return 0.4f * degree_centrality + 0.3f * activation_factor + 0.3f * weight_factor;
 }
@@ -142,7 +142,7 @@ void compute_fisher_info(HuarongTopologyNet* net, int node_id, float* fisher_dia
     // 计算有效参数数量
     // 包括：特征权重 + 连接权重 + 偏置（如果有）
     int feature_weight_count = node->feature_dim;
-    int connection_weight_count = node->connection_count;
+    int connection_weight_count = node->edge_count;
     int total_params = feature_weight_count + connection_weight_count + 1; // +1 for bias
 
     // 计算节点的"损失敏感度"作为梯度的近似
@@ -153,9 +153,9 @@ void compute_fisher_info(HuarongTopologyNet* net, int node_id, float* fisher_dia
     float total_weight_magnitude = 0.0f;
 
     // 统计激活和权重的幅度
-    for (int i = 0; i < node->connection_count; i++) {
+    for (int i = 0; i < node->edge_count; i++) {
         // 绝对值作为梯度大小的近似
-        total_weight_magnitude += fabsf(node->connection_weights[i]);
+        total_weight_magnitude += fabsf(node->edges[i].weight);
     }
 
     // 特征贡献
@@ -179,12 +179,12 @@ void compute_fisher_info(HuarongTopologyNet* net, int node_id, float* fisher_dia
         // 真实实现：fisher_diag[i] = E[(∂L/∂w_i)²]
         // 这里用：权重大小 × 激活强度 × 连接目标的重要性 来近似
         float target_importance = 0.5f;
-        if (node->connections && i < node->connection_count && node->connections[i]) {
-            target_importance = node->connections[i]->activation * node->connections[i]->confidence;
+        if (node->edges && i < node->edge_count && node->edges[i].target) {
+            target_importance = node->edges[i].target->activation * node->edges[i].target->confidence;
         }
 
         // 梯度平方的期望近似：使用方差来估计
-        float weight_gradient = node->connection_weights[i] * base_sensitivity * target_importance;
+        float weight_gradient = node->edges[i].weight * base_sensitivity * target_importance;
         float fisher_entry = weight_gradient * weight_gradient + net->learning_rate * net->learning_rate;
 
         // 加上连接目标的影响因子
@@ -233,7 +233,7 @@ int fisher_info_update(FisherInfoMatrix* matrix, HuarongTopologyNet* net, int no
     ReasoningNode* node = net->nodes[node_id];
     if (!node) return -1;
 
-    int param_count = node->feature_dim + node->connection_count + 1;
+    int param_count = node->feature_dim + node->edge_count + 1;
     if (entry->param_count != param_count) {
         if (entry->fisher_diag) free(entry->fisher_diag);
         entry->fisher_diag = (float*)malloc(param_count * sizeof(float));
@@ -249,7 +249,7 @@ int fisher_info_update(FisherInfoMatrix* matrix, HuarongTopologyNet* net, int no
     float gamma = 0.9f; // 在线EWC衰减因子
 
     // 计算节点的重要性（用于加权）
-    (void)(node->activation * (1.0f / (1.0f + node->connection_count)));
+    (void)(node->activation * (1.0f / (1.0f + node->edge_count)));
 
     for (int i = 0; i < param_count; i++) {
         // 真实实现：应该存储累积的梯度平方
@@ -334,9 +334,9 @@ float ewc_penalty_with_snapshot(TaskSnapshot* snapshot, FisherInfoMatrix* matrix
             if (!fisher) continue;
 
             // 计算 Σ F_i * (θ_i - θ*_i)²
-            int param_count = MIN(old_weight_count, node->connection_count);
+            int param_count = MIN(old_weight_count, node->edge_count);
             for (int j = 0; j < param_count; j++) {
-                float diff = node->connection_weights[j] - old_weights[j];
+                float diff = node->edges[j].weight - old_weights[j];
                 penalty += fisher[j] * diff * diff;
             }
         }
@@ -369,8 +369,8 @@ float ewc_penalty(FisherInfoMatrix* matrix, HuarongTopologyNet* net,
                 // 这比硬编码0.5更合理
                 float implicit_old_weight = node->activation * 0.5f;
 
-                for (int i = 0; i < MIN(node->connection_count, 20); i++) {
-                    float diff = node->connection_weights[i] - implicit_old_weight;
+                for (int i = 0; i < MIN(node->edge_count, 20); i++) {
+                    float diff = node->edges[i].weight - implicit_old_weight;
                     penalty += fisher[i] * diff * diff;
                 }
             }
@@ -383,8 +383,8 @@ float ewc_penalty(FisherInfoMatrix* matrix, HuarongTopologyNet* net,
                 ReasoningNode* node = net->nodes[i];
                 if (node) {
                     float implicit_old_weight = node->activation * 0.5f;
-                    for (int j = 0; j < MIN(node->connection_count, 10); j++) {
-                        float diff = node->connection_weights[j] - implicit_old_weight;
+                    for (int j = 0; j < MIN(node->edge_count, 10); j++) {
+                        float diff = node->edges[j].weight - implicit_old_weight;
                         penalty += fisher[j] * diff * diff;
                     }
                 }
@@ -416,7 +416,7 @@ int ewc_gradient_update(FisherInfoMatrix* matrix, HuarongTopologyNet* net,
                     old_weights = task_snapshot_get_weights(snapshot, node_id, &old_weight_count);
                 }
 
-                int num_weights = MIN(node->connection_count,
+                int num_weights = MIN(node->edge_count,
                                       snapshot ? old_weight_count : 10);
 
                 for (int i = 0; i < num_weights; i++) {
@@ -428,12 +428,12 @@ int ewc_gradient_update(FisherInfoMatrix* matrix, HuarongTopologyNet* net,
                     // EWC 梯度 = 原始梯度 + 2 * λ * F_i * (θ_i - θ*_i)
                     // E = L_new + λ/2 * Σ F_i * (θ_i - θ*_i)²
                     // ∂E/∂θ_i = ∂L/∂θ_i + λ * F_i * (θ_i - θ*_i)
-                    float ewc_grad = config->lambda * fisher[i] * (node->connection_weights[i] - theta_old);
+                    float ewc_grad = config->lambda * fisher[i] * (node->edges[i].weight - theta_old);
                     gradients[i] += ewc_grad;
 
                     // 应用梯度更新
-                    node->connection_weights[i] -= learning_rate * gradients[i];
-                    node->connection_weights[i] = CLAMP(node->connection_weights[i], 0.0f, 1.0f);
+                    node->edges[i].weight -= learning_rate * gradients[i];
+                    node->edges[i].weight = CLAMP(node->edges[i].weight, 0.0f, 1.0f);
                 }
             }
         }
@@ -451,7 +451,7 @@ int ewc_gradient_update(FisherInfoMatrix* matrix, HuarongTopologyNet* net,
                         old_weights = task_snapshot_get_weights(snapshot, n, &old_weight_count);
                     }
 
-                    int num_weights = MIN(node->connection_count,
+                    int num_weights = MIN(node->edge_count,
                                           snapshot ? old_weight_count : 10);
 
                     for (int i = 0; i < num_weights; i++) {
@@ -459,10 +459,10 @@ int ewc_gradient_update(FisherInfoMatrix* matrix, HuarongTopologyNet* net,
                                           ? old_weights[i]
                                           : node->activation * 0.5f;
 
-                        float ewc_grad = config->lambda * fisher[i] * (node->connection_weights[i] - theta_old);
+                        float ewc_grad = config->lambda * fisher[i] * (node->edges[i].weight - theta_old);
                         gradients[i] += ewc_grad;
-                        node->connection_weights[i] -= learning_rate * gradients[i];
-                        node->connection_weights[i] = CLAMP(node->connection_weights[i], 0.0f, 1.0f);
+                        node->edges[i].weight -= learning_rate * gradients[i];
+                        node->edges[i].weight = CLAMP(node->edges[i].weight, 0.0f, 1.0f);
                     }
                 }
             }
@@ -732,8 +732,8 @@ int isolate_domain_weights(MasterTopology* master, KnowledgeDomain* domain,
                 if (!node) continue;
 
                 // 减小跨域连接的权重
-                for (int j = 0; j < node->connection_count; j++) {
-                    node->connection_weights[j] *= (1.0f - strength);
+                for (int j = 0; j < node->edge_count; j++) {
+                    node->edges[j].weight *= (1.0f - strength);
                 }
             }
             break;
@@ -761,8 +761,8 @@ int isolate_domain_weights(MasterTopology* master, KnowledgeDomain* domain,
                     if (node_id >= sub->net->node_count) continue;
                     ReasoningNode* node = sub->net->nodes[node_id];
                     if (!node) continue;
-                    for (int j = 0; j < node->connection_count; j++) {
-                        node->connection_weights[j] *= (1.0f - adaptive_strength);
+                    for (int j = 0; j < node->edge_count; j++) {
+                        node->edges[j].weight *= (1.0f - adaptive_strength);
                     }
                 }
             }
@@ -798,10 +798,10 @@ int cross_domain_transfer(MasterTopology* master, KnowledgeDomain* from_domain,
             if (!to_node) continue;
 
             // 迁移：复制部分连接
-            for (int k = 0; k < from_node->connection_count; k++) {
-                if (from_node->connections[k]->node_id == to_node_id) {
+            for (int k = 0; k < from_node->edge_count; k++) {
+                if (from_node->edges[k].target->node_id == to_node_id) {
                     // 已有连接，按比例调整
-                    from_node->connection_weights[k] *= (1.0f - transfer_ratio);
+                    from_node->edges[k].weight *= (1.0f - transfer_ratio);
                 } else {
                     // 潜在的新连接
                     // 简化：不创建新连接，只是调整权重
@@ -831,8 +831,8 @@ float compute_domain_interference(MasterTopology* master,
         ReasoningNode* node = sub->net->nodes[node_id];
         if (!node) continue;
 
-        for (int j = 0; j < node->connection_count; j++) {
-            int target_id = node->connections[j]->node_id;
+        for (int j = 0; j < node->edge_count; j++) {
+            int target_id = node->edges[j].target->node_id;
             // 检查目标是否在另一个域
             bool in_domain2 = false;
             for (int k = 0; k < domain2->node_count; k++) {
@@ -1003,8 +1003,7 @@ TaskSnapshot* task_snapshot_create(HuarongTopologyNet* net, int task_id) {
             int node_id;
             float* weights;
             float* biases;
-            float* connection_weights;
-            int connection_count;
+                        int edge_count;
             int weight_count;
         } NodeParams;
 
@@ -1013,15 +1012,15 @@ TaskSnapshot* task_snapshot_create(HuarongTopologyNet* net, int task_id) {
 
         memset(np, 0, sizeof(NodeParams));
         np->node_id = node->node_id;
-        np->connection_count = node->connection_count;
+        np->edge_count = node->edge_count;
 
         // 复制连接权重（最重要的参数）
-        if (node->connection_count > 0 && node->connection_weights) {
-            np->connection_weights = (float*)malloc(node->connection_count * sizeof(float));
-            if (np->connection_weights) {
-                memcpy(np->connection_weights, node->connection_weights,
-                       node->connection_count * sizeof(float));
-                np->weight_count += node->connection_count;
+        if (node->edge_count > 0 && node->edges) {
+            np->weights = (float*)malloc(node->edge_count * sizeof(float));
+            if (np->weights) {
+                for (int ej = 0; ej < node->edge_count; ej++)
+                    np->weights[ej] = node->edges[ej].weight;
+                np->weight_count += node->edge_count;
             }
         }
 
@@ -1055,15 +1054,14 @@ void task_snapshot_destroy(TaskSnapshot* snapshot) {
                     int node_id;
                     float* weights;
                     float* biases;
-                    float* connection_weights;
-                    int connection_count;
+                                        int edge_count;
                     int weight_count;
                 } NodeParams;
                 NodeParams* np = (NodeParams*)snapshot->node_params[i];
                 if (np) {
                     if (np->weights) free(np->weights);
                     if (np->biases) free(np->biases);
-                    if (np->connection_weights) free(np->connection_weights);
+                    if (np->weights) free(np->weights);
                     free(np);
                 }
             }
@@ -1091,15 +1089,14 @@ float* task_snapshot_get_weights(TaskSnapshot* snapshot, int node_id, int* out_w
             int node_id;
             float* weights;
             float* biases;
-            float* connection_weights;
-            int connection_count;
+                        int edge_count;
             int weight_count;
         } NodeParams;
 
         NodeParams* np = (NodeParams*)snapshot->node_params[i];
-        if (np && np->node_id == node_id && np->connection_weights) {
-            *out_weight_count = np->connection_count;
-            return np->connection_weights;
+        if (np && np->node_id == node_id) {
+            *out_weight_count = np->weight_count;
+            return np->weights;
         }
     }
 
@@ -1123,10 +1120,10 @@ float compute_ewc_penalty_from_snapshot(TaskSnapshot* snapshot, HuarongTopologyN
         float* old_weights = task_snapshot_get_weights(snapshot, node->node_id, &weight_count);
         if (!old_weights || weight_count == 0) continue;
 
-        int num_weights = MIN(node->connection_count, weight_count);
+        int num_weights = MIN(node->edge_count, weight_count);
         for (int j = 0; j < num_weights; j++) {
             if (fisher_diag && j < weight_count) {
-                float diff = node->connection_weights[j] - old_weights[j];
+                float diff = node->edges[j].weight - old_weights[j];
                 penalty += fisher_diag[j] * diff * diff;
             }
         }
@@ -1319,7 +1316,7 @@ void continual_learning_on_episode_end(ContinualLearningContext* ctx,
                 .activation = node->activation,
                 .priority = node->activation + 0.1f,
                 .timestamp = time(NULL),
-                .access_count = node->connection_count
+                .access_count = node->edge_count
             };
             add_to_replay_buffer(ctx->replay_buffer, &sample);
         }

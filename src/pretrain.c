@@ -1,5 +1,6 @@
 #include "pretrain.h"
 #include "common.h"
+#include "error.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -182,7 +183,7 @@ int pretrain_state_init_advanced(PretrainState* state, PretrainConfig* config) {
     // 构建unigram表用于负采样
     if (state->vocab && state->vocab->size > 0) {
         if (_build_unigram_table(state) != 0) {
-            fprintf(stderr, "[预训练] 警告: unigram表构建失败，将使用均匀采样\n");
+            LOG_WARNING("[预训练] 警告: unigram表构建失败，将使用均匀采样");
         }
     }
 
@@ -289,7 +290,7 @@ int pretrain_save_weights(PretrainState* state, const char* filepath) {
 
     FILE* fp = fopen(filepath, "wb");
     if (!fp) {
-        fprintf(stderr, "[预训练] 无法创建文件: %s\n", filepath);
+        LOG_ERROR("[预训练] 无法创建文件: %s", filepath);
         return -1;
     }
 
@@ -1246,7 +1247,7 @@ PretrainState* pretrain_state_resume(Vocab* vocab, const char* ckpt_path) {
 
     FILE* fp = fopen(ckpt_path, "rb");
     if (!fp) {
-        fprintf(stderr, "[预训练] 无法打开检查点: %s\n", ckpt_path);
+        LOG_ERROR("[预训练] 无法打开检查点: %s", ckpt_path);
         return NULL;
     }
 
@@ -1254,7 +1255,7 @@ PretrainState* pretrain_state_resume(Vocab* vocab, const char* ckpt_path) {
     int magic;
     fread(&magic, sizeof(int), 1, fp);
     if (magic != 0x50524554) {
-        fprintf(stderr, "[预训练] 无效的检查点格式\n");
+        LOG_ERROR("[预训练] 无效的检查点格式");
         fclose(fp);
         return NULL;
     }

@@ -20,8 +20,26 @@ typedef enum {
 
 typedef struct {
     void* target;    /* 目标节点指针 */
-    int   index;     /* 在 connections[] 数组中的下标 */
+    int   index;     /* 在 edges[] 数组中的下标 */
+    int   is_deleted;/* 墓碑标记: 1=已删除（查找时跳过，插入时可复用） */
 } ConnHashEntry;
+
+/**
+ * 连接边结构体 — 封装目标节点指针 + 边属性
+ * 
+ * 替代原四个平行数组（connections / connection_weights /
+ * connection_motivational_bias / connection_confidences），
+ * 避免扩容/删除/排序时的同步维护灾难。
+ */
+typedef struct Edge {
+    struct ReasoningNode* target;           // 目标节点指针
+    float weight;                           // 连接权重 (logical_strength)
+    float motivational_bias;                // 动机倾向
+    float confidence;                       // 边置信度
+} Edge;
+
+/** 模板节点 — 槽位间连接词缓冲区大小（UTF-8 中文约 10 字） */
+#define TPL_CONNECTOR_BUF 32
 
 /**
  * 推理节点（类比华容道的滑块）
@@ -30,8 +48,18 @@ typedef struct {
  * 集成认知架构参数:
  * - confidence: 三维置信度 (predictive_accuracy, user_satisfaction, novelty_bonus)
  * - valence: 效价 (-1.0 ~ +1.0)
- * - connection_weights: logical_strength (逻辑强度)
- * - connection_motivational_bias: 动机倾向 (新增)
+ * - edges[].weight: logical_strength (逻辑强度)
+ * - edges[].motivational_bias: 动机倾向
+ *
+ * ========== 线程安全锁序（重要，违反会导致死锁）==========
+ * 三层锁必须严格按以下顺序获取：
+ *   ① MasterTopology.rwlock (全局读写锁，推理线程读取时只拿读锁)
+ *   ② HuarongTopologyNet.mutex (网络级互斥锁，保护扩容/节点创建)
+ *   ③ HuarongTopologyNet.node_locks[] (节点级锁池，按 node_id 升序加锁)
+ *
+ * 反向顺序（如：持节点锁再请求网络锁）会导致 ABBA 死锁。
+ * 多节点加锁始终按 node_id 升序。
+ * ============================================================
  */
 typedef struct ReasoningNode {
     int node_id;               // 节点唯一标识
@@ -39,13 +67,10 @@ typedef struct ReasoningNode {
     float* features;           // 特征向量
     int feature_dim;           // 特征维度
     
-    // 连接边
-    struct ReasoningNode** connections; // 连接的节点数组
-    int connection_capacity;           // 连接数组容量
-    float* connection_weights; // 连接权重 (logical_strength)
-    float* connection_motivational_bias; // 动机倾向 (新增)
-    float* connection_confidences; // 边置信度
-    int connection_count;      // 连接数量
+    // 连接边 — 单个 Edge 数组替代原四个平行数组
+    Edge* edges;               // 边数组（包含 target/weight/bias/confidence）
+    int edge_capacity;         // 边数组容量
+    int edge_count;            // 边数量
     
     // 连接哈希表 — O(1) 查找目标节点在 connections[] 中的索引
     // 开放寻址，key=目标节点指针, value=connections[]数组下标
@@ -72,7 +97,7 @@ typedef struct ReasoningNode {
     // 编码 POS 序列 + 槽位间连接词，如 [N]的[V]是[Adj] 表示定中+系表
     int   tpl_pos_len;             // POS 序列长度 (2-4)
     int   tpl_pos_seq[4];          // 各槽位的 POSTag（值为 POSTag 枚举）
-    char  tpl_connectors[4][8];    // 槽位间连接词（最大3个，每个最多7字符+'\0'）
+    char  tpl_connectors[4][TPL_CONNECTOR_BUF]; // 槽位间连接词 (UTF-8 中文约10字)
     
     // 元信息
     int is_reversible;         // 是否支持可逆操作
@@ -101,6 +126,9 @@ typedef struct HuarongTopologyNet {
     // 延迟释放链表 — 扩容旧数组暂存，epoch 结束统一清理
     void* retired_conns;           // 链表头节点
     int retired_pending;            // 是否有待清理的旧数组
+    int epoch;                      // 当前代次（扩容时推进）
+    volatile int active_readers;    // 当前活跃读线程计数
+    pthread_mutex_t retire_mutex;   // 退役链表锁
 
     /* 概念名→节点ID 哈希表 (O(1) 查找) */
     struct { const char* name; int node_id; }* concept_hash;
@@ -115,19 +143,64 @@ typedef struct HuarongTopologyNet {
  *  节点连接哈希表 API — O(1) 查找目标节点在 connections[] 中的索引
  * ================================================================ */
 
-/** 查找目标节点在 node->connections[] 中的位置 */
+/** 查找目标节点在 node->edges[] 中的位置 */
 static inline int node_conn_find(ReasoningNode* node, ReasoningNode* target) {
-    if (!node || !node->conn_hash || node->conn_hash_mask < 0 || !target) return -1;
+    if (!node || node->is_cooled || !node->conn_hash || node->conn_hash_mask < 0 || !target) return -1;
     uintptr_t h = ((uintptr_t)target >> 3);
     int mask = node->conn_hash_mask;
     for (int i = 0; i <= mask; i++) {
         int idx = (int)((h + (uintptr_t)i) & (uintptr_t)mask);
-        if (node->conn_hash[idx].target == target)
+        if (node->conn_hash[idx].target == target && !node->conn_hash[idx].is_deleted)
             return node->conn_hash[idx].index;
-        if (!node->conn_hash[idx].target)
-            return -1;
+        if (!node->conn_hash[idx].target && !node->conn_hash[idx].is_deleted)
+            return -1;  /* 真·空槽 = 不存在 */
     }
-    return -1;
+    return -1;  /* 表满遍历完毕仍未找到 */
+}
+
+/**
+ * 按 node_id 升序对两个节点加锁（消除 ABBA 死锁风险）
+ *
+ * 锁序约定：锁池 HutangTopologyNet.node_locks[] 遵循以下层级：
+ *   Level 1: MasterTopology.rwlock      — 全局读写锁
+ *   Level 2: HuarongTopologyNet.mutex   — 网络级互斥锁
+ *   Level 3: HuarongTopologyNet.node_locks[] — 节点级锁池，按 node_id 升序
+ *
+ * 本函数处理 Level 3 的双锁获取，确保按照 (node_id_a & mask) 升序取锁。
+ *
+ * @param net          拓扑网络
+ * @param node_id_a    第一个节点 ID
+ * @param node_id_b    第二个节点 ID
+ * @param locked_both  输出：两把锁是否不同，传 NULL 不关心
+ */
+static inline void lock_two_nodes_by_id(HuarongTopologyNet* net,
+                                       int node_id_a, int node_id_b,
+                                       int* locked_both) {
+    int li_a = node_id_a & (PM_NODE_LOCK_COUNT - 1);
+    int li_b = node_id_b & (PM_NODE_LOCK_COUNT - 1);
+    if (li_a == li_b) {
+        pthread_mutex_lock(&net->node_locks[li_a]);
+        if (locked_both) *locked_both = 0;
+    } else if (li_a < li_b) {
+        pthread_mutex_lock(&net->node_locks[li_a]);
+        pthread_mutex_lock(&net->node_locks[li_b]);
+        if (locked_both) *locked_both = 1;
+    } else {
+        pthread_mutex_lock(&net->node_locks[li_b]);
+        pthread_mutex_lock(&net->node_locks[li_a]);
+        if (locked_both) *locked_both = 1;
+    }
+}
+
+/** 释放 lock_two_nodes_by_id 获得的锁 */
+static inline void unlock_two_nodes_by_id(HuarongTopologyNet* net,
+                                          int node_id_a, int node_id_b,
+                                          int locked_both) {
+    int li_a = node_id_a & (PM_NODE_LOCK_COUNT - 1);
+    int li_b = node_id_b & (PM_NODE_LOCK_COUNT - 1);
+    pthread_mutex_unlock(&net->node_locks[li_a]);
+    if (locked_both && li_a != li_b)
+        pthread_mutex_unlock(&net->node_locks[li_b]);
 }
 
 /** 插入 (target, index) 映射 — net 用于延迟释放旧哈希表 */
@@ -151,6 +224,20 @@ void huarong_net_destroy(HuarongTopologyNet* net);
 
 /** 清理训练期间延迟释放的扩容旧数组（epoch 结束时调用） */
 void huarong_net_cleanup_retired(HuarongTopologyNet* net);
+
+/** 将任意堆指针挂入退役链表，epoch 结束时安全释放（防并发 use-after-free） */
+void huarong_net_retire_blob(HuarongTopologyNet* net, void* ptr);
+
+/** 推理线程进入读取临界区（记录活跃读者） */
+static inline void huarong_net_enter_reader(HuarongTopologyNet* net) {
+    if (net) __sync_fetch_and_add(&net->active_readers, 1);
+}
+
+/** 推理线程离开读取临界区（递减活跃读者，最后一人触发清理） */
+static inline void huarong_net_leave_reader(HuarongTopologyNet* net) {
+    if (net && __sync_sub_and_fetch(&net->active_readers, 1) == 0)
+        huarong_net_cleanup_retired(net);
+}
 
 struct MasterTopology;  /* 前向声明 — 避免与 multi_topology.h 循环依赖 */
 

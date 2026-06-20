@@ -52,6 +52,9 @@ int dream_cycle(MasterTopology* master, MemorySystem* memory,
     else { DreamConfig def = DREAM_DEFAULT_CONFIG; cfg = def; }
     (void)memory;  /* 预留 */
 
+    /* 推进跨拓扑命中轮次 — 用于耦合衰减窗口和固化阈值判定 */
+    master->cross_hit_round++;
+
     SubTopology* vocab    = master_get_sub_topology_by_type(master, TOPO_VOCABULARY);
     SubTopology* semantic = master_get_sub_topology_by_type(master, TOPO_SEMANTIC);
     SubTopology* emotion  = master_get_sub_topology_by_type(master, TOPO_EMOTION);
@@ -126,15 +129,15 @@ int dream_cycle(MasterTopology* master, MemorySystem* memory,
 
             /* 同拓扑内：检查并强化内部连接 */
             if (t0 == t1 && st0->net == st1->net) {
-                for (int c = 0; c < n0->connection_count; c++) {
-                    if (n0->connections[c] == n1) {
-                        float w = n0->connection_weights ? n0->connection_weights[c] : 0.0f;
+                for (int c = 0; c < n0->edge_count; c++) {
+                    if (n0->edges[c].target == n1) {
+                        float w = (n0->edges ? n0->edges[c].weight : 0.0f);
                         if (w < 0.4f && w > 0.0f) {
                             int lk = n0->node_id & (PM_NODE_LOCK_COUNT - 1);
                             pthread_mutex_lock(&st0->net->node_locks[lk]);
-                            n0->connection_weights[c] += cfg.weak_edge_boost;
-                            if (n0->connection_weights[c] > 1.0f)
-                                n0->connection_weights[c] = 1.0f;
+                            n0->edges[c].weight += cfg.weak_edge_boost;
+                            if (n0->edges[c].weight > 1.0f)
+                                n0->edges[c].weight = 1.0f;
                             pthread_mutex_unlock(&st0->net->node_locks[lk]);
                             edge_boosted++;
                             total_mods++;
@@ -144,20 +147,15 @@ int dream_cycle(MasterTopology* master, MemorySystem* memory,
                 }
             }
 
-            /* 跨拓扑：语义相关但无连接 → 创建跨拓扑连接 */
+            /* 跨拓扑：语义相关但无连接 → 记录临时耦合强度（不直接建边）
+             * 需累计 cfg.cross_solidify_rounds 轮梦境后才固化为永久跨拓扑连接 */
             if (t0 != t1) {
                 if (!cross_link_exists(master, t0, n0->node_id, t1, n1->node_id)) {
-                    /* 用联想激活值作为初始权重 */
-                    float init_w = 0.25f + 0.25f * assoc_activations[ai+1];
-                    if (init_w > 0.6f) init_w = 0.6f;
-                    master_add_cross_link(master, t0, n0->node_id,
-                                         t1, n1->node_id, init_w, "dream-assoc");
-                    cross_created++;
-                    total_mods++;
+                    master_record_cross_hit(master, t0, n0->node_id, t1, n1->node_id);
                     if (cfg.verbose) {
-                        fprintf(stderr, "[梦境] 联想跨拓扑 %s(%d) ↔ %s(%d) w=%.3f\n",
+                        fprintf(stderr, "[梦境] 耦合记录 %s(%d) ↔ %s(%d)\n",
                                 assoc_concepts[ai], t0,
-                                assoc_concepts[ai+1], t1, init_w);
+                                assoc_concepts[ai+1], t1);
                     }
                 }
             }
@@ -189,8 +187,26 @@ int dream_cycle(MasterTopology* master, MemorySystem* memory,
     DECAY(context);
     #undef DECAY
 
+    /* ================================================================
+     *  固化：累计跨拓扑 hit 达到 threshold 的 → 创建永久连接
+     *  衰减：超时未再命中的临时耦合 → 降低 hit_count
+     * ================================================================ */
+    cross_created = master_process_cross_hits(
+        master, cfg.cross_solidify_rounds, cfg.cross_solidify_rounds * 3);
+    total_mods += cross_created;
+
+    /* 衰减陈旧的临时耦合（round_timeout 同 process 的超时窗口） */
+    for (int i = 0; i < CROSS_HIT_TABLE_SIZE; i++) {
+        CrossTopoHitRecord* rec = &master->cross_hit_records[i];
+        if (!rec->is_used) continue;
+        if (master->cross_hit_round - rec->last_round > cfg.cross_solidify_rounds * 5) {
+            rec->hit_count = (int)(rec->hit_count * cfg.cross_coupling_decay);
+            if (rec->hit_count < 1) rec->is_used = 0;
+        }
+    }
+
     if (cfg.verbose && total_mods > 0) {
-        fprintf(stderr, "[梦境] 完成: 强化 %d 条弱边, 创建 %d 条跨拓扑连接\n",
+        fprintf(stderr, "[梦境] 完成: 强化 %d 条弱边, 固化 %d 条跨拓扑连接\n",
                 edge_boosted, cross_created);
     }
 

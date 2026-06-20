@@ -6,6 +6,8 @@
 #include "health_monitor.h"
 #include "feature_io.h"
 #include "cross_edge_io.h"
+#include "platform.h"
+#include "error.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -40,7 +42,7 @@ HealthLevel health_get_level(HealthMonitor* hm) {
 
 static void _emergency_save(MasterTopology* master) {
     if (!master) return;
-    fprintf(stderr, "[内感受] 紧急存盘...\n");
+    LOG_WARNING("[内感受] 紧急存盘...");
     int saved = master_save_state(master, "pivotmind_state.dat");
     if (saved >= 0) save_features(master, "features.bin");
     save_cross_edges(master, "cross_edges.bin");
@@ -53,32 +55,43 @@ static void _aggressive_prune(MasterTopology* master) {
         if (!sub || !sub->net) continue;
         for (int i = 0; i < sub->net->node_count; i++) {
             ReasoningNode* node = sub->net->nodes[i];
-            if (!node) continue;
+            if (!node || !node->edges) continue;
+            int lock_idx = node->node_id & (PM_NODE_LOCK_COUNT - 1);
+            pthread_mutex_lock(&sub->net->node_locks[lock_idx]);
             int kept = 0;
-            for (int c = 0; c < node->connection_count; c++) {
-                float w = node->connection_weights[c];
-                float conf = node->connection_confidences ?
-                    node->connection_confidences[c] : 0.5f;
+            for (int c = 0; c < node->edge_count; c++) {
+                float w = node->edges[c].weight;
+                float conf = node->edges[c].confidence;
                 /* RED 模式：阈值提高10倍 */
                 if (w * conf < 0.01f) { released++; continue; }
                 if (w < 0.005f) { released++; continue; }
                 if (kept != c) {
-                    node->connections[kept] = node->connections[c];
-                    node->connection_weights[kept] = node->connection_weights[c];
-                    if (node->connection_motivational_bias)
-                        node->connection_motivational_bias[kept] =
-                            node->connection_motivational_bias[c];
-                    if (node->connection_confidences)
-                        node->connection_confidences[kept] =
-                            node->connection_confidences[c];
+                    node->edges[kept].target = node->edges[c].target;
+                    node->edges[kept].weight = node->edges[c].weight;
+                    node->edges[kept].motivational_bias =
+                        node->edges[c].motivational_bias;
+                    node->edges[kept].confidence =
+                        node->edges[c].confidence;
                 }
                 kept++;
             }
-            node->connection_count = kept;
+            node->edge_count = kept;
+            /* 边压缩后重建 conn_hash，索引已变化 */
+            if (node->conn_hash) {
+                free(node->conn_hash);
+                node->conn_hash = NULL;
+                node->conn_hash_mask = -1;
+                node->conn_hash_entries = 0;
+            }
+            for (int ci = 0; ci < node->edge_count; ci++) {
+                if (node->edges[ci].target)
+                    node_conn_hash_insert(NULL, node, node->edges[ci].target, ci);
+            }
+            pthread_mutex_unlock(&sub->net->node_locks[lock_idx]);
         }
     }
     if (released > 0)
-        fprintf(stderr, "[内感受] 紧急修剪: 释放%d条弱边\n", released);
+        LOG_WARNING("[内感受] 紧急修剪: 释放%d条弱边", released);
 }
 
 void health_monitor_tick(HealthMonitor* hm,
@@ -88,11 +101,10 @@ void health_monitor_tick(HealthMonitor* hm,
 
     hm->ticks_since_check++;
 
-    /* ── 采集当前指标 ── */
-    { FILE* f = fopen("/proc/self/status", "r");
-      if (f) { char line[256]; while (fgets(line, sizeof(line), f)) {
-        if (strncmp(line, "VmRSS:", 6) == 0) hm->rss_mb = atol(line+6) / 1024.0f;
-      } fclose(f); }
+    /* ── 采集当前指标（跨平台内存读取） ── */
+    { long rss_kb = 0;
+      if (pm_get_process_memory(&rss_kb, NULL) == 0)
+          hm->rss_mb = (float)rss_kb / 1024.0f;
     }
 
     hm->total_nodes = 0;
@@ -105,7 +117,7 @@ void health_monitor_tick(HealthMonitor* hm,
         for (int i = 0; i < sub->net->node_count; i++) {
             ReasoningNode* n = sub->net->nodes[i];
             if (!n) continue;
-            hm->total_conns += n->connection_count;
+            hm->total_conns += n->edge_count;
             if (n->is_cooled) hm->frozen_nodes++;
         }
     }
@@ -153,7 +165,7 @@ void health_monitor_tick(HealthMonitor* hm,
 
     /* ── 调度器干预 ── */
     if (new_level >= HM_YELLOW && hm->level < HM_YELLOW) {
-        fprintf(stderr, "[内感受] ⚠ YELLOW → %s | RSS=%.1fMB(+%.2f/min) 连接=%d(+%d) 冻结=%d\n",
+        LOG_WARNING("[内感受] ⚠ YELLOW → %s | RSS=%.1fMB(+%.2f/min) 连接=%d(+%d) 冻结=%d",
                 reason, hm->rss_mb, hm->rss_growth_mb_min, hm->total_conns, conn_delta, hm->frozen_nodes);
         if (controller) {
             controller->satisfaction_threshold = 0.5f;     /* 提高门槛保质量 */
@@ -161,7 +173,7 @@ void health_monitor_tick(HealthMonitor* hm,
     }
 
     if (new_level == HM_RED && hm->level < HM_RED) {
-        fprintf(stderr, "[内感受] 🔴 RED → %s | RSS=%.1fMB(+%.2f/min) 连接=%d 冻结=%d\n",
+        LOG_ERROR("[内感受] 🔴 RED → %s | RSS=%.1fMB(+%.2f/min) 连接=%d 冻结=%d",
                 reason, hm->rss_mb, hm->rss_growth_mb_min, hm->total_conns, hm->frozen_nodes);
         _emergency_save(master);
         _aggressive_prune(master);
@@ -172,7 +184,7 @@ void health_monitor_tick(HealthMonitor* hm,
     }
 
     if (new_level < hm->level) {
-        fprintf(stderr, "[内感受] ✓ 恢复 GREEN | RSS=%.1fMB\n", hm->rss_mb);
+        LOG_INFO("[内感受] ✓ 恢复 GREEN | RSS=%.1fMB", hm->rss_mb);
         if (controller) controller->satisfaction_threshold = 0.15f;  /* 恢复宽松 */
     }
 

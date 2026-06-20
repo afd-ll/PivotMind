@@ -29,6 +29,7 @@
 #include "active_learner.h"
 #include "cognitive_controller.h"
 #include "web_search.h"
+#include "error.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -98,11 +99,11 @@ static void dialog_topo_worker(void* arg) {
 
         node->is_visited = 1;  // 安全：每个 worker 处理唯一的子拓扑（topo_id 不重叠）
 
-        for (int c = 0; c < node->connection_count; c++) {
-            ReasoningNode* connected = node->connections[c];
+        for (int c = 0; c < node->edge_count; c++) {
+            ReasoningNode* connected = node->edges[c].target;
             if (!connected) continue;
 
-            float edge_confidence = node->connection_confidences[c];
+            float edge_confidence = node->edges[c].confidence;
             float avg_confidence = (node->confidence + connected->confidence + edge_confidence) / 3.0f;
 
             float activation_multiplier = 1.0f;
@@ -125,7 +126,7 @@ static void dialog_topo_worker(void* arg) {
             else if (task->hop == 2)  adaptive_decay = 0.80f;
             else                      adaptive_decay = 0.65f;
 
-            float new_activation = node->connection_weights[c] *
+            float new_activation = node->edges[c].weight *
                                   node->activation *
                                   confidence_factor *
                                   activation_multiplier *
@@ -419,7 +420,7 @@ void resolve_causal_query(SemanticUnderstanding* sem, MasterTopology* master) {
     for (int i = 0; i < sem->key_concept_count && i < 50; i++) {
         sem->key_concept_ids[i] = find_node_id_by_concept(master, sem->key_concepts[i]);
         if (sem->key_concept_ids[i] >= 0) {
-            printf("  概念 [%s] → 节点ID %d\n", sem->key_concepts[i], sem->key_concept_ids[i]);
+            LOG_DEBUG("  概念 [%s] → 节点ID %d", sem->key_concepts[i], sem->key_concept_ids[i]);
         }
     }
 
@@ -442,7 +443,7 @@ void resolve_causal_query(SemanticUnderstanding* sem, MasterTopology* master) {
         }
     }
 
-    printf("  因果查询: 节点%d → 节点%d\n", sem->cause_node_id, sem->effect_node_id);
+    LOG_DEBUG("  因果查询: 节点%d → 节点%d", sem->cause_node_id, sem->effect_node_id);
 }
 
 // ==================== 语义理解主函数 ====================
@@ -515,8 +516,8 @@ SemanticUnderstanding* semantic_understand(const char* text) {
             sem->effect_node_id = sem->key_concept_ids[sem->key_concept_count - 1];
         }
 
-        printf("  原因位置: %s\n", cause_pos ? cause_pos : "(使用关键词)");
-        printf("  结果位置: %s\n", effect_pos ? effect_pos : "(使用关键词)");
+        LOG_DEBUG("  原因位置: %s", cause_pos ? cause_pos : "(使用关键词)");
+        LOG_DEBUG("  结果位置: %s", effect_pos ? effect_pos : "(使用关键词)");
     }
 
     return sem;
@@ -698,15 +699,15 @@ DialogReasoning* dialog_reason(DialogInput* input, MasterTopology* master,
                                     }
                                 } else if (exist != new_node) {
                                     int already = 0;
-                                    for (int c = 0; c < new_node->connection_count; c++)
-                                        if (new_node->connections[c] == exist) { already=1; break; }
+                                    for (int c = 0; c < new_node->edge_count; c++)
+                                        if (new_node->edges[c].target == exist) { already=1; break; }
                                     if (!already)
                                         huarong_net_add_connection(sub->net,
                                             new_node->node_id, exist->node_id, 0.35f);
                                 }
                             }
                             if (learned > 0) {
-                                fprintf(stderr, "[对话学习] '%s' → 联网学习 %d 个关联概念\n",
+                                LOG_INFO("[对话学习] '%s' → 联网学习 %d 个关联概念",
                                         new_node->concept, learned);
                             }
                         }
@@ -740,8 +741,8 @@ DialogReasoning* dialog_reason(DialogInput* input, MasterTopology* master,
                 if (a && b && a != b) {
                     // 检查是否已有连接
                     int already_connected = 0;
-                    for (int c = 0; c < a->connection_count; c++) {
-                        if (a->connections[c] == b) {
+                    for (int c = 0; c < a->edge_count; c++) {
+                        if (a->edges[c].target == b) {
                             already_connected = 1;
                             break;
                         }
@@ -956,10 +957,10 @@ float compute_prediction_error(DialogSystem* sys, const char* actual_input) {
             // 从该节点走一步，看下一步会到哪个节点
             float best_w = 0;
             int best_next = -1;
-            for (int e = 0; e < node->connection_count; e++) {
-                if (node->connections[e] && node->connection_weights[e] > best_w) {
-                    best_w = node->connection_weights[e];
-                    best_next = node->connections[e]->node_id;
+            for (int e = 0; e < node->edge_count; e++) {
+                if (node->edges[e].target && node->edges[e].weight > best_w) {
+                    best_w = node->edges[e].weight;
+                    best_next = node->edges[e].target->node_id;
                 }
             }
             if (best_next >= 0 && best_next < sub->net->node_count && sub->net->nodes[best_next]) {
@@ -1054,7 +1055,7 @@ void apply_prediction_feedback(DialogSystem* sys, float error) {
             continue;
 
         ReasoningNode* node = sub->net->nodes[node_id];
-        if (!node || edge_id < 0 || edge_id >= node->connection_count)
+        if (!node || edge_id < 0 || edge_id >= node->edge_count)
             continue;
 
         // 信用权重: 越靠近输出端, 权重越大
@@ -1064,15 +1065,15 @@ void apply_prediction_feedback(DialogSystem* sys, float error) {
         if (error <= 0.4f) {
             // 预测准确 → 奖励：涨置信度
             float bonus = adjustment * (1.0f - error);  // 误差越小奖励越大
-            node->connection_confidences[edge_id] += bonus;
-            if (node->connection_confidences[edge_id] > 1.0f)
-                node->connection_confidences[edge_id] = 1.0f;
+            node->edges[edge_id].confidence += bonus;
+            if (node->edges[edge_id].confidence > 1.0f)
+                node->edges[edge_id].confidence = 1.0f;
         } else {
             // 预测错误 → 惩罚：降置信度
             float penalty = adjustment * error;  // 误差越大惩罚越大
-            node->connection_confidences[edge_id] -= penalty;
-            if (node->connection_confidences[edge_id] < 0.1f)
-                node->connection_confidences[edge_id] = 0.1f;  // 保留最低值，不打死
+            node->edges[edge_id].confidence -= penalty;
+            if (node->edges[edge_id].confidence < 0.1f)
+                node->edges[edge_id].confidence = 0.1f;  // 保留最低值，不打死
         }
     }
 
@@ -1123,34 +1124,34 @@ DialogSystem* dialog_system_create(MasterTopology* master, MemorySystem* memory,
     sys->cognitive_state = cognitive_state_create();
     if (sys->cognitive_state) {
         cognitive_state_init(sys->cognitive_state);
-        printf("[对话系统] 认知状态（情感/动机系统）: 已就绪\n");
+        LOG_INFO("[对话系统] 认知状态（情感/动机系统）: 已就绪");
     }
 
-    printf("[对话系统] 创建成功，会话ID: %ld\n", sys->session_id);
-    printf("[对话系统] 因果图: %s\n", causal_graph ? "已连接" : "未连接");
+    LOG_INFO("[对话系统] 创建成功，会话ID: %ld", sys->session_id);
+    LOG_INFO("[对话系统] 因果图: %s", causal_graph ? "已连接" : "未连接");
     // 初始化认知调度中心
     sys->controller = cognitive_controller_create(sys->master, sys->memory);
     if (sys->controller) {
         // 注入因果图和概念层次（用于输出约束评估）
         sys->controller->causal_graph = sys->causal_graph;
         sys->controller->concept_hierarchy = sys->concept_hierarchy;
-        printf("[对话系统] 认知调度中心: 已就绪（语义-因果约束已注入）\n");
+        LOG_INFO("[对话系统] 认知调度中心: 已就绪（语义-因果约束已注入）");
     } else {
-        printf("[对话系统] 认知调度中心: 创建失败\n");
+        LOG_INFO("[对话系统] 认知调度中心: 创建失败");
     }
 
     // 初始化句式拓扑（16种固定句式 + POS scaffolding）
     if (sys->controller) {
         cc_init_sentence_topology(sys->controller);
-        printf("[对话系统] 句式拓扑: 已就绪（16种基础句式）\n");
+        LOG_INFO("[对话系统] 句式拓扑: 已就绪（16种基础句式）");
     }
 
     // 初始化 BPTT 学习器（RNN 在线反向传播）
 #define BPTT_HIDDEN_DIM 256
     sys->bptt = bptt_learner_create(sys->master, BPTT_HIDDEN_DIM, 32);
     if (sys->bptt) {
-        printf("[对话系统] BPTT 学习器: 已就绪（RNN %d→%d→%d, Adam）\n",
-               NODE_FEATURE_DIM, BPTT_HIDDEN_DIM, NODE_FEATURE_DIM);
+        LOG_INFO("[对话系统] BPTT 学习器: 已就绪（RNN %d→%d→%d, Adam）",
+                  NODE_FEATURE_DIM, BPTT_HIDDEN_DIM, NODE_FEATURE_DIM);
     }
 
     // 初始化预测误差反馈环
@@ -1178,7 +1179,7 @@ DialogSystem* dialog_system_create(MasterTopology* master, MemorySystem* memory,
 
 void dialog_system_destroy(DialogSystem* sys) {
     if (!sys) return;
-    printf("[对话系统] 销毁，会话ID: %ld, 对话轮数: %d\n", 
+    LOG_INFO("[对话系统] 销毁，会话ID: %ld, 对话轮数: %d", 
            sys->session_id, sys->turn_count);
     if (sys->concept_hierarchy) {
         concept_hierarchy_destroy((ConceptHierarchy*)sys->concept_hierarchy);
@@ -1197,7 +1198,7 @@ void dialog_system_destroy(DialogSystem* sys) {
         int steps;
         bptt_learner_stats(sys->bptt, &avg_loss, &steps);
         if (steps > 0)
-            printf("[对话系统] BPTT 统计: %d 步, avg_loss=%.6f\n", steps, avg_loss);
+            LOG_INFO("[对话系统] BPTT 统计: %d 步, avg_loss=%.6f", steps, avg_loss);
         bptt_learner_destroy(sys->bptt);
     }
     if (sys->auto_state) {
@@ -1323,22 +1324,22 @@ static void dialog_activate_context(MasterTopology* master, DialogIntent intent)
 
         /* 实例→种子：双向连接 */
         int already_seed = 0;
-        for (int c = 0; c < inst->connection_count; c++)
-            if (inst->connections[c] == seed) { already_seed = 1; break; }
+        for (int c = 0; c < inst->edge_count; c++)
+            if (inst->edges[c].target == seed) { already_seed = 1; break; }
         if (!already_seed) {
             huarong_net_add_connection(ctx->net, seed->node_id, inst->node_id, 0.7f);
             huarong_net_add_connection(ctx->net, inst->node_id, seed->node_id, 0.7f);
         }
 
         /* 时间线串联：上一实例 → 当前实例 */
-        if (master->last_context_node >= 0 &&
-            master->last_context_node < ctx->net->node_count &&
-            master->last_context_node != inst->node_id) {
-            ReasoningNode* prev = ctx->net->nodes[master->last_context_node];
+        if (master->_legacy_context_node >= 0 &&
+            master->_legacy_context_node < ctx->net->node_count &&
+            master->_legacy_context_node != inst->node_id) {
+            ReasoningNode* prev = ctx->net->nodes[master->_legacy_context_node];
             if (prev && prev != seed && prev->heat > 0.0f) {
                 int already = 0;
-                for (int c = 0; c < inst->connection_count; c++)
-                    if (inst->connections[c] == prev) { already = 1; break; }
+                for (int c = 0; c < inst->edge_count; c++)
+                    if (inst->edges[c].target == prev) { already = 1; break; }
                 if (!already) {
                     huarong_net_add_connection(ctx->net, prev->node_id, inst->node_id, 0.5f);
                     huarong_net_add_connection(ctx->net, inst->node_id, prev->node_id, 0.5f);
@@ -1352,7 +1353,7 @@ static void dialog_activate_context(MasterTopology* master, DialogIntent intent)
     inst->heat = (inst->heat < 0.05f) ? 0.5f : fminf(1.0f, inst->heat + 0.1f);
     inst->selection_count++;
     master_activate_node(master, ctx->topo_id, inst->node_id, 0.85f);
-    master->last_context_node = inst->node_id;
+    master->_legacy_context_node = inst->node_id;
 
     /* 6. 跨拓扑连接：实例 → 词汇（上限5） */
     if (vocab && vocab->net && master->cross_link_count < 50000) {
@@ -1409,7 +1410,7 @@ char* dialog_process(DialogSystem* sys, const char* user_input, DialogReasoning*
     if (sys->has_last_turn && sys->master) {
         float prediction_error = compute_prediction_error(sys, user_input);
         apply_prediction_feedback(sys, prediction_error);
-        printf("[反馈] 预测误差=%.3f  lr=%.3f  好奇心=%.3f\n",
+        LOG_INFO("[反馈] 预测误差=%.3f  lr=%.3f  好奇心=%.3f",
                prediction_error, sys->prediction_lr, sys->curiosity);
     }
 
@@ -1536,15 +1537,16 @@ char* dialog_process(DialogSystem* sys, const char* user_input, DialogReasoning*
     DialogInput* input = dialog_parse_input(user_input);
     DialogReasoning* reasoning = NULL;
     
-    // ===== 认知调度：计算意图向量 =====
+    // ===== 认知调度：计算意图向量（输出到会话局部 InferenceContext） =====
     const float* intent_ptr = NULL;
+    InferenceContext ctx = {0};
     if (sys->controller) {
         cognitive_controller_reset_round(sys->controller);
         cognitive_controller_set_context(sys->controller, user_input, NULL);
         // 注入语义意图类型（从 semantic_understand 的结果）
         if (sem && sem->intent.intent >= 0) {
             cognitive_controller_set_intent(sys->controller, sem->intent.intent);
-            printf("[认知调度] 语义意图: %d (置信度: %.2f)\n",
+            LOG_INFO("[认知调度] 语义意图: %d (置信度: %.2f)",
                    sem->intent.intent, sem->intent.confidence);
             /* 意图结果写入记忆（用于自适应调整调度器策略） */
             if (sys->controller->memory) {
@@ -1555,8 +1557,8 @@ char* dialog_process(DialogSystem* sys, const char* user_input, DialogReasoning*
                     strlen(intent_name[sem->intent.intent])+1, MEMORY_TYPE_STRING, sem->intent.confidence);
             }
         }
-        compute_intent(sys->controller, NULL);
-        intent_ptr = sys->controller->intent_weights;
+        compute_intent_local(sys->controller, NULL, ctx.intent_weights);
+        intent_ptr = ctx.intent_weights;
         ui_print_thinking_line("调度", "认知调度已激活");
     }
     
@@ -1602,10 +1604,19 @@ char* dialog_process(DialogSystem* sys, const char* user_input, DialogReasoning*
                     free(response);
                     response = NULL;
                 }
-                fprintf(stderr, "[proc] calling dialog_generate...\n"); fflush(stderr);
+
+                /* Phase 3: BPTT RNN 预激活词汇节点 — 偏置生成分布 */
+                if (sys->bptt && sys->master) {
+                    int biased = bptt_bias_vocab_activation(sys->bptt, user_input);
+                    if (biased > 0 && sys->turn_count <= 5) {
+                        LOG_INFO("[BPTT] RNN 预激活了 %d 个词汇节点", biased);
+                    }
+                }
+
+                LOG_DEBUG("[proc] calling dialog_generate...");
                 response = dialog_generate(reasoning, user_input, sys->memory,
                                         MAX_RESPONSE_LENGTH, sys);
-                fprintf(stderr, "[proc] dialog_generate returned: %s\n", response ? response : "NULL"); fflush(stderr);
+                LOG_DEBUG("[proc] dialog_generate returned: %s", response ? response : "NULL");
 
                 // --- 如果没有认知调度器，直接跳出循环 ---
                 if (!sys->controller) {
@@ -1666,7 +1677,7 @@ char* dialog_process(DialogSystem* sys, const char* user_input, DialogReasoning*
                 
                 RetryStatus retry_status = revise_and_retry(sys->controller, &draft, satisfaction);
                 
-                fprintf(stderr, "[proc] retry_status=%d satisfaction=%.2f\n", retry_status, satisfaction); fflush(stderr);
+                LOG_DEBUG("[proc] retry_status=%d satisfaction=%.2f", retry_status, satisfaction);
 
                 if (retry_status == RETRY_OK) {
                     done = 1;
@@ -1773,8 +1784,8 @@ char* dialog_process(DialogSystem* sys, const char* user_input, DialogReasoning*
     }
 
     if (sys->memory && response) {
-        char key[512] = {0};
-        snprintf(key, 511, "input:%s", user_input);
+        char key[PM_KEY_BUF] = {0};
+        snprintf(key, sizeof(key), "input:%s", user_input);
 
         MemoryEntry* existing = memory_retrieve(sys->memory, key);
         if (!existing) {
@@ -1793,7 +1804,7 @@ char* dialog_process(DialogSystem* sys, const char* user_input, DialogReasoning*
             if (sys->bptt) {
                 float loss = bptt_learn_from_dialog(sys->bptt, user_input, response);
                 if (loss >= 0.0f && sys->turn_count % 10 == 0) {
-                    printf("[BPTT] step=%d loss=%.6f\n",
+                    LOG_INFO("[BPTT] step=%d loss=%.6f",
                            sys->bptt->steps, loss);
                 }
             }
@@ -1835,7 +1846,7 @@ char* dialog_process(DialogSystem* sys, const char* user_input, DialogReasoning*
                     int pruned = master_prune_cross_links(
                         sys->master, 0.15f, 3);
                     if (pruned > 0) {
-                        fprintf(stderr, "[上下文清理] 第%d轮 修剪%d条低质量跨拓扑连接\n",
+                        LOG_INFO("[上下文清理] 第%d轮 修剪%d条低质量跨拓扑连接",
                                 sys->turn_count, pruned);
                     }
                 }
@@ -1869,14 +1880,14 @@ skip_postprocess:
     ui_print_thinking_end();
     ui_print_ai_response(response);
     fflush(stdout);
-    fprintf(stderr, "[proc] after ui_print_ai_response\n"); fflush(stderr);
+    LOG_DEBUG("[proc] after ui_print_ai_response");
     
     semantic_understanding_destroy(sem);
     fprintf(stderr, "[proc] after sem destroy\n"); fflush(stderr);
     
     // 使用 strdup 复制，避免悬挂指针问题
     char* result = response ? strdup(response) : strdup("(null)");
-    fprintf(stderr, "[proc] returning result: %s\n", result); fflush(stderr);
+    LOG_DEBUG("[proc] returning result: %s", result);
     free(response);
     return result;
 }

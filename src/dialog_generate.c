@@ -13,6 +13,7 @@
 #include "utf8_tokenizer.h"
 #include "string_pool.h"
 #include "common.h"
+#include "error.h"
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -54,10 +55,11 @@ char* dialog_generate(DialogReasoning* reasoning, const char* input,
         if (vocab && vocab->net && anc_tok_count > 0) {
             for (int t = 0; t < anc_tok_count; t++) {
                 if (!anchor_tokens[t]) continue;
-                for (int n = 0; n < vocab->net->node_count && matched < 32; n++) {
-                    ReasoningNode* node = vocab->net->nodes[n];
-                    if (!node || !node->concept || !node->features) continue;
-                    if (strcmp(node->concept, anchor_tokens[t]) == 0) {
+                /* O(1) 哈希查找替代 O(n) 遍历 */
+                int nid = huarong_net_find_concept(vocab->net, anchor_tokens[t]);
+                if (nid >= 0 && nid < vocab->net->node_count && matched < 32) {
+                    ReasoningNode* node = vocab->net->nodes[nid];
+                    if (node && node->features) {
                         for (int d = 0; d < NODE_FEATURE_DIM; d++)
                             query_anchor[d] += node->features[d];
                         matched++;
@@ -85,7 +87,7 @@ char* dialog_generate(DialogReasoning* reasoning, const char* input,
             if (topo_response && strlen(topo_response) > 0) {
                 // 启用模板投票（为后续路径做铺垫）
                 dsys->master->use_template_voting = 1;
-                fprintf(stderr, "[gen] master_generate_response: '%s'\n", topo_response);
+                LOG_INFO("[gen] master_generate_response: '%s'", topo_response);
                 return topo_response;
             }
             free(topo_response);
@@ -239,7 +241,7 @@ char* dialog_generate(DialogReasoning* reasoning, const char* input,
             {
                 ReasoningNode* start_node = (path_nodes[0] >= 0 && path_nodes[0] < sub->net->node_count)
                     ? sub->net->nodes[path_nodes[0]] : NULL;
-                if (start_node && start_node->concept) {
+                if (start_node && start_node->concept && concept_is_printable(start_node->concept)) {
                     pos += snprintf(response + pos, max_len - pos, "%s", start_node->concept);
                     last_concept = start_node->concept;
                 }
@@ -249,7 +251,7 @@ char* dialog_generate(DialogReasoning* reasoning, const char* input,
                 int nid = path_nodes[p];
                 if (nid < 0 || nid >= sub->net->node_count) continue;
                 ReasoningNode* node = sub->net->nodes[nid];
-                if (!node || !node->concept) continue;
+                if (!node || !node->concept || !concept_is_printable(node->concept)) continue;
                 
                 // 去重
                 if (last_concept && strcmp(last_concept, node->concept) == 0) continue;
@@ -314,7 +316,8 @@ char* dialog_generate(DialogReasoning* reasoning, const char* input,
         }
         // 兜底2：走边没走出结果，输出最高激活概念
         if (pos == 0 && reasoning->assoc_count > 0) {
-            snprintf(response, max_len, "%s", reasoning->associations[0].concept);
+            if (concept_is_printable(reasoning->associations[0].concept))
+                snprintf(response, max_len, "%s", reasoning->associations[0].concept);
         }
 
         // ===== 记录路径到预测误差反馈环 =====
@@ -342,8 +345,8 @@ char* dialog_generate(DialogReasoning* reasoning, const char* input,
                 if (a->from_node_id >= 0 && a->from_node_id < sub->net->node_count) {
                     ReasoningNode* from = sub->net->nodes[a->from_node_id];
                     if (from) {
-                        for (int e = 0; e < from->connection_count; e++) {
-                            if (from->connections[e] && from->connections[e]->node_id == a->node_id) {
+                        for (int e = 0; e < from->edge_count; e++) {
+                            if (from->edges[e].target && from->edges[e].target->node_id == a->node_id) {
                                 edge_idx = e;
                                 break;
                             }
@@ -382,7 +385,7 @@ char* dialog_generate(DialogReasoning* reasoning, const char* input,
             snprintf(response, max_len, "我正在思考这个问题...");
         }
 
-        fprintf(stderr, "[dialog_generate] returning: '%s' (len=%d)\n", response, (int)strlen(response));
+        LOG_INFO("[dialog_generate] returning: '%s' (len=%d)", response, (int)strlen(response));
         return response;
     }
     
@@ -404,8 +407,8 @@ static const char* STOP_WORDS[] = {
     // 注：疑问词（什么/怎么/为什么/如何）已从停用词移除 — 它们是语义核心载体
     // 标点符号
     "，", "。", "、", "；", "：", "？", "！", "…", "—", "～",
-    "·", "．", "（", "）", "【", "】", "《", "》", "”", "“",
-    "‘", "’", "　"
+    "·", "．", "（", "）", "【", "】", "《", "》", """, """,
+    "'", "'", "　"
 };
 #define STOP_WORDS_COUNT (sizeof(STOP_WORDS) / sizeof(STOP_WORDS[0]))
 
@@ -420,27 +423,40 @@ static int is_stop_word(const char* word) {
 // 检查字符串是否包含中文或英文标点
 static int contains_punctuation(const char* s) {
     if (!s) return 0;
-    const char* punct = "，。、；：？！…—～·．（）【】《》”“‘’　,.;:!?\"'()[]{}<>/\\@#$%^&*_+-=~`";
+    const char* punct = "，。、；：？！…—～·．（）【】《》""''　,.;:!?\"'()[]{}<>/\\@#$%^&*_+-=~`";
     for (const char* p = punct; *p; p++) {
         if (strchr(s, *p)) return 1;
     }
     return 0;
 }
 
-static int concept_exists(HuarongTopologyNet* net, const char* concept) {
-    if (!net || !concept) return -1;
-    for (int i = 0; i < net->node_count; i++) {
-        if (net->nodes[i] && net->nodes[i]->concept &&
-            strcmp(net->nodes[i]->concept, concept) == 0) {
-            return i;  // 返回已有节点ID
-        }
+/**
+ * 概念文本是否适合输出到回复中
+ * 允许：中文、字母数字、合法标点（中英文标点均放行）
+ * 拒绝：@ # $ % ^ & * + = \ | ~ ` 等纯噪音符号
+ */
+int concept_is_printable(const char* concept) {
+    if (!concept || !concept[0]) return 0;
+    for (const char* p = concept; *p; p++) {
+        unsigned char c = (unsigned char)*p;
+        /* 多字节 UTF-8 continuation byte (10xxxxxx) — 安全跳过 */
+        if ((c & 0xC0) == 0x80) continue;
+        if (c >= 0x80) continue;                      /* CJK/全角字符 */
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) continue;
+        if (c >= '0' && c <= '9') continue;
+        if (c == ',' || c == '.' || c == '!' || c == '?' || c == ';' || c == ':') continue;
+        if (c == '\'' || c == '"') continue;
+        if (c == '(' || c == ')' || c == '[' || c == ']' || c == '{' || c == '}') continue;
+        if (c == '-' || c == '_' || c == '/') continue;
+        return 0;  /* 空格 @#$%^&*+=|~` 等纯噪音 */
     }
-    return -1;  // 不存在
+    return 1;
 }
 
 static int get_or_create_concept(SubTopology* topo, const char* concept) {
     if (!topo || !topo->net || !concept) return -1;
-    int existing = concept_exists(topo->net, concept);
+    /* O(1) 哈希查找替代 O(n) 线性扫描 */
+    int existing = huarong_net_find_concept(topo->net, concept);
     if (existing >= 0) return existing;
     float feat[NODE_FEATURE_DIM];
     for (int i = 0; i < NODE_FEATURE_DIM; i++)
@@ -523,12 +539,12 @@ void auto_learn_concepts(MasterTopology* master, const char* text, void* str_poo
             int conn_exists = 0;
             ReasoningNode* node_a = vocab->net->nodes[concept_ids[i]];
             if (node_a) {
-                for (int k = 0; k < node_a->connection_count; k++) {
-                    ReasoningNode* target = node_a->connections[k];
+                for (int k = 0; k < node_a->edge_count; k++) {
+                    ReasoningNode* target = node_a->edges[k].target;
                     if (target && target->node_id == concept_ids[j]) {
-                        node_a->connection_weights[k] += 0.1f;
-                        if (node_a->connection_weights[k] > 1.0f)
-                            node_a->connection_weights[k] = 1.0f;
+                        node_a->edges[k].weight += 0.1f;
+                        if (node_a->edges[k].weight > 1.0f)
+                            node_a->edges[k].weight = 1.0f;
                         conn_exists = 1;
                         break;
                     }

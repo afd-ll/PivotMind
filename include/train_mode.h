@@ -32,6 +32,9 @@
 #include <pthread.h>
 #include <stdbool.h>
 
+/* Forward declaration for optional thalamus signal bus binding */
+typedef struct Thalamus Thalamus;
+
 // 语料格式
 typedef enum {
     CORPUS_JSON_QA,      // [["问","答"], ...]
@@ -92,6 +95,9 @@ typedef struct {
 
     // 内部缓冲（避免反复malloc）
     char line_buf[4096];
+
+    // 丘脑信号总线（可选，NULL = 不发送反馈 / 不做认知调速）
+    Thalamus* thalamus;
 } TrainMode;
 
 // ==================== API ====================
@@ -132,6 +138,14 @@ CorpusFormat train_detect_format(const char* path);
 
 /** 打印默认配置 */
 void train_config_print_defaults(void);
+
+/**
+ * 绑定丘脑信号总线（可选）
+ * 绑定后，批量学习时自动通过丘脑发送反馈信号，
+ * 并能根据认知状态（throttle）动态微调训练速度，
+ * 避免在对话活跃时抢占资源
+ */
+void train_mode_set_thalamus(TrainMode* tm, Thalamus* th);
 
 /** 从命令行参数解析训练配置 */
 TrainConfig train_config_from_args(int argc, char* argv[]);

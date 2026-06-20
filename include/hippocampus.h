@@ -12,7 +12,11 @@
  *   hippocampus_consolidate() — 巩固：审查连接+联网补全模糊概念
  *
  * 与感觉皮层联动：
- *   巩固时发现模糊概念 → 调用 perception 联网查证 → 联通后写入皮层
+ *   巩固时发现模糊概念 → 通过丘脑信号总线请求感知皮层联网查证
+ *
+ * 子拓扑归属（architecture note）：
+ *   海马体拥有 [上下文拓扑, 领域拓扑]
+ *   通过 thalamus_set_partition() 注册
  */
 
 #ifndef HIPPOCAMPUS_H
@@ -20,6 +24,7 @@
 
 #include "multi_topology.h"
 #include "memory_system.h"
+#include "thalamus.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -29,12 +34,13 @@ typedef struct Hippocampus {
     MasterTopology* topology;
     MemorySystem*   memory;
 
+    /* ── 丘脑信号总线（替代 void* 指针链） ── */
+    Thalamus*       thalamus;
+
     /* 对话日志缓冲 — 用于自动抽 QA 对 */
     char dialog_log[4][1024];   /* 最近4轮对话 */
     int  log_pos;
     int  log_count;
-    void*           perception;    /* 感觉皮层 (opaque, 用于巩固联网) */
-    void*           thalamus;      /* 丘脑 (opaque, 用于反馈上报) */
 
     /* 统计 */
     long consolidations;
@@ -43,13 +49,11 @@ typedef struct Hippocampus {
 
 /**
  * 创建海马体
- * @param perception 感觉皮层指针，NULL=巩固时不联网
- * @param thalamus 丘脑指针，NULL=不上报反馈
+ * @param thalamus 丘脑信号总线（通过它获取感知皮层等依赖）
  */
 Hippocampus* hippocampus_create(MasterTopology* topology,
-                                  MemorySystem* memory,
-                                  void* perception,
-                                  void* thalamus);
+                                 MemorySystem* memory,
+                                 Thalamus* thalamus);
 
 void hippocampus_destroy(Hippocampus* hc);
 

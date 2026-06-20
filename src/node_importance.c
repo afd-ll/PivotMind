@@ -58,7 +58,7 @@ float compute_degree_centrality(HuarongTopologyNet* net, int node_id) {
     if (!node) return 0.0f;
 
     // 度中心性 = degree / (n - 1)
-    int degree = node->connection_count;
+    int degree = node->edge_count;
     int max_degree = net->node_count - 1;
     
     return (max_degree > 0) ? (float)degree / max_degree : 0.0f;
@@ -73,7 +73,7 @@ void compute_all_degree_centrality(HuarongTopologyNet* net, float* scores, int c
     for (int i = 0; i < count && i < n; i++) {
         ReasoningNode* node = net->nodes[i];
         if (node) {
-            scores[i] = (float)node->connection_count / max_degree;
+            scores[i] = (float)node->edge_count / max_degree;
         } else {
             scores[i] = 0.0f;
         }
@@ -133,8 +133,8 @@ float compute_betweenness_centrality(HuarongTopologyNet* net, int node_id) {
             ReasoningNode* node = net->nodes[v];
             if (!node) continue;
 
-            for (int i = 0; i < node->connection_count; i++) {
-                int w = node->connections[i]->node_id;
+            for (int i = 0; i < node->edge_count; i++) {
+                int w = node->edges[i].target->node_id;
                 if (distances[w] < 0) {
                     distances[w] = distances[v] + 1;
                     queue[queue_back++] = w;
@@ -234,7 +234,7 @@ void compute_all_page_rank(HuarongTopologyNet* net, float* scores,
     // 计算出度
     for (int i = 0; i < n; i++) {
         if (net->nodes[i]) {
-            out_degrees[i] = net->nodes[i]->connection_count;
+            out_degrees[i] = net->nodes[i]->edge_count;
         } else {
             out_degrees[i] = 0;
         }
@@ -254,8 +254,8 @@ void compute_all_page_rank(HuarongTopologyNet* net, float* scores,
             if (net->nodes[i] && out_degrees[i] > 0) {
                 float contribution = damping * pr[i] / out_degrees[i];
                 ReasoningNode* node = net->nodes[i];
-                for (int j = 0; j < node->connection_count; j++) {
-                    int target = node->connections[j]->node_id;
+                for (int j = 0; j < node->edge_count; j++) {
+                    int target = node->edges[j].target->node_id;
                     if (target >= 0 && target < n) {
                         pr_new[target] += contribution;
                     }
@@ -294,7 +294,7 @@ float compute_activation_centrality(HuarongTopologyNet* net, int node_id,
     }
 
     // 考虑节点的连接数作为放大因子
-    float connection_factor = 1.0f + logf(1.0f + node->connection_count);
+    float connection_factor = 1.0f + logf(1.0f + node->edge_count);
 
     return total_activation * connection_factor / history_length;
 }

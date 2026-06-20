@@ -5,7 +5,6 @@
 
 #include "prefrontal.h"
 #include "cingulate.h"
-#include "diffusion.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -57,23 +56,14 @@ char* prefrontal_chat(Prefrontal* pf, const char* input) {
     /* ── 多层扩散生成 + ACC 自适应门控 ── */
     char* response = NULL;
 
-    DiffusionCtx dctx;
-    if (diffusion_init(&dctx, pf->topology) != 0) return NULL;
-
     /* 多候选生成 + ACC 门控回溯（最多尝试 3 次） */
     for (int attempt = 0; attempt < 3; attempt++) {
         /* 逐次提高温度扰动，探索不同候选 */
-        dctx.temperature = 0.15f + attempt * 0.12f;
+        float temperature = 0.15f + attempt * 0.12f;
 
-        const char* words[DIFF_MAX_SEQUENCE];
-        int n = diffusion_generate(&dctx, input, words, DIFF_MAX_SEQUENCE);
-        if (n < 2) continue;
-
-        /* 序列评分 */
         GeneratedSequence seq = {0};
-        for (int i = 0; i < n && i < MAX_GENERATED_WORDS; i++) seq.words[i] = words[i];
-        seq.count = n < MAX_GENERATED_WORDS ? n : MAX_GENERATED_WORDS;
-        cingulate_evaluate(&seq, pf->topology, input, 5);
+        int n = cingulate_diffusion_evaluate(pf->topology, input, temperature, &seq);
+        if (n < 2) continue;
 
         char gate_buf[128];
         const char* summary = cingulate_summary(&seq, gate_buf, sizeof(gate_buf));
@@ -96,8 +86,8 @@ char* prefrontal_chat(Prefrontal* pf, const char* input) {
         /* 拼合（扩散引擎已含模板连接词，直接拼接） */
         char buf[2048];
         int pos = 0;
-        for (int w = 0; w < n && pos < (int)sizeof(buf)-10; w++)
-            pos += snprintf(buf+pos, sizeof(buf)-pos, "%s", words[w]);
+        for (int w = 0; w < seq.count && pos < (int)sizeof(buf)-10; w++)
+            pos += snprintf(buf+pos, sizeof(buf)-pos, "%s", seq.words[w]);
         response = strdup(buf);
 
         /* 更新自适应阈值 */

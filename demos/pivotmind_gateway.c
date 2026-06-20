@@ -39,6 +39,7 @@
 #include "hippocampus.h"
 #include "cerebellum.h"
 #include "prefrontal.h"
+#include "amygdala.h"
 #include "multi_topology.h"
 #include "memory_system.h"
 #include "feature_io.h"
@@ -51,6 +52,8 @@
 #include "broca.h"
 #include "node_cache.h"
 #include "self_learner.h"
+#include "prefrontal_executive.h"  /* v0.3 前额叶执行器 — 推理编排 */
+#include "idea_arena.h"            /* v0.3 想法竞争竞技场 */
 
 // ==================== 配置 ====================
 
@@ -77,6 +80,10 @@ typedef struct {
     Cerebellum*      cerebellum;    /* 小脑 — 资源平衡 */
     NodeCache*       brain_cache;   /* 大脑式节点冷热缓存 */
     SelfLearner*     self_learner;  /* 自主学习器 — 用于析构时释放 */
+    Amygdala*        amygdala;      /* 杏仁核 — 情绪/文化调控 */
+
+    PrefrontalExecutive* pfe;       /* v0.3 前额叶执行器 — 推理编排 */
+    IdeaArena*          arena;      /* v0.3 想法竞争竞技场 */
 
     // 运行控制
     volatile int shutdown_requested;
@@ -285,86 +292,147 @@ static int gw_system_init(GatewaySystem* gw) {
     printf("[gateway]   丘脑就绪\n");
 
     // 感觉皮层（自主语料输送口）
+    fprintf(stderr, "[gateway]   创建感觉皮层...\n");
     gw->perception = perception_create(gw->topology, gw->memory, gw->learner, NULL);
     if (!gw->perception) { fprintf(stderr, "[gateway] 感觉皮层创建失败\n"); return -1; }
-    printf("[gateway]   感觉皮层就绪\n");
+    fprintf(stderr, "[gateway]   感觉皮层就绪\n");
 
-    // 海马体（记忆+巩固+感知联动）
-    gw->hippocampus = hippocampus_create(gw->topology, gw->memory, gw->perception, gw->thalamus);
+    // 海马体（记忆+巩固，感知联动通过丘脑信号总线）
+    fprintf(stderr, "[gateway]   创建海马体...\n");
+    gw->hippocampus = hippocampus_create(gw->topology, gw->memory, gw->thalamus);
     if (!gw->hippocampus) { fprintf(stderr, "[gateway] 海马体创建失败\n"); return -1; }
-    printf("[gateway]   海马体就绪\n");
+    fprintf(stderr, "[gateway]   海马体就绪\n");
 
     // 小脑（资源平衡）
+    fprintf(stderr, "[gateway]   创建小脑...\n");
     gw->cerebellum = cerebellum_create();
     if (!gw->cerebellum) { fprintf(stderr, "[gateway] 小脑创建失败\n"); return -1; }
-    printf("[gateway]   小脑就绪\n");
+    fprintf(stderr, "[gateway]   小脑就绪\n");
+
+    // 杏仁核（情绪/文化效价调控）
+    fprintf(stderr, "[gateway]   创建杏仁核...\n");
+    gw->amygdala = amygdala_create(gw->topology, gw->thalamus, gw->dialog->cognitive_state);
+    if (!gw->amygdala) { fprintf(stderr, "[gateway] 杏仁核创建失败\n"); return -1; }
+    fprintf(stderr, "[gateway]   杏仁核就绪\n");
+
+    /* ── v0.3 新脑区 ── */
+    // 前额叶执行器（推理编排引擎 — 任务分解/子目标调度）
+    fprintf(stderr, "[gateway]   创建前额叶执行器 (v0.3)...\n");
+    gw->pfe = pfe_create(gw->topology, gw->thalamus);
+    if (!gw->pfe) { fprintf(stderr, "[gateway] 前额叶执行器创建失败\n"); return -1; }
+    fprintf(stderr, "[gateway]   前额叶执行器就绪 (decompose_depth=%d)\n",
+            gw->pfe->max_decompose_depth);
+
+    // 想法竞争竞技场（IdeaArena — 多候选多维度竞争选择）
+    fprintf(stderr, "[gateway]   创建想法竞技场 (v0.3)...\n");
+    gw->arena = arena_create();
+    if (!gw->arena) { fprintf(stderr, "[gateway] 想法竞技场创建失败\n"); return -1; }
+    fprintf(stderr, "[gateway]   想法竞技场就绪 (max_candidates=%d)\n", ARENA_MAX_CANDIDATES);
 
     // 加载持久化数据
+    fprintf(stderr, "[gateway]   加载持久化状态...\n");
     if (access("pivotmind_state.dat", F_OK) == 0) {
         int loaded = master_load_state(gw->topology, "pivotmind_state.dat");
-        if (loaded >= 0) printf("[gateway]   加载拓扑状态: %d 节点\n", loaded);
+        if (loaded >= 0) fprintf(stderr, "[gateway]   加载拓扑状态: %d 节点\n", loaded);
     }
 
     int feat_loaded = load_features(gw->topology, "features.bin");
-    if (feat_loaded > 0) printf("[gateway]   加载特征向量: %d 节点\n", feat_loaded);
-    else { int initted = init_random_features(gw->topology); printf("[gateway]   初始化特征向量: %d 节点\n", initted); }
+    if (feat_loaded > 0) fprintf(stderr, "[gateway]   加载特征向量: %d 节点\n", feat_loaded);
+    else { int initted = init_random_features(gw->topology); fprintf(stderr, "[gateway]   初始化特征向量: %d 节点\n", initted); }
 
-    int cross_loaded = load_cross_edges(gw->topology, "cross_edges.bin");
-    if (cross_loaded > 0) printf("[gateway]   加载跨拓扑连接: %d 条\n", cross_loaded);
-    else { int rebuilt = rebuild_cross_connections(gw->topology); printf("[gateway]   重建跨拓扑连接: %d 条\n", rebuilt); }
+    /* 跨拓扑连接已在 master_load_state 中加载，无需重复 */
+    fprintf(stderr, "[gateway]   跨拓扑连接已随状态加载 (节点=%d)\n",
+            gw->topology->cross_link_count);
 
+    fprintf(stderr, "[gateway]   加载记忆种子...\n");
     memory_load_seed(gw->memory, "memory_seed.dat");
+    fprintf(stderr, "[gateway]   记忆种子就绪\n");
 
     // 模板拓扑 (懒加载：启动时不全量构建，边用边积累)
     SubTopology* tpl = master_get_sub_topology_by_type(gw->topology, TOPO_TEMPLATE);
     if (tpl && tpl->net && tpl->net->node_count > 0) {
-        printf("[gateway]   模板拓扑就绪 (%d 节点)\n", tpl->net->node_count);
+        fprintf(stderr, "[gateway]   模板拓扑就绪 (%d 节点)\n", tpl->net->node_count);
         gw->topology->use_template_voting = 1;
     } else {
-        printf("[gateway]   模板拓扑空，将在对话中逐步构建\n");
+        fprintf(stderr, "[gateway]   模板拓扑空，将在对话中逐步构建\n");
     }
     // 无论模板是否就绪，都开启投票（空模板时自动降级为无模板）
     gw->topology->use_template_voting = 1;
 
-    // 大脑式节点缓存（用于冷热管理）
-    // 创建在加载状态之后、启动后台时钟之前
+    fprintf(stderr, "[gateway]   创建节点缓存...\n");
     gw->brain_cache = node_cache_create("brain_state.dat",
                                          gw->topology->sub_topologies[0]->net->max_nodes + 10000);
     if (!gw->brain_cache) {
         fprintf(stderr, "[gateway] 大脑缓存创建失败\n");
         return -1;
     }
-    brainstem_set_node_cache(gw->brainstem, gw->brain_cache);
+    fprintf(stderr, "[gateway]   节点缓存就绪\n");
+
+    /* ================================================================
+     *  丘脑信号总线 — 注册所有脑区 + 工具组件 + 拓扑归属
+     * ================================================================ */
+
+    // 注册脑区实例
+    thalamus_register_region(gw->thalamus, THAL_PREFRONTAL,  gw->prefrontal);
+    thalamus_register_region(gw->thalamus, THAL_HIPPOCAMPUS, gw->hippocampus);
+    thalamus_register_region(gw->thalamus, THAL_PERCEPTION,  gw->perception);
+    thalamus_register_region(gw->thalamus, THAL_CEREBELLUM,  gw->cerebellum);
+    thalamus_register_region(gw->thalamus, THAL_AMYGDALA,    gw->amygdala);
+    thalamus_register_region(gw->thalamus, THAL_PREF_EXEC,  gw->pfe);      /* v0.3 前额叶执行器 */
+    thalamus_register_region(gw->thalamus, THAL_DMN,         NULL);  /* DMN 是无状态函数，无需实例 */
+    thalamus_register_region(gw->thalamus, THAL_BROCA,       NULL);  /* Broca 委托 template_builder */
+
+    // 注册工具组件
+    thalamus_register_utility(gw->thalamus, THAL_UTIL_NODE_CACHE,      gw->brain_cache);
+    thalamus_register_utility(gw->thalamus, THAL_UTIL_COGNITIVE_CTRL,  gw->prefrontal->controller);
+    thalamus_register_utility(gw->thalamus, THAL_UTIL_SELF_LEARNER,   NULL);  /* self_learner 在后面注册 */
+    thalamus_register_utility(gw->thalamus, THAL_UTIL_TOPO_BRAIN,     NULL);  /* topo_brain 在后面注册 */
+    thalamus_register_utility(gw->thalamus, THAL_UTIL_IDEA_ARENA,      gw->arena); /* v0.3 */
+
+    // 设置子拓扑按脑区归属（每个脑区只负责自己的子拓扑）
+    {
+        int prefrontal_topo[]  = {TOPO_VOCABULARY, TOPO_SEMANTIC, TOPO_PRAGMA, TOPO_CONCEPT};
+        int hippocampus_topo[] = {TOPO_CONTEXT, TOPO_DOMAIN};
+        int broca_topo[]       = {TOPO_SYNTAX, TOPO_TEMPLATE};
+        int amygdala_topo[]    = {TOPO_EMOTION, TOPO_CULTURE};
+        thalamus_set_partition(gw->thalamus, THAL_PREFRONTAL,  prefrontal_topo,  4);
+        thalamus_set_partition(gw->thalamus, THAL_HIPPOCAMPUS, hippocampus_topo, 2);
+        thalamus_set_partition(gw->thalamus, THAL_BROCA,       broca_topo,       2);
+        thalamus_set_partition(gw->thalamus, THAL_AMYGDALA,    amygdala_topo,    2);
+        /* 小脑无专属拓扑（全局监控角色） */
+    }
+
+    // 绑定丘脑到脑干（脑干通过丘脑获取所有其他脑区的引用）
     brainstem_set_thalamus(gw->brainstem, gw->thalamus);
-    brainstem_set_perception(gw->brainstem, gw->perception);
-    brainstem_set_hippocampus(gw->brainstem, gw->hippocampus);
-    brainstem_set_cerebellum(gw->brainstem, gw->cerebellum);
     brainstem_set_verbose(gw->brainstem, 1);  /* 开启脑区日志 */
 
-    // 认知调度器指针（供 health_monitor 干预满意度阈值）
-    brainstem_set_cognitive_controller(gw->brainstem, gw->prefrontal->controller);
+    printf("[gateway]   丘脑信号总线就绪 (%d 脑区, %d 工具槽)\n",
+           THAL_SUBSYSTEM_COUNT, THAL_UTIL_COUNT);
 
     // 自主学习器
     {
         gw->self_learner = self_learner_create(gw->topology, NULL);
         if (gw->self_learner) {
             printf("[gateway]   自主学习器就绪\n");
-            brainstem_set_self_learner(gw->brainstem, gw->self_learner);
+            /* 通过丘洞注册，而非 brainstem_set_self_learner */
+            thalamus_register_utility(gw->thalamus, THAL_UTIL_SELF_LEARNER, gw->self_learner);
         }
     }
 
-    // 学习已由脑干统一调度，不再单独启动 active_learner 线程
-    // active_learner_start(gw->learner);
+    /* 学习已由脑干统一调度 */
     brainstem_start(gw->brainstem);
 
     gw->start_time = time(NULL);
     gw->engine_ready = 1;  // 引擎初始化完成，可接受请求
+    printf("[gateway] ===== 引擎就绪，开始接受请求 =====\n");
 
     // 训练模式: 引擎就绪后自动开始喂料
     printf("[DEBUG] train_mode_flag=%d, corpus=%s, topology=%p\n", gw->train_mode_flag, gw->train_config.corpus_path ? gw->train_config.corpus_path : "NULL", (void*)gw->topology);
     if (gw->train_mode_flag && gw->topology) {
         gw->train_mode = train_mode_create(gw->topology, gw->memory, gw->learner, gw->train_config);
+        __sync_synchronize();  /* ARM 弱内存序: 确保 train_mode 对所有线程可见 */
         if (gw->train_mode) {
+            train_mode_set_thalamus(gw->train_mode, gw->thalamus);
             train_mode_start(gw->train_mode);
         } else {
             fprintf(stderr, "[gateway] 训练模式创建失败\n");
@@ -391,7 +459,8 @@ static int gw_system_init(GatewaySystem* gw) {
         gw->topo_brain = topobrain_create(65536);  // 预分配 64K 节点
         if (gw->topo_brain) {
             printf("[gateway]   脑区索引就绪 (9+1 脑区)\n");
-            brainstem_set_topo_brain(gw->brainstem, gw->topo_brain);
+            /* 通过丘洞注册，而非 brainstem_set_topo_brain */
+            thalamus_register_utility(gw->thalamus, THAL_UTIL_TOPO_BRAIN, gw->topo_brain);
         }
     }
     printf("[gateway] PivotMind 引擎就绪\n");
@@ -442,11 +511,14 @@ static void gw_system_shutdown(GatewaySystem* gw) {
     // 6. 销毁资源（brainstem 已在上方 stop，这里只 destroy）
     if (gw->brain_cache) node_cache_destroy(gw->brain_cache);  gw->brain_cache = NULL;
     if (gw->self_learner) { self_learner_destroy(gw->self_learner); gw->self_learner = NULL; }
+    if (gw->amygdala)    amygdala_destroy(gw->amygdala);
     if (gw->hippocampus) hippocampus_destroy(gw->hippocampus);
     if (gw->cerebellum)  cerebellum_destroy(gw->cerebellum);
     if (gw->thalamus)     thalamus_destroy(gw->thalamus);
     if (gw->perception)   perception_destroy(gw->perception);
     if (gw->brainstem)    brainstem_destroy(gw->brainstem);
+    if (gw->pfe)         pfe_destroy(gw->pfe);              /* v0.3 */
+    if (gw->arena)       arena_destroy(gw->arena);          /* v0.3 */
     if (gw->learner)     active_learner_destroy(gw->learner);
     if (gw->prefrontal)  prefrontal_destroy(gw->prefrontal);
     if (gw->causal_graph) causal_graph_destroy(gw->causal_graph);
@@ -467,8 +539,30 @@ static void handle_chat(GatewaySystem* gw, int fd, const char* body) {
         return;
     }
 
-    // 调用前额叶（意图推断+认知调度+对话）
-    char* response = prefrontal_chat(gw->prefrontal, msg);
+    /* ── v0.3 Phase 2: 复杂问题走 PFE 推理编排 ── */
+    int use_pfe = 0;
+    char* response = NULL;
+
+    if (gw->pfe) {
+        int complexity = pfe_assess_complexity(gw->pfe, msg);
+        if (complexity > 0) {
+            /* 中高复杂度 → PFE 推理管线 */
+            char pfe_answer[GW_MAX_RESPONSE];
+            int pfe_ok = pfe_reason(gw->pfe, msg, pfe_answer, sizeof(pfe_answer));
+            if (pfe_ok == 0 && strlen(pfe_answer) > 10) {
+                response = strdup(pfe_answer);
+                use_pfe   = 1;
+                printf("[gateway] PFE推理完成 (复杂度=%d, 周期=%d, 满意度=%.2f)\n",
+                       complexity, pfe_cycle_count(gw->pfe),
+                       (double)pfe_avg_satisfaction(gw->pfe));
+            }
+        }
+    }
+
+    /* 回退到旧路径：简单问题或 PFE 失败 */
+    if (!response) {
+        response = prefrontal_chat(gw->prefrontal, msg);
+    }
 
     if (response) {
         char escaped[GW_MAX_RESPONSE];
@@ -482,8 +576,9 @@ static void handle_chat(GatewaySystem* gw, int fd, const char* body) {
 
         char json[GW_MAX_RESPONSE];
         snprintf(json, sizeof(json),
-            "{\"reply\":\"%s\",\"nodes\":%d,\"dialogs\":%lld}",
-            escaped, total_nodes, (long long)gw->total_dialogs + 1);
+            "{\"reply\":\"%s\",\"nodes\":%d,\"dialogs\":%lld%s}",
+            escaped, total_nodes, (long long)gw->total_dialogs + 1,
+            use_pfe ? ",\"reasoning\":\"pfe\"" : "");
 
         http_json(fd, 200, json);
         gw->total_dialogs++;
@@ -491,12 +586,23 @@ static void handle_chat(GatewaySystem* gw, int fd, const char* body) {
         /* 海马体记下这次对话 — 巩固时自动建 QA 连接 */
         if (gw->hippocampus) hippocampus_log_dialog(gw->hippocampus, msg, response);
 
+        /* ── v0.3 Phase 2: IdeaArena 胜者反馈回流 ── */
+        if (use_pfe && gw->arena && gw->topology) {
+            arena_feedback_to_master(gw->arena, gw->topology);
+        }
+
         // 增量模板维护：每轮对话构建 2 条模板，逐步积累
         {
             SubTopology* _tpl = master_get_sub_topology_by_type(gw->topology, TOPO_TEMPLATE);
             int _tpl_count = (_tpl && _tpl->net) ? _tpl->net->node_count : 0;
-            // 每 5 轮对话构建 2 条模板（避免高频构建拖慢响应）
-            if (gw->total_dialogs % 5 == 0 && _tpl_count < 2000) {
+            // 上限动态：总节点 / 10，最低 2000（随知识增长自然扩容）
+            int _all_nodes = 0;
+            for (int _ti = 0; _ti < gw->topology->sub_topo_count; _ti++) {
+                SubTopology* _st = gw->topology->sub_topologies[_ti];
+                if (_st && _st->net) _all_nodes += _st->net->node_count;
+            }
+            int _tpl_max = (_all_nodes > 20000) ? _all_nodes / 10 : 2000;
+            if (gw->total_dialogs % 5 == 0 && _tpl_count < _tpl_max) {
                 broca_build_templates(gw->topology, 2, 5);
             }
             // 每 200 轮对话做一次衰减清理
@@ -690,7 +796,7 @@ static void handle_root(GatewaySystem* gw, int fd) {
         ".sl{font-size:9px;color:#475569;margin-top:2px;letter-spacing:.5px}"
         ".er{color:#ef4444;font-size:11px;text-align:center;margin-top:12px;word-break:break-all}"
         "@media(max-width:640px){body{padding:10px}.rw{grid-template-columns:1fr}}</style></head><body>"
-        "<h1>玄枢</h1><div class=sub>PivotMind v0.2.5</div>"
+        "<h1>玄枢</h1><div class=sub>PivotMind v0.2.7</div>"
         "<div class=gw id=ca></div>"
         "<div class=rw>"
         "<div class=cd><div class=lb>学习调度器</div><div id=s><div class=cy vl>加载中...</div></div></div>"
@@ -1011,6 +1117,7 @@ static void handle_connection(GatewaySystem* gw, int client_fd) {
 // ==================== 主函数 ====================
 
 int main(int argc, char* argv[]) {
+    setvbuf(stdout, NULL, _IOLBF, 0);  /* 行缓冲，确保所有线程日志即时可见 */
     printf("[gateway] PivotMind v%s\n", PIVOTMIND_VERSION);
     // 解析参数
     int port = GW_DEFAULT_PORT;

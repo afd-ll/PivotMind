@@ -59,7 +59,7 @@ TopoSnapshot* topo_snapshot_create(SubTopology* sub) {
             snap->concepts[i] = strdup(node->concept);
         }
 
-        int deg = node->connection_count;
+        int deg = node->edge_count;
         if (deg <= 0) continue;
 
         // 邻接表
@@ -78,10 +78,10 @@ TopoSnapshot* topo_snapshot_create(SubTopology* sub) {
         }
 
         for (int j = 0; j < deg; j++) {
-            ReasoningNode* conn = node->connections[j];
+            ReasoningNode* conn = node->edges[j].target;
             snap->adj_lists[i][j] = conn ? conn->node_id : -1;
-            snap->edge_weights[i][j] = node->connection_weights[j];
-            snap->edge_confidences[i][j] = node->connection_confidences[j];
+            snap->edge_weights[i][j] = node->edges[j].weight;
+            snap->edge_confidences[i][j] = node->edges[j].confidence;
         }
     }
 
@@ -180,8 +180,8 @@ int topo_snapshot_merge(TopoSnapshot* snap, SubTopology* sub) {
         if (!fn || !tn) continue;
 
         int exists = 0;
-        for (int c = 0; c < fn->connection_count; c++) {
-            if (fn->connections[c] == tn) { exists = 1; break; }
+        for (int c = 0; c < fn->edge_count; c++) {
+            if (fn->edges[c].target == tn) { exists = 1; break; }
         }
 
         if (!exists) {

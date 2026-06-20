@@ -60,7 +60,7 @@ float topo_edge_growth_rate(MasterTopology* master, const TopoEvalSnapshot* prev
         if (!sub || !sub->net) continue;
         for (int n = 0; n < sub->net->node_count; n++) {
             ReasoningNode* node = sub->net->nodes[n];
-            if (node) current_edges += node->connection_count;
+            if (node) current_edges += node->edge_count;
         }
     }
 
@@ -82,8 +82,8 @@ float topo_confidence_entropy(MasterTopology* master, int bins) {
         for (int n = 0; n < sub->net->node_count; n++) {
             ReasoningNode* node = sub->net->nodes[n];
             if (!node) continue;
-            for (int e = 0; e < node->connection_count; e++) {
-                float conf = node->connection_confidences[e];
+            for (int e = 0; e < node->edge_count; e++) {
+                float conf = node->edges[e].confidence;
                 if (conf < 0.0f) conf = 0.0f;
                 if (conf > 1.0f) conf = 1.0f;
                 int idx = (int)(conf * (bins - 1));
@@ -152,7 +152,7 @@ float topo_edge_density(MasterTopology* master, int topo_id) {
         int edges = 0;
         for (int i = 0; i < n; i++) {
             ReasoningNode* node = sub->net->nodes[i];
-            if (node) edges += node->connection_count;
+            if (node) edges += node->edge_count;
         }
         float max_edges = (float)n * (float)(n - 1) / 2.0f;
         return max_edges > 0 ? (float)edges / max_edges : 0.0f;
@@ -168,7 +168,7 @@ float topo_edge_density(MasterTopology* master, int topo_id) {
         int edges = 0;
         for (int i = 0; i < n; i++) {
             ReasoningNode* node = sub->net->nodes[i];
-            if (node) edges += node->connection_count;
+            if (node) edges += node->edge_count;
         }
         float max_edges = (float)n * (float)(n - 1) / 2.0f;
         sum_density += max_edges > 0 ? (float)edges / max_edges : 0.0f;
@@ -200,9 +200,9 @@ TopoEvalSnapshot topo_eval_snapshot_take(MasterTopology* master) {
         for (int n = 0; n < sub->net->node_count; n++) {
             ReasoningNode* node = sub->net->nodes[n];
             if (!node) continue;
-            for (int e = 0; e < node->connection_count; e++) {
+            for (int e = 0; e < node->edge_count; e++) {
                 total_edges++;
-                sum_conf += node->connection_confidences[e];
+                sum_conf += node->edges[e].confidence;
             }
         }
     }
@@ -592,7 +592,7 @@ float topo_domain_interference_score(MasterTopology* master) {
         if (!sub || !sub->net) continue;
         for (int n = 0; n < sub->net->node_count; n++) {
             ReasoningNode* node = sub->net->nodes[n];
-            if (node) total_edges += node->connection_count;
+            if (node) total_edges += node->edge_count;
         }
     }
 
@@ -873,9 +873,9 @@ void topo_eval_print_all(MasterTopology* master) {
         for (int i = 0; i < n; i++) {
             ReasoningNode* node = sub->net->nodes[i];
             if (!node) continue;
-            for (int j = 0; j < node->connection_count; j++) {
+            for (int j = 0; j < node->edge_count; j++) {
                 e++;
-                avg_conf += node->connection_confidences[j];
+                avg_conf += node->edges[j].confidence;
             }
         }
         avg_conf = e > 0 ? avg_conf / e : 0.0f;
@@ -949,8 +949,8 @@ static int bfs_path_exists(SubTopology* sub, int from, int to, int max_depth) {
         ReasoningNode* node = sub->net->nodes[cur];
         if (!node) continue;
 
-        for (int e = 0; e < node->connection_count; e++) {
-            ReasoningNode* next = node->connections[e];
+        for (int e = 0; e < node->edge_count; e++) {
+            ReasoningNode* next = node->edges[e].target;
             if (!next) continue;
             int next_id = next->node_id;
             if (next_id >= 0 && next_id < n && !visited[next_id]) {

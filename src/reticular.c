@@ -3,7 +3,7 @@
  * @brief 网状结构 — 节点级注意力过滤器
  *
  * 每轮调度前预筛节点，减少后续模块的扫描开销。
- * 核心算法：activation × connection_count × recency_bonus
+ * 核心算法：activation × edge_count × recency_bonus
  *
  * v2: 存储 top-K 结果供下游消费（扩散引擎、丘脑调度等）
  */
@@ -67,7 +67,7 @@ int reticular_attend(MasterTopology* topology, int top_k) {
         ReasoningNode* node = sub->net->nodes[ni];
         if (!node || node->is_cooled) continue;
 
-        float sal = node->activation * (1.0f + (float)node->connection_count * 0.05f);
+        float sal = node->activation * (1.0f + (float)node->edge_count * 0.05f);
         if (sal < 0.01f) continue;
 
         if (cand_count < MAX_CANDIDATES) {
@@ -126,7 +126,7 @@ float reticular_node_salience(MasterTopology* topology, int node_id) {
         for (int i = 0; i < sub->net->node_count; i++) {
             ReasoningNode* node = sub->net->nodes[i];
             if (node && node->node_id == node_id && !node->is_cooled)
-                return node->activation * (1.0f + (float)node->connection_count * 0.05f);
+                return node->activation * (1.0f + (float)node->edge_count * 0.05f);
         }
     }
     return 0.0f;

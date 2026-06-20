@@ -71,4 +71,21 @@
 #define PM_CLOCK_STATE_DRIFT_BASELINE 0.005f   // 认知状态漂移回归量
 #define PM_CLOCK_ACTIVATION_FLOOR     0.01f    // 激活值低于此归零
 
+/* ========== 前额叶执行器 (v0.3) ========== */
+#define PFE_MAX_SUBGOALS           8    /* 单次推理最大子目标数 */
+#define PFE_MAX_DECOMPOSE_DEPTH    2    /* 最大分解层数 */
+#define PFE_MIN_SUBGOAL_SATISF     0.5f /* 子目标最低满意度 */
+#define PFE_MAX_SUBGOAL_RETRIES    2    /* 每个子目标最大retry */
+#define PFE_CONFLICT_THRESH        0.25f /* 冲突检测阈值 */
+
+/* ========== IdeaArena (v0.3) ========== */
+#define ARENA_LATERAL_INHIBITION   0.6f /* 默认侧抑制强度 */
+#define ARENA_NOVELTY_BOOST        0.2f /* 默认新颖性奖励 */
+#define ARENA_CONVERGENCE_THRESH   0.3f /* 收敛阈值 */
+#define ARENA_DEFAULT_GOAL_THRESH  0.45f   /* 目标契合度硬门槛 */
+#define ARENA_DEFAULT_CONSIS_THRESH 0.35f  /* 一致性硬门槛 */
+#define ARENA_DEFAULT_NOVEL_THRESH  0.05f  /* 新颖性硬门槛(低门槛) */
+#define ARENA_DEFAULT_VALENCE_THRESH -0.5f /* 效价硬门槛(允许负面) */
+#define ARENA_DEFAULT_COMPOSE_THRESH 0.1f  /* 可组合性硬门槛 */
+
 #endif // PIVOTMIND_CONSTANTS_H

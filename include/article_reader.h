@@ -26,6 +26,9 @@
 
 #include "multi_topology.h"
 
+/* Forward declaration for optional thalamus signal bus binding */
+typedef struct Thalamus Thalamus;
+
 // ==================== 配置 ====================
 
 typedef struct {
@@ -97,5 +100,12 @@ void article_set_progress_ptr(ArticleReader* ar,
  */
 void article_get_stats(ArticleReader* ar,
                        int* out_chars, int* out_pairs, int* out_words);
+
+/**
+ * 绑定丘脑信号总线（可选）
+ * 绑定后，flush 建图时自动通过丘脑发送反馈信号，
+ * 使调度系统知悉文章阅读的工作量
+ */
+void article_reader_set_thalamus(ArticleReader* ar, Thalamus* th);
 
 #endif // ARTICLE_READER_H

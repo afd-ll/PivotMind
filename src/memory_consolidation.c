@@ -112,18 +112,18 @@ float compute_similarity(HuarongTopologyNet* net, int node_a_id, int node_b_id,
         case SIMILARITY_JACCARD: {
             // Jaccard 相似度 - 基于连接
             int shared = 0;
-            int total = MIN(node_a->connection_count, node_b->connection_count);
+            int total = MIN(node_a->edge_count, node_b->edge_count);
             if (total == 0) return 0.0f;
             
-            for (int i = 0; i < node_a->connection_count; i++) {
-                for (int j = 0; j < node_b->connection_count; j++) {
-                    if (node_a->connections[i]->node_id == node_b->connections[j]->node_id) {
+            for (int i = 0; i < node_a->edge_count; i++) {
+                for (int j = 0; j < node_b->edge_count; j++) {
+                    if (node_a->edges[i].target->node_id == node_b->edges[j].target->node_id) {
                         shared++;
                         break;
                     }
                 }
             }
-            return (float)shared / (node_a->connection_count + node_b->connection_count - shared);
+            return (float)shared / (node_a->edge_count + node_b->edge_count - shared);
         }
 
         case SIMILARITY_TVERSIFY:
@@ -131,16 +131,16 @@ float compute_similarity(HuarongTopologyNet* net, int node_a_id, int node_b_id,
             // Tversky 相似度 - 综合方法
             float alpha = 1.0f, beta = 1.0f;
             int shared = 0;
-            for (int i = 0; i < node_a->connection_count; i++) {
-                for (int j = 0; j < node_b->connection_count; j++) {
-                    if (node_a->connections[i]->node_id == node_b->connections[j]->node_id) {
+            for (int i = 0; i < node_a->edge_count; i++) {
+                for (int j = 0; j < node_b->edge_count; j++) {
+                    if (node_a->edges[i].target->node_id == node_b->edges[j].target->node_id) {
                         shared++;
                         break;
                     }
                 }
             }
-            float diff_a = node_a->connection_count - shared;
-            float diff_b = node_b->connection_count - shared;
+            float diff_a = node_a->edge_count - shared;
+            float diff_b = node_b->edge_count - shared;
             float tversky = (float)shared / (shared + alpha * diff_a + beta * diff_b);
             return CLAMP(tversky, 0.0f, 1.0f);
         }
@@ -211,7 +211,7 @@ float compute_frequency_score(ReasoningNode* node, int max_count) {
     if (!node) return 0.0f;
 
     // 频率评分 - 对数尺度避免极端值
-    float freq = logf(1.0f + node->connection_count) / logf(1.0f + MAX(max_count, 1));
+    float freq = logf(1.0f + node->edge_count) / logf(1.0f + MAX(max_count, 1));
     return CLAMP(freq, 0.0f, 1.0f);
 }
 
@@ -331,7 +331,7 @@ void memory_cluster_update_centroid(MemoryCluster* cluster, HuarongTopologyNet* 
             ReasoningNode* node = net->nodes[node_id];
             if (node) {
                 total_activation += node->activation;
-                total_connections += node->connection_count;
+                total_connections += node->edge_count;
             }
         }
     }
@@ -504,8 +504,8 @@ int merge_memories(HuarongTopologyNet* net, int node_a_id, int node_b_id,
     node_a->activation = new_activation;
 
     // 保留 node_a 作为合并后的节点
-    // node_b 将被标记为待删除 (connection_count = -1 表示无效)
-    node_b->connection_count = -1;
+    // node_b 将被标记为待删除 (edge_count = -1 表示无效)
+    node_b->edge_count = -1;
 
     return node_a_id;
 }
@@ -549,7 +549,7 @@ int compress_memory_cluster(HuarongTopologyNet* net, ClusterManager* manager,
         memory_cluster_remove_node(cluster, removed_node_id);
         // 标记节点为无效
         if (removed_node_id >= 0 && removed_node_id < net->node_count) {
-            net->nodes[removed_node_id]->connection_count = -1;
+            net->nodes[removed_node_id]->edge_count = -1;
         }
         removed++;
     }
@@ -624,7 +624,7 @@ int* select_forgetting_candidates(HuarongTopologyNet* net,
 
     for (int i = 0; i < net->node_count; i++) {
         ReasoningNode* node = net->nodes[i];
-        if (!node || node->connection_count < 0) continue;
+        if (!node || node->edge_count < 0) continue;
 
         float priority = compute_forgetting_priority(node, now, def_config);
         if (priority > 0.5f) {  // 高遗忘优先级
@@ -645,10 +645,10 @@ int execute_forgetting(HuarongTopologyNet* net, int node_id, float forgetting_st
     // 遗忘：降低激活值和连接权重
     node->activation *= (1.0f - forgetting_strength);
 
-    for (int i = 0; i < node->connection_count; i++) {
-        node->connection_weights[i] *= (1.0f - forgetting_strength * 0.5f);
-        if (node->connection_weights[i] < 0.01f) {
-            node->connection_weights[i] = 0.0f;
+    for (int i = 0; i < node->edge_count; i++) {
+        node->edges[i].weight *= (1.0f - forgetting_strength * 0.5f);
+        if (node->edges[i].weight < 0.01f) {
+            node->edges[i].weight = 0.0f;
         }
     }
 

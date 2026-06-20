@@ -46,6 +46,26 @@ static inline void hebbian_update(float* a, float* b, int dim, float lr) {
     }
 }
 
+/** 上下文敏感 Hebbian 更新: 双向拉近的同时，两个向量都向上下文均值微移。
+ *  这使得同一个概念在不同上下文中逐渐分化为不同的语义倾向。
+ *  @param context_mean     路径上下文的特征向量均值（NULL=退化为普通 hebbian）
+ *  @param context_strength 上下文引力强度，建议 0.1~0.2 */
+static inline void hebbian_update_contextual(float* a, float* b, int dim,
+                                              float lr,
+                                              const float* context_mean,
+                                              float context_strength) {
+    if (!a || !b || dim <= 0) return;
+    for (int i = 0; i < dim; i++) {
+        float diff = b[i] - a[i];
+        a[i] += lr * diff;
+        b[i] -= lr * diff;
+        if (context_mean) {
+            a[i] += lr * context_strength * (context_mean[i] - a[i]);
+            b[i] += lr * context_strength * (context_mean[i] - b[i]);
+        }
+    }
+}
+
 /**
  * Initialize random number generator (only once)
  * This function uses a static flag to ensure srand() is called only once,

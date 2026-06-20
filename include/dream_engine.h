@@ -32,11 +32,17 @@ typedef struct {
     float dream_decay;          /* 梦境退出时全局衰减率 (默认 0.3) */
     int   max_path_record;      /* 最多记录的路径长度 (默认 32) */
     int   verbose;              /* 是否输出梦境日志 */
+
+    /* 跨拓扑连接噪声控制 — 双阈值固化 */
+    int   cross_solidify_rounds;   /* 需要多少轮梦境反复触发才固化 (默认 3) */
+    float cross_coupling_weight;   /* 临时耦合的初始权重 (默认 0.12) */
+    float cross_coupling_decay;    /* 临时耦合未再触发的衰减率 (默认 0.7) */
 } DreamConfig;
 
 /** 默认梦境配置 */
 #define DREAM_DEFAULT_CONFIG { \
-    5, 3, 2, 4, 0.08f, 0.4f, 0.3f, 32, 1 \
+    5, 3, 2, 4, 0.08f, 0.4f, 0.3f, 32, 1, \
+    3, 0.12f, 0.7f \
 }
 
 /**

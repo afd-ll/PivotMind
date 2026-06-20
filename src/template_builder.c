@@ -7,6 +7,7 @@
 #include "string_pool.h"
 #include "common.h"
 #include "cognitive_controller.h"
+#include "topology_growth.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -91,6 +92,76 @@ static void uf_destroy(UnionFind* uf) {
     free(uf->parent);
     free(uf->rank);
     free(uf);
+}
+
+/* ================================================================
+ *  模板合并辅助: 连接词归一化
+ *
+ *  规则:
+ *    1. NULL 或空字符串 → ""
+ *    2. 去除首尾空白
+ *    3. 纯空白 → ""
+ *
+ *  dst 缓冲区至少需要 TPL_CONNECTOR_BUF 字节。
+ * ================================================================ */
+
+static void norm_connector(const char* src, char* dst) {
+    if (!src || !src[0]) { dst[0] = '\0'; return; }
+    /* 跳过头部的空白 */
+    while (*src == ' ' || *src == '\t') src++;
+    /* 找到尾部非空白位置 */
+    int len = 0;
+    while (src[len] && src[len] != ' ' && src[len] != '\t') len++;
+    if (len == 0) { dst[0] = '\0'; return; }
+    int n = (len < TPL_CONNECTOR_BUF - 1) ? len : TPL_CONNECTOR_BUF - 1;
+    memcpy(dst, src, (size_t)n);
+    dst[n] = '\0';
+}
+
+/* ================================================================
+ *  模板合并辅助: 合并键哈希
+ *
+ *  合并键 = (tpl_pos_len, tpl_pos_seq[0..len-1],
+ *            normalized tpl_connectors[0..len-2])
+ *
+ *  pos_seq 逐元素 + 归一化后的 connector 逐字节参与 djb2 哈希。
+ * ================================================================ */
+
+static uint32_t merge_key_hash(int pos_len, const int* pos_seq,
+                                const char connectors[][TPL_CONNECTOR_BUF]) {
+    uint32_t h = 5381;
+    h = (h * 33) ^ (uint32_t)pos_len;
+    for (int i = 0; i < pos_len; i++)
+        h = (h * 33) ^ (uint32_t)pos_seq[i];
+    for (int i = 0; i < pos_len - 1; i++) {
+        char norm[TPL_CONNECTOR_BUF];
+        norm_connector(connectors[i], norm);
+        for (const char* p = norm; *p; p++)
+            h = (h * 33) ^ (uint8_t)*p;
+    }
+    return h;
+}
+
+/* ================================================================
+ *  模板合并辅助: 合并键相等性判断
+ *
+ *  conn_a: 组内已存储的归一化 connector
+ *  conn_b: 候选模板的原始 connector（需要归一化后比较）
+ * ================================================================ */
+
+static int merge_key_equals(
+    int len_a, const int* seq_a, const char conn_a[][TPL_CONNECTOR_BUF],
+    int len_b, const int* seq_b, const char conn_b[][TPL_CONNECTOR_BUF])
+{
+    if (len_a != len_b) return 0;
+    for (int i = 0; i < len_a; i++)
+        if (seq_a[i] != seq_b[i]) return 0;
+    for (int i = 0; i < len_a - 1; i++) {
+        char norm[TPL_CONNECTOR_BUF];
+        norm_connector(conn_b[i], norm);
+        if (strcmp(conn_a[i], norm) != 0) return 0;
+    }
+    return 1;
 }
 
 /* ================================================================
@@ -454,18 +525,18 @@ int template_build_nodes(
             continue;  /* 没有特征无法建模板 */
         }
 
-        /* 在模板拓扑中创建节点 */
+        /* 在模板拓扑中创建节点（自动扩容） */
         float* feat_copy = (float*)malloc((size_t)feat_dim * sizeof(float));
         if (!feat_copy) continue;
         memcpy(feat_copy, tpl_feat, (size_t)feat_dim * sizeof(float));
 
-        ReasoningNode* tpl_node = huarong_net_add_node(tpl->net, name_buf, feat_copy, feat_dim);
-        if (!tpl_node) {
+        int tpl_node_id = insert_node_dynamic(master, tpl->topo_id, name_buf, feat_copy, feat_dim);
+        if (tpl_node_id < 0) {
             free(feat_copy);
             continue;
         }
-        int tpl_node_id = tpl_node->node_id;
         cl->template_node_id = tpl_node_id;
+        ReasoningNode* tpl_node = tpl->net->nodes[tpl_node_id];
 
         /* 存储模板锚点元数据 — POS 序列格式 */
         tpl_node->tpl_pos_len = 3;  /* 三元组模板 */
@@ -630,10 +701,9 @@ int template_build_concepts(MasterTopology* master, int max_concepts) {
         if (!feat_copy) continue;
         memcpy(feat_copy, concept_feat, (size_t)NODE_FEATURE_DIM * sizeof(float));
 
-        ReasoningNode* cnode = huarong_net_add_node(concept->net, name_buf,
-                                                     feat_copy, NODE_FEATURE_DIM);
-        if (!cnode) { free(feat_copy); continue; }
-        int cid = cnode->node_id;
+        int cid = insert_node_dynamic(master, concept->topo_id, name_buf,
+                                       feat_copy, NODE_FEATURE_DIM);
+        if (cid < 0) { free(feat_copy); continue; }
 
         /* 概念 → 每个成员模板: 双向跨拓扑连接 */
         for (int m = 0; m < groups[g].count; m++) {
@@ -760,7 +830,12 @@ int template_auto_build(MasterTopology* master, int min_entries, int max_templat
         built = template_build_nodes(master, clus, cc, vocab, max_templates);
     }
 
-    /* Step 5: 创建高层概念节点 */
+    /* Step 5: POS 结构合并 — 消除 Pipeline A/B 间的冗余模板 */
+    if (built > 0) {
+        template_merge_by_pos_structure(master);
+    }
+
+    /* Step 6: 创建高层概念节点 */
     if (built > 0) {
         template_build_concepts(master, max_templates / 4);
     }
@@ -853,9 +928,10 @@ int template_build_from_pos_patterns(MasterTopology* master,
         if (!feat_copy) continue;
         memcpy(feat_copy, feat, (size_t)NODE_FEATURE_DIM * sizeof(float));
 
-        ReasoningNode* tn = huarong_net_add_node(tpl->net, name_buf,
-                                                   feat_copy, NODE_FEATURE_DIM);
-        if (!tn) { free(feat_copy); continue; }
+        int tn_id = insert_node_dynamic(master, tpl->topo_id, name_buf,
+                                         feat_copy, NODE_FEATURE_DIM);
+        if (tn_id < 0) { free(feat_copy); continue; }
+        ReasoningNode* tn = tpl->net->nodes[tn_id];
 
         /* 存入 POS 序列 + 自动生成连接词 */
         tn->tpl_pos_len = pat->length;
@@ -886,4 +962,616 @@ int template_build_from_pos_patterns(MasterTopology* master,
     }
     return built;
 }
+
+/* ================================================================
+ *  POS 槽位化诊断 — 用现有数据验证"相同 POS = 相同推理角色"假设
+ *
+ *  核心问题：
+ *    相同 POS 结构（如 [N][的][N]）的不同词对（苹果的红色、
+ *    中国的首都、人民的利益）在特征空间中是否足够接近？
+ *    如果差异很大，简单 POS 合并会稀释模板的推理引导力。
+ *
+ *  诊断维度：
+ *    (a) 组内特征离异度：pairwise cosine sim 的分布
+ *    (b) 连接词一致性：tpl_connectors[0] 是否统一
+ *    (c) 组间重合度：不同 POS 组之间的最近邻相似度
+ *    (d) 组内样本数：样本太少时统计不可靠
+ *
+ *  输出：机器可解析的表格 + 人类可读的建议
+ * ================================================================ */
+
+/* 诊断用 POS 名映射（11 类，索引即 POSTag 值） */
+static const char* diag_pos_name(int tag) {
+    static const char* names[] = {
+        "?", "N", "V", "Adj", "Adv", "Pron", "Prep", "Conj", "Num", "Part", "Int"
+    };
+    if (tag < 0 || tag >= POS_COUNT) return "?";
+    return names[tag];
+}
+
+/* POS 组内统计 */
+typedef struct {
+    int   pos_a, pos_b;        /* 组 POS 前缀 */
+    int*  tpl_ids;             /* 组内模板节点 ID */
+    int   count;               /* 组内成员数 */
+    float sim_mean;            /* 组内 pairwise cosine sim 均值 */
+    float sim_std;             /* 组内 pairwise sim 标准差 */
+    float sim_min, sim_max;    /* 组内 sim 极值 */
+    int   connector_agree;     /* connector[0] 一致的数量（用于比率） */
+    char  dominant_conn[TPL_CONNECTOR_BUF]; /* 最高频连接词 */
+} DiagPosGroup;
+
+/* 诊断报告 — 各维度建议 */
+typedef struct {
+    int   pos_pair_count;      /* 有 >=2 成员的 POS 组数 */
+    int   total_templates;     /* 被分析模板总数 */
+    int   safe_merge_groups;   /* 可直接合并的组数 */
+    int   subcluster_groups;   /* 需要子聚类的组数 */
+    int   insufficient_groups; /* POS 粒度不够的组数 */
+    float overall_intra_mean;  /* 全局组内 sim 均值 */
+    float overall_intra_std;   /* 全局组内 sim 标准差 */
+    float worst_inter_intra;   /* 最差组间/组内 sim 比值 */
+    int   recommendation;      /* 最终建议码 */
+} DiagReport;
+
+/* 阈值 */
+#define DIAG_MIN_GROUP_SIZE     2     /* 组内至少2个成员才分析 */
+#define DIAG_SAFE_SIM_MEAN      0.65f /* 组内均值 > 此值 → 同构 */
+#define DIAG_SAFE_SIM_STD       0.15f /* 组内标准差 < 此值 → 单峰 */
+#define DIAG_WARN_SIM_STD       0.25f /* 组内标准差 > 此值 → 多峰/散乱 */
+#define DIAG_CONNECTOR_THRESH   0.8f  /* 连接词一致性 > 此值 → 可靠 */
+#define DIAG_INTER_INTRA_RATIO  1.15f /* 组间/组内 sim 比值 > 此值 → POS 区分度不足 */
+
+static void diag_compute_group_stats(DiagPosGroup* grp,
+                                      ReasoningNode* const* tpl_nodes,
+                                      int tpl_count) {
+    if (grp->count < 2) { grp->sim_mean = grp->sim_std = 0.0f; return; }
+
+    /* 收集组内特征向量指针 */
+    float** feats = (float**)malloc((size_t)grp->count * sizeof(float*));
+    int valid = 0;
+    for (int i = 0; i < grp->count; i++) {
+        int tid = grp->tpl_ids[i];
+        if (tid >= 0 && tid < tpl_count) {
+            ReasoningNode* tn = tpl_nodes[tid];
+            if (tn && tn->features) feats[valid++] = tn->features;
+        }
+    }
+    if (valid < 2) { free(feats); grp->sim_mean = grp->sim_std = 0.0f; return; }
+
+    /* Pairwise 余弦相似度 */
+    int npair = valid * (valid - 1) / 2;
+    float* sims = (float*)malloc((size_t)npair * sizeof(float));
+    int si = 0;
+    grp->sim_min = 1.0f;
+    grp->sim_max = -1.0f;
+    double sum = 0.0;
+    for (int i = 0; i < valid; i++) {
+        for (int j = i + 1; j < valid; j++) {
+            float s = template_cosine_sim(feats[i], feats[j], NODE_FEATURE_DIM);
+            sims[si++] = s;
+            sum += s;
+            if (s < grp->sim_min) grp->sim_min = s;
+            if (s > grp->sim_max) grp->sim_max = s;
+        }
+    }
+    grp->sim_mean = (float)(sum / (double)npair);
+
+    /* 标准差 */
+    double sqsum = 0.0;
+    for (int k = 0; k < npair; k++) {
+        double d = (double)sims[k] - (double)grp->sim_mean;
+        sqsum += d * d;
+    }
+    grp->sim_std = (float)sqrt(sqsum / (double)npair);
+
+    free(sims);
+    free(feats);
+}
+
+static void diag_compute_connector_agree(DiagPosGroup* grp,
+                                          ReasoningNode* const* tpl_nodes,
+                                          int tpl_count) {
+    typedef struct { char key[TPL_CONNECTOR_BUF]; int cnt; } ConnVote;
+    ConnVote votes[16];
+    int nv = 0;
+
+    for (int i = 0; i < grp->count; i++) {
+        int tid = grp->tpl_ids[i];
+        const char* conn = "";
+        if (tid >= 0 && tid < tpl_count) {
+            ReasoningNode* tn = tpl_nodes[tid];
+            if (tn && tn->tpl_connectors[0][0]) conn = tn->tpl_connectors[0];
+        }
+        /* 查找/创建投票 */
+        int found = 0;
+        for (int v = 0; v < nv; v++) {
+            if (strcmp(votes[v].key, conn) == 0) { votes[v].cnt++; found = 1; break; }
+        }
+        if (!found && nv < 16) {
+            snprintf(votes[nv].key, sizeof(votes[nv].key), "%s", conn);
+            votes[nv].cnt = 1;
+            nv++;
+        }
+    }
+
+    /* 找最高频 */
+    int best_cnt = 0;
+    for (int v = 0; v < nv; v++) {
+        if (votes[v].cnt > best_cnt) {
+            best_cnt = votes[v].cnt;
+            snprintf(grp->dominant_conn, sizeof(grp->dominant_conn), "%s", votes[v].key);
+        }
+    }
+    grp->connector_agree = best_cnt;
+}
+
+static void diag_compute_inter_group(DiagPosGroup* groups, int gc,
+                                      ReasoningNode* const* tpl_nodes,
+                                      int tpl_count,
+                                      DiagReport* report) {
+    /* 对每对 POS 组，计算组间最近邻相似度 vs 组内均值 */
+    float worst_ratio = 0.0f;
+
+    for (int gi = 0; gi < gc; gi++) {
+        if (groups[gi].count < DIAG_MIN_GROUP_SIZE) continue;
+
+        for (int gj = gi + 1; gj < gc; gj++) {
+            if (groups[gj].count < DIAG_MIN_GROUP_SIZE) continue;
+
+            /* 组间最近邻: g_i 每个成员找 g_j 中最近的 */
+            float best_inter = -1.0f;
+            for (int i = 0; i < groups[gi].count; i++) {
+                int ti = groups[gi].tpl_ids[i];
+                if (ti < 0 || ti >= tpl_count) continue;
+                ReasoningNode* ni = tpl_nodes[ti];
+                if (!ni || !ni->features) continue;
+
+                for (int j = 0; j < groups[gj].count; j++) {
+                    int tj = groups[gj].tpl_ids[j];
+                    if (tj < 0 || tj >= tpl_count) continue;
+                    ReasoningNode* nj = tpl_nodes[tj];
+                    if (!nj || !nj->features) continue;
+
+                    float s = template_cosine_sim(ni->features, nj->features, NODE_FEATURE_DIM);
+                    if (s > best_inter) best_inter = s;
+                }
+            }
+
+            /* g_j 每个成员找 g_i 中最近的 */
+            float best_rev = -1.0f;
+            for (int j = 0; j < groups[gj].count; j++) {
+                int tj = groups[gj].tpl_ids[j];
+                if (tj < 0 || tj >= tpl_count) continue;
+                ReasoningNode* nj = tpl_nodes[tj];
+                if (!nj || !nj->features) continue;
+
+                for (int i = 0; i < groups[gi].count; i++) {
+                    int ti = groups[gi].tpl_ids[i];
+                    if (ti < 0 || ti >= tpl_count) continue;
+                    ReasoningNode* ni = tpl_nodes[ti];
+                    if (!ni || !ni->features) continue;
+
+                    float s = template_cosine_sim(nj->features, ni->features, NODE_FEATURE_DIM);
+                    if (s > best_rev) best_rev = s;
+                }
+            }
+
+            float inter_nn = (best_inter > best_rev) ? best_inter : best_rev;
+            float intra_avg = (groups[gi].sim_mean + groups[gj].sim_mean) * 0.5f;
+
+            if (intra_avg > 0.05f) {
+                float ratio = inter_nn / intra_avg;
+                if (ratio > worst_ratio) worst_ratio = ratio;
+            }
+        }
+    }
+    report->worst_inter_intra = worst_ratio;
+}
+
+int template_diagnose_pos_coherence(MasterTopology* master) {
+    DiagReport report;
+    memset(&report, 0, sizeof(report));
+
+    if (!master) { fprintf(stderr, "[DIAG] master is NULL\n"); return 0; }
+
+    SubTopology* tpl = master_get_sub_topology_by_type(master, TOPO_TEMPLATE);
+    if (!tpl || !tpl->net) {
+        fprintf(stderr, "[DIAG] 模板拓扑不存在\n");
+        return 0;
+    }
+
+    HuarongTopologyNet* tnet = tpl->net;
+    int tn = tnet->node_count;
+    if (tn < 2) {
+        fprintf(stderr, "[DIAG] 模板拓扑节点不足 (%d)\n", tn);
+        return 0;
+    }
+
+    /* ---- 阶段 1: 收集有 POS 标签 + 特征的模板节点, 按 POS 前缀分组 ---- */
+
+    /* 哈希桶: POS pair → 组索引（桶大小 11*11=121，加少量留白） */
+    typedef struct { int pos_a, pos_b; int grp_idx; int used; } PosBucket;
+    #define DIAG_POS_HASH_SIZE 151
+    PosBucket* buckets = (PosBucket*)calloc(DIAG_POS_HASH_SIZE, sizeof(PosBucket));
+    if (!buckets) return 0;
+
+    /* 预分配组（最多 POS_COUNT*POS_COUNT 组） */
+    int max_grps = POS_COUNT * POS_COUNT;
+    DiagPosGroup* groups = (DiagPosGroup*)calloc((size_t)max_grps, sizeof(DiagPosGroup));
+    if (!groups) { free(buckets); return 0; }
+
+    /* 为每组预分配成员 ID 数组（上限 = 全部模板节点） */
+    for (int g = 0; g < max_grps; g++) {
+        groups[g].tpl_ids = (int*)malloc((size_t)tn * sizeof(int));
+        groups[g].count = 0;
+        groups[g].sim_mean = groups[g].sim_std = 0.0f;
+        groups[g].dominant_conn[0] = '\0';
+    }
+
+    int gc = 0; /* 实际用到的组数 */
+    int total_with_pos = 0;
+
+    for (int i = 0; i < tn; i++) {
+        ReasoningNode* node = tnet->nodes[i];
+        if (!node) continue;
+        if (node->tpl_pos_len < 2) continue;
+        if (!node->features) continue;
+
+        int pa = node->tpl_pos_seq[0];
+        int pb = node->tpl_pos_seq[1];
+        if (pa < 0 || pa >= POS_COUNT || pb < 0 || pb >= POS_COUNT) continue;
+
+        total_with_pos++;
+
+        /* 哈希查找 POS 组 */
+        unsigned h = (unsigned)(pa * 31 + pb * 17) % DIAG_POS_HASH_SIZE;
+        int gi = -1;
+        for (int probe = 0; probe < DIAG_POS_HASH_SIZE; probe++) {
+            unsigned idx = (h + (unsigned)probe) % DIAG_POS_HASH_SIZE;
+            if (!buckets[idx].used) {
+                /* 新组 */
+                buckets[idx].pos_a = pa;
+                buckets[idx].pos_b = pb;
+                buckets[idx].grp_idx = gc;
+                buckets[idx].used = 1;
+                groups[gc].pos_a = pa;
+                groups[gc].pos_b = pb;
+                gi = gc;
+                gc++;
+                break;
+            }
+            if (buckets[idx].pos_a == pa && buckets[idx].pos_b == pb) {
+                gi = buckets[idx].grp_idx;
+                break;
+            }
+        }
+        if (gi < 0 || gi >= max_grps) continue;
+
+        groups[gi].tpl_ids[groups[gi].count] = i;
+        groups[gi].count++;
+    }
+
+    free(buckets);
+
+    report.total_templates = total_with_pos;
+    report.pos_pair_count = 0;
+
+    if (gc < 1) {
+        fprintf(stderr, "[DIAG] 无可分析的 POS 组\n");
+        for (int g = 0; g < max_grps; g++) free(groups[g].tpl_ids);
+        free(groups);
+        return 0;
+    }
+
+    /* ---- 阶段 2: 逐组计算统计 ---- */
+
+    double global_sim_sum = 0.0;
+    double global_sim_sqsum = 0.0;
+    int global_npair = 0;
+
+    for (int g = 0; g < gc; g++) {
+        if (groups[g].count < DIAG_MIN_GROUP_SIZE) continue;
+        report.pos_pair_count++;
+
+        diag_compute_group_stats(&groups[g], tnet->nodes, tn);
+        diag_compute_connector_agree(&groups[g], tnet->nodes, tn);
+
+        /* 累积全局统计 */
+        int np = groups[g].count * (groups[g].count - 1) / 2;
+        global_sim_sum += (double)groups[g].sim_mean * (double)np;
+        global_sim_sqsum += (double)(groups[g].sim_std * groups[g].sim_std) * (double)np;
+        global_npair += np;
+
+        /* 分类各组的合并建议 */
+        float conn_ratio = (float)groups[g].connector_agree / (float)groups[g].count;
+
+        int safe = (groups[g].sim_mean >= DIAG_SAFE_SIM_MEAN &&
+                    groups[g].sim_std  <= DIAG_SAFE_SIM_STD &&
+                    conn_ratio >= DIAG_CONNECTOR_THRESH);
+        int need_sub = (groups[g].sim_std > DIAG_WARN_SIM_STD);
+        /* need_sub 优先于 safe（高方差 + 高均值也可能需要子聚类） */
+
+        if (need_sub) report.subcluster_groups++;
+        else if (safe) report.safe_merge_groups++;
+        else report.insufficient_groups++;
+    }
+
+    if (global_npair > 0) {
+        report.overall_intra_mean = (float)(global_sim_sum / (double)global_npair);
+        report.overall_intra_std  = (float)sqrt(global_sim_sqsum / (double)global_npair);
+    }
+
+    /* ---- 阶段 3: 组间重合度 ---- */
+
+    diag_compute_inter_group(groups, gc, tnet->nodes, tn, &report);
+
+    /* ---- 阶段 4: 诊断报告 ---- */
+
+    fprintf(stderr, "\n");
+    fprintf(stderr, "╔══════════════════════════════════════════════════════════════╗\n");
+    fprintf(stderr, "║ 模板 POS 槽位化诊断报告                                    ║\n");
+    fprintf(stderr, "╠══════════════════════════════════════════════════════════════╣\n");
+    fprintf(stderr, "║ 总模板节点: %-5d  有POS+特征: %-5d  POS组数: %-3d       ║\n",
+            tn, report.total_templates, report.pos_pair_count);
+    fprintf(stderr, "╠══════════════════════════════════════════════════════════════╣\n");
+    fprintf(stderr, "║ POS组   组内sim均值  sim标准差  连接词一致性  建议         ║\n");
+    fprintf(stderr, "╠══════════════════════════════════════════════════════════════╣\n");
+
+    for (int g = 0; g < gc; g++) {
+        if (groups[g].count < DIAG_MIN_GROUP_SIZE) continue;
+        const char* pa_name = diag_pos_name(groups[g].pos_a);
+        const char* pb_name = diag_pos_name(groups[g].pos_b);
+        float cr = (float)groups[g].connector_agree / (float)groups[g].count;
+        const char* tag;
+        if (groups[g].sim_std > DIAG_WARN_SIM_STD)
+            tag = "需子聚类";
+        else if (groups[g].sim_mean >= DIAG_SAFE_SIM_MEAN && groups[g].sim_std <= DIAG_SAFE_SIM_STD && cr >= DIAG_CONNECTOR_THRESH)
+            tag = "可纯POS合并";
+        else
+            tag = "粒度不够";
+
+        fprintf(stderr, "║ [%s][%s]  %5.2f       %5.3f       %5.1f%% (%s)  %-14s║\n",
+                pa_name, pb_name,
+                groups[g].sim_mean, groups[g].sim_std,
+                cr * 100.0f,
+                groups[g].dominant_conn[0] ? groups[g].dominant_conn : "无",
+                tag);
+    }
+
+    fprintf(stderr, "╠══════════════════════════════════════════════════════════════╣\n");
+    fprintf(stderr, "║ 全局组内 sim 均值: %.3f  标准差: %.3f                      ║\n",
+            report.overall_intra_mean, report.overall_intra_std);
+    fprintf(stderr, "║ 组间/组内 sim 比值 (最大): %.3f                           ║\n",
+            report.worst_inter_intra);
+    fprintf(stderr, "╠══════════════════════════════════════════════════════════════╣\n");
+
+    /* 建议决策 */
+    if (report.pos_pair_count == 0) {
+        report.recommendation = 0;
+        fprintf(stderr, "║ 建议: 数据不足，推迟决策                                  ║\n");
+    } else if (report.safe_merge_groups >= report.pos_pair_count * 0.7f
+               && report.worst_inter_intra < DIAG_INTER_INTRA_RATIO) {
+        report.recommendation = DIAG_POS_SAFE_MERGE;
+        fprintf(stderr, "║ 建议: 纯POS合并 — 70%%+组同构，组间区分度良好              ║\n");
+    } else if (report.subcluster_groups > 0
+               && report.overall_intra_mean > 0.5f) {
+        report.recommendation = DIAG_POS_WITH_SUBCLUSTER;
+        fprintf(stderr, "║ 建议: POS+特征子聚类 — 组内多峰但POS仍有区分力             ║\n");
+    } else {
+        report.recommendation = DIAG_POS_INSUFFICIENT;
+        fprintf(stderr, "║ 建议: POS粒度不够 — 需要额外信号（边共现/拓扑上下文）     ║\n");
+    }
+
+    fprintf(stderr, "╠══════════════════════════════════════════════════════════════╣\n");
+    fprintf(stderr, "║ 可纯POS合并: %-3d组   需子聚类: %-3d组   粒度不够: %-3d组  ║\n",
+            report.safe_merge_groups, report.subcluster_groups,
+            report.insufficient_groups);
+    fprintf(stderr, "╚══════════════════════════════════════════════════════════════╝\n");
+    fprintf(stderr, "\n");
+
+    /* 清理 */
+    for (int g = 0; g < max_grps; g++) free(groups[g].tpl_ids);
+    free(groups);
+
+    return report.recommendation;
+}
+
+/* ================================================================
+ *  模板 POS 结构合并 — 统一 Pipeline A 和 Pipeline B 的模板产出
+ *
+ *  合并策略（批量合并 — 选项 b）：
+ *    - 扫描 TOPO_TEMPLATE 中所有模板节点
+ *    - 按合并键 = (tpl_pos_len, tpl_pos_seq, 归一化 tpl_connectors) 分组
+ *    - 同组内保留 confidence 最高的为 survivor
+ *    - Survivor 特征向量 = 组内所有成员加权平均（权重 = 各自 confidence）
+ *    - Survivor 置信度 = 组内均值
+ *    - 其他成员软删除: tpl_pos_len = 0, confidence = 0
+ *
+ *  下游匹配引擎零改动：master_find_template_for_pair_nolock
+ *  只扫描一种模板格式，自动跳过 tpl_pos_len < 2 的节点。
+ *
+ *  @param master  主拓扑
+ *  @return 合并的组数 (每组 ≥2 个成员才触发合并)
+ * ================================================================ */
+
+#define MERGE_HASH_SIZE 1021  /* 质数，足够容纳 ~300 个模板 */
+
+int template_merge_by_pos_structure(MasterTopology* master) {
+    if (!master) return 0;
+
+    SubTopology* tpl = master_get_sub_topology_by_type(master, TOPO_TEMPLATE);
+    if (!tpl || !tpl->net) return 0;
+
+    HuarongTopologyNet* tnet = tpl->net;
+    int tn = tnet->node_count;
+    if (tn < 2) return 0;
+
+    /* 哈希表分组结构 */
+    typedef struct {
+        int   pos_len;
+        int   pos_seq[4];
+        char  connectors[4][TPL_CONNECTOR_BUF];  /* 已归一化 */
+        int*  member_ids;    /* tnet->nodes[] 索引 */
+        int   member_count;
+        int   member_cap;
+        int   used;
+    } MergeGroup;
+
+    MergeGroup* groups = (MergeGroup*)calloc(MERGE_HASH_SIZE, sizeof(MergeGroup));
+    if (!groups) return 0;
+
+    /* ---- Pass 1: 按合并键分组 ---- */
+    int total_groups = 0;
+
+    for (int i = 0; i < tn; i++) {
+        ReasoningNode* node = tnet->nodes[i];
+        if (!node) continue;
+        if (node->tpl_pos_len < 2) continue;
+        if (!node->features) continue;
+
+        uint32_t h = merge_key_hash(node->tpl_pos_len,
+                                     node->tpl_pos_seq,
+                                     node->tpl_connectors);
+        uint32_t idx = h % MERGE_HASH_SIZE;
+
+        int found = 0;
+        for (int probe = 0; probe < MERGE_HASH_SIZE; probe++) {
+            uint32_t cur = (idx + (uint32_t)probe) % MERGE_HASH_SIZE;
+
+            if (!groups[cur].used) {
+                /* 新组 */
+                groups[cur].pos_len = node->tpl_pos_len;
+                memcpy(groups[cur].pos_seq, node->tpl_pos_seq,
+                       sizeof(int) * 4);
+                for (int k = 0; k < node->tpl_pos_len - 1; k++) {
+                    norm_connector(node->tpl_connectors[k],
+                                   groups[cur].connectors[k]);
+                }
+                /* 确保未使用的 connector 槽位为空 */
+                for (int k = node->tpl_pos_len - 1; k < 4; k++) {
+                    groups[cur].connectors[k][0] = '\0';
+                }
+                groups[cur].member_cap = 8;
+                groups[cur].member_ids = (int*)malloc(
+                    (size_t)groups[cur].member_cap * sizeof(int));
+                if (!groups[cur].member_ids) {
+                    groups[cur].used = 0;
+                    break;
+                }
+                groups[cur].member_ids[0] = i;
+                groups[cur].member_count = 1;
+                groups[cur].used = 1;
+                total_groups++;
+                found = 1;
+                break;
+            }
+
+            if (merge_key_equals(
+                    groups[cur].pos_len, groups[cur].pos_seq,
+                    (const char(*)[TPL_CONNECTOR_BUF])groups[cur].connectors,
+                    node->tpl_pos_len, node->tpl_pos_seq,
+                    node->tpl_connectors))
+            {
+                /* 加入已有组 */
+                if (groups[cur].member_count >= groups[cur].member_cap) {
+                    groups[cur].member_cap *= 2;
+                    int* new_ids = (int*)realloc(groups[cur].member_ids,
+                        (size_t)groups[cur].member_cap * sizeof(int));
+                    if (!new_ids) break;  /* 扩容失败，跳过此节点 */
+                    groups[cur].member_ids = new_ids;
+                }
+                groups[cur].member_ids[groups[cur].member_count++] = i;
+                found = 1;
+                break;
+            }
+        }
+        /* found==0: 哈希表满或扩容失败，安全跳过 */
+        (void)found;
+    }
+
+    /* ---- Pass 2: 合并组内成员 ---- */
+    int merged_groups = 0;
+    int merged_nodes  = 0;
+
+    for (int gi = 0; gi < MERGE_HASH_SIZE; gi++) {
+        if (!groups[gi].used) continue;
+        if (groups[gi].member_count < 2) continue;
+
+        /* 选 survivor: confidence 最高者 */
+        int survivor_idx = groups[gi].member_ids[0];
+        float survivor_conf = tnet->nodes[survivor_idx]->confidence;
+        for (int m = 1; m < groups[gi].member_count; m++) {
+            int mid = groups[gi].member_ids[m];
+            float mc = tnet->nodes[mid]->confidence;
+            if (mc > survivor_conf) {
+                survivor_idx = mid;
+                survivor_conf = mc;
+            }
+        }
+
+        ReasoningNode* survivor = tnet->nodes[survivor_idx];
+
+        /* 重新计算特征向量: 组内所有成员加权平均 */
+        float sum_weight = 0.0f;
+        float new_feat[NODE_FEATURE_DIM];
+        memset(new_feat, 0, sizeof(new_feat));
+
+        for (int m = 0; m < groups[gi].member_count; m++) {
+            int mid = groups[gi].member_ids[m];
+            ReasoningNode* mn = tnet->nodes[mid];
+            if (!mn || !mn->features) continue;
+            float w = (mn->confidence > 0.01f) ? mn->confidence : 0.01f;
+            for (int d = 0; d < NODE_FEATURE_DIM; d++) {
+                new_feat[d] += mn->features[d] * w;
+            }
+            sum_weight += w;
+        }
+
+        if (sum_weight > 0.0f) {
+            float inv_w = 1.0f / sum_weight;
+            for (int d = 0; d < NODE_FEATURE_DIM; d++) {
+                new_feat[d] *= inv_w;
+            }
+            memcpy(survivor->features, new_feat,
+                   (size_t)NODE_FEATURE_DIM * sizeof(float));
+        }
+
+        /* 更新 survivor 置信度: 取组内最大值
+         *
+         * 不用均值的原因：均值会稀释高置信度模板。
+         * 例如 A survivor conf=0.8 + B 同 POS 模板 conf=0.6 → 均值 0.7，
+         * 但 B 是独立确认同一结构的证据，不应拉低置信度。
+         * 取 max 保证 survivor 保持其锚点置信度不被稀释。 */
+        survivor->confidence = survivor_conf;  /* 已是最高的 */
+
+        /* 软删除其他成员: tpl_pos_len=0 使下游自动跳过 */
+        for (int m = 0; m < groups[gi].member_count; m++) {
+            int mid = groups[gi].member_ids[m];
+            if (mid == survivor_idx) continue;
+            ReasoningNode* mn = tnet->nodes[mid];
+            mn->tpl_pos_len = 0;
+            mn->confidence   = 0.0f;
+            merged_nodes++;
+        }
+
+        merged_groups++;
+    }
+
+    /* ---- 清理 ---- */
+    for (int gi = 0; gi < MERGE_HASH_SIZE; gi++) {
+        free(groups[gi].member_ids);
+    }
+    free(groups);
+
+    if (merged_groups > 0) {
+        fprintf(stderr,
+            "[TEMPLATE-MERGE] 合并 %d 组, 软删除 %d 个冗余模板节点\n",
+            merged_groups, merged_nodes);
+    }
+
+    return merged_groups;
+}
+
+
 

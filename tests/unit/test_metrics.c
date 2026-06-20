@@ -122,9 +122,9 @@ void test_compute_accuracy_zero() {
 void test_compute_precision() {
     TEST_START("Precision calculation");
 
-    // 修复: 创建部分匹配数据（TP=3, FP=1, Precision=3/4=0.75）
-    float predictions[] = {1.0f, 1.0f, 1.0f, 0.0f};
-    float targets[] = {1.0f, 1.0f, 1.0f, 1.0f};
+    // TP=3, FP=1 → Precision = 3/(3+1) = 0.75
+    float predictions[] = {1.0f, 1.0f, 1.0f, 1.0f};
+    float targets[]     = {1.0f, 1.0f, 1.0f, 0.0f};
 
     Tensor* pred_tensor = create_tensor_from_array(predictions, 4);
     Tensor* target_tensor = create_tensor_from_array(targets, 4);
@@ -285,7 +285,7 @@ void test_compute_mae_with_errors() {
     TEST_START("MAE with prediction errors");
 
     float predictions[] = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f};
-    float targets[] = {0.0f, 1.0f, 0.0f, 0.0f};
+    float targets[]     = {0.0f, 1.0f, 0.0f, 0.0f, 0.0f};
 
     Tensor* pred_tensor = create_tensor_from_array(predictions, 5);
     Tensor* target_tensor = create_tensor_from_array(targets, 5);

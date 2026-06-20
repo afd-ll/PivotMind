@@ -22,6 +22,7 @@
  *   - 内存待更新边数超阈值
  */
 
+#include "error.h"
 #include "autonomic_learner.h"
 #include "common.h"
 #include "utf8_tokenizer.h"
@@ -157,8 +158,8 @@ void autonomic_state_destroy(AutonomicState* state) {
  * 调用方已持有 flush_lock，保证单线程执行
  */
 static void do_flush_work(AutonomicState* state, MasterTopology* master, time_t now) {
-    printf("[自主学习刷盘] %d 次更新, 距上次 %lds\n",
-           state->pending_updates, (long)(now - state->last_flush_time));
+    LOG_INFO("[自主学习刷盘] %d 次更新, 距上次 %lds",
+             state->pending_updates, (long)(now - state->last_flush_time));
 
     if (master) {
         // 刷盘前先剪枝低质量边（控制拓扑膨胀）
@@ -187,9 +188,9 @@ static void do_flush_work(AutonomicState* state, MasterTopology* master, time_t 
                 for (int i = 0; i < sub->net->node_count; i++) {
                     ReasoningNode* node = sub->net->nodes[i];
                     if (!node || !node->features) continue;
-                    for (int c = 0; c < node->connection_count; c++) {
-                        if (node->connection_confidences[c] < 0.6f) continue;
-                        ReasoningNode* nb = node->connections[c];
+                    for (int c = 0; c < node->edge_count; c++) {
+                        if (node->edges[c].confidence < 0.6f) continue;
+                        ReasoningNode* nb = node->edges[c].target;
                         if (!nb || !nb->features || nb->feature_dim != node->feature_dim) continue;
                         hebbian_update(node->features, nb->features, node->feature_dim, 0.01f);
                         attract_count++;
@@ -197,19 +198,19 @@ static void do_flush_work(AutonomicState* state, MasterTopology* master, time_t 
                 }
             }
             if (attract_count > 0) {
-                printf("[自主学习刷盘] 特征吸引: %d 对\n", attract_count);
+                LOG_INFO("[自主学习刷盘] 特征吸引: %d 对", attract_count);
             }
         }
 
-        char path[512];
-        snprintf(path, 511, "pivotmind_state.dat");
+        char path[PM_PATH_BUF];
+        snprintf(path, sizeof(path), "pivotmind_state.dat");
 
         // 备份：如果已有状态文件，先重命名，防止刷盘过程中崩了丢数据
         FILE* existing = fopen(path, "rb");
         if (existing) {
             fclose(existing);
-            char bak_path[520];
-            snprintf(bak_path, 519, "%s.bak", path);
+            char bak_path[PM_PATH_BUF + 4]; /* +4 容纳 ".bak" 后缀 */
+            snprintf(bak_path, sizeof(bak_path), "%s.bak", path);
             remove(bak_path);
             rename(path, bak_path);
         }
@@ -217,15 +218,15 @@ static void do_flush_work(AutonomicState* state, MasterTopology* master, time_t 
         // 持久化拓扑
         int saved = master_save_state(master, path);
         if (saved > 0) {
-            printf("[自主学习刷盘] ✓ 已保存到 %s (%d 节点)\n", path, saved);
+            LOG_INFO("[自主学习刷盘] ✓ 已保存到 %s (%d 节点)", path, saved);
         } else {
-            printf("[自主学习刷盘] × 保存失败\n");
+            LOG_ERROR("[自主学习刷盘] × 保存失败");
         }
 
         // 同时保存特征向量, 确保与拓扑状态同步
         int feat_saved = save_features(master, "features.bin");
         if (feat_saved > 0) {
-            printf("[自主学习刷盘] ✓ 已保存特征向量 (%d 节点)\n", feat_saved);
+            LOG_INFO("[自主学习刷盘] ✓ 已保存特征向量 (%d 节点)", feat_saved);
         }
     }
 
@@ -302,11 +303,11 @@ int autonomic_start_async_flush(AutonomicState* state, MasterTopology* master) {
 
     int ret = pthread_create(&state->flush_thread, NULL, flush_thread_worker, state);
     if (ret != 0) {
-        fprintf(stderr, "[异步刷盘] 创建线程失败: %d\n", ret);
+        LOG_ERROR("[异步刷盘] 创建线程失败: %d", ret);
         return 0;
     }
 
-    printf("[异步刷盘] 后台线程已启动\n");
+    LOG_INFO("[异步刷盘] 后台线程已启动");
     return 1;
 }
 
@@ -319,7 +320,7 @@ void autonomic_stop_async_flush(AutonomicState* state) {
     pthread_mutex_unlock(&state->flush_mutex);
 
     pthread_join(state->flush_thread, NULL);
-    printf("[异步刷盘] 后台线程已停止\n");
+    LOG_INFO("[异步刷盘] 后台线程已停止");
 }
 
 // ==================== 同步/异步刷盘入口 ====================
@@ -424,8 +425,8 @@ static void boost_connection_weighted(SubTopology* topo, ReasoningNode* a, Reaso
 
     HuarongTopologyNet* net = (topo && topo->net) ? topo->net : NULL;
 
-    if (a->connection_count >= AUTONOMIC_MAX_CONNECTIONS ||
-        b->connection_count >= AUTONOMIC_MAX_CONNECTIONS) return;
+    if (a->edge_count >= AUTONOMIC_MAX_CONNECTIONS ||
+        b->edge_count >= AUTONOMIC_MAX_CONNECTIONS) return;
 
     float base_weight = AUTONOMIC_BASE_WEIGHT * weight_mult;
     // 回路6: 被走边频繁选中的节点对，赫布学习时给更大boost
@@ -438,30 +439,45 @@ static void boost_connection_weighted(SubTopology* topo, ReasoningNode* a, Reaso
     int existing_b_to_a = -1;
     
     /* 节点级条纹锁：hash(node_id) & (PM_NODE_LOCK_COUNT - 1) 选锁
-     * 20线程 × 分散到256把锁 → 对撞率 <8%，无撞零等待 */
+     * 20线程 × 分散到256把锁 → 对撞率 <8%，无撞零等待
+     * 注意：node_conn_find 在锁外执行，锁内 double-check 防御 TOCTOU */
+    int li_a = (a && net) ? (a->node_id & (PM_NODE_LOCK_COUNT - 1)) : -1;
+    int li_b = (b && net) ? (b->node_id & (PM_NODE_LOCK_COUNT - 1)) : -1;
+
     existing_a_to_b = node_conn_find(a, b);
-    if (existing_a_to_b >= 0 && net) {
-        int li = a->node_id & (PM_NODE_LOCK_COUNT - 1);
-        pthread_mutex_lock(&net->node_locks[li]);
-        float dw = AUTONOMIC_LEARNING_RATE * 0.5f * weight_mult;
-        a->connection_weights[existing_a_to_b] += dw;
-        if (a->connection_weights[existing_a_to_b] > 0.9f)
-            a->connection_weights[existing_a_to_b] = 0.9f;
-        float dc = AUTONOMIC_LEARNING_RATE * (1.0f - a->connection_confidences[existing_a_to_b]);
-        a->connection_confidences[existing_a_to_b] += dc;
-        pthread_mutex_unlock(&net->node_locks[li]);
+    if (existing_a_to_b >= 0 && net && li_a >= 0) {
+        pthread_mutex_lock(&net->node_locks[li_a]);
+        /* double-check：持锁后重新查找，防止并发剪枝导致下标失效 */
+        int idx = node_conn_find(a, b);
+        if (idx >= 0 && idx < a->edge_count) {
+            float dw = AUTONOMIC_LEARNING_RATE * 0.5f * weight_mult;
+            a->edges[idx].weight += dw;
+            if (a->edges[idx].weight > 0.9f)
+                a->edges[idx].weight = 0.9f;
+            float dc = AUTONOMIC_LEARNING_RATE * (1.0f - a->edges[idx].confidence);
+            a->edges[idx].confidence += dc;
+            existing_a_to_b = idx;
+        } else {
+            existing_a_to_b = -1;
+        }
+        pthread_mutex_unlock(&net->node_locks[li_a]);
     }
     existing_b_to_a = node_conn_find(b, a);
-    if (existing_b_to_a >= 0 && net) {
-        int li = b->node_id & (PM_NODE_LOCK_COUNT - 1);
-        pthread_mutex_lock(&net->node_locks[li]);
-        float dw = AUTONOMIC_LEARNING_RATE * 0.5f * weight_mult;
-        b->connection_weights[existing_b_to_a] += dw;
-        if (b->connection_weights[existing_b_to_a] > 0.9f)
-            b->connection_weights[existing_b_to_a] = 0.9f;
-        float dc = AUTONOMIC_LEARNING_RATE * (1.0f - b->connection_confidences[existing_b_to_a]);
-        b->connection_confidences[existing_b_to_a] += dc;
-        pthread_mutex_unlock(&net->node_locks[li]);
+    if (existing_b_to_a >= 0 && net && li_b >= 0) {
+        pthread_mutex_lock(&net->node_locks[li_b]);
+        int idx = node_conn_find(b, a);
+        if (idx >= 0 && idx < b->edge_count) {
+            float dw = AUTONOMIC_LEARNING_RATE * 0.5f * weight_mult;
+            b->edges[idx].weight += dw;
+            if (b->edges[idx].weight > 0.9f)
+                b->edges[idx].weight = 0.9f;
+            float dc = AUTONOMIC_LEARNING_RATE * (1.0f - b->edges[idx].confidence);
+            b->edges[idx].confidence += dc;
+            existing_b_to_a = idx;
+        } else {
+            existing_b_to_a = -1;
+        }
+        pthread_mutex_unlock(&net->node_locks[li_b]);
     }
     if (existing_a_to_b >= 0) record_edge_activated(a, existing_a_to_b,
         topo ? (int)topo->type : 0);
@@ -474,7 +490,7 @@ static void boost_connection_weighted(SubTopology* topo, ReasoningNode* a, Reaso
         if (ret == 0) {
             int idx = node_conn_find(a, b);
             if (idx >= 0) {
-                a->connection_confidences[idx] = AUTONOMIC_INITIAL_CONFIDENCE;
+                a->edges[idx].confidence = AUTONOMIC_INITIAL_CONFIDENCE;
                 record_edge_activated(a, idx, topo ? (int)topo->type : 0);
                 if (a->features && b->features && a->feature_dim == b->feature_dim)
                     hebbian_update(a->features, b->features, a->feature_dim, 0.02f);
@@ -485,7 +501,7 @@ static void boost_connection_weighted(SubTopology* topo, ReasoningNode* a, Reaso
         huarong_net_add_connection(net, b->node_id, a->node_id, base_weight);
         int idx = node_conn_find(b, a);
         if (idx >= 0) {
-            b->connection_confidences[idx] = AUTONOMIC_INITIAL_CONFIDENCE;
+            b->edges[idx].confidence = AUTONOMIC_INITIAL_CONFIDENCE;
         }
     }
 
@@ -732,8 +748,8 @@ void autonomic_learn_from_dialog(MasterTopology* master,
         }
 
         if (causal_boosted > 0 || ltm_boosted > 0)
-            printf("[回路7+9] 因果boost: %d对 | LTM boost: %d对\n",
-                   causal_boosted, ltm_boosted);
+            LOG_DEBUG("[回路7+9] 因果boost: %d对 | LTM boost: %d对",
+                      causal_boosted, ltm_boosted);
     }
 
     // 核心4：跨拓扑传播 — 使用已缓存的拓扑指针
@@ -859,13 +875,13 @@ void autonomic_decay_all(MasterTopology* master) {
         pthread_mutex_lock(&sub->net->mutex);
         for (int n = 0; n < sub->net->node_count; n++) {
             ReasoningNode* node = sub->net->nodes[n];
-            if (!node || node->connection_count < 2) {
+            if (!node || node->edge_count < 2) {
                 // 单边或无连接：直接均匀衰减
                 if (node) {
-                    for (int e = 0; e < node->connection_count; e++) {
-                        node->connection_confidences[e] *= AUTONOMIC_DECAY_RATE;
-                        if (node->connection_confidences[e] < 0.05f)
-                            node->connection_confidences[e] = 0.05f;
+                    for (int e = 0; e < node->edge_count; e++) {
+                        node->edges[e].confidence *= AUTONOMIC_DECAY_RATE;
+                        if (node->edges[e].confidence < 0.05f)
+                            node->edges[e].confidence = 0.05f;
                         total_decayed++;
                     }
                 }
@@ -874,17 +890,17 @@ void autonomic_decay_all(MasterTopology* master) {
 
             // 计算该节点所有出边的平均置信度
             float sum_conf = 0.0f;
-            for (int e = 0; e < node->connection_count; e++)
-                sum_conf += node->connection_confidences[e];
-            float avg_conf = sum_conf / node->connection_count;
+            for (int e = 0; e < node->edge_count; e++)
+                sum_conf += node->edges[e].confidence;
+            float avg_conf = sum_conf / node->edge_count;
 
             // ═══ 回路5: Fisher信息代理（selection_count + confidence 保护重要边）═══
             float node_importance = (node->selection_count > 0)
                 ? 1.0f / (1.0f + 0.05f * node->selection_count)  // 越重要衰减越慢
                 : 1.0f;
             // 三档差异化衰减
-            for (int e = 0; e < node->connection_count; e++) {
-                float conf = node->connection_confidences[e];
+            for (int e = 0; e < node->edge_count; e++) {
+                float conf = node->edges[e].confidence;
                 float rate;
 
                 if (conf > avg_conf * 1.5f && conf > 0.5f) {
@@ -900,16 +916,16 @@ void autonomic_decay_all(MasterTopology* master) {
                     rate = 1.0f - (1.0f - AUTONOMIC_DECAY_RATE) * node_importance;
                 }
 
-                node->connection_confidences[e] = conf * rate;
-                if (node->connection_confidences[e] < 0.05f)
-                    node->connection_confidences[e] = 0.05f;
+                node->edges[e].confidence = conf * rate;
+                if (node->edges[e].confidence < 0.05f)
+                    node->edges[e].confidence = 0.05f;
                 total_decayed++;
             }
         }
         pthread_mutex_unlock(&sub->net->mutex);
     }
-    printf("[自主学习] 全局衰减: %d 条 (竞争加速: %d, 保留: %d)\n",
-           total_decayed, competition_decayed, preserved);
+    LOG_INFO("[自主学习] 全局衰减: %d 条 (竞争加速: %d, 保留: %d)",
+             total_decayed, competition_decayed, preserved);
 }
 
 // ==================== 批量文本学习（替代 reader 工具） ====================
@@ -1011,12 +1027,11 @@ int autonomic_learn_from_text(MasterTopology* master,
 
         // 每100对打印进度
         if (pairs % 100 == 0) {
-            printf("[文本学习] 已处理 %d 句对...\r", pairs);
-            fflush(stdout);
+            LOG_INFO("[文本学习] 已处理 %d 句对...", pairs);
         }
     }
 
-    printf("[文本学习] 完成: %d 句对, %d 句\n", pairs, scount);
+    LOG_INFO("[文本学习] 完成: %d 句对, %d 句", pairs, scount);
     return pairs;
 }
 
@@ -1037,9 +1052,9 @@ int autonomic_get_edge_stats(MasterTopology* master,
             ReasoningNode* node = sub->net->nodes[n];
             if (!node) continue;
 
-            for (int e = 0; e < node->connection_count; e++) {
+            for (int e = 0; e < node->edge_count; e++) {
                 total_edges++;
-                sum_confidence += node->connection_confidences[e];
+                sum_confidence += node->edges[e].confidence;
             }
         }
         pthread_mutex_unlock(&sub->net->mutex);
@@ -1097,12 +1112,12 @@ int main() {
     ReasoningNode* node_xue = find_node_by_concept(vocab, "学");
     if (node_xue) {
         printf("\n「学」节点的连接:\n");
-        for (int i = 0; i < node_xue->connection_count; i++) {
-            if (node_xue->connections[i] && node_xue->connections[i]->concept) {
+        for (int i = 0; i < node_xue->edge_count; i++) {
+            if (node_xue->edges[i].target && node_xue->edges[i].target->concept) {
                 printf("  → %s (weight=%.3f, conf=%.3f)\n",
-                       node_xue->connections[i]->concept,
-                       node_xue->connection_weights[i],
-                       node_xue->connection_confidences[i]);
+                       node_xue->edges[i].target->concept,
+                       node_xue->edges[i].weight,
+                       node_xue->edges[i].confidence);
             }
         }
     }
@@ -1116,12 +1131,12 @@ int main() {
 
     if (node_xue) {
         printf("\n「学」节点的连接:\n");
-        for (int i = 0; i < node_xue->connection_count; i++) {
-            if (node_xue->connections[i] && node_xue->connections[i]->concept) {
+        for (int i = 0; i < node_xue->edge_count; i++) {
+            if (node_xue->edges[i].target && node_xue->edges[i].target->concept) {
                 printf("  → %s (weight=%.3f, conf=%.3f)\n",
-                       node_xue->connections[i]->concept,
-                       node_xue->connection_weights[i],
-                       node_xue->connection_confidences[i]);
+                       node_xue->edges[i].target->concept,
+                       node_xue->edges[i].weight,
+                       node_xue->edges[i].confidence);
             }
         }
     }

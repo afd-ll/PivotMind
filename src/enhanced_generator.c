@@ -88,10 +88,10 @@ static void propagate_activation(MasterTopology* master,
                 strstr(node->concept, tokens[i])) {
                 master_activate_node(master, vocab->topo_id, j, 0.9f);
                 // 激活后向邻居传播
-                for (int c = 0; c < node->connection_count; c++) {
-                    ReasoningNode* neighbor = node->connections[c];
+                for (int c = 0; c < node->edge_count; c++) {
+                    ReasoningNode* neighbor = node->edges[c].target;
                     if (neighbor && neighbor->activation < 0.5f)
-                        neighbor->activation = 0.5f * node->connection_weights[c];
+                        neighbor->activation = 0.5f * node->edges[c].weight;
                 }
                 break;
             }
@@ -107,8 +107,8 @@ static void propagate_activation(MasterTopology* master,
                 ReasoningNode* node = sub->net->nodes[n];
                 if (!node || node->activation < ACTIVATION_THRESHOLD) continue;
                 float spread = node->activation * ACTIVATION_DECAY;
-                for (int c = 0; c < node->connection_count; c++) {
-                    ReasoningNode* neighbor = node->connections[c];
+                for (int c = 0; c < node->edge_count; c++) {
+                    ReasoningNode* neighbor = node->edges[c].target;
                     if (neighbor && neighbor->activation < spread)
                         neighbor->activation = spread;
                 }

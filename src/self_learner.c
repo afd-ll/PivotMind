@@ -12,7 +12,9 @@
 #include "huarong_topology.h"
 #include "node_hash.h"
 #include "common.h"
+#include "error.h"
 #include "web_search.h"
+#include "topology_growth.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -20,9 +22,9 @@
 #include <pthread.h>
 #include <time.h>
 
-/* 线程本地 RNG */
+/* 线程本地 RNG — _Thread_local 替代 static 防止多线程竞态 */
 static unsigned int _sl_rng(void) {
-    static unsigned int s = 0;
+    static _Thread_local unsigned int s = 0;
     if (!s) s = (unsigned int)time(NULL) ^ (unsigned int)(uintptr_t)&s;
     s = s * 1103515245 + 12345;
     return (s >> 16) & 0x7FFF;
@@ -186,7 +188,7 @@ static int deep_walk(SelfLearner* sl, int start_topo, int start_node,
         len++;
 
         /* 选择下一跳：偏向低权重的边（探索未知） */
-        if (node->connection_count == 0) {
+        if (node->edge_count == 0) {
             /* 无内部边 → 尝试跨拓扑跳转 */
             int jumped = 0;
             if (sl->master->cross_adj) {
@@ -211,9 +213,9 @@ static int deep_walk(SelfLearner* sl, int start_topo, int start_node,
             /* 偏弱边选择（同梦境引擎的反向权重逻辑） */
             float wsum = 0.0f;
             float wbuf[64];
-            int nc = node->connection_count < 64 ? node->connection_count : 64;
+            int nc = node->edge_count < 64 ? node->edge_count : 64;
             for (int i = 0; i < nc; i++) {
-                float w = node->connection_weights ? node->connection_weights[i] : 0.5f;
+                float w = (node->edges ? node->edges[i].weight : 0.5f);
                 wbuf[i] = (1.0f - w + 0.05f);
                 if (wbuf[i] < 0.01f) wbuf[i] = 0.01f;
                 wsum += wbuf[i];
@@ -226,7 +228,7 @@ static int deep_walk(SelfLearner* sl, int start_topo, int start_node,
                 acc += wbuf[i];
                 if (r <= acc) { chosen = i; break; }
             }
-            cur_node = node->connections[chosen]->node_id;
+            cur_node = node->edges[chosen].target->node_id;
             /* 30% 概率尝试跨拓扑跳转 */
             if (_sl_randf() < 0.3f && sl->master->cross_adj) {
                 int adj = cur_topo * MAX_NODES_PER_TOPO + cur_node;
@@ -258,7 +260,7 @@ static int deep_walk(SelfLearner* sl, int start_topo, int start_node,
  *   - 语义：相似节点无连接 → 建议连接
  */
 static int _fuzzy_roll(void) {
-    return (rand() % 100) < 15;  // 15% 模糊区
+    return _sl_rand(100) < 15;  // 15% 模糊区
 }
 
 static int audit_path(SelfLearner* sl, WalkStep* steps, int len) {
@@ -278,16 +280,14 @@ static int audit_path(SelfLearner* sl, WalkStep* steps, int len) {
             if (steps[a].topo_id == steps[c].topo_id) {
                 /* 同拓扑内的传递检测 */
                 int a_to_c = 0;
-                for (int ci = 0; ci < na->connection_count; ci++) {
-                    if (na->connections[ci] == nc) { a_to_c = 1; break; }
+                for (int ci = 0; ci < na->edge_count; ci++) {
+                    if (na->edges[ci].target == nc) { a_to_c = 1; break; }
                 }
                 if (!a_to_c) {
                     // 15% 模糊区：即使条件满足也随机跳过（防回音壁）
                     if (_fuzzy_roll()) {
-                        if (sl->cfg.verbose) {
-                            fprintf(stderr, "[自学] 模糊跳过: %s→%s→%s\n",
-                                    na->concept, nb->concept, nc->concept);
-                        }
+                        LOG_DEBUG("[自学] 模糊跳过: %s→%s→%s",
+                                  na->concept, nb->concept, nc->concept);
                     } else {
                         SubTopology* sub = sl->master->sub_topologies[steps[a].topo_id];
                         if (sub && sub->net) {
@@ -295,11 +295,9 @@ static int audit_path(SelfLearner* sl, WalkStep* steps, int len) {
                                 nc->node_id, sl->cfg.transitive_boost);
                             sl->total_transitive++;
                             mods++;
-                            if (sl->cfg.verbose) {
-                                fprintf(stderr, "[自学] 传递性: %s→%s→%s → 新建 %s→%s\n",
-                                        na->concept, nb->concept, nc->concept,
-                                        na->concept, nc->concept);
-                            }
+                            LOG_INFO("[自学] 传递性: %s→%s→%s → 新建 %s→%s",
+                                     na->concept, nb->concept, nc->concept,
+                                     na->concept, nc->concept);
                         }
                     }
                 }
@@ -324,11 +322,9 @@ static int audit_path(SelfLearner* sl, WalkStep* steps, int len) {
                             init_w, "self-learn");
                         sl->total_created++;
                         mods++;
-                        if (sl->cfg.verbose) {
-                            fprintf(stderr, "[自学] 语义关联 %s(%d) ↔ %s(%d) sim=%.2f\n",
-                                    na->concept, steps[a].topo_id,
-                                    nc->concept, steps[c].topo_id, sim);
-                        }
+                        LOG_INFO("[自学] 语义关联 %s(%d) ↔ %s(%d) sim=%.2f",
+                                 na->concept, steps[a].topo_id,
+                                 nc->concept, steps[c].topo_id, sim);
                     }
                 }
             }
@@ -342,18 +338,18 @@ static int audit_path(SelfLearner* sl, WalkStep* steps, int len) {
                 ReasoningNode* na2 = steps[a].ptr;
                 ReasoningNode* nb2 = steps[b2].ptr;
                 if (na2 && nb2) {
-                    for (int ci = 0; ci < na2->connection_count; ci++) {
-                        if (na2->connections[ci] == nb2) {
-                            float w = na2->connection_weights ? na2->connection_weights[ci] : 0.0f;
+                    for (int ci = 0; ci < na2->edge_count; ci++) {
+                        if (na2->edges[ci].target == nb2) {
+                            float w = (na2->edges ? na2->edges[ci].weight : 0.0f);
                             if (w < 0.1f && w > 0.0f) {
                                 /* 极弱边：标记衰减 */
                                 int lk = na2->node_id & (PM_NODE_LOCK_COUNT - 1);
                                 SubTopology* sub = sl->master->sub_topologies[steps[a].topo_id];
                                 if (sub && sub->net) {
                                     pthread_mutex_lock(&sub->net->node_locks[lk]);
-                                    na2->connection_weights[ci] *= sl->cfg.contradiction_decay;
-                                    if (na2->connection_weights[ci] < 0.01f)
-                                        na2->connection_weights[ci] = 0.0f;
+                                    na2->edges[ci].weight *= sl->cfg.contradiction_decay;
+                                    if (na2->edges[ci].weight < 0.01f)
+                                        na2->edges[ci].weight = 0.0f;
                                     pthread_mutex_unlock(&sub->net->node_locks[lk]);
                                     sl->total_demoted++;
                                     mods++;
@@ -385,9 +381,7 @@ int self_learner_cycle(SelfLearner* sl) {
     /* 1. 好奇心采样 */
     int n = sample_by_curiosity(sl, seeds_topo, seeds_node, sl->cfg.seeds_per_cycle);
 
-    if (sl->cfg.verbose) {
-        fprintf(stderr, "[自学] 周期#%d 采样%d个起点...\n", sl->cycle_num, n);
-    }
+    LOG_DEBUG("[自学] 周期#%d 采样%d个起点...", sl->cycle_num, n);
 
     int total_mods = 0;
 
@@ -410,7 +404,7 @@ int self_learner_cycle(SelfLearner* sl) {
             SubTopology* sub = sl->master->sub_topologies[seeds_topo[s]];
             if (sub && sub->net && seeds_node[s] < sub->net->node_count) {
                 ReasoningNode* node = sub->net->nodes[seeds_node[s]];
-                if (node && node->concept && node->connection_count == 0) {
+                if (node && node->concept && node->edge_count == 0) {
                     /* 构建搜索URL：优先百度百科（静态HTML，可解析） */
                     char search_url[1024];
                     snprintf(search_url, sizeof(search_url),
@@ -431,20 +425,22 @@ int self_learner_cycle(SelfLearner* sl) {
 
                                 ReasoningNode* exist = node_hash_find(vocab->node_hash, wr->keywords[k]);
                                 if (!exist) {
-                                    ReasoningNode* new_n = huarong_net_add_node(
-                                        vocab->net, wr->keywords[k], NULL, 0);
-                                    if (new_n) {
-                                        new_n->confidence = 0.3f;
-                                        node_hash_add(vocab->node_hash, new_n);
-                                        huarong_net_add_connection(vocab->net,
-                                            node->node_id, new_n->node_id, 0.25f);
-                                        learned++;
-                                        total_mods++;
+                                    int nid = insert_node_dynamic(sl->master, vocab->topo_id,
+                                                                   wr->keywords[k], NULL, 0);
+                                    if (nid >= 0 && nid < vocab->net->node_count) {
+                                        ReasoningNode* new_n = vocab->net->nodes[nid];
+                                        if (new_n) {
+                                            new_n->confidence = 0.3f;
+                                            huarong_net_add_connection(vocab->net,
+                                                node->node_id, new_n->node_id, 0.25f);
+                                            learned++;
+                                            total_mods++;
+                                        }
                                     }
                                 } else if (exist != node) {
                                     int already = 0;
-                                    for (int c = 0; c < node->connection_count; c++)
-                                        if (node->connections[c] == exist) { already = 1; break; }
+                                    for (int c = 0; c < node->edge_count; c++)
+                                        if (node->edges[c].target == exist) { already = 1; break; }
                                     if (!already) {
                                         huarong_net_add_connection(vocab->net,
                                             node->node_id, exist->node_id, 0.3f);
@@ -452,9 +448,9 @@ int self_learner_cycle(SelfLearner* sl) {
                                     }
                                 }
                             }
-                            if (sl->cfg.verbose && learned > 0) {
-                                fprintf(stderr, "[自学] 联网学习 '%s' → 新增%d个关联概念\n",
-                                        node->concept, learned);
+                            if (learned > 0) {
+                                LOG_INFO("[自学] 联网学习 '%s' → 新增%d个关联概念",
+                                         node->concept, learned);
                             }
                         }
                     }
@@ -475,7 +471,7 @@ int self_learner_cycle(SelfLearner* sl) {
                 /* 跳过已探索或连接数太多（已充分关联）的节点 */
                 ExploreRecord* rec = find_record(sl, vocab->topo_id, n->node_id);
                 if (rec && rec->explore_count > 0) continue;
-                if (n->connection_count > 3) continue;
+                if (n->edge_count > 3) continue;
                 /* 对新概念做快速探索 */
                 WalkStep steps[16];
                 int len = deep_walk(sl, vocab->topo_id, n->node_id, steps, 16);
@@ -484,16 +480,16 @@ int self_learner_cycle(SelfLearner* sl) {
                     mark_explored(sl, steps[j].topo_id, steps[j].node_id);
                 second_pass++;
             }
-            if (sl->cfg.verbose && second_pass > 0)
-                fprintf(stderr, "[自学] 二次好奇心: 探索 %d 个新概念\n", second_pass);
+            if (second_pass > 0)
+                LOG_DEBUG("[自学] 二次好奇心: 探索 %d 个新概念", second_pass);
         }
     }
 
     sl->total_cycles++;
-    if (sl->cfg.verbose && total_mods > 0) {
-        fprintf(stderr, "[自学] 周期#%d完成: %d处修正 (传递:%d 创建:%d 降权:%d)\n",
-                sl->cycle_num, total_mods,
-                sl->total_transitive, sl->total_created, sl->total_demoted);
+    if (total_mods > 0) {
+        LOG_INFO("[自学] 周期#%d完成: %d处修正 (传递:%d 创建:%d 降权:%d)",
+                 sl->cycle_num, total_mods,
+                 sl->total_transitive, sl->total_created, sl->total_demoted);
     }
 
     pthread_rwlock_unlock(&sl->master->rwlock);

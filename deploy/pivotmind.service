@@ -2,21 +2,29 @@
 Description=PivotMind Cognitive Engine Gateway
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=3
 
 [Service]
 Type=simple
 User=cx
 WorkingDirectory=/home/cx/pivotmind
 ExecStart=/home/cx/pivotmind/build/bin/pivotmind_gateway 8080 /home/cx/pivotmind
+ExecStopPost=/bin/sh -c '/usr/bin/fuser -k 8080/tcp 2>/dev/null || true'
 Restart=on-failure
-RestartSec=5
-StartLimitIntervalSec=60
-StartLimitBurst=5
+RestartSec=10
 
-# 优雅关闭
+# 优雅关闭（脑干需等模板构建等长操作完成）
 KillMode=mixed
 KillSignal=SIGTERM
-TimeoutStopSec=30
+TimeoutStopSec=120
+
+# Core dump
+LimitCORE=infinity
+
+# 内存限制（RK3399 仅 3.8GB，防 OOM）
+MemoryMax=2G
+MemoryHigh=1.5G
 
 # 安全限制
 NoNewPrivileges=true

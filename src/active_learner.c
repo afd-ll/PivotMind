@@ -22,6 +22,7 @@
 #include "memory_arena.h"
 #include "topo_snapshot.h"
 #include "common.h"
+#include "error.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -409,8 +410,8 @@ static float concept_string_similarity(const char* a, const char* b) {
  * 检查两个节点是否已有连接
  */
 static int has_connection(ReasoningNode* a, ReasoningNode* b) {
-    for (int i = 0; i < a->connection_count; i++) {
-        if (a->connections[i] == b) {
+    for (int i = 0; i < a->edge_count; i++) {
+        if (a->edges[i].target == b) {
             return 1;
         }
     }
@@ -527,12 +528,12 @@ int update_connection_weights_by_features(ActiveLearner* learner, int topo_id) {
 
     for (int i = 0; i < sub->net->node_count; i++) {
         ReasoningNode* node = sub->net->nodes[i];
-        if (!node || node->connection_count == 0) continue;
+        if (!node || node->edge_count == 0) continue;
 
         if (node->feature_dim <= 0 || !node->features) continue;
 
-        for (int c = 0; c < node->connection_count; c++) {
-            ReasoningNode* connected = node->connections[c];
+        for (int c = 0; c < node->edge_count; c++) {
+            ReasoningNode* connected = node->edges[c].target;
             if (!connected) continue;
             if (connected->feature_dim <= 0 || !connected->features) continue;
 
@@ -542,7 +543,7 @@ int update_connection_weights_by_features(ActiveLearner* learner, int topo_id) {
             float sim = cosine_similarity(node->features, connected->features, dim);
 
             // 动态调整权重：基础权重 + 相似度调整
-            float base_weight = node->connection_weights[c];
+            float base_weight = node->edges[c].weight;
             float new_weight = base_weight * 0.7f + sim * 0.3f;
 
             // 确保权重在合理范围
@@ -550,7 +551,7 @@ int update_connection_weights_by_features(ActiveLearner* learner, int topo_id) {
             if (new_weight < 0.1f) new_weight = 0.1f;
 
             if (fabsf(new_weight - base_weight) > 0.05f) {
-                node->connection_weights[c] = new_weight;
+                node->edges[c].weight = new_weight;
                 updated++;
             }
         }
@@ -707,19 +708,19 @@ void cleanup_forgotten_knowledge(ActiveLearner* learner) {
             
             // 清理低权重连接
             int new_count = 0;
-            for (int c = 0; c < node->connection_count; c++) {
-                if (node->connection_weights[c] > threshold) {
+            for (int c = 0; c < node->edge_count; c++) {
+                if (node->edges[c].weight > threshold) {
                     // 保留
                     if (new_count != c) {
-                        node->connections[new_count] = node->connections[c];
-                        node->connection_weights[new_count] = node->connection_weights[c];
+                        node->edges[new_count].target = node->edges[c].target;
+                        node->edges[new_count].weight = node->edges[c].weight;
                     }
                     new_count++;
                 } else {
                     forgotten_count++;
                 }
             }
-            node->connection_count = new_count;
+            node->edge_count = new_count;
         }
     }
     
@@ -777,10 +778,10 @@ static void update_node_from_feedback(ReasoningNode* node, float feedback_valenc
     }
     
     float motivation_delta = is_correct ? 0.1f : -0.1f;
-    if (node->connection_motivational_bias && node->connection_count > 0) {
-        for (int c = 0; c < node->connection_count; c++) {
-            float new_motivation = node->connection_motivational_bias[c] + motivation_delta;
-            node->connection_motivational_bias[c] = clamp_float(new_motivation, 0.1f, 1.0f);
+    if (node->edges && node->edge_count > 0) {
+        for (int c = 0; c < node->edge_count; c++) {
+            float new_motivation = node->edges[c].motivational_bias + motivation_delta;
+            node->edges[c].motivational_bias = clamp_float(new_motivation, 0.1f, 1.0f);
         }
         printf("  → 边动机倾向已更新\n");
     }
@@ -799,8 +800,8 @@ void learn_from_feedback(ActiveLearner* learner, const char* question,
     
     float feedback_valence = is_correct ? 0.6f : -0.6f;
     
-    char key[512];
-    snprintf(key, 511, "input:%s", question);
+    char key[PM_KEY_BUF];
+    snprintf(key, sizeof(key), "input:%s", question);
     
     if (is_correct) {
         MemoryEntry* mem = memory_retrieve(learner->memory, key);
@@ -883,8 +884,8 @@ void learn_from_dialog(ActiveLearner* learner, const char* user_input,
         is_correct = 0;
     } else if (strncmp(user_feedback, "更好的回答:", 12) == 0) {
         const char* better_answer = user_feedback + 12;
-        char key[512];
-        snprintf(key, 511, "input:%s", user_input);
+        char key[PM_KEY_BUF];
+        snprintf(key, sizeof(key), "input:%s", user_input);
         memory_store(learner->memory, key, strdup(better_answer),
                     strlen(better_answer) + 1, MEMORY_TYPE_STRING, 0.5f);
         printf("  → 已学习更好的回答: %s\n", better_answer);
@@ -899,8 +900,8 @@ void learn_from_dialog(ActiveLearner* learner, const char* user_input,
     }
     
     float feedback_valence = is_correct ? 0.6f : -0.6f;
-    char key[512];
-    snprintf(key, 511, "input:%s", user_input);
+    char key[PM_KEY_BUF];
+    snprintf(key, sizeof(key), "input:%s", user_input);
     
     if (is_correct) {
         MemoryEntry* mem = memory_retrieve(learner->memory, key);
@@ -954,8 +955,23 @@ void learn_from_dialog(ActiveLearner* learner, const char* user_input,
         }
     }
 
-    // 边权重压制：用户纠错时，压低上一轮路径使用的边置信度
+    // ── 边权重压制：用户纠错时，压低上一轮路径使用的边置信度 ──
+    // Phase 3 增强: (1) 分级压制 (2) 跨拓扑连接同步衰减
     if (!is_correct && learner->last_path_count > 0) {
+        /* 根据反馈类型分级衰减系数
+         * "错误" / "不对"  → decay=0.50 (严重，直接砍半)
+         * "不准确" / "偏差" → decay=0.65 (中等)
+         * 其他否定          → decay=0.75 (轻度) */
+        float edge_decay;
+        if (strstr(user_feedback, "错") || strstr(user_feedback, "不对")
+            || strstr(user_feedback, "wrong"))
+            edge_decay = 0.50f;
+        else if (strstr(user_feedback, "不准") || strstr(user_feedback, "偏差")
+                 || strstr(user_feedback, "偏差"))
+            edge_decay = 0.65f;
+        else
+            edge_decay = 0.75f;
+
         int suppressed = 0;
         for (int pi = 0; pi < learner->last_path_count && pi < PM_PATH_TRACK; pi++) {
             int topo_id = learner->last_path_topo_types[pi];
@@ -967,15 +983,48 @@ void learn_from_dialog(ActiveLearner* learner, const char* user_input,
             int node_id = learner->last_path_node_ids[pi];
             if (node_id < 0 || node_id >= sub->net->node_count) continue;
             ReasoningNode* node = sub->net->nodes[node_id];
-            if (!node || edge_idx >= node->connection_count) continue;
-            float old_conf = node->connection_confidences[edge_idx];
-            node->connection_confidences[edge_idx] = old_conf * 0.6f;  // 压至60%
-            if (node->connection_confidences[edge_idx] < 0.05f)
-                node->connection_confidences[edge_idx] = 0.05f;
+            if (!node || edge_idx >= node->edge_count) continue;
+            float old_conf = node->edges[edge_idx].confidence;
+            node->edges[edge_idx].confidence = old_conf * edge_decay;
+            if (node->edges[edge_idx].confidence < 0.03f)
+                node->edges[edge_idx].confidence = 0.03f;
             suppressed++;
         }
-        if (suppressed > 0)
-            printf("  → 压制了 %d 条边置信度\n", suppressed);
+
+        /* ── 跨拓扑连接同步衰减 ──
+         * 遍历所有跨拓扑连接，若涉及路径上的节点，则按较弱系数衰减 */
+        if (learner->master->cross_links && learner->master->cross_link_count > 0) {
+            int cross_suppressed = 0;
+            for (int cl = 0; cl < learner->master->cross_link_count; cl++) {
+                CrossTopologyLink* clink = learner->master->cross_links[cl];
+                if (!clink) continue;
+
+                /* 检查此跨拓扑连接是否涉及路径上的任一节点 */
+                int hit = 0;
+                for (int pi = 0; pi < learner->last_path_count && pi < PM_PATH_TRACK; pi++) {
+                    if ((clink->from_topo_id == learner->last_path_topo_types[pi]
+                         && clink->from_node_id == learner->last_path_node_ids[pi])
+                        ||
+                        (clink->to_topo_id == learner->last_path_topo_types[pi]
+                         && clink->to_node_id == learner->last_path_node_ids[pi])) {
+                        hit = 1;
+                        break;
+                    }
+                }
+                if (!hit) continue;
+
+                /* 跨拓扑边衰减：比同拓扑边温和（权重而非 confidence） */
+                clink->weight *= (edge_decay + 0.15f);  /* 跨拓扑边衰减量减半 */
+                if (clink->weight < 0.01f) clink->weight = 0.01f;
+                cross_suppressed++;
+            }
+            if (cross_suppressed > 0)
+                printf("  → 压制了 %d 条边置信度 + %d 条跨拓扑连接\n",
+                       suppressed, cross_suppressed);
+        } else if (suppressed > 0) {
+            printf("  → 压制了 %d 条边置信度 (decay=%.0f%%)\n",
+                   suppressed, (double)(edge_decay * 100.0f));
+        }
     }
     
     pthread_mutex_unlock(&learner->mutex);

@@ -9,6 +9,9 @@
 #include "huarong_topology.h"
 #include "feature_io.h"
 #include "article_reader.h"
+#include "thalamus.h"
+#include "error.h"
+#include "utf8_tokenizer.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -27,8 +30,13 @@ static int train_feed_pipe_qa(TrainMode* tm, const char* path);
 static int train_feed_plain_text(TrainMode* tm, const char* path);
 static int train_feed_article(TrainMode* tm, const char* path);
 static int train_feed_one_line(TrainMode* tm, const char* text);
+static int train_feed_token_sequence(TrainMode* tm, SubTopology* vocab,
+                                      char** tokens, int token_count,
+                                      float edge_weight,
+                                      int* first_id_out, int* last_id_out);
 static void train_do_batch_learn(TrainMode* tm);
 static void train_do_auto_save(TrainMode* tm, const char* workdir);
+static void train_throttled_delay(TrainMode* tm, long count);
 static long train_count_lines(const char* path);
 
 // ==================== 轻量JSON QA解析 ====================
@@ -182,6 +190,7 @@ TrainMode* train_mode_create(MasterTopology* topology,
     // 默认值
     if (config.rounds <= 0) tm->config.rounds = 1;
     if (config.speed <= 0) tm->config.speed = 20;
+    tm->thalamus = NULL;
     if (config.batch_learn_interval <= 0) tm->config.batch_learn_interval = 100;
     if (config.save_interval <= 0) tm->config.save_interval = 5000;
 
@@ -196,9 +205,9 @@ void train_mode_destroy(TrainMode* tm) {
     train_mode_stop(tm);
     // 用 pthread_join 等线程退出（不用 detach 了）
     if (tm->is_running) {
-        printf("[训练] 等待训练线程退出...\n");
+        LOG_INFO("[训练] 等待训练线程退出...");
         pthread_join(tm->thread, NULL);
-        printf("[训练] 训练线程已退出\n");
+        LOG_INFO("[训练] 训练线程已退出");
     }
     tm->is_running = 0;
     free(tm);
@@ -319,6 +328,13 @@ static void* train_thread_func(void* arg) {
                tm->progress.total_fed, tm->progress.total_added_nodes,
                tm->progress.total_added_edges);
 
+        // 通过丘脑报告本轮训练完成
+        if (tm->thalamus) {
+            thalamus_send_feedback(tm->thalamus, THAL_HIPPOCAMPUS,
+                                   (int)(tm->progress.total_added_nodes +
+                                         tm->progress.total_learned), 0, 0);
+        }
+
         // 增量关系发现：训练结束后执行一次全图关系发现
         // 之前禁用的 discover_new_relations 在此安全执行
         if (tm->learner) {
@@ -390,10 +406,8 @@ static int train_feed_qa_json(TrainMode* tm, const char* path) {
         count++;
         tm->progress.current_line = count;
 
-        // 限速
-        if (tm->config.speed > 0 && count % tm->config.speed == 0) {
-            usleep(1000000); // 1秒
-        }
+        // 限速（认知感知版）
+        train_throttled_delay(tm, count);
 
         // 批量学习
         if (tm->progress.total_fed > 0 &&
@@ -418,6 +432,54 @@ static int train_feed_qa_json(TrainMode* tm, const char* path) {
     json_qa_stream_close(stream);
     tm->progress.total_lines = count;  // 更新实际条数
     return 0;
+}
+
+// ==================== 辅助：逐字token序列建节点+序贯边 ====================
+
+#define TRAIN_MAX_TOKENS 2048
+
+/**
+ * 将 utf8_tokenize 产出的 token 数组逐个建节点，相邻 token 间拉序贯边。
+ * 返回新增节点数；first_id_out / last_id_out 输出首尾节点 id（用于跨句连接）。
+ */
+static int train_feed_token_sequence(TrainMode* tm, SubTopology* vocab,
+                                      char** tokens, int token_count,
+                                      float edge_weight,
+                                      int* first_id_out, int* last_id_out) {
+    int prev_id = -1;
+    int first_id = -1;
+    int last_id = -1;
+    int added = 0;
+
+    for (int i = 0; i < token_count; i++) {
+        int nid = huarong_net_find_concept(vocab->net, tokens[i]);
+        if (nid < 0 && vocab->net->node_count < vocab->net->max_nodes) {
+            nid = huarong_net_dynamic_add_node(vocab->net, tokens[i], NULL, 0);
+            if (nid >= 0) {
+                added++;
+                tm->progress.total_added_nodes++;
+            }
+        }
+        if (nid >= 0) {
+            int lk = nid & (PM_NODE_LOCK_COUNT - 1);
+            pthread_mutex_lock(&vocab->net->node_locks[lk]);
+            vocab->net->nodes[nid]->activation += 0.1f;
+            pthread_mutex_unlock(&vocab->net->node_locks[lk]);
+            if (first_id < 0) first_id = nid;
+            if (prev_id >= 0 && prev_id != nid) {
+                ReasoningNode* prev_node = vocab->net->nodes[prev_id];
+                int exists = node_conn_find(prev_node, vocab->net->nodes[nid]);
+                huarong_net_add_connection(vocab->net, prev_id, nid, edge_weight);
+                if (exists < 0) tm->progress.total_added_edges++;
+            }
+            prev_id = nid;
+            last_id = nid;
+        }
+    }
+
+    if (first_id_out)  *first_id_out  = first_id;
+    if (last_id_out)   *last_id_out   = last_id;
+    return added;
 }
 
 // ==================== 管道QA ====================
@@ -448,7 +510,7 @@ static int train_feed_pipe_qa(TrainMode* tm, const char* path) {
         char* a = pipe + 1;
         if (strlen(q) == 0) continue;
 
-        // Q→A 直接强连接
+        // 逐字建节点 + 序贯边 + Q→A跨连接
         {
             SubTopology* vocab = NULL;
             for (int t = 0; t < tm->topology->sub_topo_count; t++) {
@@ -458,31 +520,40 @@ static int train_feed_pipe_qa(TrainMode* tm, const char* path) {
                 }
             }
             if (vocab && vocab->net) {
-                int qid = huarong_net_find_concept(vocab->net, q);
-                if (qid < 0 && vocab->net->node_count < vocab->net->max_nodes)
-                    qid = huarong_net_dynamic_add_node(vocab->net, q, NULL, 0);
-                int aid = huarong_net_find_concept(vocab->net, a);
-                if (aid < 0 && vocab->net->node_count < vocab->net->max_nodes)
-                    aid = huarong_net_dynamic_add_node(vocab->net, a, NULL, 0);
+                char* q_tokens[TRAIN_MAX_TOKENS];
+                char* a_tokens[TRAIN_MAX_TOKENS];
 
-                if (qid >= 0 && aid >= 0 && qid != aid) {
-                    vocab->net->nodes[qid]->activation += 0.2f;
-                    vocab->net->nodes[aid]->activation += 0.2f;
-                    ReasoningNode* prev = vocab->net->nodes[qid];
-                    int exists = node_conn_find(prev, vocab->net->nodes[aid]);
-                    huarong_net_add_connection(vocab->net, qid, aid, 0.8f);
-                    if (exists < 0) {
-                        tm->progress.total_added_edges++;
-                    }
+                int q_count = utf8_tokenize(q, q_tokens, TRAIN_MAX_TOKENS);
+                int a_count = utf8_tokenize(a, a_tokens, TRAIN_MAX_TOKENS);
+
+                int q_last = -1, a_first = -1, a_last = -1;
+
+                if (q_count > 0)
+                    train_feed_token_sequence(tm, vocab, q_tokens, q_count,
+                                              0.35f, NULL, &q_last);
+                if (a_count > 0)
+                    train_feed_token_sequence(tm, vocab, a_tokens, a_count,
+                                              0.35f, &a_first, &a_last);
+
+                // Q尾 → A首 强连接
+                if (q_last >= 0 && a_first >= 0 && q_last != a_first) {
+                    ReasoningNode* qn = vocab->net->nodes[q_last];
+                    int exists = node_conn_find(qn, vocab->net->nodes[a_first]);
+                    huarong_net_add_connection(vocab->net, q_last, a_first, 0.8f);
+                    if (exists < 0) tm->progress.total_added_edges++;
                 }
+
+                // 释放 token 内存
+                for (int i = 0; i < q_count; i++) free(q_tokens[i]);
+                for (int i = 0; i < a_count; i++) free(a_tokens[i]);
+
                 tm->progress.total_fed++;
             }
         }
         tm->progress.current_line = line_no;
 
-        if (tm->config.speed > 0 && line_no % tm->config.speed == 0) {
-            usleep(1000000);
-        }
+        // 限速（认知感知版）
+        train_throttled_delay(tm, line_no);
 
         if (tm->progress.total_fed > 0 &&
             tm->progress.total_fed % tm->config.batch_learn_interval == 0) {
@@ -530,9 +601,8 @@ static int train_feed_plain_text(TrainMode* tm, const char* path) {
         }
         tm->progress.current_line = line_no;
 
-        if (tm->config.speed > 0 && line_no % tm->config.speed == 0) {
-            usleep(1000000);
-        }
+        // 限速（认知感知版）
+        train_throttled_delay(tm, line_no);
 
         if (tm->progress.total_fed > 0 &&
             tm->progress.total_fed % tm->config.batch_learn_interval == 0) {
@@ -574,6 +644,8 @@ static int train_feed_article(TrainMode* tm, const char* path) {
         return -1;
     }
 
+    article_reader_set_thalamus(ar, tm->thalamus);
+
     // 设置进度指针
     article_set_progress_ptr(ar,
                              &tm->progress.total_added_nodes,
@@ -600,10 +672,8 @@ static int train_feed_article(TrainMode* tm, const char* path) {
 
         tm->progress.current_line = line_no;
 
-        // 限速
-        if (tm->config.speed > 0 && line_no % tm->config.speed == 0) {
-            usleep(1000000);
-        }
+        // 限速（认知感知版）
+        train_throttled_delay(tm, line_no);
 
         // 进度日志
         if (line_no % 1000 == 0) {
@@ -654,56 +724,68 @@ static int train_feed_one_line(TrainMode* tm, const char* text) {
     strncpy(copy, text, sizeof(copy) - 1);
     copy[sizeof(copy) - 1] = 0;
 
-    int added = 0;
-    char* tok = strtok(copy, " \t\n\r。，！？、；：“”''《》…—,.!?;:\"'()");
-    int prev_id = -1;
+    char* tokens[TRAIN_MAX_TOKENS];
+    int token_count = utf8_tokenize(copy, tokens, TRAIN_MAX_TOKENS);
 
-    while (tok) {
-        int tlen = strlen(tok);
-        if (tlen >= 2) {
-            int nid = huarong_net_find_concept(vocab->net, tok);
-            if (nid < 0 && vocab->net->node_count < vocab->net->max_nodes) {
-                nid = huarong_net_dynamic_add_node(vocab->net, tok, NULL, 0);
-                if (nid >= 0) {
-                    added++;
-                    tm->progress.total_added_nodes++;
-                }
-            }
-            if (nid >= 0) {
-                vocab->net->nodes[nid]->activation += 0.1f;
-                if (prev_id >= 0 && prev_id != nid) {
-                    /* dedup check: O(1) hash lookup before adding edge */
-                    ReasoningNode* prev_node = vocab->net->nodes[prev_id];
-                    int exists = node_conn_find(prev_node, vocab->net->nodes[nid]);
-                    huarong_net_add_connection(vocab->net, prev_id, nid, 0.4f);
-                    if (exists < 0) {
-                        tm->progress.total_added_edges++;
-                    }
-                }
-                prev_id = nid;
-            }
-        }
-        tok = strtok(NULL, " \t\n\r。，！？、；：“”''《》…—,.!?;:\"'()");
-    }
+    int added = train_feed_token_sequence(tm, vocab, tokens, token_count,
+                                          0.4f, NULL, NULL);
+
+    for (int i = 0; i < token_count; i++) free(tokens[i]);
 
     return added;
 }
 
 // ==================== 批量学习 & 存盘 ====================
 
+/**
+ * 根据丘脑认知状态调整限速延迟
+ * 前额叶活跃（对话中） → 增大延迟，让出 CPU
+ * 空闲时 → 减小延迟，快速学习
+ */
+static void train_throttled_delay(TrainMode* tm, long count) {
+    if (tm->config.speed <= 0) return;
+    if (count % tm->config.speed != 0) return;
+
+    int base_us = 1000000; // 1 秒基准
+    if (tm->thalamus) {
+        // 前额叶 throttle 表示对话活跃度：高 → 认知繁忙，低 → 空闲
+        float pfc = thalamus_get_throttle(tm->thalamus, THAL_PREFRONTAL);
+        // 对海马体的 throttle：高 → 空闲可训练，低 → 应减慢
+        float hip = thalamus_get_throttle(tm->thalamus, THAL_HIPPOCAMPUS);
+
+        // 综合因子：前额叶活跃时 ≥1.5x 延迟，海马体受抑制时 ≥2x 延迟
+        float pfc_factor = 0.5f + pfc * 1.5f;            // [0.5, 2.0]
+        float hip_factor = 0.3f + (1.0f - hip) * 1.5f;   // [0.3, 1.8]
+        float factor = pfc_factor * hip_factor;
+        if (factor < 0.3f) factor = 0.3f;
+        if (factor > 3.0f) factor = 3.0f;
+        base_us = (int)(base_us * factor);
+    }
+    usleep(base_us);
+}
+
 static void train_do_batch_learn(TrainMode* tm) {
     if (tm->learner) {
         printf("[训练] 触发主动学习 (已喂%ld条)...\n", tm->progress.total_fed);
         learn_from_memory(tm->learner);
-        // discover_new_relations: 训练期间不调用，避免O(n2)连接爆炸
         tm->progress.total_learned++;
+
+        // 通过丘脑报告学习工作量
+        if (tm->thalamus) {
+            thalamus_send_feedback(tm->thalamus, THAL_HIPPOCAMPUS,
+                                   (int)tm->progress.total_learned, 0, 0);
+        }
     }
 }
 
 static void train_do_auto_save(TrainMode* tm, const char* workdir) {
-    printf("[训练] 自动存盘 (已喂%ld条)...\n", tm->progress.total_fed);
-    // gateway 主进程的脑干定期存盘会处理
-    // 这里只是日志提示，实际存盘由 brainstem 的 tick 驱动
+    (void)workdir;
+    if (!tm->topology) return;
+    printf("[训练] 强制存盘 (已喂%ld条)...\n", tm->progress.total_fed);
+    int saved = master_save_state(tm->topology, "pivotmind_state.dat");
+    if (saved > 0) printf("[训练]   已保存 %d 节点\n", saved);
+    /* 备份一份防崩 */
+    master_save_state(tm->topology, "pivotmind_state.bak");
 }
 
 // ==================== 辅助函数 ====================
@@ -805,4 +887,8 @@ void train_config_print_defaults(void) {
     printf("  --batch N            每N条触发主动学习 (默认100)\n");
     printf("  --save-interval N    每N条自动存盘 (默认5000)\n");
     printf("  --verbose            详细输出\n");
+}
+
+void train_mode_set_thalamus(TrainMode* tm, Thalamus* th) {
+    if (tm) tm->thalamus = th;
 }

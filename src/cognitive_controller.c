@@ -3,6 +3,7 @@
  * @brief 认知调度中心实现
  */
 
+#include "error.h"
 #include "cognitive_controller.h"
 #include "causal_reasoning.h"
 #include "concept_abstraction.h"
@@ -45,6 +46,7 @@ CognitiveController* cognitive_controller_create(MasterTopology* master,
     cc->novelty_bias = 0.4f;
     cc->valence_bias = 0.3f;
     cc->coherence_target = 0.5f;
+    cc->coherence_influence_scale = 0.5f;  /* 默认值，对应原硬编码 0.5 */
 
     // 默认负反馈参数
     cc->satisfaction_threshold = PM_EVALUATE_THRESHOLD;
@@ -66,7 +68,7 @@ CognitiveController* cognitive_controller_create(MasterTopology* master,
     }
     cc->prev_satisfaction = 0.0f;
 
-    printf("[认知调度] 创建成功\n");
+    LOG_INFO("[认知调度] 创建成功");
     // 尝试加载持久化的 learned_base
     intent_base_load(cc);
     return cc;
@@ -166,6 +168,9 @@ void calc_context_activations(CognitiveController* cc,
  * 计算各个子拓扑的新颖性因子。
  * 基于短时记忆（最近对话）中各子拓扑被使用的频率。
  * 用得多 → 新颖性低 → 降权。
+ *
+ * 【线程安全】仅读取 sub->recent_activation，不修改共享状态。
+ * 衰减更新由 cognitive_controller_decay_novelty 单独负责。
  */
 static void calc_novelty_factors(CognitiveController* cc,
                                  float* novelty_factors) {
@@ -187,18 +192,31 @@ static void calc_novelty_factors(CognitiveController* cc,
 
         float recent = sub->recent_activation;
         novelty_factors[t] = 1.0f / (1.0f + 10.0f * recent);
-
-        // 每轮结束后衰减 — 未被激活的拓扑 novelty 自然恢复
-        sub->recent_activation *= 0.8f;
     }
 
     if (cc->novelty_bias > 0.001f) {
-        printf("  [新颖性] ");
+        LOG_INFO("[新颖性] 偏离基线: %d 个拓扑有调整", cc->master->sub_topo_count);
         for (int i = 0; i < MAX_SUBTOPOS && i < cc->master->sub_topo_count; i++) {
             if (fabsf(novelty_factors[i] - 1.0f) > 0.01f)
-                printf("%s=%.3f ", TOPO_NAMES[i], novelty_factors[i]);
+                LOG_INFO("  %s=%.3f", TOPO_NAMES[i], novelty_factors[i]);
         }
-        printf("\n");
+    }
+}
+
+/**
+ * 新颖性衰减 — 每轮结束后对 recent_activation 做指数衰减。
+ *
+ * 与 calc_novelty_factors 分离，确保线程安全版本 (compute_intent_local)
+ * 不会意外修改共享状态。
+ *
+ * @warning 调用本函数前需持有 master->rwlock 或确保单线程访问。
+ */
+void cognitive_controller_decay_novelty(CognitiveController* cc) {
+    if (!cc || !cc->master) return;
+    for (int t = 0; t < cc->master->sub_topo_count && t < MAX_SUBTOPOS; t++) {
+        SubTopology* sub = cc->master->sub_topologies[t];
+        if (!sub) continue;
+        sub->recent_activation *= 0.8f;
     }
 }
 
@@ -358,7 +376,7 @@ static void intent_base_load(CognitiveController* cc) {
         size_t n = fread(cc->learned_base, sizeof(float), MAX_SUBTOPOS, f);
         fclose(f);
         if (n == MAX_SUBTOPOS) {
-            printf("[在线学习] 已加载 learned_base (来自 %s)\n", INTENT_BASE_FILE);
+            LOG_INFO("[在线学习] 已加载 learned_base (来自 %s)", INTENT_BASE_FILE);
         }
     }
     // 文件不存在 → 保持默认值（全1.0）
@@ -396,17 +414,29 @@ void intent_base_learn(CognitiveController* cc, const int* used_topos,
     intent_base_save(cc);
 
     if (feedback > 0.5f) {
-        printf("  [在线学习] α=%.4f 反馈=%.2f | 活跃拓扑: ", alpha, feedback);
+        char topo_names_buf[256] = {0};
+        int pos = 0;
         for (int i = 0; i < topo_count; i++)
-            printf("%s ", TOPO_NAMES[used_topos[i]]);
-        printf("→ learned_base 已更新\n");
+            pos += snprintf(topo_names_buf + pos, sizeof(topo_names_buf) - pos,
+                            "%s ", TOPO_NAMES[used_topos[i]]);
+        LOG_INFO("  [在线学习] α=%.4f 反馈=%.2f | 活跃拓扑: %s→ learned_base 已更新",
+                 alpha, feedback, topo_names_buf);
     }
 }
 
 void compute_intent(CognitiveController* cc, const float* ctx_activations) {
-    if (!cc) return;
+    /* 委托到线程安全版本，保持向后兼容 */
+    compute_intent_local(cc, ctx_activations, cc->intent_weights);
+    /* 衰减新颖性活跃度（状态写入从线程安全版本中分离） */
+    cognitive_controller_decay_novelty(cc);
+}
 
-    printf("\n[认知调度] 计算意图向量...\n");
+void compute_intent_local(CognitiveController* cc,
+                          const float* ctx_activations,
+                          float* output_weights) {
+    if (!cc || !output_weights) return;
+
+    LOG_INFO("\n[认知调度] 计算意图向量...");
 
     // 1. 从语义意图获取基准权重
     float intent_base[MAX_SUBTOPOS];
@@ -423,41 +453,47 @@ void compute_intent(CognitiveController* cc, const float* ctx_activations) {
     // 3. 合成意图权重
     float total = 0.0f;
     for (int i = 0; i < MAX_SUBTOPOS; i++) {
-        float base = intent_base[i] * cc->learned_base[i];  // 硬编码基准 × 在线学习因子
+        /* learned_base 乘法 → 1.0 + tanh(adjust) * 0.3 平滑限幅，
+         * 避免乘法推至极值导致意图分布坍缩为 one-hot */
+        float base = intent_base[i] * (1.0f + tanhf(cc->learned_base[i] - 1.0f) * 0.3f);
         float nf = 1.0f + cc->novelty_bias * (novelty[i] - 1.0f);
         float vf = 1.0f + cc->valence_bias * (valence_p[i] - 1.0f);
-        float cf = 1.0f + (cc->coherence_target * 0.5f) * (coherence[i] - 1.0f);
+        float coherence_scale = (cc->coherence_influence_scale > 0.0f)
+                                ? cc->coherence_influence_scale : 0.5f;
+        float cf = 1.0f + coherence_scale * (coherence[i] - 1.0f);
 
         float ctx_f = ctx_activations
                         ? (1.0f + cc->context_bias * ctx_activations[i])
                         : 1.0f;
         float w = base * ctx_f * nf * vf * cf;
 
-        cc->intent_weights[i] = w;
+        /* NaN/Inf 防护：任何异常值安全修复为0 */
+        if (!isfinite(w)) w = 0.0f;
+
+        output_weights[i] = w;
         total += w;
 
-        printf("  [%s]  base=%.3f nov=%.3f val=%.3f coh=%.3f → raw=%.3f\n",
-               TOPO_NAMES[i], base, novelty[i], valence_p[i], coherence[i], w);
+        LOG_DEBUG("  [%s]  base=%.3f nov=%.3f val=%.3f coh=%.3f → raw=%.3f",
+                  TOPO_NAMES[i], base, novelty[i], valence_p[i], coherence[i], w);
     }
 
     // 4. 归一化
     if (total > 0.0f) {
         for (int i = 0; i < MAX_SUBTOPOS; i++) {
-            cc->intent_weights[i] /= total;
+            output_weights[i] /= total;
         }
     } else {
         // 兜底：均匀分布
         for (int i = 0; i < MAX_SUBTOPOS; i++) {
-            cc->intent_weights[i] = 1.0f / MAX_SUBTOPOS;
+            output_weights[i] = 1.0f / MAX_SUBTOPOS;
         }
     }
 
-    printf("[认知调度] 意图向量: ");
+    LOG_INFO("[认知调度] 意图向量: ");
     for (int i = 0; i < MAX_SUBTOPOS; i++) {
-        if (cc->intent_weights[i] > 0.05f)
-            printf("%s=%.3f ", TOPO_NAMES[i], cc->intent_weights[i]);
+        if (output_weights[i] > 0.05f)
+            LOG_INFO("%s=%.3f ", TOPO_NAMES[i], output_weights[i]);
     }
-    printf("\n");
 }
 
 // ==================== 因果路径筛选（中游：约束 walk 候选） ====================
@@ -651,10 +687,10 @@ float evaluate_draft(CognitiveController* cc,
                     to >= 0 && to < sub->net->node_count) {
                     ReasoningNode* fn = sub->net->nodes[from];
                     if (fn) {
-                        for (int c = 0; c < fn->connection_count; c++) {
-                            ReasoningNode* conn = fn->connections[c];
+                        for (int c = 0; c < fn->edge_count; c++) {
+                            ReasoningNode* conn = fn->edges[c].target;
                             if (conn && conn->node_id == to) {
-                                total_weight += fn->connection_weights[c];
+                                total_weight += fn->edges[c].weight;
                                 count++;
                                 break;
                             }
@@ -704,9 +740,9 @@ float evaluate_draft(CognitiveController* cc,
     if (satisfaction < 0.0f) satisfaction = 0.0f;
     if (satisfaction > 1.0f) satisfaction = 1.0f;
 
-    printf("[内感受] 质量=%.3f 连贯=%.3f 效价=%.3f 矛盾=-%.3f → 满意度=%.3f (阈值=%.2f)\n",
-           activation_score, coherence_score, drive_score, contradict_penalty,
-           satisfaction, cc->satisfaction_threshold);
+    LOG_DEBUG("[内感受] 质量=%.3f 连贯=%.3f 效价=%.3f 矛盾=-%.3f → 满意度=%.3f (阈值=%.2f)",
+             activation_score, coherence_score, drive_score, contradict_penalty,
+             satisfaction, cc->satisfaction_threshold);
 
     // ═══ 回路1: 效价回流（多巴胺标记）═══
     // 满意度回写到路径节点的valence，满意→正标记，不满意→负标记
@@ -790,8 +826,8 @@ void compute_correction_vector(CognitiveController* cc,
             }
         }
 
-        printf("[修正向量] 压 %s(%.2f) → 提升其他 (+%.3f each)\n",
-               TOPO_NAMES[draft->topo_id], -deficit, boost);
+        LOG_INFO("[修正向量] 压 %s(%.2f) → 提升其他 (+%.3f each)",
+                 TOPO_NAMES[draft->topo_id], -deficit, boost);
     }
 }
 
@@ -803,12 +839,12 @@ RetryStatus revise_and_retry(CognitiveController* cc,
     if (!cc) return RETRY_FAILED;
 
     if (satisfaction >= cc->satisfaction_threshold) {
-        printf("[认知调度] ✓ 满意，无需修正\n");
+        LOG_INFO("[认知调度] ✓ 满意，无需修正");
         return RETRY_OK;  // 通过
     }
 
     if (cc->retry_count >= cc->max_retry) {
-        printf("[认知调度] ! 已达最大修正次数(%d)，强制输出\n", cc->max_retry);
+        LOG_WARNING("[认知调度] ! 已达最大修正次数(%d)，强制输出", cc->max_retry);
         return RETRY_FAILED;  // 已达上限
     }
 
@@ -845,16 +881,20 @@ RetryStatus revise_and_retry(CognitiveController* cc,
         status = RETRY_FAILED;
     }
 
-    printf("[认知调度] 第 %d 次修正: 满意度 %.3f < %.3f → %s\n",
-           cc->retry_count, satisfaction, cc->satisfaction_threshold,
-           status == RETRY_FROM_POOL ? "重排" :
-           status == RETRY_WITH_SEARCH ? "重搜" : "强制输出");
-    printf("[认知调度] 修正后意图: ");
-    for (int i = 0; i < MAX_SUBTOPOS; i++) {
-        if (cc->intent_weights[i] > 0.05f)
-            printf("%s=%.3f ", TOPO_NAMES[i], cc->intent_weights[i]);
+    LOG_INFO("[认知调度] 第 %d 次修正: 满意度 %.3f < %.3f → %s",
+             cc->retry_count, satisfaction, cc->satisfaction_threshold,
+             status == RETRY_FROM_POOL ? "重排" :
+             status == RETRY_WITH_SEARCH ? "重搜" : "强制输出");
+    {
+        char intent_buf[512] = {0};
+        int pos = 0;
+        for (int i = 0; i < MAX_SUBTOPOS; i++) {
+            if (cc->intent_weights[i] > 0.05f)
+                pos += snprintf(intent_buf + pos, sizeof(intent_buf) - pos,
+                               "%s=%.3f ", TOPO_NAMES[i], cc->intent_weights[i]);
+        }
+        LOG_INFO("[认知调度] 修正后意图: %s", intent_buf);
     }
-    printf("\n");
 
     return status;
 }
@@ -944,10 +984,10 @@ static float cc_avg_edge_strength(SubTopology* sub, const int* ids, int len) {
         ReasoningNode* from = cc_get_node(sub, ids[i]);
         if (!from) continue;
         int to_id = ids[i + 1];
-        for (int c = 0; c < from->connection_count; c++) {
-            ReasoningNode* t = from->connections[c];
+        for (int c = 0; c < from->edge_count; c++) {
+            ReasoningNode* t = from->edges[c].target;
             if (t && t->node_id == to_id) {
-                total += from->connection_weights[c];
+                total += from->edges[c].weight;
                 count++;
                 break;
             }
@@ -1037,10 +1077,10 @@ static int cc_create_composite(CognitiveController* cc,
         // 从复合节点 → 继承最后一个字的最强出边
         ReasoningNode* last = cc_get_node(vocab, node_ids[len - 1]);
         if (last) {
-            for (int c = 0; c < last->connection_count && c < 10; c++) {
-                ReasoningNode* target = last->connections[c];
+            for (int c = 0; c < last->edge_count && c < 10; c++) {
+                ReasoningNode* target = last->edges[c].target;
                 if (!target) continue;
-                float w = last->connection_weights[c];
+                float w = last->edges[c].weight;
                 if (w > 0.3f) {
                     master_add_cross_link(cc->master,
                         concept_topo_id, composite->node_id,
@@ -1052,8 +1092,8 @@ static int cc_create_composite(CognitiveController* cc,
         }
     }
 
-    printf("[认知调度·概念涌现] 创建复合节点 '%s'(ID=%d, %d字)\n",
-           composite->concept, composite->node_id, len);
+    LOG_INFO("[认知调度·概念涌现] 创建复合节点 '%s'(ID=%d, %d字)",
+             composite->concept, composite->node_id, len);
     return composite->node_id;
 }
 
@@ -1185,8 +1225,8 @@ int cognitive_controller_scan_patterns(CognitiveController* cc) {
     }
 
     if (created > 0) {
-        printf("[认知调度·概念涌现] 本轮创建 %d 个复合节点 (共 %d 模式)\n",
-               created, cc->pattern_count);
+        LOG_INFO("[认知调度·概念涌现] 本轮创建 %d 个复合节点 (共 %d 模式)",
+                 created, cc->pattern_count);
     }
 
     // 清理路径缓冲（滚动刷新）
@@ -1209,7 +1249,7 @@ int cognitive_controller_scan_patterns(CognitiveController* cc) {
     cc->master->cross_hit_round++;
     int cross_created = master_process_cross_hits(cc->master, 5, 100);
     if (cross_created > 0) {
-        printf("[CognitiveController] 动态创建 %d 条跨拓扑边\n", cross_created);
+        LOG_INFO("[CognitiveController] 动态创建 %d 条跨拓扑边", cross_created);
     }
 
     return created + cross_created;
@@ -1382,12 +1422,12 @@ int cc_init_sentence_topology(CognitiveController* cc) {
     if (!syntax) {
         int topo_id = master_add_sub_topology(cc->master, TOPO_SYNTAX,
                                               "句式拓扑", 128, 5);
-        if (topo_id < 0) { printf("[句式拓扑] 创建失败\n"); return -1; }
+        if (topo_id < 0) { LOG_ERROR("[句式拓扑] 创建失败"); return -1; }
         syntax = master_get_sub_topology(cc->master, topo_id);
         if (!syntax) return -1;
     }
     if (syntax->net && syntax->net->node_count > 0) {
-        printf("[句式拓扑] 已存在 %d 个句式节点\n", syntax->net->node_count);
+        LOG_INFO("[句式拓扑] 已存在 %d 个句式节点", syntax->net->node_count);
         return 0;
     }
     int created = 0;
@@ -1400,7 +1440,7 @@ int cc_init_sentence_topology(CognitiveController* cc) {
         node->activation = 0.5f;
         created++;
     }
-    printf("[句式拓扑] 初始化完成: %d 个句式节点\n", created);
+    LOG_INFO("[句式拓扑] 初始化完成: %d 个句式节点", created);
     return created;
 }
 
@@ -1461,7 +1501,9 @@ int cc_scan_pos_patterns(CognitiveController* cc) {
     typedef struct {
         POSTag seq[8]; int len; int count;
     } TempPattern;
-    TempPattern temp[MAX_TEMP_PATTERNS];
+    /* 动态分配避免栈上 10KB 大数组 */
+    TempPattern* temp = (TempPattern*)calloc(MAX_TEMP_PATTERNS, sizeof(TempPattern));
+    if (!temp) return 0;
     int temp_count = 0;
 
     int total = cc->pos_obs_count < POS_OBS_BUF_SIZE
@@ -1505,7 +1547,8 @@ int cc_scan_pos_patterns(CognitiveController* cc) {
         }
     }
     if (!syntax || !syntax->net) {
-        printf("[POS模式] 句式拓扑未就绪，跳过模式创建\n");
+        free(temp);
+        LOG_WARNING("[POS模式] 句式拓扑未就绪，跳过模式创建");
         return 0;
     }
 
@@ -1554,9 +1597,10 @@ int cc_scan_pos_patterns(CognitiveController* cc) {
         }
     }
     if (created > 0 || updated > 0) {
-        printf("[POS模式] 扫描 %d 条观测 → %d 个新模式 + %d 个更新 (总 %d 模式, min=%d)\n",
-               total, created, updated, cc->pos_pattern_count, min_freq);
+        LOG_INFO("[POS模式] 扫描 %d 条观测 → %d 个新模式 + %d 个更新 (总 %d 模式, min=%d)",
+                 total, created, updated, cc->pos_pattern_count, min_freq);
     }
+    free(temp);
     return created;
 }
 
