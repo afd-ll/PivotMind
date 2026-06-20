@@ -3,6 +3,10 @@ build/
 *.a
 *.dat
 *.bin
+*.bundle
+cron/
+--version
+-version
 *.bak*
 *.codewhale
 *.hebbian_bak
