@@ -13,5 +13,4 @@ data/
 *.log
 *.err
 *.bat
---help
--data
+.codebuddy/
