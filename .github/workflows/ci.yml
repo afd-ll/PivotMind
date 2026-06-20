@@ -22,8 +22,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Enable ARM architecture
+        run: sudo dpkg --add-architecture armhf && sudo apt-get update
       - name: Install ARM cross-compiler
-        run: sudo dpkg --add-architecture armhf && sudo apt-get update && sudo apt-get install -y --no-install-recommends gcc-arm-linux-gnueabihf libc6-dev-armhf-cross libssl-dev:armhf
+        run: sudo apt-get install -y --no-install-recommends gcc-arm-linux-gnueabihf libc6-dev-armhf-cross
+      - name: Install ARM OpenSSL
+        run: sudo apt-get install -y --no-install-recommends libssl-dev:armhf
       - name: Build ARM (no OpenMP — no libgomp for ARM target)
         run: make linux CC=arm-linux-gnueabihf-gcc CFLAGS="-Wall -Wextra -O2 -Iinclude -I. -Ilibs -std=gnu99 -MD -MP -DHAS_OPENSSL" LDFLAGS="-lm -lssl -lcrypto -pthread"
       - name: Verify ARM ELF
