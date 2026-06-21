@@ -15,8 +15,8 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libsqlite3-dev libssl-dev libcurl4-openssl-dev zlib1g-dev
       - name: Build (x86_64, OpenMP)
         run: make linux
-      - name: Run tests
-        run: make test
+      - name: Run tests (skip test-chinese — needs windows.h)
+        run: make test-tensor test-model test-metrics test-trainer test-io test-cc test-web-fetch
       - name: Show binaries
         run: file build/bin/*
 
@@ -46,14 +46,28 @@ jobs:
           make -j$(nproc)
           make install_sw
 
+      - name: Build libcurl for ARM
+        run: |
+          curl -sL https://curl.se/download/curl-8.12.1.tar.gz -o /tmp/curl.tar.gz
+          tar xzf /tmp/curl.tar.gz -C /tmp
+          cd /tmp/curl-8.12.1
+          ./configure \
+            --host=arm-linux-gnueabihf \
+            --prefix=/tmp/curl-arm \
+            --with-openssl=/tmp/openssl-arm \
+            --without-nghttp2 \
+            --disable-shared \
+            --disable-ldap \
+            --without-libpsl
+          make -j$(nproc)
+          make install
+
       - name: Build ARM (no OpenMP — no libgomp for ARM target)
         run: |
           make linux \
             CC=arm-linux-gnueabihf-gcc \
-            CFLAGS="-Wall -Wextra -O2 -Iinclude -I. -Ilibs -I/tmp/openssl-arm/include -std=gnu99 -MD -MP -DHAS_OPENSSL" \
-            LDFLAGS="-L/tmp/openssl-arm/lib -lm -lssl -lcrypto -pthread -static-libstdc++"
-          # 将 ARM 库路径加入加载器搜索
-          export LD_LIBRARY_PATH=/tmp/openssl-arm/lib:$LD_LIBRARY_PATH
+            CFLAGS="-Wall -Wextra -O2 -Iinclude -I. -Ilibs -I/tmp/openssl-arm/include -I/tmp/curl-arm/include -std=gnu99 -MD -MP -DHAS_OPENSSL" \
+            LDFLAGS="-L/tmp/openssl-arm/lib -L/tmp/curl-arm/lib -lm -lssl -lcrypto -lcurl -lz -pthread -static-libstdc++"
 
       - name: Verify ARM ELF
         run: |
