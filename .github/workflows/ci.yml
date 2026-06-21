@@ -34,7 +34,7 @@ jobs:
 
       - name: Build zlib for ARM
         run: |
-          curl -sL https://zlib.net/zlib-1.3.1.tar.gz -o /tmp/zlib.tar.gz
+          curl -sL https://github.com/madler/zlib/archive/refs/tags/v1.3.1.tar.gz -o /tmp/zlib.tar.gz
           tar xzf /tmp/zlib.tar.gz -C /tmp
           cd /tmp/zlib-1.3.1
           CC=arm-linux-gnueabihf-gcc \
