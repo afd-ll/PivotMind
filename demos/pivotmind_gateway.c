@@ -55,6 +55,7 @@
 #include "prefrontal_executive.h"  /* v0.3 前额叶执行器 — 推理编排 */
 #include "idea_arena.h"            /* v0.3 想法竞争竞技场 */
 #include "hypothalamus.h"          /* v0.4 下丘脑 — 需求/动机调控 */
+#include "web_fetch.h"             /* 爬虫框架 */
 
 // ==================== 配置 ====================
 
@@ -293,6 +294,13 @@ static int gw_system_init(GatewaySystem* gw) {
     gw->thalamus = thalamus_create();
     if (!gw->thalamus) { fprintf(stderr, "[gateway] 丘脑创建失败\n"); return -1; }
     printf("[gateway]   丘脑就绪\n");
+
+    // 初始化爬虫框架（禁止 robots.txt 检查：AI 学习系统不做商业爬虫合规）
+    {
+        CrawlPolicy policy = CRAWL_POLICY_DEFAULT;
+        policy.respect_robots = 0;  /* 搜狗 /sie? 等路径被 robots.txt 禁了 */
+        web_fetch_init(&policy);
+    }
 
     // 感觉皮层（自主语料输送口）
     fprintf(stderr, "[gateway]   创建感觉皮层...\n");
@@ -534,6 +542,7 @@ static void gw_system_shutdown(GatewaySystem* gw) {
     if (gw->cerebellum)  cerebellum_destroy(gw->cerebellum);
     if (gw->thalamus)     thalamus_destroy(gw->thalamus);
     if (gw->perception)   perception_destroy(gw->perception);
+    web_fetch_destroy();  /* 爬虫框架 */
     if (gw->brainstem)    brainstem_destroy(gw->brainstem);
     if (gw->pfe)         pfe_destroy(gw->pfe);              /* v0.3 */
     if (gw->arena)       idea_arena_destroy(gw->arena);          /* v0.3 */
