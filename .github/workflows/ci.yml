@@ -51,14 +51,24 @@ jobs:
           curl -sL https://curl.se/download/curl-8.12.1.tar.gz -o /tmp/curl.tar.gz
           tar xzf /tmp/curl.tar.gz -C /tmp
           cd /tmp/curl-8.12.1
+          # 禁用 pkg-config（主机 pkg-config 无法识别 ARM 交叉编译链）
+          export PKG_CONFIG_LIBDIR=/tmp/curl-arm/lib/pkgconfig
+          mkdir -p $PKG_CONFIG_LIBDIR
+          CC=arm-linux-gnueabihf-gcc \
+          CPPFLAGS="-I/tmp/openssl-arm/include" \
+          LDFLAGS="-L/tmp/openssl-arm/lib" \
           ./configure \
+            --build=x86_64-linux-gnu \
             --host=arm-linux-gnueabihf \
             --prefix=/tmp/curl-arm \
             --with-openssl=/tmp/openssl-arm \
             --without-nghttp2 \
+            --without-zstd \
+            --without-brotli \
             --disable-shared \
             --disable-ldap \
-            --without-libpsl
+            --without-libpsl \
+            --disable-libcurl-option
           make -j$(nproc)
           make install
 
