@@ -80,10 +80,36 @@ static void _decode_unicode_escapes(char* str) {
     char* src = str;
     char* dst = str;
     while (*src) {
+        /* 分支 0: uXXXX（无反斜杠，概念名存储损坏补丁）
+         * 只在解码结果为非 ASCII 时才执行，避免误伤 "usage" 等英文 */
+        if (src[0] == 'u' &&
+            isxdigit((unsigned char)src[1]) && isxdigit((unsigned char)src[2]) &&
+            isxdigit((unsigned char)src[3]) && isxdigit((unsigned char)src[4])) {
+            unsigned int cp = 0;
+            for (int i = 1; i <= 4; i++) {
+                char c = src[i];
+                cp = cp * 16 + (unsigned int)(c >= '0' && c <= '9' ? c - '0' :
+                                              c >= 'a' && c <= 'f' ? c - 'a' + 10 :
+                                              c >= 'A' && c <= 'F' ? c - 'A' + 10 : 0);
+            }
+            if (cp >= 0x80) {  /* 非 ASCII 才解码，避免误伤英文单词 */
+                if (cp < 0x800) {
+                    *dst++ = (char)(0xC0 | (cp >> 6));
+                    *dst++ = (char)(0x80 | (cp & 0x3F));
+                } else {
+                    *dst++ = (char)(0xE0 | (cp >> 12));
+                    *dst++ = (char)(0x80 | ((cp >> 6) & 0x3F));
+                    *dst++ = (char)(0x80 | (cp & 0x3F));
+                }
+                src += 5;
+                continue;
+            }
+            /* cp < 0x80: 可能是巧合的英文，跳过不解码 */
+        }
+        /* 分支 1: \uXXXX */
         if (src[0] == '\\' && src[1] == 'u' &&
             isxdigit((unsigned char)src[2]) && isxdigit((unsigned char)src[3]) &&
             isxdigit((unsigned char)src[4]) && isxdigit((unsigned char)src[5])) {
-            /* 解析 \uXXXX */
             unsigned int cp = 0;
             for (int i = 2; i <= 5; i++) {
                 char c = src[i];
@@ -91,7 +117,6 @@ static void _decode_unicode_escapes(char* str) {
                                               c >= 'a' && c <= 'f' ? c - 'a' + 10 :
                                               c >= 'A' && c <= 'F' ? c - 'A' + 10 : 0);
             }
-            /* 编码为 UTF-8 */
             if (cp < 0x80) {
                 *dst++ = (char)cp;
             } else if (cp < 0x800) {
@@ -105,7 +130,7 @@ static void _decode_unicode_escapes(char* str) {
             src += 6;
         } else if (src[0] == '\\' && src[1] == 'x' &&
                    isxdigit((unsigned char)src[2]) && isxdigit((unsigned char)src[3])) {
-            /* 解析 \xXX */
+            /* 分支 2: \xXX */
             unsigned int cp = 0;
             for (int i = 2; i <= 3; i++) {
                 char c = src[i];
