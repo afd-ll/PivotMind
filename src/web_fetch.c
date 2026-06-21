@@ -197,6 +197,13 @@ static void domain_throttle(const char* domain) {
             now = time(NULL);
         }
 
+        /* 首次请求跳过限速（last_request==0 时差值溢出 32-bit int） */
+        if (rec->last_request == 0) {
+            rec->last_request = now;
+            DOMAIN_UNLOCK();
+            return;
+        }
+
         /* 速率限制 */
         int elapsed_ms = (int)((now - rec->last_request) * 1000);
         int wait_ms = g_policy.request_delay_ms - elapsed_ms;
