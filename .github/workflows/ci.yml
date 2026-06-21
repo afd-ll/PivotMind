@@ -88,7 +88,7 @@ jobs:
           make linux \
             CC=arm-linux-gnueabihf-gcc \
             CFLAGS="-Wall -Wextra -O2 -Iinclude -I. -Ilibs -I/tmp/openssl-arm/include -I/tmp/curl-arm/include -I/tmp/zlib-arm/include -std=gnu99 -MD -MP -DHAS_OPENSSL" \
-            LDFLAGS="-L/tmp/openssl-arm/lib -L/tmp/curl-arm/lib -L/tmp/zlib-arm/lib -lm -lssl -lcrypto -lcurl -lz -pthread -static-libstdc++"
+            LDFLAGS="-L/tmp/openssl-arm/lib -L/tmp/curl-arm/lib -L/tmp/zlib-arm/lib -lm -lcurl -lssl -lcrypto -lz -pthread -static-libstdc++"
 
       - name: Verify ARM ELF
         run: |
