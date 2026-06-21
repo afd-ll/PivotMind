@@ -15,29 +15,24 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 #include <time.h>
 
 /* 全局感觉皮层指针 — 供 self_learner / dialog_system 等模块通过 extern 引用 */
 Perception* g_perception = NULL;
 
-/* 百度百科搜索 URL */
-#define BAIDU_BK "https://baike.baidu.com/item/"
-/* 百度搜索 URL（备选 1） */
-#define BAIDU_WEB "https://www.baidu.com/s?wd="
-/* 中文维基百科 URL（备选 2） */
-#define ZH_WIKI "https://zh.wikipedia.org/wiki/"
-/* Bing 搜索（备选 3，海外友好） */
-#define BING_SEARCH "https://www.bing.com/search?q="
-/* Bing 新闻搜索（备选 4，实时新闻） */
-#define BING_NEWS "https://www.bing.com/news/search?q="
+/* 搜狗搜索（已验证可用，HTTP 200, 528KB） */
+#define SOGOU_WEB   "https://www.sogou.com/sie?ie=utf-8&query="
+/* 搜狗备选（独立熔断状态，同一 URL 不同 UA 重试） */
+#define SOGOU_WEB2  "https://www.sogou.com/sie?ie=utf-8&query="
+/* Bing 搜索（cn.bing.com，需 302 重定向，web_fetch 已支持） */
+#define BING_WEB    "https://cn.bing.com/search?q="
 
 /* 搜索 Provider 索引 */
-#define PROV_BAIDU_BK   0
-#define PROV_BAIDU_WEB  1
-#define PROV_ZH_WIKI    2
-#define PROV_BING       3
-#define PROV_BING_NEWS  4
-#define PROV_COUNT      5
+#define PROV_SOGOU    0
+#define PROV_BING     1
+#define PROV_SOGOU2   2   /* 备选：搜狗独立熔断入口 */
+#define PROV_COUNT    3
 
 /* Provider 熔断：连续失败此数后冷却 */
 #define PROVIDER_FAIL_MAX   3
@@ -74,6 +69,57 @@ static int _url_encode(const char* src, char* dst, int dst_sz) {
     }
     dst[j] = '\0';
     return j;
+}
+
+/* ================================================================
+ *  Unicode 转义序列解码 — 将 "\uXXXX" → UTF-8 字符
+ *  修复概念名存了 "u4eca" 等未解码转义序列的问题
+ * ================================================================ */
+static void _decode_unicode_escapes(char* str) {
+    if (!str) return;
+    char* src = str;
+    char* dst = str;
+    while (*src) {
+        if (src[0] == '\\' && src[1] == 'u' &&
+            isxdigit((unsigned char)src[2]) && isxdigit((unsigned char)src[3]) &&
+            isxdigit((unsigned char)src[4]) && isxdigit((unsigned char)src[5])) {
+            /* 解析 \uXXXX */
+            unsigned int cp = 0;
+            for (int i = 2; i <= 5; i++) {
+                char c = src[i];
+                cp = cp * 16 + (unsigned int)(c >= '0' && c <= '9' ? c - '0' :
+                                              c >= 'a' && c <= 'f' ? c - 'a' + 10 :
+                                              c >= 'A' && c <= 'F' ? c - 'A' + 10 : 0);
+            }
+            /* 编码为 UTF-8 */
+            if (cp < 0x80) {
+                *dst++ = (char)cp;
+            } else if (cp < 0x800) {
+                *dst++ = (char)(0xC0 | (cp >> 6));
+                *dst++ = (char)(0x80 | (cp & 0x3F));
+            } else {
+                *dst++ = (char)(0xE0 | (cp >> 12));
+                *dst++ = (char)(0x80 | ((cp >> 6) & 0x3F));
+                *dst++ = (char)(0x80 | (cp & 0x3F));
+            }
+            src += 6;
+        } else if (src[0] == '\\' && src[1] == 'x' &&
+                   isxdigit((unsigned char)src[2]) && isxdigit((unsigned char)src[3])) {
+            /* 解析 \xXX */
+            unsigned int cp = 0;
+            for (int i = 2; i <= 3; i++) {
+                char c = src[i];
+                cp = cp * 16 + (unsigned int)(c >= '0' && c <= '9' ? c - '0' :
+                                              c >= 'a' && c <= 'f' ? c - 'a' + 10 :
+                                              c >= 'A' && c <= 'F' ? c - 'A' + 10 : 0);
+            }
+            *dst++ = (char)cp;
+            src += 4;
+        } else {
+            *dst++ = *src++;
+        }
+    }
+    *dst = '\0';
 }
 
 /* ================================================================
@@ -259,7 +305,7 @@ static void _provider_result(Perception* p, int prov_idx, int success) {
         if (p->provider_failures[prov_idx] >= PROVIDER_FAIL_MAX) {
             p->provider_cooldown[prov_idx] = p->tick_counter + PROVIDER_COOLDOWN_TICKS;
             if (p->cfg.verbose) {
-                const char* names[] = {"百度百科", "百度搜索", "中文维基", "Bing搜索", "Bing新闻"};
+                const char* names[] = {"搜狗搜索", "Bing搜索", "搜狗备选"};
                 fprintf(stderr, "[感觉皮层] Provider '%s' 进入冷却 (%d ticks)\n",
                         names[prov_idx], PROVIDER_COOLDOWN_TICKS);
             }
@@ -276,7 +322,7 @@ static void _provider_check_http_status(Perception* p, int prov_idx, WebResult* 
         p->provider_failures[prov_idx] = PROVIDER_FAIL_MAX;
         p->provider_cooldown[prov_idx] = p->tick_counter + PROVIDER_COOLDOWN_TICKS * 5;
         if (p->cfg.verbose) {
-            const char* names[] = {"百度百科", "百度搜索", "中文维基", "Bing搜索", "Bing新闻"};
+            const char* names[] = {"搜狗搜索", "Bing搜索", "搜狗备选"};
             fprintf(stderr, "[感觉皮层] Provider '%s' HTTP %d 永久封禁，冷却延长\n",
                     names[prov_idx], wr->status_code);
         }
@@ -287,7 +333,7 @@ static void _provider_check_http_status(Perception* p, int prov_idx, WebResult* 
     if (web_fetch_is_rate_limit(wr->status_code)) {
         p->provider_cooldown[prov_idx] = p->tick_counter + PROVIDER_COOLDOWN_TICKS * 2;
         if (p->cfg.verbose) {
-            const char* names[] = {"百度百科", "百度搜索", "中文维基", "Bing搜索", "Bing新闻"};
+            const char* names[] = {"搜狗搜索", "Bing搜索", "搜狗备选"};
             fprintf(stderr, "[感觉皮层] Provider '%s' HTTP 429 限速，冷却延长\n",
                     names[prov_idx]);
         }
@@ -306,20 +352,14 @@ static WebResult* _try_provider(Perception* p, int prov_idx,
                                 const char* encoded_query) {
     char url[512];
     switch (prov_idx) {
-    case PROV_BAIDU_BK:
-        snprintf(url, sizeof(url), "%s%s", BAIDU_BK, encoded_query);
-        break;
-    case PROV_BAIDU_WEB:
-        snprintf(url, sizeof(url), "%s%s", BAIDU_WEB, encoded_query);
-        break;
-    case PROV_ZH_WIKI:
-        snprintf(url, sizeof(url), "%s%s", ZH_WIKI, encoded_query);
+    case PROV_SOGOU:
+        snprintf(url, sizeof(url), "%s%s", SOGOU_WEB, encoded_query);
         break;
     case PROV_BING:
-        snprintf(url, sizeof(url), "%s%s", BING_SEARCH, encoded_query);
+        snprintf(url, sizeof(url), "%s%s", BING_WEB, encoded_query);
         break;
-    case PROV_BING_NEWS:
-        snprintf(url, sizeof(url), "%s%s", BING_NEWS, encoded_query);
+    case PROV_SOGOU2:
+        snprintf(url, sizeof(url), "%s%s", SOGOU_WEB2, encoded_query);
         break;
     default:
         return NULL;
@@ -340,18 +380,23 @@ static int search_and_learn(Perception* p, const char* concept, PerceptionSource
     if (!concept || strlen(concept) < 2) return 0;
     if (!p->ar) return -1;
 
-    /* 检查缓存 */
-    time_t cached = _cache_lookup(p, concept);
+    /* 解码 Unicode 转义序列（修复概念名存了 "u4eca" 等问题） */
+    char clean_concept[256];
+    snprintf(clean_concept, sizeof(clean_concept), "%s", concept);
+    _decode_unicode_escapes(clean_concept);
+
+    /* 检查缓存（用解码后的概念名） */
+    time_t cached = _cache_lookup(p, clean_concept);
     time_t now = time(NULL);
     if (cached > 0 && (now - cached) < p->cfg.cache_ttl_seconds) {
         if (p->cfg.verbose)
-            fprintf(stderr, "[感觉皮层] '%s' 已缓存，跳过\n", concept);
+            fprintf(stderr, "[感觉皮层] '%s' 已缓存，跳过\n", clean_concept);
         return 0;
     }
 
     /* URL 编码 */
     char encoded[256];
-    _url_encode(concept, encoded, sizeof(encoded));
+    _url_encode(clean_concept, encoded, sizeof(encoded));
 
     /* 多源尝试拼接 */
     char* merged_text = (char*)calloc(MAX_SEARCH_TEXT, 1);
@@ -359,14 +404,13 @@ static int search_and_learn(Perception* p, const char* concept, PerceptionSource
     int merged_len = 0;
     int sources_used = 0;
 
-    /* Provider 优先级: 百度百科 → 百度搜索 → 中文维基 → Bing → Bing新闻 */
-    int prov_priority[PROV_COUNT] = { PROV_BAIDU_BK, PROV_BAIDU_WEB, PROV_ZH_WIKI,
-                                      PROV_BING, PROV_BING_NEWS };
-    const char* prov_names[] = { "百度百科", "百度搜索", "中文维基", "Bing搜索", "Bing新闻" };
+    /* Provider 优先级: 搜狗 → Bing → 搜狗备选 */
+    int prov_priority[PROV_COUNT] = { PROV_SOGOU, PROV_BING, PROV_SOGOU2 };
+    const char* prov_names[] = { "搜狗搜索", "Bing搜索", "搜狗备选" };
 
     if (p->cfg.verbose) {
         const char* src_names[] = {"好奇", "巩固", "对话", "空闲"};
-        fprintf(stderr, "[感觉皮层] %s探索: '%s'\n", src_names[source], concept);
+        fprintf(stderr, "[感觉皮层] %s探索: '%s'\n", src_names[source], clean_concept);
     }
 
     for (int pi = 0; pi < PROV_COUNT && sources_used < 2; pi++) {
@@ -411,7 +455,7 @@ static int search_and_learn(Perception* p, const char* concept, PerceptionSource
         int space_left = MAX_SEARCH_TEXT - merged_len - 128;
         if (space_left > 0) {
             int src_line = snprintf(merged_text + merged_len, space_left,
-                                    "  %s\n", concept);
+                                    "  %s\n", clean_concept);
             int copy_len = (text_len < space_left - src_line) ?
                            text_len : (space_left - src_line);
             memcpy(merged_text + merged_len + src_line, text, copy_len);
@@ -428,7 +472,7 @@ static int search_and_learn(Perception* p, const char* concept, PerceptionSource
 
     if (merged_len < 10 || sources_used == 0) {
         free(merged_text);
-        _cache_insert(p, concept, 0);
+        _cache_insert(p, clean_concept, 0);
         return 0;
     }
 
@@ -437,7 +481,7 @@ static int search_and_learn(Perception* p, const char* concept, PerceptionSource
     /* 概念上下文：作为标题先行注入，帮助 article_reader 建立主题锚点 */
     {
         char title_line[320];
-        snprintf(title_line, sizeof(title_line), "搜索概念：%s", concept);
+        snprintf(title_line, sizeof(title_line), "搜索概念：%s", clean_concept);
         article_process_line(p->ar, title_line);
     }
 
@@ -481,7 +525,7 @@ static int search_and_learn(Perception* p, const char* concept, PerceptionSource
 
         if (p->cfg.verbose && new_words > 0)
             fprintf(stderr, "[感觉皮层] '%s' → article_flush: +%d 新词\n",
-                    concept, new_words);
+                    clean_concept, new_words);
     }
 
     /* 也通过海马体学习（保持双向通路） */
@@ -650,7 +694,7 @@ int perception_suggest_queries(Perception* p, const char** queries) {
 }
 
 /**
- * 定时新闻搜索 — 每小时搜 Bing News 头条
+ * 定时新闻搜索 — 每小时搜新闻头条（走搜狗，搜索结果已含新闻）
  * 不同时段搜不同关键词，保持对现实世界的感知
  */
 int perception_search_news(Perception* p) {
@@ -675,26 +719,26 @@ int perception_search_news(Perception* p) {
     char encoded[256];
     _url_encode(topic, encoded, sizeof(encoded));
 
-    /* 只用 Bing 新闻 provider */
-    if (!_provider_available(p, PROV_BING_NEWS)) {
+    /* 走搜狗搜索（搜索结果已包含新闻，无需独立新闻入口） */
+    if (!_provider_available(p, PROV_SOGOU)) {
         if (p->cfg.verbose)
-            fprintf(stderr, "[感觉皮层] Bing新闻 冷却中，跳过\n");
+            fprintf(stderr, "[感觉皮层] 搜狗搜索 冷却中，跳过新闻\n");
         return 0;
     }
 
-    WebResult* wr = _try_provider(p, PROV_BING_NEWS, encoded);
+    WebResult* wr = _try_provider(p, PROV_SOGOU, encoded);
     if (!wr || !wr->body) {
         if (wr) {
-            _provider_check_http_status(p, PROV_BING_NEWS, wr);
+            _provider_check_http_status(p, PROV_SOGOU, wr);
             web_result_free(wr);
         } else {
-            _provider_result(p, PROV_BING_NEWS, 0);
+            _provider_result(p, PROV_SOGOU, 0);
         }
         return 0;
     }
 
-    _provider_check_http_status(p, PROV_BING_NEWS, wr);
-    _provider_result(p, PROV_BING_NEWS, 1);
+    _provider_check_http_status(p, PROV_SOGOU, wr);
+    _provider_result(p, PROV_SOGOU, 1);
 
     /* 提取文本 */
     int body_len = wr->body_len;

@@ -87,8 +87,8 @@ typedef struct Perception {
     int               article_accum_count;  /* 累计未 flush 的搜索结果数 */
 
     /* 搜索策略 */
-    int               provider_cooldown[5]; /* 各 provider 冷却到何时(tick) */
-    int               provider_failures[5]; /* 连续失败计数 */
+    int               provider_cooldown[3]; /* 各 provider 冷却到何时(tick) */
+    int               provider_failures[3]; /* 连续失败计数 */
 
     /* 统计 */
     long  total_searches;
