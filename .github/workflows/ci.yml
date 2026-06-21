@@ -32,6 +32,16 @@ jobs:
             gcc-arm-linux-gnueabihf \
             libc6-dev-armhf-cross
 
+      - name: Build zlib for ARM
+        run: |
+          curl -sL https://zlib.net/zlib-1.3.1.tar.gz -o /tmp/zlib.tar.gz
+          tar xzf /tmp/zlib.tar.gz -C /tmp
+          cd /tmp/zlib-1.3.1
+          CC=arm-linux-gnueabihf-gcc \
+          ./configure --prefix=/tmp/zlib-arm
+          make -j$(nproc)
+          make install
+
       - name: Build OpenSSL for ARM
         run: |
           curl -sL https://github.com/openssl/openssl/releases/download/openssl-3.0.15/openssl-3.0.15.tar.gz -o /tmp/openssl.tar.gz
@@ -55,13 +65,14 @@ jobs:
           export PKG_CONFIG_LIBDIR=/tmp/curl-arm/lib/pkgconfig
           mkdir -p $PKG_CONFIG_LIBDIR
           CC=arm-linux-gnueabihf-gcc \
-          CPPFLAGS="-I/tmp/openssl-arm/include" \
-          LDFLAGS="-L/tmp/openssl-arm/lib" \
+          CPPFLAGS="-I/tmp/openssl-arm/include -I/tmp/zlib-arm/include" \
+          LDFLAGS="-L/tmp/openssl-arm/lib -L/tmp/zlib-arm/lib" \
           ./configure \
             --build=x86_64-linux-gnu \
             --host=arm-linux-gnueabihf \
             --prefix=/tmp/curl-arm \
             --with-openssl=/tmp/openssl-arm \
+            --with-zlib=/tmp/zlib-arm \
             --without-nghttp2 \
             --without-zstd \
             --without-brotli \
@@ -76,8 +87,8 @@ jobs:
         run: |
           make linux \
             CC=arm-linux-gnueabihf-gcc \
-            CFLAGS="-Wall -Wextra -O2 -Iinclude -I. -Ilibs -I/tmp/openssl-arm/include -I/tmp/curl-arm/include -std=gnu99 -MD -MP -DHAS_OPENSSL" \
-            LDFLAGS="-L/tmp/openssl-arm/lib -L/tmp/curl-arm/lib -lm -lssl -lcrypto -lcurl -lz -pthread -static-libstdc++"
+            CFLAGS="-Wall -Wextra -O2 -Iinclude -I. -Ilibs -I/tmp/openssl-arm/include -I/tmp/curl-arm/include -I/tmp/zlib-arm/include -std=gnu99 -MD -MP -DHAS_OPENSSL" \
+            LDFLAGS="-L/tmp/openssl-arm/lib -L/tmp/curl-arm/lib -L/tmp/zlib-arm/lib -lm -lssl -lcrypto -lcurl -lz -pthread -static-libstdc++"
 
       - name: Verify ARM ELF
         run: |
