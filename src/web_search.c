@@ -16,25 +16,6 @@
 #include <ctype.h>
 
 /* ================================================================
- *  URL 编码 — 中文等非ASCII字节 → %XX
- * ================================================================ */
-static int url_encode(const char* src, char* dst, int dst_sz) {
-    if (!src || !dst || dst_sz <= 0) return 0;
-    int pos = 0;
-    for (const unsigned char* p = (const unsigned char*)src; *p && pos < dst_sz - 4; p++) {
-        if ((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') ||
-            (*p >= '0' && *p <= '9') || *p == '-' || *p == '_' ||
-            *p == '.' || *p == '~' || *p == '/') {
-            dst[pos++] = (char)*p;
-        } else {
-            pos += snprintf(dst + pos, dst_sz - pos, "%%%02X", *p);
-        }
-    }
-    dst[pos] = '\0';
-    return pos;
-}
-
-/* ================================================================
  *  HTML → 文本（增强版：结构化分层提取）
  * ================================================================ */
 

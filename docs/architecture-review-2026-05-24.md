@@ -83,7 +83,7 @@ associative_reasoning.c  #include "multi_topology.h"
 
 ### P3 — 线程安全无文档
 
-只有 `huarong_topology.c` 的 `net->mutex` 和 `autonomic_learner.c` 的 `flush_lock`/shard locks 有锁。其他模块（dialog_system、cognitive_controller、multi_topology 的大部分）没有明确的线程安全保证。读者无法从接口判断能否并发调用。
+只有 `trace_wisdom_topology.c` 的 `net->mutex` 和 `autonomic_learner.c` 的 `flush_lock`/shard locks 有锁。其他模块（dialog_system、cognitive_controller、multi_topology 的大部分）没有明确的线程安全保证。读者无法从接口判断能否并发调用。
 
 **建议：** 在每个公开函数的注释中标明 `@threadsafe` 或 `@single_thread`。
 
@@ -101,7 +101,7 @@ associative_reasoning.c  #include "multi_topology.h"
 
 以下设计是正确的，应保留：
 
-1. **拓扑抽象层清晰** — `HuarongTopologyNet`（底层图）→ `SubTopology`（语义包装）→ `MasterTopology`（多拓扑管理），三层抽象合理
+1. **拓扑抽象层清晰** — `TraceWisdomNetwork`（底层图）→ `SubTopology`（语义包装）→ `MasterTopology`（多拓扑管理），三层抽象合理
 2. **自主学习器解耦正确** — `autonomic_learner.c` 通过 `AutonomicState` 与管线交互，接口干净
 3. **批量训练工具独立** — `batch_learn.c` 只依赖核心库，不污染核心代码
 4. **特征向量持久化** — `feature_io.c` 独立管理特征向量的序列化，职责单一

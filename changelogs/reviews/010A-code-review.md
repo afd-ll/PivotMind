@@ -244,7 +244,7 @@ changelog 008B/009B 标记 `seq2seq.c` 和 `seq2seq.h` 已删除。确认文件�
 | 设计 | 实现 |
 |------|------|
 | 同时激活 → 涨置信度 | `autonomic_learner.c:boost_connection` |
-| 新边自动创建 | `boost_connection → huarong_net_add_connection` |
+| 新边自动创建 | `boost_connection → trace_wisdom_net_add_connection` |
 | 全局衰减 | `autonomic_decay_all`（均匀衰减，非竞争） |
 | 刷盘持久化 | `autonomic_request_flush` + 先备份再覆写 |
 | 跨拓扑传播 | `autonomic_learn_from_dialog` 核心4-5 |

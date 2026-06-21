@@ -7,7 +7,7 @@
 
 [English](README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [Русский](README.ru.md)
 
-[![Version](https://img.shields.io/badge/version-v0.4.0-blue.svg)](changelogs/)
+[![Version](https://img.shields.io/badge/version-v0.4.1-blue.svg)](changelogs/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green.svg)](LICENSE)
 [![Language](https://img.shields.io/badge/C-99%2B-orange.svg)](https://en.wikipedia.org/wiki/C99)
 [![Platform](https://img.shields.io/badge/ARM-RK3399%20%7C%20x86__64-lightgrey.svg)](#running-on)
@@ -24,15 +24,15 @@
 ## What is PivotMind
 
 PivotMind is a **brain-inspired cognitive engine** built on
-[HuarongTopologyNet](#huarongtopologynet) +
+[TraceWisdomNetwork](#tracewisdomnetwork) +
 [Hebbian Learning](#core-mechanisms) +
 [Multi-Layer Diffusion Reasoning](#multi-layer-diffusion-engine).
 No Transformers. No embedding vectors. No backpropagation.
 Just nodes, edges, activation, and decay — powered by a relentless background clock.
 
-**Current Version: v0.4.0** — 10 brain regions, PFE reasoning, IdeaArena competition, online Hebbian learning.
+**Current Version: v0.4.1** — 10 brain regions, PFE reasoning, IdeaArena competition, online Hebbian learning.
 
-### HuarongTopologyNet
+### TraceWisdomNetwork
 
 Each concept is a node. Co-occurrence creates an edge. Edges carry a triple attribute:
 **weight × confidence × motivational bias**.
@@ -216,8 +216,9 @@ pivotmind/
 | v0.2.x     | Multi-layer diffusion, Hippocampus / DMN / Perception, interoceptive monitoring     |
 | **v0.3.0** | Prefrontal Executive (6-mode reasoning), IdeaArena 5D, strategy weight self-learning |
 | **v0.4.0** | Code simplification (~200 lines), 11 unified lookups, Broca upgrade, Hypothalamus new region |
+| **v0.4.1** | Web fetch refactor (libcurl engine), Bing/Bing News providers, news timer, overseas compliance |
 
-> Detailed changelogs: v0.3.0 → [changelogs/032-v0.3.0-reasoning-architecture.md](changelogs/032-v0.3.0-reasoning-architecture.md) ｜ v0.4.0 → [changelogs/034-v0.4.0-code-simplify-brain-boundary.md](changelogs/034-v0.4.0-code-simplify-brain-boundary.md)
+> Detailed changelogs: v0.3.0 → [changelogs/032-v0.3.0-reasoning-architecture.md](changelogs/032-v0.3.0-reasoning-architecture.md) ｜ v0.4.0 → [changelogs/034-v0.4.0-code-simplify-brain-boundary.md](changelogs/034-v0.4.0-code-simplify-brain-boundary.md) ｜ v0.4.1 → [changelogs/035-v0.4.1-web-fetch-refactor.md](changelogs/035-v0.4.1-web-fetch-refactor.md)
 
 ---
 

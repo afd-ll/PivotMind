@@ -7,7 +7,7 @@
 
 [English](README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [Русский](README.ru.md)
 
-[![Version](https://img.shields.io/badge/version-v0.4.0-blue.svg)](changelogs/)
+[![Version](https://img.shields.io/badge/version-v0.4.1-blue.svg)](changelogs/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green.svg)](LICENSE)
 [![Language](https://img.shields.io/badge/C-99%2B-orange.svg)](https://zh.wikipedia.org/wiki/C99)
 [![Platform](https://img.shields.io/badge/ARM-RK3399%20%7C%20x86__64-lightgrey.svg)](#运行平台)
@@ -29,7 +29,7 @@
 没有 Transformer，没有 embedding 向量，没有反向传播。
 只有节点、边、激活、衰减——以及一个永不停歇的后台时钟。
 
-**当前版本：v0.4.0** —— 10 脑区完整架构、PFE 推理编排、IdeaArena 竞争、在线赫布学习。
+**当前版本：v0.4.1** —— 10 脑区完整架构、PFE 推理编排、IdeaArena 竞争、在线赫布学习。
 
 ### 溯智网络
 
@@ -211,8 +211,9 @@ pivotmind/
 | v0.2.x      | 多层扩散引擎、海马体/DMN/感知皮层、内感受自检、突触缩放、认知调度中心                  |
 | **v0.3.0**  | 前额叶执行器（6 模式推理编排）、IdeaArena 五维竞争、策略权重自学习、递归分解            |
 | **v0.4.0**  | 代码简化（消除~200 行重复）、脑区边界修复（11 处统一查找）、Broca 升级、下丘脑新脑区  |
+| **v0.4.1**  | 爬虫框架重构（libcurl 引擎）、Bing/Bing 新闻 provider、新闻定时抓取、海外合规  |
 
-> 详细变更：v0.3.0 → [changelogs/032-v0.3.0-reasoning-architecture.md](changelogs/032-v0.3.0-reasoning-architecture.md) ｜ v0.4.0 → [changelogs/034-v0.4.0-code-simplify-brain-boundary.md](changelogs/034-v0.4.0-code-simplify-brain-boundary.md)
+> 详细变更：v0.3.0 → [changelogs/032-v0.3.0-reasoning-architecture.md](changelogs/032-v0.3.0-reasoning-architecture.md) ｜ v0.4.0 → [changelogs/034-v0.4.0-code-simplify-brain-boundary.md](changelogs/034-v0.4.0-code-simplify-brain-boundary.md) ｜ v0.4.1 → [changelogs/035-v0.4.1-web-fetch-refactor.md](changelogs/035-v0.4.1-web-fetch-refactor.md)
 
 ---
 

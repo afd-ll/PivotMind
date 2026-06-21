@@ -7,13 +7,13 @@
 ### 🔴 严重
 
 #### 1. `create_reasoning_node` 空指针解引用
-- **文件**: `src/huarong_topology.c:39-48`
+- **文件**: `src/trace_wisdom_topology.c:39-48`
 - **问题**: `if (features)` 检查的是外部传入参数而非 `node->features` 分配结果。
   当 `malloc` 返回 NULL 而调用方传入非 NULL 的 `features` 时，直接 `memcpy` 到空指针导致崩溃。
 - **修复**: 改为 `if (node->features)` 先验证分配成功。
 
-#### 2. `huarong_net_dynamic_remove_node` use-after-free
-- **文件**: `src/huarong_topology.c:396-409`
+#### 2. `trace_wisdom_net_dynamic_remove_node` use-after-free
+- **文件**: `src/trace_wisdom_topology.c:396-409`
 - **问题**: 删除节点后未清理其他节点 `connections[]` 中的悬空指针，后续走边/激活传播
   访问已释放内存。
 - **修复**: 在释放节点前加 mutex 保护，遍历所有节点清理指向被删节点的连接引用。

@@ -7,7 +7,7 @@
 
 [English](README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [Русский](README.ru.md)
 
-[![Version](https://img.shields.io/badge/version-v0.4.0-blue.svg)](changelogs/)
+[![Version](https://img.shields.io/badge/version-v0.4.1-blue.svg)](changelogs/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green.svg)](LICENSE)
 [![Language](https://img.shields.io/badge/C-99%2B-orange.svg)](https://en.wikipedia.org/wiki/C99)
 [![Platform](https://img.shields.io/badge/ARM-RK3399%20%7C%20x86__64-lightgrey.svg)](#running-on)
@@ -22,18 +22,18 @@
 
 ## What is PivotMind
 
-PivotMind는 [HuarongTopologyNet](#huarongtopologynet) +
+PivotMind는 [TraceWisdomNetwork](#tracewisdomnetwork) +
 [Hebbian Learning](#core-mechanisms) +
 [Multi-Layer Diffusion Reasoning](#multi-layer-diffusion-engine)을 기반으로 한
 **뇌에서 영감을 받은 인지 엔진**입니다.
 Transformer 없음. 임베딩 벡터 없음. 역전파 없음.
 노드, 엣지, 활성화, 감쇠 — 끊임없이 돌아가는 백그라운드 클록에 의해 구동됩니다.
 
-**현재 버전: v0.4.0** — 10개 뇌 영역, PFE 추론, IdeaArena 경쟁, 온라인 Hebbian 학습.
+**현재 버전: v0.4.1** — 10개 뇌 영역, PFE 추론, IdeaArena 경쟁, 온라인 Hebbian 학습.
 
-### HuarongTopologyNet
+### TraceWisdomNetwork
 
-각 개념은 노드입니다. 공기(co-occurrence)가 엣지를 생성합니다. 엣지는 세 가지 속성을 갖습니다:
+각 개념은 노드입니다. 동시출현(co-occurrence)이 엣지를 생성합니다. 엣지는 세 가지 속성을 갖습니다:
 **가중치 × 신뢰도 × 동기적 편향**.
 10개의 하위 토폴로지(어휘 / 의미 / 감정 / 구문 / 문맥 / 도메인 / 화용 / 문화 / 개념 / 템플릿)
 각각이 독립적인 추론 네트워크를 형성하고, 토폴로지 간 링크를 통해 상호 연결됩니다.
@@ -215,6 +215,7 @@ pivotmind/
 | v0.2.x     | Multi-layer diffusion, Hippocampus / DMN / Perception, interoceptive monitoring     |
 | **v0.3.0** | Prefrontal Executive (6-mode reasoning), IdeaArena 5D, strategy weight self-learning |
 | **v0.4.0** | Code simplification (~200 lines), 11 unified lookups, Broca upgrade, Hypothalamus new region |
+| **v0.4.1** | Web fetch refactor (libcurl engine), Bing/Bing News providers, news timer, overseas compliance |
 
 > Detailed changelogs: see [`changelogs/`](changelogs/) directory
 

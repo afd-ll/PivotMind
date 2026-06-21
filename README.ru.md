@@ -7,7 +7,7 @@
 
 [English](README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [Русский](README.ru.md)
 
-[![Version](https://img.shields.io/badge/version-v0.4.0-blue.svg)](changelogs/)
+[![Version](https://img.shields.io/badge/version-v0.4.1-blue.svg)](changelogs/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green.svg)](LICENSE)
 [![Language](https://img.shields.io/badge/C-99%2B-orange.svg)](https://en.wikipedia.org/wiki/C99)
 [![Platform](https://img.shields.io/badge/ARM-RK3399%20%7C%20x86__64-lightgrey.svg)](#running-on)
@@ -23,15 +23,15 @@
 ## Что такое PivotMind
 
 PivotMind — это **когнитивный движок, вдохновлённый мозгом**,
-построенный на [HuarongTopologyNet](#huarongtopologynet) +
+построенный на [TraceWisdomNetwork](#tracewisdomnetwork) +
 [Хеббовском обучении](#core-mechanisms) +
 [Многослойном диффузионном рассуждении](#multi-layer-diffusion-engine).
 Никаких трансформеров. Никаких эмбеддингов. Никакого обратного распространения.
 Только узлы, рёбра, активация и затухание — под управлением неумолимых фоновых часов.
 
-**Текущая версия: v0.4.0** — 10 зон мозга, PFE-рассуждения, соревнование IdeaArena, онлайн-хеббовское обучение.
+**Текущая версия: v0.4.1** — 10 зон мозга, PFE-рассуждения, соревнование IdeaArena, онлайн-хеббовское обучение.
 
-### HuarongTopologyNet
+### TraceWisdomNetwork
 
 Каждое понятие — это узел. Совместная встречаемость создаёт ребро. Рёбра несут тройной атрибут:
 **вес × уверенность × мотивационное смещение**.
@@ -215,6 +215,7 @@ pivotmind/
 | v0.2.x     | Многослойная диффузия, Hippocampus / DMN / Perception, интероцептивный мониторинг     |
 | **v0.3.0** | Prefrontal Executive (6 режимов рассуждений), IdeaArena 5D, самообучение весов стратегий |
 | **v0.4.0** | Упрощение кода (~200 строк), 11 унифицированных лукапов, апгрейд Broca, новая зона Hypothalamus |
+| **v0.4.1** | Рефакторинг web fetch (libcurl), провайдеры Bing/Bing News, таймер новостей, зарубежный комплаенс |
 
 > Подробные списки изменений: см. директорию [`changelogs/`](changelogs/)
 

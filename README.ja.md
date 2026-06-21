@@ -3,11 +3,11 @@
 # 玄枢 PivotMind
 
 ### 脳に着想を得た意味連想エンジン
-**Pure C · AI フレームワーク依存ゼロ · ARM 組み込みボードで動作**
+**ピュアC · AIフレームワーク依存ゼロ · ARM組み込みボードで動作**
 
 [English](README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [Русский](README.ru.md)
 
-[![Version](https://img.shields.io/badge/version-v0.4.0-blue.svg)](changelogs/)
+[![Version](https://img.shields.io/badge/version-v0.4.1-blue.svg)](changelogs/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green.svg)](LICENSE)
 [![Language](https://img.shields.io/badge/C-99%2B-orange.svg)](https://en.wikipedia.org/wiki/C99)
 [![Platform](https://img.shields.io/badge/ARM-RK3399%20%7C%20x86__64-lightgrey.svg)](#running-on)
@@ -22,16 +22,16 @@
 
 ## PivotMind とは
 
-PivotMind は [HuarongTopologyNet](#huarongtopologynet) +
+PivotMind は [TraceWisdomNetwork](#tracewisdomnetwork) +
 [Hebbian Learning](#core-mechanisms) +
 [Multi-Layer Diffusion Reasoning](#multi-layer-diffusion-engine)
 の上に構築された**脳に着想を得た認知エンジン**です。
 Transformer なし。埋め込みベクトルなし。誤差逆伝播なし。
 あるのはノードとエッジ、活性化と減衰だけ — 絶え間なく刻む背景クロックによって駆動されます。
 
-**現行バージョン: v0.4.0** — 10 の脳領域、PFE 推論、IdeaArena 競合、オンライン Hebbian 学習。
+**現行バージョン: v0.4.1** — 10 の脳領域、PFE 推論、IdeaArena 競合、オンライン Hebbian 学習。
 
-### HuarongTopologyNet
+### TraceWisdomNetwork
 
 各概念はノードです。同時出現がエッジを生成します。エッジは三重属性を保持します:
 **重み × 信頼度 × 動機バイアス**。
@@ -214,6 +214,7 @@ pivotmind/
 | v0.2.x      | 多層拡散、Hippocampus / DMN / Perception、内受容的モニタリング                          |
 | **v0.3.0**  | Prefrontal Executive(6 モード推論)、IdeaArena 5D、戦略重み自己学習                      |
 | **v0.4.0**  | コード簡素化(約 200 行)、11 件のルックアップ統合、Broca アップグレード、Hypothalamus 新設 |
+| **v0.4.1**  | Web fetch リファクタ (libcurl)、Bing/Bing News 追加、ニュースタイマー、海外コンプライアンス |
 
 > 詳細な変更履歴: [`changelogs/`](changelogs/) ディレクトリを参照
 

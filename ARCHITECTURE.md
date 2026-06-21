@@ -1,6 +1,6 @@
 # 玄枢 PivotMind 架构文档
 
-> 当前版本: **v0.4.0** — 10 脑区完整架构 + Broca 升级 + 下丘脑新脑区
+> 当前版本: **v0.4.1** — 10 脑区完整架构 + libcurl 爬虫引擎 + 海外合规
 
 ## 整体架构
 
@@ -10,7 +10,7 @@
 
 | 层级 | 职责 | 核心文件 |
 |------|------|---------|
-| **多拓扑网络层** | 11 层子拓扑接收输入，逐字分词后激活对应节点，跨拓扑传播 | `huarong_topology.c`, `multi_topology.c` |
+| **多拓扑网络层** | 11 层子拓扑接收输入，逐字分词后激活对应节点，跨拓扑传播 | `trace_wisdom_topology.c`, `multi_topology.c` |
 | **认知调度层** | 意图向量计算、满意度评估、retry 循环、在线学习调整 | `cognitive_controller.c` |
 | **对话学习层** | 联想推理、回复生成、赫布在线学习、状态持久化 | `dialog_system.c`, `autonomic_learner.c` |
 | **推理编排层** (v0.3) | 6 模式推理编排、任务分解、子目标调度、多候选竞争、冲突检测 | `prefrontal_executive.c`, `idea_arena.c` |
@@ -42,12 +42,12 @@
 
 ### 1. 拓扑网络层
 
-**核心文件**: `src/huarong_topology.c`, `src/multi_topology.c`, `include/huarong_topology.h`, `include/multi_topology.h`
+**核心文件**: `src/trace_wisdom_topology.c`, `src/multi_topology.c`, `include/trace_wisdom_topology.h`, `include/multi_topology.h`
 
 **职责**: 节点/边管理、跨拓扑连接、激活传播、拓扑排序
 
 **关键 API**:
-- `huarong_net_find_or_create_node()` — 查找或创建节点
+- `trace_wisdom_net_find_or_create_node()` — 查找或创建节点
 - `topology_walk_greedy()` — 贪心走边
 - `master_add_cross_link()` — 添加跨拓扑连接
 
@@ -104,7 +104,7 @@ typedef struct SubTopology {
     int topo_id;                    // 拓扑唯一 ID
     TopologyType type;              // 拓扑类型枚举
     const char* name;               // 拓扑名称
-    HuarongTopologyNet* net;        // 底层拓扑网络
+    TraceWisdomNetwork* net;        // 底层拓扑网络
     NodeHashTable* node_hash;       // 节点哈希表（加速按名查找）
     int priority;                   // 推理优先级 (1-10)
     float weight;                   // 在主拓扑中的权重
@@ -337,6 +337,10 @@ typedef struct {
 
 ## v0.4.0 新增脑区
 
+> 详见 v0.4.1 changelog: [035-v0.4.1-web-fetch-refactor.md](changelogs/035-v0.4.1-web-fetch-refactor.md)
+
+## v0.4.0 新增脑区（历史）
+
 ### 下丘脑 (Hypothalamus) — 需求驱动系统
 
 **核心文件**: `src/hypothalamus.c`
@@ -485,7 +489,7 @@ typedef enum {
 ```
 
 **并行安全机制**：
-- `huarong_net_add_connection()` 内部有 `net->mutex`（递归锁）保护
+- `trace_wisdom_net_add_connection()` 内部有 `net->mutex`（递归锁）保护
 - 赫布学习用 thread-local buffer 收集激活对，barrier 后批量更新
 - 边更新按哈希分片（`AUTONOMIC_SHARD_COUNT=16`），各 shard 独立 mutex
 - 刷盘操作有 `flush_lock`（double-check 模式）
@@ -505,7 +509,7 @@ void autonomic_learn_from_dialog(MasterTopology* master,
         if edge exists:
             confidence += 0.05;         // 涨置信
         else:
-            huarong_net_add_connection(... , 0.3);  // 新边初始0.3
+            trace_wisdom_net_add_connection(... , 0.3);  // 新边初始0.3
 }
 ```
 
@@ -566,7 +570,7 @@ void autonomic_learn_from_dialog(MasterTopology* master,
 
 ### 拓扑排序（Kahn 队列算法）
 
-位于 `src/huarong_topology.c`：
+位于 `src/trace_wisdom_topology.c`：
 
 ```
 1. 预建节点指针→索引查找表（二分查找 O(log N)）
@@ -619,7 +623,7 @@ confidence = base_score × 0.4
 ``` 
 PivotMind/
 ├── src/                    # 核心源文件（82个 .c）
-│   ├── huarong_topology.c           # 底层拓扑网络：节点/边/哈希/拓扑排序
+│   ├── trace_wisdom_topology.c           # 底层拓扑网络：节点/边/哈希/拓扑排序
 │   ├── multi_topology.c             # 多拓扑管理：SubTopology/MasterTopology/走边
 │   ├── cognitive_controller.c       # 认知调度中心：意图向量/retry/满意度
 │   ├── dialog_system.c              # 对话管线：激活传播/联想记录
@@ -665,7 +669,7 @@ PivotMind/
 │
 ├── include/                # 头文件（86个 .h）
 │   ├── multi_topology.h          # MasterTopology / SubTopology / CrossTopologyLink
-│   ├── huarong_topology.h        # ReasoningNode / HuarongTopologyNet
+│   ├── trace_wisdom_topology.h        # ReasoningNode / TraceWisdomNetwork
 │   ├── cognitive_controller.h    # CognitiveController / intent_weights / retry
 │   ├── dialog_system.h           # DialogSystem / DialogReasoning / IntentType
 │   ├── memory_system.h           # MemoryEntry / STM / LTM
@@ -704,10 +708,10 @@ PivotMind/
 
 | Bug | 修复方式 | 相关文件 |
 |-----|---------|---------|
-| 走边 O(n²) | 预建节点指针→索引二分查找表，拓扑排序 O(N²)→O(N log N+E) | huarong_topology.c |
+| 走边 O(n²) | 预建节点指针→索引二分查找表，拓扑排序 O(N²)→O(N log N+E) | trace_wisdom_topology.c |
 | strstr 误匹配 | 循环变量未使用 + 包含匹配导致"人"匹配"人民"→改用 strcmp 精确匹配 | cognitive_controller.c |
 | 跨拓扑冷启动 | 实现动态跨拓扑建边（CrossTopoHitRecord 跟踪） | multi_topology.c |
-| 并发建边竞态 | huarong_net_add_connection 内部加 net->mutex 递归锁 | huarong_topology.c |
+| 并发建边竞态 | trace_wisdom_net_add_connection 内部加 net->mutex 递归锁 | trace_wisdom_topology.c |
 | 刷盘数据丢失 | 先备份 .bak 再 rename 覆盖（原子写入） | autonomic_learner.c |
 | 循环激活栈溢出 | 递归传播加 recursion_depth 硬上限（MAX_RECURSION_DEPTH=1000） | associative_reasoning.c |
 | 跨连接读写断裂 | sentinel(-1) + 魔数(0xDEADBEEF) 分隔节点区和跨连接区 | multi_topology.c |

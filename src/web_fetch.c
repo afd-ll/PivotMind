@@ -38,6 +38,7 @@
 #define msleep(ms) usleep((ms) * 1000)
 #endif
 
+#include <stdint.h>
 #include <curl/curl.h>
 
 /* ================================================================
