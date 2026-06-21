@@ -12,6 +12,7 @@
 [![Language](https://img.shields.io/badge/C-99%2B-orange.svg)](https://en.wikipedia.org/wiki/C99)
 [![Platform](https://img.shields.io/badge/ARM-RK3399%20%7C%20x86__64-lightgrey.svg)](#running-on)
 [![Dependencies](https://img.shields.io/badge/dependencies-zero-success.svg)](#quick-start)
+[![CI](https://github.com/afd-ll/PivotMind/actions/workflows/ci.yml/badge.svg)](https://github.com/afd-ll/PivotMind/actions/workflows/ci.yml)
 
 > Intelligence is not a stack of matrix multiplications,
 > but ripples of activation spreading through a reasoning network.
