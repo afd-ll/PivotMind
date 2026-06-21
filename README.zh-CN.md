@@ -212,7 +212,7 @@ pivotmind/
 | **v0.3.0**  | 前额叶执行器（6 模式推理编排）、IdeaArena 五维竞争、策略权重自学习、递归分解            |
 | **v0.4.0**  | 代码简化（消除~200 行重复）、脑区边界修复（11 处统一查找）、Broca 升级、下丘脑新脑区  |
 
-> 详细变更：见 [`changelogs/`](changelogs/) 目录
+> 详细变更：v0.3.0 → [changelogs/032-v0.3.0-reasoning-architecture.md](changelogs/032-v0.3.0-reasoning-architecture.md) ｜ v0.4.0 → [changelogs/034-v0.4.0-code-simplify-brain-boundary.md](changelogs/034-v0.4.0-code-simplify-brain-boundary.md)
 
 ---
 

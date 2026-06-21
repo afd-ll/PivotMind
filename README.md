@@ -216,7 +216,7 @@ pivotmind/
 | **v0.3.0** | Prefrontal Executive (6-mode reasoning), IdeaArena 5D, strategy weight self-learning |
 | **v0.4.0** | Code simplification (~200 lines), 11 unified lookups, Broca upgrade, Hypothalamus new region |
 
-> Detailed changelogs: see [`changelogs/`](changelogs/) directory
+> Detailed changelogs: v0.3.0 → [changelogs/032-v0.3.0-reasoning-architecture.md](changelogs/032-v0.3.0-reasoning-architecture.md) ｜ v0.4.0 → [changelogs/034-v0.4.0-code-simplify-brain-boundary.md](changelogs/034-v0.4.0-code-simplify-brain-boundary.md)
 
 ---
 
