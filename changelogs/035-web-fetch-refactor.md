@@ -1,0 +1,120 @@
+# 0.4.1 — 爬虫框架重构 + 海外适配 + 多源搜索
+
+> **日期**: 2026-06-21 | **类型**: 重构
+
+---
+
+## 概述
+
+v0.4.1 是对网络爬虫系统的全面重构。从裸 BSD socket + OpenSSL 切换为 libcurl 引擎 + 自建策略管控层，实现 HTTP/2、TLS 1.3、gzip/Brotli 自动解压、海外合规等能力。同时统一所有网络搜索入口到感知皮层（Perception）管线，新增 Bing 搜索/新闻两个 provider，增加实时新闻定时抓取。
+
+---
+
+## 核心变更
+
+### 新增文件
+
+| 文件 | 说明 |
+|------|------|
+| `include/web_fetch.h` | 爬虫框架头文件（`CrawlPolicy`/`FetchResult`/响应码分类 API） |
+| `src/web_fetch.c` | ~500 行：libcurl 引擎 + 策略管控层 + 安全层 |
+| `tests/unit/test_web_fetch.c` | 7 组 46 个单元测试（离线 100% 通过） |
+
+### 爬虫框架架构（`web_fetch.c`）
+
+```
+┌─────────────────────────────────┐
+│  策略层                          │
+│  • 域名限速 (同domain ≥ 2s间隔)   │
+│  • robots.txt 缓存 (TTL 1h)      │
+│  • UA 轮换池 (5个真实浏览器)       │
+│  • 响应码→FetchClass 映射         │
+│  • 重试 + 指数退避 (max 2次)      │
+│  • 代理接口 (预留)                │
+├─────────────────────────────────┤
+│  libcurl 引擎（传输层）            │
+│  • HTTP/1.1 + HTTP/2            │
+│  • TLS 1.3 + 证书链验证          │
+│  • gzip / Brotli 自动解压         │
+│  • 302 重定向自动跟随 (max 5次)    │
+│  • _Thread_local CURL* 线程安全   │
+└─────────────────────────────────┘
+```
+
+### 重构文件
+
+| 文件 | 变更 |
+|------|------|
+| `src/web_search.c` | 删除 `bsd_http_get()` + `openssl_https_get()` + `do_fetch()` (~300行裸socket)；`web_search()` 改为调用 `web_fetch()`；HTML 提取管线保留；新增搜索结果页文本提取策略；删除废弃 `url_encode()` |
+| `include/web_search.h` | 更新注释，移除过时的跨平台描述 |
+
+### 修改文件
+
+| 文件 | 变更 |
+|------|------|
+| `include/perception.h` | `provider_cooldown[4]→[5]`、`provider_failures[4]→[5]`；新增 `perception_search_news()` |
+| `src/perception.c` | `PROV_COUNT` 3→5（百度百科/百度搜索/中文维基/**Bing搜索**/**Bing新闻**）；新增 `_provider_check_http_status()` 响应码熔断（403/451→永久冷却，429→延长冷却）；新增 `perception_search_news()`（每小时按时间段搜 Bing News 头条）；定义 `g_perception` 全局指针，`perception_create` 自动赋值 |
+| `src/self_learner.c` | 硬编码百度百科 URL 替换为 `perception_learn_concept()`；`#include "web_search.h"` → `"perception.h"` |
+| `src/dialog_system.c` | 删除 `dialog_search_concept()` 及其阻塞式联网搜索；改为 `perception_suggest_queries()` 异步提交；清理残留死代码；`#include "web_search.h"` → `"perception.h"` |
+| `src/brainstem.c` | `brainstem_tick_perception()` 新增每 3600 tick 调用 `perception_search_news()` |
+| `demos/pivotmind_gateway.c` | 不再冗余设置 `g_perception`（已由 `perception_create` 自动处理） |
+| `include/web_fetch.h` | 新增爬虫框架公共接口 |
+| `src/web_fetch.c` | 修复 `WriteBuffer`/`write_callback` 前向引用；加 `#include <stdint.h>` |
+| `Makefile` | `LDFLAGS` 加 `-lcurl -lz`；新增 `test-web-fetch` 构建目标；纳入 `make test` 全量套件 |
+| `tests/test_runner.c` | 新增 `test_web_fetch` 到运行列表 |
+
+### 版本文件
+
+| 文件 | 变更 |
+|------|------|
+| `include/pivotmind_version.h` | 0.4.0 → **0.4.1** |
+
+### 海外合规
+
+| 要求 | 实现 |
+|------|------|
+| robots.txt | `CrawlPolicy.respect_robots=1`，首次访问抓取并缓存 |
+| 合理 UA | 5 个真实浏览器轮换（无 PivotMind 字样） |
+| 请求频率 | 同 domain 间隔 ≥ 2s（`request_delay_ms=2000`） |
+| TLS 证书 | libcurl 默认验证（不再设 `SSL_VERIFY_NONE`） |
+| GDPR | 不存用户数据，只抓公开百科/新闻 |
+
+### 不涉及
+
+- ❌ JavaScript 渲染（headless browser）— 内存开销过大
+- ❌ 缺口驱动搜索 — 节点数不够，保持随机暴力采样
+- ❌ 图片下载 — 预留 `content_type` 字段，后续多模态可用
+
+---
+
+## 测试
+
+`tests/unit/test_web_fetch.c` — 7 组 46 个离线测试（100% 通过）：
+
+| 组 | 用例数 | 通过 | 说明 |
+|----|--------|------|------|
+| 1. 响应码分类器 | 23 | 23 | block/rate/server_error 全覆盖 + 交叉检查 |
+| 2. 初始化/销毁 | 4 | 4 | 默认策略/幂等/init-destroy-init 循环 |
+| 3. 策略边界 | 7 | 7 | delay/redirect/timeout/body/retries 极值限额 |
+| 4. 域名冷却 | 5 | 5 | NULL/空/正常/0秒/长冷却 |
+| 5. FetchResult | 3 | 3 | NULL释放/空字段/完整字段 |
+| 6. 安全防护 | 4 | 4 | 未初始化/NULL URL/空 URL |
+| 7. 在线测试 | 7 | — | 需 `WEBB_FETCH_TEST_LIVE=1`，默认跳过 |
+
+---
+
+## 部署注意
+
+```bash
+# 新依赖
+apt install libcurl4-openssl-dev
+
+# 编译
+make clean && make all
+
+# 测试（离线）
+make test-web-fetch && ./build/bin/test_web_fetch
+
+# 全量测试
+make test
+```
