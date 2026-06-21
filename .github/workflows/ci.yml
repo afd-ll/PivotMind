@@ -12,7 +12,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libsqlite3-dev libssl-dev
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libsqlite3-dev libssl-dev libcurl4-openssl-dev zlib1g-dev
       - name: Build (x86_64, OpenMP)
         run: make linux
       - name: Run tests
