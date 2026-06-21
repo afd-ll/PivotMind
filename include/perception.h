@@ -87,8 +87,8 @@ typedef struct Perception {
     int               article_accum_count;  /* 累计未 flush 的搜索结果数 */
 
     /* 搜索策略 */
-    int               provider_cooldown[4]; /* 各 provider 冷却到何时(tick) */
-    int               provider_failures[4]; /* 连续失败计数 */
+    int               provider_cooldown[5]; /* 各 provider 冷却到何时(tick) */
+    int               provider_failures[5]; /* 连续失败计数 */
 
     /* 统计 */
     long  total_searches;
@@ -142,6 +142,13 @@ void perception_stats(Perception* p, long* searches, long* learned, long* new_co
  * @return 成功搜索并学习的词数
  */
 int perception_suggest_queries(Perception* p, const char** queries);
+
+/**
+ * 定时新闻搜索 — 每小时搜 Bing News 头条
+ * 不同时段搜不同关键词，保持对现实世界的感知
+ * @return 新学到的词数，0=无新词或跳过
+ */
+int perception_search_news(Perception* p);
 
 #ifdef __cplusplus
 }

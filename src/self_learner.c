@@ -13,7 +13,8 @@
 #include "node_hash.h"
 #include "common.h"
 #include "error.h"
-#include "web_search.h"
+#include "perception.h"
+
 #include "topology_growth.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -379,62 +380,18 @@ int self_learner_cycle(SelfLearner* sl) {
             mark_explored(sl, steps[i].topo_id, steps[i].node_id);
         }
 
-        /* 6. 孤立节点 → 联网搜索学习 */
+        /* 6. 孤立节点 → 通过 perception 统一管线搜索学习 */
         if (len <= 1) {
             SubTopology* sub = sl->master->sub_topologies[seeds_topo[s]];
             if (sub && sub->net && seeds_node[s] < sub->net->node_count) {
                 ReasoningNode* node = sub->net->nodes[seeds_node[s]];
                 if (node && node->concept && node->edge_count == 0) {
-                    /* 构建搜索URL：优先百度百科（静态HTML，可解析） */
-                    char search_url[1024];
-                    snprintf(search_url, sizeof(search_url),
-                        "https://baike.baidu.com/item/%s", node->concept);
-
-                    WebResult* wr = web_search(search_url, 5000, 32768);
-                    if (wr && wr->keyword_count > 0) {
-                        SubTopology* vocab = sl->master->sub_topologies[0];
-                        if (vocab && vocab->net && vocab->node_hash) {
-                            int learned = 0;
-                            for (int k = 0; k < wr->keyword_count && learned < 5; k++) {
-                                if (!wr->keywords[k] || strlen(wr->keywords[k]) < 2) continue;
-                                /* 跳过纯数字/英文短词 */
-                                int is_text = 0;
-                                for (const char* cp = wr->keywords[k]; *cp; cp++)
-                                    if ((unsigned char)*cp > 127) { is_text = 1; break; }
-                                if (!is_text) continue;
-
-                                ReasoningNode* exist = node_hash_find(vocab->node_hash, wr->keywords[k]);
-                                if (!exist) {
-                                    int nid = insert_node_dynamic(sl->master, vocab->topo_id,
-                                                                   wr->keywords[k], NULL, 0);
-                                    if (nid >= 0 && nid < vocab->net->node_count) {
-                                        ReasoningNode* new_n = vocab->net->nodes[nid];
-                                        if (new_n) {
-                                            new_n->confidence = 0.3f;
-                                            huarong_net_add_connection(vocab->net,
-                                                node->node_id, new_n->node_id, 0.25f);
-                                            learned++;
-                                            total_mods++;
-                                        }
-                                    }
-                                } else if (exist != node) {
-                                    int already = 0;
-                                    for (int c = 0; c < node->edge_count; c++)
-                                        if (node->edges[c].target == exist) { already = 1; break; }
-                                    if (!already) {
-                                        huarong_net_add_connection(vocab->net,
-                                            node->node_id, exist->node_id, 0.3f);
-                                        total_mods++;
-                                    }
-                                }
-                            }
-                            if (learned > 0) {
-                                LOG_INFO("[自学] 联网学习 '%s' → 新增%d个关联概念",
-                                         node->concept, learned);
-                            }
-                        }
+                    /* 走 perception 统一管线（熔断/缓存/多源 fallback） */
+                    extern Perception* g_perception;  /* 由主程序注入的全局感觉皮层 */
+                    if (g_perception) {
+                        int result = perception_learn_concept(g_perception, node->concept);
+                        if (result > 0) total_mods++;
                     }
-                    web_result_free(wr);
                 }
             }
         }

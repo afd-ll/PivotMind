@@ -1,11 +1,8 @@
 /**
  * @file web_search.h
- * @brief 自实现搜索引擎 — 零依赖 HTTP 客户端 + HTML 解析
+ * @brief 网页搜索 — 基于 web_fetch 框架的 HTML 抓取 + 解析
  *
- * 跨平台实现：
- *   - Linux: BSD sockets
- *   - Windows: Winsock2
- * 无外部库依赖，纯 C + OS socket API。
+ * 传输层委托给 web_fetch（libcurl 引擎），本文件只负责 HTML 解析。
  */
 
 #ifndef WEB_SEARCH_H

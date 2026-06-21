@@ -306,6 +306,11 @@ static int brainstem_tick_perception(Brainstem* bs) {
     Perception* p = (Perception*)thalamus_get_region(th, THAL_PERCEPTION);
     if (p) work = perception_tick(p, p_throttle);
 
+    /* 每小时搜一次 Bing 新闻头条（3600 ticks ≈ 1h） */
+    if (p && bs->tick_count % 3600 == 0) {
+        perception_search_news(p);
+    }
+
     Amygdala* amy = (Amygdala*)thalamus_get_region(th, THAL_AMYGDALA);
     if (amy) amygdala_tick(amy);
     return work;

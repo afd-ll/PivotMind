@@ -28,7 +28,8 @@
 #include "autonomic_learner.h"
 #include "active_learner.h"
 #include "cognitive_controller.h"
-#include "web_search.h"
+#include "perception.h"
+
 #include "error.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -47,7 +48,6 @@
 
 // 前向声明
 static const char* get_confidence_level_name(CausalConfidenceLevel level);
-static WebResult* dialog_search_concept(const char* concept);
 
 // ==================== 推理常量 ====================
 
@@ -673,46 +673,16 @@ DialogReasoning* dialog_reason(DialogInput* input, MasterTopology* master,
                         found_count++;
                     }
 
-                    /* 联网搜索学习：为不懂的概念查询百度百科 */
+                    /* 联网搜索学习：为不懂的概念提交给 perception 管线异步学习 */
                     {
-                        WebResult* wr = dialog_search_concept(new_node->concept);
-                        if (wr && wr->keyword_count > 0) {
-                            int learned = 0;
-                            for (int k = 0; k < wr->keyword_count && learned < 4; k++) {
-                                if (!wr->keywords[k] || strlen(wr->keywords[k]) < 2) continue;
-                                int has_text = 0;
-                                for (const char* cp = wr->keywords[k]; *cp; cp++)
-                                    if ((unsigned char)*cp > 127 || isalpha((unsigned char)*cp))
-                                        { has_text = 1; break; }
-                                if (!has_text) continue;
-
-                                ReasoningNode* exist = node_hash_find(sub->node_hash, wr->keywords[k]);
-                                if (!exist) {
-                                    ReasoningNode* kn = huarong_net_add_node(
-                                        sub->net, wr->keywords[k], NULL, 0);
-                                    if (kn) {
-                                        kn->confidence = 0.35f;
-                                        node_hash_add(sub->node_hash, kn);
-                                        huarong_net_add_connection(sub->net,
-                                            new_node->node_id, kn->node_id, 0.3f);
-                                        learned++;
-                                    }
-                                } else if (exist != new_node) {
-                                    int already = 0;
-                                    for (int c = 0; c < new_node->edge_count; c++)
-                                        if (new_node->edges[c].target == exist) { already=1; break; }
-                                    if (!already)
-                                        huarong_net_add_connection(sub->net,
-                                            new_node->node_id, exist->node_id, 0.35f);
-                                }
-                            }
-                            if (learned > 0) {
-                                LOG_INFO("[对话学习] '%s' → 联网学习 %d 个关联概念",
-                                        new_node->concept, learned);
-                            }
-                        }
-                        web_result_free(wr);
+                        /* 提交给 perception，不阻塞对话（内部有缓存） */
+                        extern Perception* g_perception;
+                        if (g_perception)
+                            perception_suggest_queries(g_perception,
+                                (const char*[]){new_node->concept, NULL});
                     }
+                    /* 新概念学习已完全委托给 perception 的 article_reader 语义理解管线，
+                     * 不再在此处阻塞式调 web_search 建关键词节点。 */
                 }
             }
         }
@@ -1221,13 +1191,7 @@ static const char* context_seed_for_intent(DialogIntent intent) {
     }
 }
 
-/** 对话中联网搜索概念：超短超时（1秒），不阻塞对话 */
-static WebResult* dialog_search_concept(const char* concept) {
-    if (!concept || !concept[0]) return NULL;
-    char url[1024];
-    snprintf(url, sizeof(url), "https://baike.baidu.com/item/%s", concept);
-    return web_search(url, 1000, 32768);  /* 1秒超时，不阻塞对话 */
-}
+
 
 /**
  * 上下文实例节点管理 - 话题追踪 + 整理

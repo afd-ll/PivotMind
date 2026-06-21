@@ -47,6 +47,7 @@ int main(void) {
         "build/bin/test_io",
         "build/bin/test_cognitive_controller",
         "build/bin/test_cognitive_full",
+        "build/bin/test_web_fetch",
         "build/bin/test_integration",
     };
     int count = sizeof(tests) / sizeof(tests[0]);

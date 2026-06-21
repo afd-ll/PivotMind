@@ -5,6 +5,7 @@
 
 #include "perception.h"
 #include "web_search.h"
+#include "web_fetch.h"
 #include "active_learner.h"
 #include "article_reader.h"
 #include "huarong_topology.h"
@@ -16,18 +17,27 @@
 #include <string.h>
 #include <time.h>
 
+/* 全局感觉皮层指针 — 供 self_learner / dialog_system 等模块通过 extern 引用 */
+Perception* g_perception = NULL;
+
 /* 百度百科搜索 URL */
 #define BAIDU_BK "https://baike.baidu.com/item/"
 /* 百度搜索 URL（备选 1） */
 #define BAIDU_WEB "https://www.baidu.com/s?wd="
 /* 中文维基百科 URL（备选 2） */
 #define ZH_WIKI "https://zh.wikipedia.org/wiki/"
+/* Bing 搜索（备选 3，海外友好） */
+#define BING_SEARCH "https://www.bing.com/search?q="
+/* Bing 新闻搜索（备选 4，实时新闻） */
+#define BING_NEWS "https://www.bing.com/news/search?q="
 
 /* 搜索 Provider 索引 */
 #define PROV_BAIDU_BK   0
 #define PROV_BAIDU_WEB  1
 #define PROV_ZH_WIKI    2
-#define PROV_COUNT      3
+#define PROV_BING       3
+#define PROV_BING_NEWS  4
+#define PROV_COUNT      5
 
 /* Provider 熔断：连续失败此数后冷却 */
 #define PROVIDER_FAIL_MAX   3
@@ -125,6 +135,9 @@ Perception* perception_create(MasterTopology* topology,
     p->cache_size = 0;
     p->cache_max  = CACHE_MAX_ENTRIES;
 
+    /* 设置全局指针供其他模块引用 */
+    g_perception = p;
+
     printf("[感觉皮层] 就绪 (最大%d个/周期, 超时%dms, 缓存%ds, article_reader 已绑定)\n",
            p->cfg.max_searches_per_cycle, p->cfg.search_timeout_ms,
            p->cfg.cache_ttl_seconds);
@@ -152,6 +165,7 @@ void perception_destroy(Perception* p) {
     }
     /* 销毁文章阅读器 */
     if (p->ar) article_reader_destroy(p->ar);
+    if (g_perception == p) g_perception = NULL;
     free(p);
 }
 
@@ -245,10 +259,37 @@ static void _provider_result(Perception* p, int prov_idx, int success) {
         if (p->provider_failures[prov_idx] >= PROVIDER_FAIL_MAX) {
             p->provider_cooldown[prov_idx] = p->tick_counter + PROVIDER_COOLDOWN_TICKS;
             if (p->cfg.verbose) {
-                const char* names[] = {"百度百科", "百度搜索", "中文维基"};
+                const char* names[] = {"百度百科", "百度搜索", "中文维基", "Bing搜索", "Bing新闻"};
                 fprintf(stderr, "[感觉皮层] Provider '%s' 进入冷却 (%d ticks)\n",
                         names[prov_idx], PROVIDER_COOLDOWN_TICKS);
             }
+        }
+    }
+}
+
+/** 根据响应码触发熔断 — 对接 web_fetch 响应码分类 */
+static void _provider_check_http_status(Perception* p, int prov_idx, WebResult* wr) {
+    if (!wr || !p) return;
+
+    /* 永久封禁 403/451 → 加长冷却 */
+    if (web_fetch_is_permanent_block(wr->status_code)) {
+        p->provider_failures[prov_idx] = PROVIDER_FAIL_MAX;
+        p->provider_cooldown[prov_idx] = p->tick_counter + PROVIDER_COOLDOWN_TICKS * 5;
+        if (p->cfg.verbose) {
+            const char* names[] = {"百度百科", "百度搜索", "中文维基", "Bing搜索", "Bing新闻"};
+            fprintf(stderr, "[感觉皮层] Provider '%s' HTTP %d 永久封禁，冷却延长\n",
+                    names[prov_idx], wr->status_code);
+        }
+        return;
+    }
+
+    /* 限速 429 → 加大延迟 */
+    if (web_fetch_is_rate_limit(wr->status_code)) {
+        p->provider_cooldown[prov_idx] = p->tick_counter + PROVIDER_COOLDOWN_TICKS * 2;
+        if (p->cfg.verbose) {
+            const char* names[] = {"百度百科", "百度搜索", "中文维基", "Bing搜索", "Bing新闻"};
+            fprintf(stderr, "[感觉皮层] Provider '%s' HTTP 429 限速，冷却延长\n",
+                    names[prov_idx]);
         }
     }
 }
@@ -273,6 +314,12 @@ static WebResult* _try_provider(Perception* p, int prov_idx,
         break;
     case PROV_ZH_WIKI:
         snprintf(url, sizeof(url), "%s%s", ZH_WIKI, encoded_query);
+        break;
+    case PROV_BING:
+        snprintf(url, sizeof(url), "%s%s", BING_SEARCH, encoded_query);
+        break;
+    case PROV_BING_NEWS:
+        snprintf(url, sizeof(url), "%s%s", BING_NEWS, encoded_query);
         break;
     default:
         return NULL;
@@ -312,9 +359,10 @@ static int search_and_learn(Perception* p, const char* concept, PerceptionSource
     int merged_len = 0;
     int sources_used = 0;
 
-    /* Provider 优先级: 百度百科 → 百度搜索 → 中文维基 */
-    int prov_priority[PROV_COUNT] = { PROV_BAIDU_BK, PROV_BAIDU_WEB, PROV_ZH_WIKI };
-    const char* prov_names[] = { "百度百科", "百度搜索", "中文维基" };
+    /* Provider 优先级: 百度百科 → 百度搜索 → 中文维基 → Bing → Bing新闻 */
+    int prov_priority[PROV_COUNT] = { PROV_BAIDU_BK, PROV_BAIDU_WEB, PROV_ZH_WIKI,
+                                      PROV_BING, PROV_BING_NEWS };
+    const char* prov_names[] = { "百度百科", "百度搜索", "中文维基", "Bing搜索", "Bing新闻" };
 
     if (p->cfg.verbose) {
         const char* src_names[] = {"好奇", "巩固", "对话", "空闲"};
@@ -331,12 +379,19 @@ static int search_and_learn(Perception* p, const char* concept, PerceptionSource
 
         WebResult* wr = _try_provider(p, prov, encoded);
         if (!wr || (wr->status_code != 200 && wr->status_code != 0) || !wr->body) {
-            if (wr) web_result_free(wr);
-            _provider_result(p, prov, 0);
+            if (wr) {
+                _provider_check_http_status(p, prov, wr);
+                web_result_free(wr);
+            } else {
+                _provider_result(p, prov, 0);
+            }
             if (p->cfg.verbose)
                 fprintf(stderr, "[感觉皮层]   %s 无响应\n", prov_names[prov]);
             continue;
         }
+
+        /* 检查是否需要熔断 */
+        _provider_check_http_status(p, prov, wr);
 
         _provider_result(p, prov, 1);
 
@@ -592,6 +647,118 @@ int perception_suggest_queries(Perception* p, const char** queries) {
             learned++;
     }
     return learned;
+}
+
+/**
+ * 定时新闻搜索 — 每小时搜 Bing News 头条
+ * 不同时段搜不同关键词，保持对现实世界的感知
+ */
+int perception_search_news(Perception* p) {
+    if (!p || !p->ar) return 0;
+
+    /* 根据当前小时选择新闻主题 */
+    time_t now = time(NULL);
+    struct tm* tm_info = localtime(&now);
+    int hour = tm_info ? tm_info->tm_hour : 12;
+
+    const char* topic;
+    if (hour >= 6 && hour < 10)       topic = "科技";
+    else if (hour >= 10 && hour < 14) topic = "财经";
+    else if (hour >= 14 && hour < 18) topic = "国际";
+    else if (hour >= 18 && hour < 22) topic = "文化";
+    else                              topic = "科技";  /* 夜间默认 */
+
+    if (p->cfg.verbose)
+        fprintf(stderr, "[感觉皮层] 📰 实时新闻搜索: '%s'\n", topic);
+
+    /* 编码查询 */
+    char encoded[256];
+    _url_encode(topic, encoded, sizeof(encoded));
+
+    /* 只用 Bing 新闻 provider */
+    if (!_provider_available(p, PROV_BING_NEWS)) {
+        if (p->cfg.verbose)
+            fprintf(stderr, "[感觉皮层] Bing新闻 冷却中，跳过\n");
+        return 0;
+    }
+
+    WebResult* wr = _try_provider(p, PROV_BING_NEWS, encoded);
+    if (!wr || !wr->body) {
+        if (wr) {
+            _provider_check_http_status(p, PROV_BING_NEWS, wr);
+            web_result_free(wr);
+        } else {
+            _provider_result(p, PROV_BING_NEWS, 0);
+        }
+        return 0;
+    }
+
+    _provider_check_http_status(p, PROV_BING_NEWS, wr);
+    _provider_result(p, PROV_BING_NEWS, 1);
+
+    /* 提取文本 */
+    int body_len = wr->body_len;
+    if (body_len > 16384) body_len = 16384;
+    char* text = (char*)malloc(body_len + 1);
+    if (!text) { web_result_free(wr); return 0; }
+
+    int text_len = web_extract_text(wr->body, text, body_len);
+    text[text_len] = '\0';
+    web_result_free(wr);
+
+    if (text_len < 20) { free(text); return 0; }
+
+    /* 概念上下文 */
+    char title_line[320];
+    snprintf(title_line, sizeof(title_line), "新闻：%s", topic);
+    article_process_line(p->ar, title_line);
+
+    /* 分句处理 */
+    _normalize_sentence_breaks(text);
+
+    char* line_ctx = NULL;
+    int lines_processed = 0;
+#ifdef _WIN32
+    char* line = strtok_s(text, "\n", &line_ctx);
+#else
+    char* line = strtok_r(text, "\n", &line_ctx);
+#endif
+    while (line) {
+        int len = (int)strlen(line);
+        int has_content = 0;
+        for (int i = 0; i < len; i++) {
+            if ((unsigned char)line[i] > 32) { has_content = 1; break; }
+        }
+        if (has_content && len > 2) {
+            article_process_line(p->ar, line);
+            lines_processed++;
+        }
+#ifdef _WIN32
+        line = strtok_s(NULL, "\n", &line_ctx);
+#else
+        line = strtok_r(NULL, "\n", &line_ctx);
+#endif
+    }
+    free(text);
+
+    /* 累积并可能 flush */
+    p->article_accum_count++;
+    int new_words = 0;
+    if (p->article_accum_count >= p->cfg.article_flush_interval) {
+        new_words = article_flush(p->ar, NULL);
+        p->article_accum_count = 0;
+    }
+
+    p->total_searches++;
+    p->total_concepts_learned++;
+    if (lines_processed > 0)
+        learn_from_dialog(p->learner, topic, "", "");
+
+    if (p->cfg.verbose)
+        fprintf(stderr, "[感觉皮层] 📰 新闻 '%s' 处理 %d 行, +%d 新词\n",
+                topic, lines_processed, new_words);
+
+    return (new_words > 0) ? new_words : 1;
 }
 
 void perception_stats(Perception* p, long* searches, long* learned, long* new_conns) {

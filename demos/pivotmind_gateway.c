@@ -298,6 +298,7 @@ static int gw_system_init(GatewaySystem* gw) {
     fprintf(stderr, "[gateway]   创建感觉皮层...\n");
     gw->perception = perception_create(gw->topology, gw->memory, gw->learner, NULL);
     if (!gw->perception) { fprintf(stderr, "[gateway] 感觉皮层创建失败\n"); return -1; }
+    /* g_perception 已由 perception_create 自动设置 */
     fprintf(stderr, "[gateway]   感觉皮层就绪\n");
 
     // 海马体（记忆+巩固，感知联动通过丘脑信号总线）

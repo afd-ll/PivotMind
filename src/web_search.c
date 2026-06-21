@@ -1,34 +1,19 @@
 /**
  * @file web_search.c
- * @brief 自实现搜索引擎 — HTTP/HTTPS + HTML解析 + URL编码
+ * @brief 网页搜索 — 基于 web_fetch 框架的 HTML 抓取 + 解析
  *
- * Windows: WinHTTP (HTTPS原生)
- * Linux:   BSD socket HTTP GET; 有OpenSSL时启用HTTPS
- * 回退: HTTPS失败 → 尝试HTTP等价URL
+ * 传输层：委托给 web_fetch.c（libcurl 引擎 + 策略管控）
+ * 解析层：HTML → 纯文本提取（多策略分层）
+ *
+ * 跨平台：web_fetch 内部处理 Windows/Linux 差异，本文件无需平台条件编译
  */
+
 #include "web_search.h"
+#include "web_fetch.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
-
-#ifdef _WIN32
-  #include <windows.h>
-  #include <winhttp.h>
-  #pragma comment(lib, "winhttp.lib")
-#else
-  #include <sys/socket.h>
-  #include <netinet/in.h>
-  #include <arpa/inet.h>
-  #include <netdb.h>
-  #include <unistd.h>
-  #include <errno.h>
-  #ifdef HAS_OPENSSL
-    #include <openssl/ssl.h>
-    #include <openssl/err.h>
-    static int ssl_ready = 0;
-  #endif
-#endif
 
 /* ================================================================
  *  URL 编码 — 中文等非ASCII字节 → %XX
@@ -48,348 +33,6 @@ static int url_encode(const char* src, char* dst, int dst_sz) {
     dst[pos] = '\0';
     return pos;
 }
-
-/* ================================================================
- *  URL 解析
- * ================================================================ */
-static int parse_url(const char* url, char* host, int hs, int* port, char* path, int ps) {
-    int is_https = (strncmp(url, "https://", 8) == 0);
-    const char* p = is_https ? url+8 : (strncmp(url,"http://",7)==0 ? url+7 : url);
-    *port = is_https ? 443 : 80;
-    int hi=0; while(*p && *p!='/' && *p!=':' && hi<hs-1) host[hi++]=*p++;
-    host[hi]=0;
-    if(*p==':'){p++; *port=atoi(p); while(isdigit((unsigned char)*p))p++;}
-    if(*p){int pi=0; while(*p&&pi<ps-1)path[pi++]=*p++; path[pi]=0;}
-    else{path[0]='/';path[1]=0;}
-    return is_https;
-}
-
-/* ================================================================
- *  Linux: BSD socket HTTP GET
- * ================================================================ */
-#ifndef _WIN32
-static char* bsd_http_get(const char* host, int port, const char* path,
-                          int timeout_ms, int max_body, int* out_len,
-                          char** out_content_type) {
-    struct hostent* he = gethostbyname(host);
-    if (!he) return NULL;
-
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons((unsigned short)port);
-    memcpy(&addr.sin_addr, he->h_addr_list[0], he->h_length);
-
-    int sock = (int)socket(AF_INET, SOCK_STREAM, 0);
-    if (sock < 0) return NULL;
-
-    struct timeval tv = { timeout_ms/1000, (timeout_ms%1000)*1000 };
-    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-
-    if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-        close(sock); return NULL;
-    }
-
-    char req[2048];
-    int rl = snprintf(req, sizeof(req),
-        "GET %s HTTP/1.1\r\nHost: %s\r\n"
-        "User-Agent: Mozilla/5.0 (X11; Linux aarch64) PivotMind/0.2\r\n"
-        "Accept: text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.8\r\n"
-        "Accept-Language: zh-CN,zh;q=0.9,en;q=0.5\r\n"
-        "Connection: close\r\n\r\n", path, host);
-
-    if (send(sock, req, rl, 0) < 0) { close(sock); return NULL; }
-
-    char* body = (char*)malloc(max_body + 1);
-    if (!body) { close(sock); return NULL; }
-    int total = 0;
-    char buf[4096];
-    while (total < max_body) {
-        int n = (int)recv(sock, buf, sizeof(buf) - 1, 0);
-        if (n <= 0) break;
-        if (total + n > max_body) n = max_body - total;
-        memcpy(body + total, buf, n);
-        total += n;
-    }
-    body[total] = '\0';
-    *out_len = total;
-    close(sock);
-
-    /* 提取 Content-Type 响应头（在剥离 header 之前） */
-    if (out_content_type) {
-        *out_content_type = NULL;
-        /* 找 Content-Type: 行（大小写不敏感） */
-        char* ct = NULL;
-        char* bs1 = strstr(body, "Content-Type:");
-        char* bs2 = strstr(body, "content-type:");
-        ct = bs1 ? bs1 : bs2;
-        if (ct) {
-            ct += 13;  /* skip "Content-Type:" */
-            while (*ct == ' ' || *ct == ':') ct++;
-            char* end = strstr(ct, "\r\n");
-            if (!end) end = strstr(ct, "\n");
-            if (end) {
-                int ct_len = (int)(end - ct);
-                if (ct_len > 0 && ct_len < 256) {
-                    *out_content_type = (char*)malloc(ct_len + 1);
-                    if (*out_content_type) {
-                        memcpy(*out_content_type, ct, ct_len);
-                        (*out_content_type)[ct_len] = '\0';
-                    }
-                }
-            }
-        }
-    }
-
-    /* 跳过 HTTP 头，只保留 body */
-    char* bs = strstr(body, "\r\n\r\n");
-    if (!bs) bs = strstr(body, "\n\n");
-    if (bs) {
-        int skip = (int)(bs - body) + ((bs[2]=='\n') ? 3 : 4);
-        int blen = total - skip;
-        if (blen > 0) memmove(body, bs + ((bs[2]=='\n')?3:4), blen);
-        body[blen] = '\0';
-        *out_len = blen;
-    }
-    return body;
-}
-
-#ifdef HAS_OPENSSL
-static char* openssl_https_get(const char* host, int port, const char* path,
-                               int timeout_ms, int max_body, int* out_len,
-                               char** out_content_type) {
-    if (!ssl_ready) {
-        SSL_load_error_strings();
-        OpenSSL_add_ssl_algorithms();
-        ssl_ready = 1;
-    }
-
-    /* 1. 解析主机名 */
-    struct hostent* he = gethostbyname(host);
-    if (!he) return NULL;
-
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons((unsigned short)port);
-    memcpy(&addr.sin_addr, he->h_addr_list[0], he->h_length);
-
-    /* 2. 创建 socket + connect */
-    int sock = (int)socket(AF_INET, SOCK_STREAM, 0);
-    if (sock < 0) return NULL;
-
-    struct timeval tv = { timeout_ms / 1000, (timeout_ms % 1000) * 1000 };
-    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-
-    if (connect(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-        close(sock);
-        return NULL;
-    }
-
-    /* 3. SSL 上下文 — TLS 1.2+ */
-    const SSL_METHOD* method = TLS_client_method();
-    SSL_CTX* ctx = SSL_CTX_new(method);
-    if (!ctx) { close(sock); return NULL; }
-
-    /* 跳过证书验证（对公开网站可接受，后期可加固为 CA bundle） */
-    SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, NULL);
-
-    SSL* ssl = SSL_new(ctx);
-    if (!ssl) { SSL_CTX_free(ctx); close(sock); return NULL; }
-
-    SSL_set_fd(ssl, sock);
-    if (SSL_connect(ssl) != 1) {
-        SSL_free(ssl);
-        SSL_CTX_free(ctx);
-        close(sock);
-        return NULL;
-    }
-
-    /* 4. 构建并发送 HTTP 请求 */
-    char req[2048];
-    int rl = snprintf(req, sizeof(req),
-        "GET %s HTTP/1.1\r\nHost: %s\r\n"
-        "User-Agent: Mozilla/5.0 (X11; Linux aarch64) PivotMind/0.2\r\n"
-        "Accept: text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.8\r\n"
-        "Accept-Language: zh-CN,zh;q=0.9,en;q=0.5\r\n"
-        "Connection: close\r\n\r\n",
-        path, host);
-
-    if (SSL_write(ssl, req, rl) <= 0) {
-        SSL_free(ssl);
-        SSL_CTX_free(ctx);
-        close(sock);
-        return NULL;
-    }
-
-    /* 5. 读取响应 */
-    char* body = (char*)malloc(max_body + 1);
-    if (!body) {
-        SSL_free(ssl);
-        SSL_CTX_free(ctx);
-        close(sock);
-        return NULL;
-    }
-    int total = 0;
-    while (total < max_body) {
-        int n = SSL_read(ssl, body + total, max_body - total);
-        if (n <= 0) break;
-        total += n;
-    }
-    body[total] = '\0';
-    *out_len = total;
-
-    SSL_shutdown(ssl);
-    SSL_free(ssl);
-    SSL_CTX_free(ctx);
-    close(sock);
-
-    /* 6. 提取 Content-Type（在剥离 header 之前） */
-    if (out_content_type) {
-        *out_content_type = NULL;
-        char* ct = NULL;
-        char* bs1 = strstr(body, "Content-Type:");
-        char* bs2 = strstr(body, "content-type:");
-        ct = bs1 ? bs1 : bs2;
-        if (ct) {
-            ct += 13;
-            while (*ct == ' ' || *ct == ':') ct++;
-            char* end = strstr(ct, "\r\n");
-            if (!end) end = strstr(ct, "\n");
-            if (end) {
-                int ct_len = (int)(end - ct);
-                if (ct_len > 0 && ct_len < 256) {
-                    *out_content_type = (char*)malloc(ct_len + 1);
-                    if (*out_content_type) {
-                        memcpy(*out_content_type, ct, ct_len);
-                        (*out_content_type)[ct_len] = '\0';
-                    }
-                }
-            }
-        }
-    }
-
-    /* 7. 剥离 HTTP 头，只保留 body */
-    char* bs = strstr(body, "\r\n\r\n");
-    if (!bs) bs = strstr(body, "\n\n");
-    if (bs) {
-        int skip = (int)(bs - body) + ((bs[2] == '\n') ? 3 : 4);
-        int blen = total - skip;
-        if (blen > 0) memmove(body, bs + ((bs[2] == '\n') ? 3 : 4), blen);
-        body[blen] = '\0';
-        *out_len = blen;
-    }
-    return body;
-}
-#endif
-#endif /* !_WIN32 */
-
-/* ================================================================
- *  主 fetch 函数
- * ================================================================ */
-
-#ifdef _WIN32
-static char* do_fetch(const char* url, int timeout_ms, int max_body,
-                      int* out_len, int* out_status,
-                      char** out_content_type) {
-    char host[256], path[2048]; int port, is_https;
-    (void)timeout_ms;  /* WinHTTP 自管超时 */
-    is_https = parse_url(url, host, sizeof(host), &port, path, sizeof(path));
-
-    *out_content_type = NULL;
-
-    HINTERNET s = WinHttpOpen(L"PivotMind/0.1", 0,0,0,0);
-    if (!s) return NULL;
-
-    wchar_t wh[256], wp[2048];
-    MultiByteToWideChar(CP_UTF8, 0, host, -1, wh, 256);
-    MultiByteToWideChar(CP_UTF8, 0, path, -1, wp, 2048);
-
-    HINTERNET c = WinHttpConnect(s, wh, (unsigned short)port, 0);
-    if (!c) { WinHttpCloseHandle(s); return NULL; }
-
-    DWORD flags = is_https ? WINHTTP_FLAG_SECURE : 0;
-    HINTERNET r = WinHttpOpenRequest(c, L"GET", wp, 0,0,0, flags);
-    if (!r) { WinHttpCloseHandle(c); WinHttpCloseHandle(s); return NULL; }
-
-    if (is_https) {
-        DWORD sf = 0x100|0x200|0x1000;
-        WinHttpSetOption(r, 31, &sf, sizeof(sf));
-    }
-
-    if (!WinHttpSendRequest(r,0,0,0,0,0,0) || !WinHttpReceiveResponse(r,0)) {
-        WinHttpCloseHandle(r); WinHttpCloseHandle(c); WinHttpCloseHandle(s); return NULL;
-    }
-
-    DWORD st=0,sz=4;
-    WinHttpQueryHeaders(r, 19|0x20000000, 0, &st, &sz, 0);
-    *out_status = (int)st;
-
-    /* 提取 Content-Type */
-    {
-        DWORD ct_sz = 0;
-        WinHttpQueryHeaders(r, 28, 0, 0, &ct_sz, 0);  /* 28 = WINHTTP_QUERY_CONTENT_TYPE */
-        if (ct_sz > 0) {
-            wchar_t* wct = (wchar_t*)malloc(ct_sz);
-            if (wct && WinHttpQueryHeaders(r, 28, 0, wct, &ct_sz, 0)) {
-                int ct_len = WideCharToMultiByte(CP_UTF8, 0, wct, -1, 0, 0, 0, 0);
-                if (ct_len > 1) {
-                    *out_content_type = (char*)malloc(ct_len);
-                    if (*out_content_type)
-                        WideCharToMultiByte(CP_UTF8, 0, wct, -1,
-                                           *out_content_type, ct_len, 0, 0);
-                }
-            }
-            free(wct);
-        }
-    }
-
-    char* body = (char*)malloc(max_body+1);
-    if (!body) { WinHttpCloseHandle(r); WinHttpCloseHandle(c); WinHttpCloseHandle(s); return NULL; }
-    int total=0; DWORD avail, read;
-    while (total<max_body && WinHttpQueryDataAvailable(r,&avail) && avail>0) {
-        if (avail > (DWORD)(max_body-total)) avail=(DWORD)(max_body-total);
-        if (!WinHttpReadData(r, body+total, avail, &read)) break;
-        total+=(int)read;
-    }
-    body[total]=0; *out_len=total;
-    WinHttpCloseHandle(r); WinHttpCloseHandle(c); WinHttpCloseHandle(s);
-    return body;
-}
-#else
-static char* do_fetch(const char* url, int timeout_ms, int max_body,
-                      int* out_len, int* out_status,
-                      char** out_content_type) {
-    char host[256], path[2048]; int port, is_https;
-    (void)timeout_ms;  /* 传入底层 socket 函数 */
-    is_https = parse_url(url, host, sizeof(host), &port, path, sizeof(path));
-
-    /* 初始化 */
-    *out_content_type = NULL;
-
-    /* HTTPS: 优先尝试 SSL */
-#ifdef HAS_OPENSSL
-    if (is_https) {
-        char* body = openssl_https_get(host, port, path,
-                                       timeout_ms, max_body, out_len,
-                                       out_content_type);
-        if (body) { *out_status = 200; return body; }
-    }
-#endif
-
-    /* HTTP 直连（非 HTTPS，或 HTTPS+OpenSSL 未编译/失败） */
-    if (!is_https) {
-        char* body = bsd_http_get(host, port, path,
-                                  timeout_ms, max_body, out_len,
-                                  out_content_type);
-        if (body) { *out_status = 200; return body; }
-    }
-
-    return NULL;
-}
-#endif
 
 /* ================================================================
  *  HTML → 文本（增强版：结构化分层提取）
@@ -591,14 +234,61 @@ static int _legacy_extract_text(const char* html, char* out, int out_sz) {
 }
 
 /**
+ * 搜索结果页文本提取策略 — 适配 Bing/Google 搜索结果页
+ * 提取搜索摘要片段和标题链接文本
+ */
+static int _extract_search_results(const char* html, char* out, int out_sz) {
+    if (!html || !out || out_sz <= 0) return 0;
+
+    int total = 0;
+
+    /* 提取所有 <h2> / <h3> 标题（搜索结果通常以标题链接呈现） */
+    int h2 = _extract_tag_content(html, "h2", out + total, out_sz - total);
+    total += h2;
+    if (total < out_sz - 1) {
+        int h3 = _extract_tag_content(html, "h3", out + total, out_sz - total);
+        total += h3;
+    }
+
+    /* 提取 <cite> 标签（URL/来源标注） */
+    if (total < out_sz - 1) {
+        total += _extract_tag_content(html, "cite", out + total, out_sz - total);
+    }
+
+    /* 回退：用普通段落提取兜底 */
+    if (total < 50 && total < out_sz - 1) {
+        total += web_extract_paragraphs(html, out + total, out_sz - total, 5);
+    }
+
+    return total;
+}
+
+/**
  * 主入口：分层提取 HTML 文本
  *
+ * 策略 0: 检测是否为搜索结果页 → 搜索摘要提取
  * 策略 1: <meta name="description"> — 最高质量摘要（百度百科/维基标准）
  * 策略 2: <h1>/<h2> 标题 + 前 3 段 <p> — 结构化正文
  * 策略 3: 回退到原始 tag 剥离
  */
 int web_extract_text(const char* html, char* out, int out_sz) {
     if (!html || !out || out_sz <= 0) return 0;
+
+    /* 策略 0: 快速检测是否为搜索结果页（含 /search 或 "result" 等特征） */
+    {
+        const char* check = html;
+        int search_hints = 0;
+        if (strstr(check, "/search")) search_hints++;
+        if (strstr(check, "result-stats") || strstr(check, "resultStats")) search_hints++;
+        if (strstr(check, "search-results") || strstr(check, "searchResults")) search_hints++;
+        if (strstr(check, "b_results") || strstr(check, "b_algo")) search_hints++; /* Bing */
+        if (strstr(check, "\"estimatedResultCount\"") || strstr(check, "\"webPages\"")) search_hints++;
+
+        if (search_hints >= 2) {
+            int len = _extract_search_results(html, out, out_sz);
+            if (len > 30) return len;
+        }
+    }
 
     /* 策略 1: meta description */
     int len = web_extract_meta_description(html, out, out_sz);
@@ -617,56 +307,60 @@ int web_extract_text(const char* html, char* out, int out_sz) {
 }
 
 /* ================================================================
- *  主 API
+ *  主 API — 委托给 web_fetch 框架
  * ================================================================ */
+
 WebResult* web_search(const char* url, int timeout_ms, int max_body) {
+    (void)timeout_ms;  /* 超时由 web_fetch 的 CrawlPolicy 统一管理 */
     if (!url) return NULL;
 
-    /* URL编码：自动处理中文 */
-    char encoded[2048];
-    if (strchr(url, '%') == NULL) {
-        /* 未编码的URL → 编码path部分 */
-        int is_https = (strncmp(url, "https://", 8) == 0);
-        const char* p = is_https ? url+8 : (strncmp(url,"http://",7)==0 ? url+7 : url);
-        /* 找到path起始 */
-        const char* path_start = strchr(p, '/');
-        if (!path_start) path_start = p + strlen(p);
-        int prefix_len = (int)(path_start - url);
-        /* 编码path */
-        char encoded_path[1536];
-        url_encode(path_start, encoded_path, sizeof(encoded_path));
-        snprintf(encoded, sizeof(encoded), "%.*s%s", prefix_len, url, encoded_path);
-    } else {
-        snprintf(encoded, sizeof(encoded), "%s", url);
+    /* 使用 web_fetch 替代裸 socket */
+    FetchResult* fr = web_fetch(url);
+    if (!fr) return NULL;
+
+    /* 永久封禁或网络错误 → 直接返回 NULL */
+    if (fr->fetch_class == FETCH_PERM_BLOCK ||
+        fr->fetch_class == FETCH_NETWORK_ERR) {
+        web_fetch_result_free(fr);
+        return NULL;
     }
 
-    WebResult* r = (WebResult*)calloc(1,sizeof(WebResult));
-    if (!r) return NULL;
+    /* 构造 WebResult（保持现有 API 兼容） */
+    WebResult* r = (WebResult*)calloc(1, sizeof(WebResult));
+    if (!r) { web_fetch_result_free(fr); return NULL; }
 
-    int body_len=0, status=0;
-    char* content_type = NULL;
-    char* raw = do_fetch(encoded, timeout_ms, max_body, &body_len, &status, &content_type);
-    if (!raw) { free(r); free(content_type); return NULL; }
+    r->url          = strdup(fr->final_url ? fr->final_url : url);
+    r->status_code  = fr->status_code;
+    r->body         = fr->body;          /* 转移所有权 */
+    r->body_len     = fr->body_len;
+    r->content_type = fr->content_type;  /* 转移所有权 */
+    fr->body = NULL;
+    fr->content_type = NULL;
+    web_fetch_result_free(fr);
 
-    r->status_code = status;
-    r->body = raw;
-    r->body_len = body_len;
-    r->content_type = content_type;  /* 可能为 NULL */
+    /* 截断 body 到 max_body */
+    if (r->body && r->body_len > max_body) {
+        r->body_len = max_body;
+        r->body[r->body_len] = '\0';
+    }
 
     /* 提取 <title> */
     if (r->body) {
         const char* ts = strstr(r->body, "<title>");
-        const char* te = ts?strstr(ts,"</title>"):NULL;
-        if (ts&&te) {
-            ts+=7; int tl=(int)(te-ts);
-            if(tl>0&&tl<256){r->title=(char*)malloc(tl+1);
-                if(r->title){memcpy(r->title,ts,tl);r->title[tl]=0;}}
+        const char* te = ts ? strstr(ts, "</title>") : NULL;
+        if (ts && te) {
+            ts += 7;
+            int tl = (int)(te - ts);
+            if (tl > 0 && tl < 256) {
+                r->title = (char*)malloc(tl + 1);
+                if (r->title) { memcpy(r->title, ts, tl); r->title[tl] = 0; }
+            }
         }
     }
 
-    /* 提取关键词（含中文n-gram） */
-    if (r->body && r->body_len>0) {
-        char* text = (char*)malloc(r->body_len+1);
+    /* 提取关键词（含中文 n-gram） */
+    if (r->body && r->body_len > 0) {
+        char* text = (char*)malloc(r->body_len + 1);
         if (text) {
             int tl = web_extract_text(r->body, text, r->body_len);
             text[tl] = 0;
@@ -676,49 +370,49 @@ WebResult* web_search(const char* url, int timeout_ms, int max_body) {
             /* 双策略：strtok分词 + 中文2-gram补充 */
             char* delim = " \t\n\r,.;:!?()[]{}<>，。；：！？（）【】《》";
 #ifdef _WIN32
-            char* next=NULL;
+            char* next = NULL;
             char* tok = strtok_s(text, delim, &next);
-            while(tok&&r->keyword_count<kw_cap-10){
+            while (tok && r->keyword_count < kw_cap - 10) {
 #else
             char* sv;
             char* tok = strtok_r(text, delim, &sv);
-            while(tok&&r->keyword_count<kw_cap-10){
+            while (tok && r->keyword_count < kw_cap - 10) {
 #endif
-                int tkl=(int)strlen(tok);
-                if(tkl>=2&&tkl<32){
-                    int ht=0; for(const char*cp=tok;*cp;cp++)
-                        if((unsigned char)*cp>127||isalpha((unsigned char)*cp)){ht=1;break;}
-                    if(ht){r->keywords[r->keyword_count]=strdup(tok); r->keyword_count++;}
+                int tkl = (int)strlen(tok);
+                if (tkl >= 2 && tkl < 32) {
+                    int ht = 0;
+                    for (const char* cp = tok; *cp; cp++)
+                        if ((unsigned char)*cp > 127 || isalpha((unsigned char)*cp)) { ht = 1; break; }
+                    if (ht) { r->keywords[r->keyword_count] = strdup(tok); r->keyword_count++; }
                 }
 #ifdef _WIN32
-                tok=strtok_s(NULL,delim,&next);
+                tok = strtok_s(NULL, delim, &next);
 #else
-                tok=strtok_r(NULL,delim,&sv);
+                tok = strtok_r(NULL, delim, &sv);
 #endif
             }
 
-            /* 中文2-gram补充：从文本中提取连续的CJK字符对 */
+            /* 中文2-gram补充 */
             int kg_start = r->keyword_count;
-            for (int i=0; i<tl-2 && r->keyword_count<kw_cap; i++) {
-                unsigned char c1=(unsigned char)text[i];
-                unsigned char c2=(unsigned char)text[i+1];
-                unsigned char c3=(unsigned char)text[i+2];
-                unsigned char c4=(unsigned char)text[i+3];
-                /* 2个CJK字符（3字节*2=6字节UTF-8）→ 中文词组 */
-                if (c1>=0xE0 && c2>=0x80 && (c3>=0xE0||c3<0x80)) {
-                    if (c3>=0xE0 && c4>=0x80) {
+            for (int i = 0; i < tl - 2 && r->keyword_count < kw_cap; i++) {
+                unsigned char c1 = (unsigned char)text[i];
+                unsigned char c2 = (unsigned char)text[i + 1];
+                unsigned char c3 = (unsigned char)text[i + 2];
+                unsigned char c4 = (unsigned char)text[i + 3];
+                if (c1 >= 0xE0 && c2 >= 0x80 && (c3 >= 0xE0 || c3 < 0x80)) {
+                    if (c3 >= 0xE0 && c4 >= 0x80) {
                         char bigram[7];
-                        bigram[0]=text[i]; bigram[1]=text[i+1]; bigram[2]=text[i+2];
-                        bigram[3]=text[i+3]; bigram[4]=text[i+4]; bigram[5]=text[i+5];
-                        bigram[6]=0;
-                        int dup=0;
-                        for(int d=kg_start; d<r->keyword_count; d++)
-                            if(strcmp(r->keywords[d],bigram)==0){dup=1;break;}
-                        if(!dup&&r->keyword_count<kw_cap) {
-                            r->keywords[r->keyword_count]=strdup(bigram);
+                        bigram[0] = text[i]; bigram[1] = text[i+1]; bigram[2] = text[i+2];
+                        bigram[3] = text[i+3]; bigram[4] = text[i+4]; bigram[5] = text[i+5];
+                        bigram[6] = 0;
+                        int dup = 0;
+                        for (int d = kg_start; d < r->keyword_count; d++)
+                            if (strcmp(r->keywords[d], bigram) == 0) { dup = 1; break; }
+                        if (!dup && r->keyword_count < kw_cap) {
+                            r->keywords[r->keyword_count] = strdup(bigram);
                             r->keyword_count++;
                         }
-                        i+=2; /* skip next UTF-8 char */
+                        i += 2;
                     }
                 }
             }
@@ -726,13 +420,17 @@ WebResult* web_search(const char* url, int timeout_ms, int max_body) {
         }
     }
 
-    r->url = strdup(url);
+    if (!r->url) r->url = strdup(url);
     return r;
 }
 
 void web_result_free(WebResult* r) {
     if (!r) return;
-    free(r->url); free(r->body); free(r->title); free(r->content_type);
-    for(int i=0;i<r->keyword_count;i++) free(r->keywords[i]);
-    free(r->keywords); free(r);
+    free(r->url);
+    free(r->body);
+    free(r->title);
+    free(r->content_type);
+    for (int i = 0; i < r->keyword_count; i++) free(r->keywords[i]);
+    free(r->keywords);
+    free(r);
 }
