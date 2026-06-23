@@ -249,20 +249,21 @@ int node_cache_freeze(NodeCache* nc, HuarongTopologyNet* net, ReasoningNode* nod
     int lock_idx = node->node_id & (PM_NODE_LOCK_COUNT - 1);
     pthread_mutex_lock(&net->node_locks[lock_idx]);
 
-    /* 2. 释放连接相关内存（Edges 和 conn_hash 都走延迟释放防 use-after-free） */
-    if (node->edges) {
-        huarong_net_retire_blob(net, node->edges);
-    }
-    if (node->conn_hash) {
-        huarong_net_retire_blob(net, node->conn_hash);
-        node->conn_hash = NULL;
+    /* 2. 释放连接相关内存（Edges 和 conn_hash 都走延迟释放防 use-after-free）
+     *    先置 NULL 断活引用，再入退役链表——防止 read 线程在 retire→free
+     *    窗口内读到悬空指针。 */
+    {
+        Edge*     old_edges = node->edges;
+        void*     old_hash  = node->conn_hash;
+        node->edges       = NULL;
+        node->edge_count  = 0;
+        node->edge_capacity = 0;
+        node->conn_hash   = NULL;
         node->conn_hash_mask = -1;
         node->conn_hash_entries = 0;
+        if (old_edges) huarong_net_retire_blob(net, old_edges);
+        if (old_hash)  huarong_net_retire_blob(net, old_hash);
     }
-
-    node->edges = NULL;
-    node->edge_count = 0;
-    node->edge_capacity = 0;
     node->is_cooled = 1;
 
     __sync_fetch_and_add(&nc->total_freezes, 1);

@@ -448,19 +448,29 @@ void node_conn_hash_free(ReasoningNode* node) {
 /* ================================================================
  *  延迟释放 — epoch 边界统一清理扩容旧数组
  *
- *  训练时 add_connection 扩容不 free 旧数组，而是挂到 net 的链表上。
- *  等 epoch 结束（所有线程都跑完），调用 cleanup 统一释放。
- *  这保证了训练线程的 boost_connection_weighted 原子操作不会
- *  碰到已释放的悬空指针。
+ *  训练时 add_connection 扩容不立即 free 旧数组，而是：
+ *   1) 先 swap 活指针 (from_node->edges = new_edges)
+ *   2) 再将旧数组挂到 net 的退役链表上
+ *   3) epoch 结束时由调用方统一 cleanup_retired 释放
+ *
+ *  安全保证来自两步：
+ *   a) swap-before-retire 时序：活指针在 retire 之前已切换到新数组，
+ *      故此间任何读线程通过 from_node->edges 访问的都是新数组。
+ *   b) 调用方纪律：cleanup 只在 epoch 间隙（所有训练线程已返回）
+ *      或 net 销毁时调用，不与 add_connection 并发。
  * ================================================================ */
 
 void huarong_net_cleanup_retired(HuarongTopologyNet* net) {
     if (!net) return;
-
-    /* 仅当无活跃读者时才安全释放 */
-    if (net->active_readers > 0) return;
+    if (!net->retired_pending) return;  /* 无待释放对象 */
 
     pthread_mutex_lock(&net->retire_mutex);
+    /* double-check：持锁后再次确认（防止 unlock→lock 之间被其他线程清空） */
+    if (!net->retired_conns) {
+        net->retired_pending = 0;
+        pthread_mutex_unlock(&net->retire_mutex);
+        return;
+    }
     RetiredArrays* list = (RetiredArrays*)net->retired_conns;
     net->retired_conns = NULL;
     net->retired_pending = 0;
@@ -539,30 +549,37 @@ int huarong_net_add_connection(HuarongTopologyNet* net,
 
         memcpy(new_edges, from_node->edges, from_node->edge_capacity * sizeof(Edge));
 
-        /* 旧数组不立即 free：训练线程可能在无锁读取。
-         * 挂到 net 的延迟释放链表，epoch 结束时统一清理。 */
+        /* 初始化新扩容的槽位（此时 new_edges 尚未挂到 from_node->edges，
+         * 但 from_node->edge_capacity 仍是旧值，用 new_cap 作为上限）。 */
+        for (int i = from_node->edge_capacity; i < new_cap; i++) {
+            new_edges[i].target = NULL;
+            new_edges[i].weight = 0.5f;
+            new_edges[i].motivational_bias = 0.5f;
+            new_edges[i].confidence = 0.5f;
+        }
+
+        /* ★ 先 swap 活指针，再 retire 旧数组。
+         * 此后 from_node->edges 永远指向新数组，读线程安全。 */
+        Edge* old_edges_save = from_node->edges;
+        from_node->edges = new_edges;
+        from_node->edge_capacity = new_cap;
+
+        /* 旧数组延迟释放：训练线程可能在无锁读取 from_node->edges，
+         * 但此时已 swap，即使旧数组被 cleanup_retired 立即 free，
+         * 也不存在活指针指向它。 */
         RetiredArrays* ra = (RetiredArrays*)malloc(sizeof(RetiredArrays));
         if (ra) {
-            ra->old_edges = from_node->edges;
+            ra->old_edges = old_edges_save;
             pthread_mutex_lock(&net->retire_mutex);
             ra->next    = (RetiredArrays*)net->retired_conns;
             net->retired_conns  = ra;
             net->retired_pending = 1;
             pthread_mutex_unlock(&net->retire_mutex);
         } else {
-            /* 极端情况 malloc 失败：只能立即 free */
-            free(from_node->edges);
+            /* 极端情况 malloc 失败：只能立即 free。
+             * 安全：from_node->edges 已指向 new_edges，没有活引用。 */
+            free(old_edges_save);
         }
-
-        from_node->edges = new_edges;
-        /* 新扩容的 Edge.target 默认 NULL，权重/置信度需初始化 */
-        for (int i = from_node->edge_capacity; i < new_cap; i++) {
-            from_node->edges[i].target = NULL;
-            from_node->edges[i].weight = 0.5f;
-            from_node->edges[i].motivational_bias = 0.5f;
-            from_node->edges[i].confidence = 0.5f;
-        }
-        from_node->edge_capacity = new_cap;
     }
 
     // 添加新连接
@@ -781,12 +798,14 @@ int huarong_net_dynamic_remove_node(HuarongTopologyNet* net, int node_id) {
             }
         }
         other->edge_count = kept;
-        /* 边压缩后重建 conn_hash，索引已变化 */
-        if (other->conn_hash) {
-            free(other->conn_hash);
+        /* 边压缩后重建 conn_hash，索引已变化。
+         * 先置 NULL 再 free，防止无锁读 node_conn_hash_lookup 踩悬空指针 */
+        {
+            void* old_hash = other->conn_hash;
             other->conn_hash = NULL;
             other->conn_hash_mask = -1;
             other->conn_hash_entries = 0;
+            free(old_hash);
         }
         for (int ci = 0; ci < other->edge_count; ci++) {
             if (other->edges[ci].target)
@@ -837,12 +856,14 @@ void huarong_net_optimize(HuarongTopologyNet* net) {
         }
         
         node->edge_count = new_edge_count;
-        /* 边压缩后重建 conn_hash，索引已变化 */
-        if (node->conn_hash) {
-            free(node->conn_hash);
+        /* 边压缩后重建 conn_hash，索引已变化。
+         * 先置 NULL 再 free，防止无锁读 node_conn_hash_lookup 踩悬空指针 */
+        {
+            void* old_hash = node->conn_hash;
             node->conn_hash = NULL;
             node->conn_hash_mask = -1;
             node->conn_hash_entries = 0;
+            free(old_hash);
         }
         for (int ci = 0; ci < node->edge_count; ci++) {
             if (node->edges[ci].target)
@@ -887,12 +908,14 @@ int huarong_net_prune_edges(HuarongTopologyNet* net, float min_confidence, float
                 }
             }
             node->edge_count = kept;
-            /* 边压缩后重建 conn_hash，索引已变化 */
-            if (node->conn_hash) {
-                free(node->conn_hash);
+            /* 边压缩后重建 conn_hash，索引已变化。
+             * 先置 NULL 再 free，防止无锁读 node_conn_hash_lookup 踩悬空指针 */
+            {
+                void* old_hash = node->conn_hash;
                 node->conn_hash = NULL;
                 node->conn_hash_mask = -1;
                 node->conn_hash_entries = 0;
+                free(old_hash);
             }
             for (int ci = 0; ci < node->edge_count; ci++) {
                 if (node->edges[ci].target)

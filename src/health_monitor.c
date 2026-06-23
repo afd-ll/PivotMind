@@ -76,12 +76,14 @@ static void _aggressive_prune(MasterTopology* master) {
                 kept++;
             }
             node->edge_count = kept;
-            /* 边压缩后重建 conn_hash，索引已变化 */
-            if (node->conn_hash) {
-                free(node->conn_hash);
+            /* 边压缩后重建 conn_hash，索引已变化。
+             * 先置 NULL 再 free，防止无锁读 node_conn_hash_lookup 踩悬空指针 */
+            {
+                void* old_hash = node->conn_hash;
                 node->conn_hash = NULL;
                 node->conn_hash_mask = -1;
                 node->conn_hash_entries = 0;
+                free(old_hash);
             }
             for (int ci = 0; ci < node->edge_count; ci++) {
                 if (node->edges[ci].target)
