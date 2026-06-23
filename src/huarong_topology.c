@@ -515,12 +515,20 @@ int huarong_net_add_connection(HuarongTopologyNet* net,
 
     // 检查容量，必要时扩容
     if (from_node->edge_count >= from_node->edge_capacity) {
+        /* 硬上限：防止单节点连接爆炸导致 OOM（来自 constants.h） */
+        if (from_node->edge_capacity >= PM_AUTONOMIC_MAX_CONN) {
+            pthread_mutex_unlock(&net->node_locks[li]);
+            return -1;
+        }
         /* 防止整数溢出 */
         if (from_node->edge_capacity > INT_MAX / 2) {
             pthread_mutex_unlock(&net->node_locks[li]);
             return -1;
         }
         int new_cap = from_node->edge_capacity * 2;
+        /* 扩容后不得超过硬上限 */
+        if (new_cap > PM_AUTONOMIC_MAX_CONN)
+            new_cap = PM_AUTONOMIC_MAX_CONN;
 
         Edge* new_edges = (Edge*)malloc(new_cap * sizeof(Edge));
 
