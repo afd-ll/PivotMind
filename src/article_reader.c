@@ -594,8 +594,8 @@ int article_flush(ArticleReader* ar, SubTopology* topo) {
     free(pair_scores);
 
     // ============ 一轮三字扩展（首字哈希索引 O(n)） ============
-    // 构建首字→词列表哈希索引
-    typedef struct { WordEntry** list; int count; int cap; } CharWordList;
+    // 构建首字→词索引列表（存索引而非指针，防御下方 _ar_find_or_add_word 内部 realloc）
+    typedef struct { int* list; int count; int cap; } CharWordList;
     CharWordList first_char_map[256];  // 仅索引首个字节
     memset(first_char_map, 0, sizeof(first_char_map));
     for (int wi = 0; wi < ar->word_count; wi++) {
@@ -605,12 +605,12 @@ int article_flush(ArticleReader* ar, SubTopology* topo) {
         CharWordList* cwl = &first_char_map[first_byte];
         if (cwl->count >= cwl->cap) {
             int new_cap = cwl->cap ? cwl->cap * 2 : 8;
-            WordEntry** tmp = (WordEntry**)realloc(cwl->list, new_cap * sizeof(WordEntry*));
+            int* tmp = (int*)realloc(cwl->list, new_cap * sizeof(int));
             if (!tmp) continue;
             cwl->list = tmp;
             cwl->cap = new_cap;
         }
-        cwl->list[cwl->count++] = w;
+        cwl->list[cwl->count++] = wi;  /* 存索引，不存指针 */
     }
 
     for (int wi = 0; wi < ar->word_count; wi++) {
@@ -636,7 +636,8 @@ int article_flush(ArticleReader* ar, SubTopology* topo) {
         unsigned char first_byte = (unsigned char)last_c[0];
         CharWordList* cwl = &first_char_map[first_byte];
         for (int wi2 = 0; wi2 < cwl->count; wi2++) {
-            WordEntry* w2 = cwl->list[wi2];
+            int widx2 = cwl->list[wi2];
+            WordEntry* w2 = &ar->words[widx2];  /* 每次从最新 ar->words 取，防御 realloc */
             if (w1 == w2 || w2->char_len < 1) continue;
 
             // 检查 pair_table 中该字对是否高频
