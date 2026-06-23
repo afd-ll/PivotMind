@@ -154,6 +154,11 @@ HuarongTopologyNet* huarong_net_create(int max_nodes) {
 
 void huarong_net_destroy(HuarongTopologyNet* net) {
     if (!net) return;
+    if (net->concept_hash) {
+        int cap = net->concept_hash_mask + 1;
+        for (int i = 0; i < cap; i++)
+            free((void*)net->concept_hash[i].name);
+    }
     free(net->concept_hash);
     // 清理延迟释放的旧数组
     huarong_net_cleanup_retired(net);
@@ -216,7 +221,8 @@ static void _concept_hash_insert(HuarongTopologyNet* net, const char* name, int 
         }
         h = (h + 1) & (unsigned)net->concept_hash_mask;
     }
-    net->concept_hash[h].name = name;
+    net->concept_hash[h].name = strdup(name);  /* 哈希表接管字符串所有权，防御调用方 realloc/free */
+    if (!net->concept_hash[h].name) return;
     net->concept_hash[h].node_id = nid;
     net->concept_hash_count++;
 }
