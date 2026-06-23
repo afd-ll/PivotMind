@@ -275,7 +275,7 @@ static int _ar_extract_chars(ArticleReader* ar, const char* line) {
         if (bytes == 1 && *p >= '0' && *p <= '9') { p++; continue; }
 
         // 跳过ASCII标点（不参与PMI词发现，减少噪声计算）
-        if (bytes == 1 && is_punctuation(*p)) { p++; continue; }
+        if (bytes == 1 && is_punctuation(p)) { p++; continue; }
 
         char* dest = ar->line_chars[count];
         size_t cp_len = (size_t)(bytes < 7 ? bytes : 7);
