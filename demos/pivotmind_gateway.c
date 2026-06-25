@@ -6,11 +6,12 @@
  * 链接 libpivotmind.a，复用完整认知引擎
  *
  * API:
- *   POST /chat       {"msg":"..."}   -> {"reply":"...","nodes":492}
+ *   POST /chat       {"msg":"..."}     -> {"reply":"...","nodes":492}
+ *   POST /learn      {"msg":"..."}     -> {"result":"learned","added":N}
+ *   POST /learnqa    {"question":"...","answer":"..."}  -> {"result":"learned_qa","q_added":N,"a_added":M}
+ *   POST /feedback   {"msg":"...","rating":"correct|wrong"} -> {"result":"ok"}
  *   GET  /status                      -> {"nodes":492,"uptime":3600,...}
  *   GET  /health                      -> {"status":"ok"}
- *   POST /learn      {"msg":"..."}   -> {"result":"learned"}
- *   POST /feedback   {"msg":"...","rating":"correct|wrong"} -> {"result":"ok"}
  *
  * 用法:
  *   pivotmind_gateway [port] [workdir]
@@ -629,6 +630,55 @@ static void handle_chat(GatewaySystem* gw, int fd, const char* body) {
     }
 }
 
+/* 中文预处理：连续 CJK 字符间插入空格，使 strtok 能切出单字 */
+static void _cjk_insert_spaces(const char* src, char* dst, int dst_sz) {
+    int wi = 0;
+    for (const char* p = src; *p && wi < dst_sz - 1; ) {
+        unsigned char c = (unsigned char)*p;
+        int blen = 1;
+        if (c >= 0xE0 && c <= 0xEF) blen = 3;
+        else if (c >= 0xC0 && c <= 0xDF) blen = 2;
+
+        if (blen == 3 && wi > 0 && (unsigned char)dst[wi-1] != ' '
+            && wi + 1 < dst_sz) {
+            dst[wi++] = ' ';
+        }
+        for (int b = 0; b < blen && p[b] && wi < dst_sz - 1; b++)
+            dst[wi++] = p[b];
+        dst[wi] = '\0';
+        p += blen;
+    }
+}
+
+/* 分词 + 注册到 vocab + 建相邻边，返回新增节点数 */
+static int _learn_tokens(SubTopology* vocab, const char* text, int* p_prev_id) {
+    if (!vocab || !vocab->net) return 0;
+    char copy[2048];
+    _cjk_insert_spaces(text, copy, sizeof(copy));
+    char* tok = strtok(copy, " \t\n\r。，！？、；：\"\"''（）《》…—");
+    int added = 0;
+    while (tok) {
+        if (strlen(tok) >= 2) {
+            int nid = huarong_net_find_concept(vocab->net, tok);
+            if (nid < 0 && vocab->net->node_count < vocab->net->max_nodes) {
+                nid = huarong_net_dynamic_add_node(vocab->net, tok, NULL, 0);
+                if (nid >= 0) {
+                    added++;
+                    node_hash_add(vocab->node_hash, vocab->net->nodes[nid]);
+                }
+            }
+            if (nid >= 0) {
+                vocab->net->nodes[nid]->activation += 0.1f;
+                if (*p_prev_id >= 0 && *p_prev_id != nid)
+                    huarong_net_add_connection(vocab->net, *p_prev_id, nid, 0.4f);
+                *p_prev_id = nid;
+            }
+        }
+        tok = strtok(NULL, " \t\n\r。，！？、；：\"\"''（）《》…—");
+    }
+    return added;
+}
+
 // POST /learn - 主动学习
 static void handle_learn(GatewaySystem* gw, int fd, const char* body) {
     char msg[2048] = {0};
@@ -659,60 +709,57 @@ static void handle_learn(GatewaySystem* gw, int fd, const char* body) {
     }
     if (!vocab || !vocab->net) { http_json(fd, 200, "{\"result\":\"no vocab\"}"); return; }
 
-    /* 分词 → 查现有节点(去重) → 建边
-       中文没有空格，需预处理：连续中文字符间插入空格，使 strtok 能切出单字 */
-    char raw[2048];
-    strncpy(raw, msg, sizeof(raw)-1);
-    raw[sizeof(raw)-1] = 0;
-
-    char copy[2048];
-    int wi = 0;
-    for (const char* p = raw; *p && wi < (int)sizeof(copy)-1; ) {
-        unsigned char c = (unsigned char)*p;
-        int blen = 1;
-        if (c >= 0xE0 && c <= 0xEF) blen = 3; /* UTF-8 中文三字节 */
-        else if (c >= 0xC0 && c <= 0xDF) blen = 2;
-
-        /* 若前一个字符与当前字符均为中文（3字节），插入空格分隔 */
-        if (blen == 3 && wi > 0 && (unsigned char)copy[wi-1] != ' ' && copy[wi-1] != '\0'
-            && wi + 1 < (int)sizeof(copy)) {
-            copy[wi++] = ' ';
-        }
-
-        for (int b = 0; b < blen && p[b] && wi < (int)sizeof(copy)-1; b++)
-            copy[wi++] = p[b];
-        copy[wi] = '\0';
-        p += blen;
-    }
-
-    char* tok = strtok(copy, " \t\n\r。，！？、；：\"\"''（）《》…—");
     int prev_id = -1;
-    int added = 0;
-
-    while (tok) {
-        if (strlen(tok) >= 2) {
-            int nid = huarong_net_find_concept(vocab->net, tok);
-            if (nid < 0 && vocab->net->node_count < vocab->net->max_nodes) {
-                nid = huarong_net_dynamic_add_node(vocab->net, tok, NULL, 0);
-                if (nid >= 0) {
-                    added++;
-                    /* 同步注册到 node_hash，保证 master_generate_response 等路径可查 */
-                    node_hash_add(vocab->node_hash, vocab->net->nodes[nid]);
-                }
-            }
-            if (nid >= 0) {
-                vocab->net->nodes[nid]->activation += 0.1f;
-                if (prev_id >= 0 && prev_id != nid)
-                    huarong_net_add_connection(vocab->net, prev_id, nid, 0.4f);
-                prev_id = nid;
-            }
-        }
-        tok = strtok(NULL, " \t\n\r。，！？、；：\"\"''（）《》…—");
-    }
+    int added = _learn_tokens(vocab, msg, &prev_id);
 
     gw->total_learning_cycles++;
     char resp[128];
     snprintf(resp, sizeof(resp), "{\"result\":\"learned\",\"added\":%d}", added);
+    http_json(fd, 200, resp);
+}
+
+// POST /learnqa - 对话对学习（问题→答案模板建立）
+static void handle_learnqa(GatewaySystem* gw, int fd, const char* body) {
+    char question[2048] = {0};
+    char answer[2048]   = {0};
+    if (!json_extract_string(body, "question", question, sizeof(question)) || strlen(question) == 0 ||
+        !json_extract_string(body, "answer",   answer,   sizeof(answer))   || strlen(answer)   == 0) {
+        http_json(fd, 400, "{\"error\":\"need 'question' and 'answer' fields\"}");
+        return;
+    }
+
+    MasterTopology* m = gw->topology;
+    if (!m) { http_json(fd, 200, "{\"result\":\"no topology\"}"); return; }
+    SubTopology* vocab = NULL;
+    for (int t = 0; t < m->sub_topo_count; t++)
+        if (m->sub_topologies[t] && m->sub_topologies[t]->type == TOPO_VOCABULARY)
+            { vocab = m->sub_topologies[t]; break; }
+    if (!vocab || !vocab->net) { http_json(fd, 200, "{\"result\":\"no vocab\"}"); return; }
+
+    /* 分词 + 注册问题的词 */
+    int q_prev_id = -1;
+    int q_added = _learn_tokens(vocab, question, &q_prev_id);
+
+    /* 分词 + 注册答案的词 */
+    int a_prev_id = -1;
+    int a_added = _learn_tokens(vocab, answer, &a_prev_id);
+
+    /* 存储问答对到记忆（精确匹配快速回复） */
+    if (gw->memory) {
+        char mem_key[256];
+        snprintf(mem_key, sizeof(mem_key), "response:%s", question);
+        memory_store(gw->memory, mem_key, answer, (int)strlen(answer)+1,
+                     MEMORY_TYPE_STRING, 0.95f);
+    }
+
+    /* 海马体记录对话对 */
+    if (gw->hippocampus)
+        hippocampus_log_dialog(gw->hippocampus, question, answer);
+
+    gw->total_learning_cycles++;
+    char resp[256];
+    snprintf(resp, sizeof(resp),
+             "{\"result\":\"learned_qa\",\"q_added\":%d,\"a_added\":%d}", q_added, a_added);
     http_json(fd, 200, resp);
 }
 
@@ -1103,6 +1150,8 @@ static void handle_connection(GatewaySystem* gw, int client_fd) {
             handle_chat(gw, client_fd, req.body);
         } else if (strcmp(req.path, "/learn") == 0) {
             handle_learn(gw, client_fd, req.body);
+        } else if (strcmp(req.path, "/learnqa") == 0) {
+            handle_learnqa(gw, client_fd, req.body);
         } else if (strcmp(req.path, "/feedback") == 0) {
             handle_feedback(gw, client_fd, req.body);
         } else if (strncmp(req.path, "/train/", 7) == 0) {
