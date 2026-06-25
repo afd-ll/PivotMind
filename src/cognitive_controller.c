@@ -1138,9 +1138,10 @@ int cognitive_controller_scan_patterns(CognitiveController* cc) {
                 // 新增模式
                 if (cc->pattern_count >= cc->pattern_capacity) {
                     int new_cap = cc->pattern_capacity * 2;
-                    cc->patterns = realloc(cc->patterns,
-                                           new_cap * sizeof(*cc->patterns));
-                    if (!cc->patterns) return -1;
+                    void* tmp = realloc(cc->patterns,
+                                        new_cap * sizeof(*cc->patterns));
+                    if (!tmp) return -1;
+                    cc->patterns = (typeof(cc->patterns))tmp;
                     cc->pattern_capacity = new_cap;
                     memset(&cc->patterns[cc->pattern_count], 0,
                            (cc->pattern_capacity - cc->pattern_count) * sizeof(*cc->patterns));
@@ -1207,9 +1208,10 @@ int cognitive_controller_scan_patterns(CognitiveController* cc) {
                     if (found3 < 0) {
                         if (cc->pattern_count >= cc->pattern_capacity) {
                             int new_cap3 = cc->pattern_capacity * 2;
-                            cc->patterns = realloc(cc->patterns,
-                                                   new_cap3 * sizeof(*cc->patterns));
-                            if (!cc->patterns) return -1;
+                            void* tmp3 = realloc(cc->patterns,
+                                                new_cap3 * sizeof(*cc->patterns));
+                            if (!tmp3) return -1;
+                            cc->patterns = (typeof(cc->patterns))tmp3;
                             cc->pattern_capacity = new_cap3;
                             memset(&cc->patterns[cc->pattern_count], 0,
                                    (cc->pattern_capacity - cc->pattern_count) * sizeof(*cc->patterns));
