@@ -659,10 +659,32 @@ static void handle_learn(GatewaySystem* gw, int fd, const char* body) {
     }
     if (!vocab || !vocab->net) { http_json(fd, 200, "{\"result\":\"no vocab\"}"); return; }
 
-    /* 分词 → 查现有节点(去重) → 建边 */
+    /* 分词 → 查现有节点(去重) → 建边
+       中文没有空格，需预处理：连续中文字符间插入空格，使 strtok 能切出单字 */
+    char raw[2048];
+    strncpy(raw, msg, sizeof(raw)-1);
+    raw[sizeof(raw)-1] = 0;
+
     char copy[2048];
-    strncpy(copy, msg, sizeof(copy)-1);
-    copy[sizeof(copy)-1] = 0;
+    int wi = 0;
+    for (const char* p = raw; *p && wi < (int)sizeof(copy)-1; ) {
+        unsigned char c = (unsigned char)*p;
+        int blen = 1;
+        if (c >= 0xE0 && c <= 0xEF) blen = 3; /* UTF-8 中文三字节 */
+        else if (c >= 0xC0 && c <= 0xDF) blen = 2;
+
+        /* 若前一个字符与当前字符均为中文（3字节），插入空格分隔 */
+        if (blen == 3 && wi > 0 && (unsigned char)copy[wi-1] != ' ' && copy[wi-1] != '\0'
+            && wi + 1 < (int)sizeof(copy)) {
+            copy[wi++] = ' ';
+        }
+
+        for (int b = 0; b < blen && p[b] && wi < (int)sizeof(copy)-1; b++)
+            copy[wi++] = p[b];
+        copy[wi] = '\0';
+        p += blen;
+    }
+
     char* tok = strtok(copy, " \t\n\r。，！？、；：\"\"''（）《》…—");
     int prev_id = -1;
     int added = 0;
