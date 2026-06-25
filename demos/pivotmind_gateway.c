@@ -8,7 +8,6 @@
  * API:
  *   POST /chat       {"msg":"..."}     -> {"reply":"...","nodes":492}
  *   POST /learn      {"msg":"..."}     -> {"result":"learned","added":N}
- *   POST /learnqa    {"question":"...","answer":"..."}  -> {"result":"learned_qa","q_added":N,"a_added":M}
  *   POST /feedback   {"msg":"...","rating":"correct|wrong"} -> {"result":"ok"}
  *   GET  /status                      -> {"nodes":492,"uptime":3600,...}
  *   GET  /health                      -> {"status":"ok"}
@@ -52,7 +51,7 @@
 #include "learning_scheduler.h"
 #include "broca.h"
 #include "node_cache.h"
-#include "autonomic_learner.h"
+
 #include "self_learner.h"
 #include "prefrontal_executive.h"  /* v0.3 前额叶执行器 — 推理编排 */
 #include "idea_arena.h"            /* v0.3 想法竞争竞技场 */
@@ -719,54 +718,6 @@ static void handle_learn(GatewaySystem* gw, int fd, const char* body) {
     http_json(fd, 200, resp);
 }
 
-// POST /learnqa - 对话对学习（问题→答案模板建立）
-static void handle_learnqa(GatewaySystem* gw, int fd, const char* body) {
-    char question[2048] = {0};
-    char answer[2048]   = {0};
-    if (!json_extract_string(body, "question", question, sizeof(question)) || strlen(question) == 0 ||
-        !json_extract_string(body, "answer",   answer,   sizeof(answer))   || strlen(answer)   == 0) {
-        http_json(fd, 400, "{\"error\":\"need 'question' and 'answer' fields\"}");
-        return;
-    }
-
-    MasterTopology* m = gw->topology;
-    if (!m) { http_json(fd, 200, "{\"result\":\"no topology\"}"); return; }
-    SubTopology* vocab = NULL;
-    for (int t = 0; t < m->sub_topo_count; t++)
-        if (m->sub_topologies[t] && m->sub_topologies[t]->type == TOPO_VOCABULARY)
-            { vocab = m->sub_topologies[t]; break; }
-    if (!vocab || !vocab->net) { http_json(fd, 200, "{\"result\":\"no vocab\"}"); return; }
-
-    /* 分词 + 注册问题的词 */
-    int q_prev_id = -1;
-    int q_added = _learn_tokens(vocab, question, &q_prev_id);
-
-    /* 分词 + 注册答案的词 */
-    int a_prev_id = -1;
-    int a_added = _learn_tokens(vocab, answer, &a_prev_id);
-
-    /* 存储问答对到记忆（精确匹配快速回复） */
-    if (gw->memory) {
-        char mem_key[256];
-        snprintf(mem_key, sizeof(mem_key), "response:%s", question);
-        memory_store(gw->memory, mem_key, answer, (int)strlen(answer)+1,
-                     MEMORY_TYPE_STRING, 0.95f);
-    }
-
-    /* 海马体记录对话对 */
-    if (gw->hippocampus)
-        hippocampus_log_dialog(gw->hippocampus, question, answer);
-
-    /* 跨拓扑学习：问题词→答案词 建立多维度 Hebbian 连接 */
-    autonomic_learn_from_dialog(m, question, answer, NULL, NULL, gw->memory);
-
-    gw->total_learning_cycles++;
-    char resp[256];
-    snprintf(resp, sizeof(resp),
-             "{\"result\":\"learned_qa\",\"q_added\":%d,\"a_added\":%d}", q_added, a_added);
-    http_json(fd, 200, resp);
-}
-
 // POST /feedback - 反馈
 static void handle_feedback(GatewaySystem* gw, int fd, const char* body) {
     char msg[2048] = {0};
@@ -1154,8 +1105,6 @@ static void handle_connection(GatewaySystem* gw, int client_fd) {
             handle_chat(gw, client_fd, req.body);
         } else if (strcmp(req.path, "/learn") == 0) {
             handle_learn(gw, client_fd, req.body);
-        } else if (strcmp(req.path, "/learnqa") == 0) {
-            handle_learnqa(gw, client_fd, req.body);
         } else if (strcmp(req.path, "/feedback") == 0) {
             handle_feedback(gw, client_fd, req.body);
         } else if (strncmp(req.path, "/train/", 7) == 0) {

@@ -1114,6 +1114,8 @@ DialogSystem* dialog_system_create(MasterTopology* master, MemorySystem* memory,
     if (sys->controller) {
         cc_init_sentence_topology(sys->controller);
         LOG_INFO("[对话系统] 句式拓扑: 已就绪（16种基础句式）");
+        /* 涌现词类系统: 延迟初始化（等待词汇拓扑就绪后由训练或对话触发） */
+        LOG_INFO("[对话系统] 涌现词类系统: 待词汇拓扑就绪后自动初始化");
     }
 
     // 初始化 BPTT 学习器（RNN 在线反向传播）

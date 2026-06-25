@@ -5,6 +5,7 @@
 #include "utf8_tokenizer.h"
 #include "cognitive_params.h"
 #include "cognitive_controller.h"
+#include "emergent_pos.h"
 #include "common.h"
 #include "error.h"
 #include "thread_pool.h"
@@ -1328,8 +1329,10 @@ char* master_generate_response(MasterTopology* master,
                                 // 内置 POS 映射兜底
                                 if (!connector || !connector[0]) {
                                     ReasoningNode* pn = vocab_sub->net->nodes[prev_nid];
-                                    POSTag pa = pn ? pos_tag_chinese(pn->concept) : POS_UNKNOWN;
-                                    POSTag pb = pos_tag_chinese(node->concept);
+                                    POSTag pa = pn ? pos_tag_emergent(
+                                        master->cognitive_controller, pn->concept) : POS_UNKNOWN;
+                                    POSTag pb = pos_tag_emergent(
+                                        master->cognitive_controller, node->concept);
                                     connector = pos_connector_map((int)pa, (int)pb);
                                 }
                             }
@@ -1427,44 +1430,61 @@ static inline float walk_base_score(
 int master_get_node_pos_tag(MasterTopology* master,
                              int vocab_topo_id, int node_id) {
     if (!master || node_id < 0) return POS_UNKNOWN;
-    if (!master->cross_adj || master->cross_adj_count <= 0) return POS_UNKNOWN;
+
+    /* === 第一层：涌现式词类系统（种子锚点 + 特征向量聚类）=== */
+    if (master->cognitive_controller && master->cognitive_controller->emergent_pos) {
+        SubTopology* vocab = master_get_sub_topology_by_type(master, TOPO_VOCABULARY);
+        if (vocab && vocab->net && node_id >= 0 && node_id < vocab->net->node_count) {
+            ReasoningNode* node = vocab->net->nodes[node_id];
+            if (node && node->concept) {
+                POSTag tag = emergent_pos_tag(
+                    master->cognitive_controller->emergent_pos,
+                    master, node->concept);
+                if (tag != POS_UNKNOWN) return (int)tag;
+            }
+        }
+    }
+
+    /* === 第二层：跨拓扑连接 vocab → TOPO_SYNTAX === */
+    if (!master->cross_adj || master->cross_adj_count <= 0) goto fallback_hardcoded;
 
     SubTopology* syntax = master_get_sub_topology_by_type(master, TOPO_SYNTAX);
-    if (!syntax) return POS_UNKNOWN;
+    if (!syntax) goto fallback_hardcoded;
 
-    int adj_idx = vocab_topo_id * MAX_NODES_PER_TOPO + node_id;
-    if (adj_idx >= master->cross_adj_count) return POS_UNKNOWN;
+    {
+        int adj_idx = vocab_topo_id * MAX_NODES_PER_TOPO + node_id;
+        if (adj_idx >= master->cross_adj_count) goto fallback_hardcoded;
 
-    /* 遍历跨拓扑连接：找 vocab_node → syntax_node */
-    CrossTopoAdjEntry* entry = master->cross_adj[adj_idx];
-    while (entry) {
-        if (entry->link_index < master->cross_link_count) {
-            CrossTopologyLink* link = master->cross_links[entry->link_index];
-            if (link && link->to_topo_id == TOPO_SYNTAX) {
-                int syn_id = link->to_node_id;
-                if (syn_id >= 0 && syn_id < syntax->net->node_count) {
-                    ReasoningNode* sn = syntax->net->nodes[syn_id];
-                    if (sn && sn->concept) {
-                        /* 语法节点概念就是 POS 标签名，如 "名词" */
-                        const char* name = sn->concept;
-                        if (strstr(name, "名词")) return POS_NOUN;
-                        if (strstr(name, "动词")) return POS_VERB;
-                        if (strstr(name, "形容词")) return POS_ADJ;
-                        if (strstr(name, "副词")) return POS_ADV;
-                        if (strstr(name, "代词")) return POS_PRON;
-                        if (strstr(name, "介词")) return POS_PREP;
-                        if (strstr(name, "连词")) return POS_CONJ;
-                        if (strstr(name, "数词")||strstr(name, "量词")) return POS_NUM;
-                        if (strstr(name, "助词")) return POS_PARTICLE;
-                        if (strstr(name, "叹词")) return POS_INTERJ;
+        CrossTopoAdjEntry* entry = master->cross_adj[adj_idx];
+        while (entry) {
+            if (entry->link_index < master->cross_link_count) {
+                CrossTopologyLink* link = master->cross_links[entry->link_index];
+                if (link && link->to_topo_id == TOPO_SYNTAX) {
+                    int syn_id = link->to_node_id;
+                    if (syn_id >= 0 && syn_id < syntax->net->node_count) {
+                        ReasoningNode* sn = syntax->net->nodes[syn_id];
+                        if (sn && sn->concept) {
+                            const char* name = sn->concept;
+                            if (strstr(name, "名词")) return POS_NOUN;
+                            if (strstr(name, "动词")) return POS_VERB;
+                            if (strstr(name, "形容词")) return POS_ADJ;
+                            if (strstr(name, "副词")) return POS_ADV;
+                            if (strstr(name, "代词")) return POS_PRON;
+                            if (strstr(name, "介词")) return POS_PREP;
+                            if (strstr(name, "连词")) return POS_CONJ;
+                            if (strstr(name, "数词")||strstr(name, "量词")) return POS_NUM;
+                            if (strstr(name, "助词")) return POS_PARTICLE;
+                            if (strstr(name, "叹词")) return POS_INTERJ;
+                        }
                     }
                 }
             }
+            entry = entry->next;
         }
-        entry = entry->next;
     }
 
-    /* 兜底：若跨拓扑没有 POS 标注，使用启发式词性标注 */
+fallback_hardcoded:
+    /* === 第三层：硬编码字典兜底（冷启动期）=== */
     {
         SubTopology* vocab = master_get_sub_topology_by_type(master, TOPO_VOCABULARY);
         if (vocab && vocab->net && node_id >= 0 && node_id < vocab->net->node_count) {
@@ -1498,56 +1518,87 @@ int master_find_template_for_pair_nolock(MasterTopology* master,
     SubTopology* tpl = master_get_sub_topology_by_type(master, TOPO_TEMPLATE);
     if (!tpl || !tpl->net) return -1;
 
-    /* 第一阶段：POS 标签匹配 */
-    POSTag pos_a = (POSTag)master_get_node_pos_tag(master, 0, node_a);
-    POSTag pos_b = (POSTag)master_get_node_pos_tag(master, 0, node_b);
+    /* 获取词汇节点 (用于涌现词类 + 余弦兜底) */
+    SubTopology* vocab = master_get_sub_topology_by_type(master, TOPO_VOCABULARY);
+    ReasoningNode* rna = NULL;
+    ReasoningNode* rnb = NULL;
+    if (vocab && vocab->net) {
+        if (node_a >= 0 && node_a < vocab->net->node_count)
+            rna = vocab->net->nodes[node_a];
+        if (node_b >= 0 && node_b < vocab->net->node_count)
+            rnb = vocab->net->nodes[node_b];
+    }
 
     int best_tpl = -1;
     float best_conf = 0.0f;
-    if (pos_a != POS_UNKNOWN || pos_b != POS_UNKNOWN) {
+
+    /* ====== 第一阶段：涌现词类槽位匹配（自主学习的词类）====== */
+    /* 若词汇节点已有涌现词类标注，优先用涌现槽位匹配 */
+    if (rna && rna->emergent_class_count > 0 && rnb && rnb->emergent_class_count > 0) {
         for (int i = 0; i < tpl->net->node_count; i++) {
             ReasoningNode* tn = tpl->net->nodes[i];
             if (!tn || tn->tpl_pos_len < 2) continue;
+            if (tn->tpl_emergent_slot[0] < 0 || tn->tpl_emergent_slot[1] < 0) continue;
 
-            /* 匹配前两个 POS 槽位 */
-            if (tn->tpl_pos_seq[0] == (int)pos_a && tn->tpl_pos_seq[1] == (int)pos_b) {
-                if (tn->confidence > best_conf) {
-                    best_conf = tn->confidence;
+            /* 软匹配: 多义词时任一组合匹配即可 */
+            float pair_score = 0.0f;
+            for (int ai = 0; ai < rna->emergent_class_count && ai < 4; ai++) {
+                if (rna->emergent_class_ids[ai] != tn->tpl_emergent_slot[0]) continue;
+                for (int bi = 0; bi < rnb->emergent_class_count && bi < 4; bi++) {
+                    if (rnb->emergent_class_ids[bi] == tn->tpl_emergent_slot[1]) {
+                        float sc = rna->emergent_class_confs[ai] * rnb->emergent_class_confs[bi];
+                        if (sc > pair_score) pair_score = sc;
+                    }
+                }
+            }
+
+            if (pair_score > 0.0f) {
+                float final_conf = tn->confidence * (0.5f + 0.5f * pair_score);
+                if (final_conf > best_conf) {
+                    best_conf = final_conf;
                     best_tpl = tn->node_id;
                 }
             }
         }
     }
 
-    /* 第二阶段（兜底）：若 POS 匹配失败，用特征向量余弦相似度 */
+    /* ====== 第二阶段：硬编码 POS 标签匹配（向后兼容 + 冷启动）====== */
     if (best_tpl < 0) {
-        /* 获取两个词汇节点的特征向量 */
-        SubTopology* vocab = master_get_sub_topology_by_type(master, TOPO_VOCABULARY);
-        if (vocab && vocab->net) {
-            ReasoningNode* rna = NULL;
-            ReasoningNode* rnb = NULL;
-            if (node_a >= 0 && node_a < vocab->net->node_count)
-                rna = vocab->net->nodes[node_a];
-            if (node_b >= 0 && node_b < vocab->net->node_count)
-                rnb = vocab->net->nodes[node_b];
+        POSTag pos_a = (POSTag)master_get_node_pos_tag(master, 0, node_a);
+        POSTag pos_b = (POSTag)master_get_node_pos_tag(master, 0, node_b);
 
-            if (rna && rna->features && rnb && rnb->features) {
-                /* 构建 pair 的组合特征向量：取两节点特征的均值 */
-                float pair_feat[NODE_FEATURE_DIM];
-                for (int d = 0; d < NODE_FEATURE_DIM; d++) {
-                    pair_feat[d] = (rna->features[d] + rnb->features[d]) * 0.5f;
-                }
+        if (pos_a != POS_UNKNOWN || pos_b != POS_UNKNOWN) {
+            for (int i = 0; i < tpl->net->node_count; i++) {
+                ReasoningNode* tn = tpl->net->nodes[i];
+                if (!tn || tn->tpl_pos_len < 2) continue;
 
-                float best_sim = 0.65f;  /* 最低相似度阈值 */
-                for (int i = 0; i < tpl->net->node_count; i++) {
-                    ReasoningNode* tn = tpl->net->nodes[i];
-                    if (!tn || !tn->features || tn->tpl_pos_len < 2) continue;
-
-                    float sim = template_cosine_sim(pair_feat, tn->features, NODE_FEATURE_DIM);
-                    if (sim > best_sim) {
-                        best_sim = sim;
+                if (tn->tpl_pos_seq[0] == (int)pos_a && tn->tpl_pos_seq[1] == (int)pos_b) {
+                    if (tn->confidence > best_conf) {
+                        best_conf = tn->confidence;
                         best_tpl = tn->node_id;
                     }
+                }
+            }
+        }
+    }
+
+    /* ====== 第三阶段（兜底）：特征向量余弦相似度 ====== */
+    if (best_tpl < 0) {
+        if (rna && rna->features && rnb && rnb->features) {
+            float pair_feat[NODE_FEATURE_DIM];
+            for (int d = 0; d < NODE_FEATURE_DIM; d++) {
+                pair_feat[d] = (rna->features[d] + rnb->features[d]) * 0.5f;
+            }
+
+            float best_sim = 0.65f;
+            for (int i = 0; i < tpl->net->node_count; i++) {
+                ReasoningNode* tn = tpl->net->nodes[i];
+                if (!tn || !tn->features || tn->tpl_pos_len < 2) continue;
+
+                float sim = template_cosine_sim(pair_feat, tn->features, NODE_FEATURE_DIM);
+                if (sim > best_sim) {
+                    best_sim = sim;
+                    best_tpl = tn->node_id;
                 }
             }
         }
@@ -1647,7 +1698,7 @@ int topology_walk_greedy(SubTopology* sub, int start_node_id,
 
     // 记录起点 POS
     if (cc && start_node_ptr && start_node_ptr->concept) {
-        pos_trail[0] = (int)pos_tag_chinese(start_node_ptr->concept);
+        pos_trail[0] = (int)pos_tag_emergent(cc, start_node_ptr->concept);
         pos_trail_len = 1;
     }
 
@@ -1877,7 +1928,7 @@ int topology_walk_greedy(SubTopology* sub, int start_node_id,
 
                 // 2) 句式 scaffold 引导分
                 const char* cand_label = target->concept;
-                POSTag cand_pos = pos_tag_chinese(cand_label);
+                POSTag cand_pos = pos_tag_emergent(cc, cand_label);
                 float scaffold_b = cc_scaffold_bonus(cc, pos_trail_len, cand_pos);
                 score += scaffold_b;
             }
@@ -1910,7 +1961,7 @@ int topology_walk_greedy(SubTopology* sub, int start_node_id,
         if (cc && pos_trail_len < 64) {
             ReasoningNode* sn = net->nodes[current_id];
             const char* sl = sn ? sn->concept : NULL;
-            pos_trail[pos_trail_len] = (int)pos_tag_chinese(sl);
+            pos_trail[pos_trail_len] = (int)pos_tag_emergent(cc, sl);
             pos_trail_len++;
         }
 
@@ -2085,7 +2136,7 @@ int competitive_queue_generate(
                 score += pattern_bonus;
 
                 const char* cl = node->concept;
-                POSTag tag = pos_tag_chinese(cl);
+                POSTag tag = pos_tag_emergent(cc, cl);
                 float scaffold_b = cc_scaffold_bonus(cc, pos_trail_len, tag);
                 score += scaffold_b;
             }
@@ -2120,7 +2171,7 @@ int competitive_queue_generate(
 
         // 更新 POS 追踪
         if (cc && pos_trail_len < 64) {
-            pos_trail[pos_trail_len] = (int)pos_tag_chinese(winner->concept);
+            pos_trail[pos_trail_len] = (int)pos_tag_emergent(cc, winner->concept);
             pos_trail_len++;
         }
 
@@ -2355,14 +2406,14 @@ int topology_walk_beam(SubTopology* sub, int start_node_id,
                         int nid = beam->nodes[pi];
                         ReasoningNode* nn = (nid >= 0 && nid < node_count)
                             ? net->nodes[nid] : NULL;
-                        bpos_trail[bpl++] = (int)pos_tag_chinese(
+                        bpos_trail[bpl++] = (int)pos_tag_emergent(cc,
                             nn ? nn->concept : NULL);
                     }
                     float pattern_bonus = cc_pattern_match_score(
                         cc, sub->topo_id, bpos_trail, bpl);
                     score += pattern_bonus;
 
-                    POSTag tag = pos_tag_chinese(target->concept);
+                    POSTag tag = pos_tag_emergent(cc, target->concept);
                     float scaffold_b = cc_scaffold_bonus(cc, bpl, tag);
                     score += scaffold_b;
                 }
@@ -2768,7 +2819,7 @@ int topology_walk_cross(MasterTopology* master,
                             score += pattern_bonus;
 
                             const char* cl = tgt_node->concept;
-                            POSTag tag = pos_tag_chinese(cl);
+                            POSTag tag = pos_tag_emergent(cc, cl);
                             float scaffold_b = cc_scaffold_bonus(cc, pos_trail_len, tag);
                             score += scaffold_b;
                         }
@@ -2863,7 +2914,7 @@ int topology_walk_cross(MasterTopology* master,
             SubTopology* ps = master_get_sub_topology(master, cur_topo);
             if (ps && ps->net && cur_node < ps->net->node_count) {
                 ReasoningNode* pn = ps->net->nodes[cur_node];
-                pos_trail[pos_trail_len] = (int)pos_tag_chinese(
+                pos_trail[pos_trail_len] = (int)pos_tag_emergent(cc,
                     pn ? pn->concept : NULL);
                 pos_trail_len++;
             }

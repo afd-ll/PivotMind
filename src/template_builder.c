@@ -7,6 +7,7 @@
 #include "string_pool.h"
 #include "common.h"
 #include "cognitive_controller.h"
+#include "emergent_pos.h"
 #include "topology_growth.h"
 #include <stdlib.h>
 #include <string.h>
@@ -548,6 +549,23 @@ int template_build_nodes(
         tpl_node->tpl_pos_seq[2] = master_get_node_pos_tag(master, vocab->topo_id, nc_id);
         memset(tpl_node->tpl_connectors, 0, sizeof(tpl_node->tpl_connectors));
 
+        /* 涌现槽位 — 从锚点节点的涌现词类填充 */
+        tpl_node->tpl_emergent_slot[0] = na->emergent_class_count > 0
+            ? na->emergent_class_ids[0] : -1;
+        tpl_node->tpl_emergent_slot[1] = nb->emergent_class_count > 0
+            ? nb->emergent_class_ids[0] : -1;
+        tpl_node->tpl_emergent_slot[2] = nc->emergent_class_count > 0
+            ? nc->emergent_class_ids[0] : -1;
+        tpl_node->tpl_emergent_conf[0] = na->emergent_class_count > 0
+            ? na->emergent_class_confs[0] : 0.0f;
+        tpl_node->tpl_emergent_conf[1] = nb->emergent_class_count > 0
+            ? nb->emergent_class_confs[0] : 0.0f;
+        tpl_node->tpl_emergent_conf[2] = nc->emergent_class_count > 0
+            ? nc->emergent_class_confs[0] : 0.0f;
+        /* 确保未使用的槽位为 -1 */
+        tpl_node->tpl_emergent_slot[3] = -1;
+        tpl_node->tpl_emergent_conf[3] = 0.0f;
+
         /* 建立跨拓扑连接: anchor nodes → template node */
         master_add_cross_link(master, vocab->topo_id, na_id,
                               tpl->topo_id, tpl_node_id, 0.8f, "anchor_a");
@@ -937,8 +955,17 @@ int template_build_from_pos_patterns(MasterTopology* master,
 
         /* 存入 POS 序列 + 自动生成连接词 */
         tn->tpl_pos_len = pat->length;
-        for (int k = 0; k < pat->length; k++)
+        for (int k = 0; k < pat->length; k++) {
             tn->tpl_pos_seq[k] = pat->pos_seq[k];
+            /* 涌现槽位: POS 语法模板的槽位 ID 即 POSTag 值本身 */
+            tn->tpl_emergent_slot[k] = (int)pat->pos_seq[k];
+            tn->tpl_emergent_conf[k] = 1.0f; /* POS 模式模板置信度高 */
+        }
+        /* 确保未使用的槽位为 -1 */
+        for (int k = pat->length; k < 4; k++) {
+            tn->tpl_emergent_slot[k] = -1;
+            tn->tpl_emergent_conf[k] = 0.0f;
+        }
         for (int k = 0; k < pat->length - 1; k++) {
             const char* conn = pos_connector_map(
                 pat->pos_seq[k], pat->pos_seq[k+1]);

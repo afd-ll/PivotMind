@@ -93,12 +93,21 @@ typedef struct ReasoningNode {
     int selection_count;       // 被贪心走边选中的累计次数
     NodeType node_type;        // 节点类型（功能词/普通词/专有名词）
     
+    // 涌现词类系统 — 自主学习的词性标注（与硬编码 POS 并行）
+    // 一个词可以属于多个涌现词类（支持多义词如"计划"既是名词也是动词）
+    int   emergent_class_count;              // 实际词类数
+    int   emergent_class_ids[4];             // 涌现词类 ID（值同 POSTag 枚举，但来源为特征向量聚类）
+    float emergent_class_confs[4];           // 各词类置信度
+
     // 模板节点元数据 — 语法句式模板（仅 TOPO_TEMPLATE 节点有效）
     // 编码 POS 序列 + 槽位间连接词，如 [N]的[V]是[Adj] 表示定中+系表
     int   tpl_pos_len;             // POS 序列长度 (2-4)
     int   tpl_pos_seq[4];          // 各槽位的 POSTag（值为 POSTag 枚举）
     char  tpl_connectors[4][TPL_CONNECTOR_BUF]; // 槽位间连接词 (UTF-8 中文约10字)
-    
+    // 涌现槽位 — 以涌现词类 ID 编码模板槽位，支持多义词软匹配
+    int   tpl_emergent_slot[4];    // 各槽位的涌现词类 ID（-1=未设置）
+    float tpl_emergent_conf[4];    // 各涌现槽位的置信度
+
     // 元信息
     int is_reversible;         // 是否支持可逆操作
     int is_visited;            // 搜索过程中是否已访问

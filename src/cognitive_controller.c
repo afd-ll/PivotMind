@@ -5,6 +5,7 @@
 
 #include "error.h"
 #include "cognitive_controller.h"
+#include "emergent_pos.h"
 #include "causal_reasoning.h"
 #include "concept_abstraction.h"
 #include "node_hash.h"
@@ -68,6 +69,17 @@ CognitiveController* cognitive_controller_create(MasterTopology* master,
     }
     cc->prev_satisfaction = 0.0f;
 
+    /* 涌现式词类系统: 轻量创建，尝试加载持久化中心，失败则懒初始化 */
+    cc->emergent_pos = emergent_pos_create("zh");
+    if (cc->emergent_pos) {
+        int loaded = emergent_pos_load(cc->emergent_pos, NULL);
+        if (loaded > 0) {
+            LOG_INFO("[认知调度] 涌现词类系统: 已从磁盘恢复 %d 个锚点", loaded);
+        } else {
+            LOG_INFO("[认知调度] 涌现词类系统已创建 (待懒初始化中心向量)");
+        }
+    }
+
     LOG_INFO("[认知调度] 创建成功");
     // 尝试加载持久化的 learned_base
     intent_base_load(cc);
@@ -82,6 +94,11 @@ void cognitive_controller_destroy(CognitiveController* cc) {
             free(cc->patterns[i].node_ids);
         }
         free(cc->patterns);
+    }
+    // 释放涌现词类系统
+    if (cc->emergent_pos) {
+        emergent_pos_destroy(cc->emergent_pos);
+        cc->emergent_pos = NULL;
     }
     free(cc);
 }
@@ -1395,7 +1412,60 @@ const char* pos_tag_name(POSTag tag) {
 }
 
 POSTag pos_tag_chinese(const char* word) {
+    /* chinese_pos_lookup 保留为纯硬编码快速查询函数；
+     * 外部调用者应使用 pos_tag_emergent 获得涌现式分类。 */
     return chinese_pos_lookup(word);
+}
+
+/* ================================================================
+ *  涌现式词类系统 API — 锚点中心分类
+ * ================================================================ */
+
+int cc_init_emergent_pos(CognitiveController* cc, const char* lang) {
+    if (!cc) return 0;
+    if (!cc->emergent_pos) {
+        cc->emergent_pos = emergent_pos_create(lang ? lang : "zh");
+        if (!cc->emergent_pos) return 0;
+    }
+    if (!cc->master) return 0;
+    return emergent_pos_init_centroids(cc->emergent_pos, cc->master);
+}
+
+POSTag pos_tag_emergent(CognitiveController* cc, const char* word) {
+    if (!cc || !word || !word[0]) return POS_UNKNOWN;
+
+    /* 如果涌现词类系统已就绪，优先使用 */
+    if (cc->emergent_pos) {
+        POSTag tag = emergent_pos_tag(cc->emergent_pos, cc->master, word);
+        if (tag != POS_UNKNOWN) return tag;
+    }
+
+    /* 兜底: 硬编码字典（冷启动期保证可用） */
+    return chinese_pos_lookup(word);
+}
+
+void pos_tag_emergent_soft(CognitiveController* cc, const char* word,
+                           SoftClassResult* result) {
+    if (result) result->count = 0;
+    if (!cc || !word || !word[0] || !result) return;
+
+    if (cc->emergent_pos) {
+        emergent_pos_tag_soft(cc->emergent_pos, cc->master, word, result);
+        if (result->count > 0) return;
+    }
+
+    /* 硬编码兜底: 单结果 */
+    POSTag tag = chinese_pos_lookup(word);
+    if (tag != POS_UNKNOWN) {
+        result->tags[0] = tag;
+        result->confs[0] = 1.0f;
+        result->count = 1;
+    }
+}
+
+int cc_emergent_pos_ready(CognitiveController* cc) {
+    if (!cc || !cc->emergent_pos) return 0;
+    return emergent_pos_anchor_count(cc->emergent_pos) > 0 ? 1 : 0;
 }
 
 // ==================== 句式拓扑 ====================
@@ -1640,7 +1710,7 @@ int cc_select_sentence_pattern(CognitiveController* cc, const char* input) {
         else if ((c & 0xF8) == 0xF0) { memcpy(ch, p, 4); clen = 4; }
         else { p++; continue; }
         ch[clen] = '\0';
-        POSTag tag = pos_tag_chinese(ch);
+        POSTag tag = pos_tag_emergent(cc, ch);
         if (tag != POS_UNKNOWN) input_pos[input_pos_len++] = tag;
         p += clen;
     }

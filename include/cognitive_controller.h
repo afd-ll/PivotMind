@@ -16,6 +16,9 @@
 #include "memory_system.h"
 #include <stdbool.h>
 
+/** 前向声明: 涌现词类系统（定义在 emergent_pos.h） */
+typedef struct EmergentPOS EmergentPOS;
+
 // ==================== 常量 ====================
 
 /** 子拓扑数量上限（匹配 TopologyType 枚举 0-10，预留 1 个扩展位） */
@@ -95,6 +98,21 @@ typedef struct {
     int syntax_node_id;      // 在句式拓扑中的节点ID（-1=未创建）
     float avg_freq;          // 平均频率归一化值
 } POSPattern;
+
+/** 软分类最大候选数 */
+#define SOFT_CLASS_MAX 4
+
+/**
+ * 涌现词类软分类结果 — 一个词的多个可能词类
+ *
+ * 用于多义词：如"计划"同时属于名词和动词。
+ * 特征向量在高维空间中可以同时接近多个锚点中心。
+ */
+typedef struct {
+    POSTag tags[SOFT_CLASS_MAX];           // 候选词类
+    float  confs[SOFT_CLASS_MAX];          // 余弦相似度
+    int    count;                          // 实际候选数
+} SoftClassResult;
 
 // ==================== 认知调度中心 ====================
 
@@ -180,6 +198,9 @@ typedef struct {
 
     // ========== 8. 在线学习 ==========
     float learned_base[MAX_SUBTOPOS];    // 意图基准在线学习因子 (1.0=未调整)
+
+    // ========== 10. 涌现式词类系统 ==========
+    EmergentPOS* emergent_pos;           // 种子锚点 + 特征向量聚类词类系统
 
 } CognitiveController;
 
@@ -436,5 +457,42 @@ int cc_get_all_patterns(CognitiveController* cc,
  * @return 1=可输出, 0=应静默跳过
  */
 int concept_is_printable(const char* concept);
+
+// ==================== 涌现式词类系统 API ====================
+
+/**
+ * 初始化涌现词类系统
+ *
+ * 在词汇拓扑足够丰富后调用（通常 start_environ 中或词汇 >500 节点后）。
+ * 扫描词汇拓扑找种子词节点，用其特征向量初始化锚点中心。
+ *
+ * @param cc    认知调度中心
+ * @param lang  语言 "zh" / "en"
+ * @return 成功初始化的锚点数
+ */
+int cc_init_emergent_pos(CognitiveController* cc, const char* lang);
+
+/**
+ * 涌现式词性标注（双层路由）
+ *
+ * 优先用锚点系统的特征向量匹配，失败则回退到硬编码字典取种子词。
+ * 每次成功匹配自动微调锚点中心。
+ *
+ * @param cc    认知调度中心
+ * @param word  词名
+ * @return POSTag 标签
+ */
+POSTag pos_tag_emergent(CognitiveController* cc, const char* word);
+
+/**
+ * 涌现式软标注 — 返回多个候选词类（支持多义词）
+ */
+void pos_tag_emergent_soft(CognitiveController* cc, const char* word,
+                           SoftClassResult* result);
+
+/**
+ * 检查涌现词类系统是否就绪
+ */
+int cc_emergent_pos_ready(CognitiveController* cc);
 
 #endif // COGNITIVE_CONTROLLER_H
