@@ -52,6 +52,7 @@
 #include "learning_scheduler.h"
 #include "broca.h"
 #include "node_cache.h"
+#include "autonomic_learner.h"
 #include "self_learner.h"
 #include "prefrontal_executive.h"  /* v0.3 前额叶执行器 — 推理编排 */
 #include "idea_arena.h"            /* v0.3 想法竞争竞技场 */
@@ -755,6 +756,9 @@ static void handle_learnqa(GatewaySystem* gw, int fd, const char* body) {
     /* 海马体记录对话对 */
     if (gw->hippocampus)
         hippocampus_log_dialog(gw->hippocampus, question, answer);
+
+    /* 跨拓扑学习：问题词→答案词 建立多维度 Hebbian 连接 */
+    autonomic_learn_from_dialog(m, question, answer, NULL, NULL, gw->memory);
 
     gw->total_learning_cycles++;
     char resp[256];
