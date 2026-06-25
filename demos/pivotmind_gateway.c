@@ -633,11 +633,14 @@ static void handle_chat(GatewaySystem* gw, int fd, const char* body) {
 /* 中文预处理：连续 CJK 字符间插入空格，使 strtok 能切出单字 */
 static void _cjk_insert_spaces(const char* src, char* dst, int dst_sz) {
     int wi = 0;
-    for (const char* p = src; *p && wi < dst_sz - 1; ) {
+    for (const char* p = src; *p && wi < dst_sz - 4; ) {
         unsigned char c = (unsigned char)*p;
         int blen = 1;
         if (c >= 0xE0 && c <= 0xEF) blen = 3;
         else if (c >= 0xC0 && c <= 0xDF) blen = 2;
+
+        /* 多字节字符必须完整写入：检查是否有足够空间放 字符+空格+null */
+        if (blen > 1 && wi + blen + 2 >= dst_sz) break;
 
         if (blen == 3 && wi > 0 && (unsigned char)dst[wi-1] != ' '
             && wi + 1 < dst_sz) {
@@ -648,13 +651,22 @@ static void _cjk_insert_spaces(const char* src, char* dst, int dst_sz) {
         dst[wi] = '\0';
         p += blen;
     }
+    /* 确保 null 结尾 */
+    if (wi < dst_sz) dst[wi] = '\0';
 }
 
 /* 分词 + 注册到 vocab + 建相邻边，返回新增节点数 */
 static int _learn_tokens(SubTopology* vocab, const char* text, int* p_prev_id) {
-    if (!vocab || !vocab->net) return 0;
-    char copy[2048];
-    _cjk_insert_spaces(text, copy, sizeof(copy));
+    if (!vocab || !vocab->net || !text || !text[0]) return 0;
+
+    /* 动态分配缓冲区：CJK spaced 最坏情况 = strlen * 4/3 + 1 */
+    int text_len = (int)strlen(text);
+    int copy_sz = text_len * 4 / 3 + 32;
+    if (copy_sz < 256) copy_sz = 256;
+    char* copy = (char*)malloc((size_t)copy_sz);
+    if (!copy) return 0;
+
+    _cjk_insert_spaces(text, copy, copy_sz);
     char* tok = strtok(copy, " \t\n\r。，！？、；：\"\"''（）《》…—");
     int added = 0;
     while (tok) {
@@ -676,6 +688,7 @@ static int _learn_tokens(SubTopology* vocab, const char* text, int* p_prev_id) {
         }
         tok = strtok(NULL, " \t\n\r。，！？、；：\"\"''（）《》…—");
     }
+    free(copy);
     return added;
 }
 
