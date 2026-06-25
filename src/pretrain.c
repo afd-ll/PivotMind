@@ -1466,13 +1466,13 @@ int pretrain_expand_vocab(PretrainState* state, Vocab* new_vocab, int init_strat
     if (!new_embed) return -1;
     w->data = new_embed;
 
-    // 扩展上下文权重
+    // 扩展上下文权重（若失败则 w->data 已扩容但尺寸与旧 context 不一致；上层调用方需检查返回值）
     float* new_ctx = (float*)realloc(state->context_weights,
                                       new_vocab->size * embed_dim * sizeof(float));
     if (!new_ctx) return -1;
     state->context_weights = new_ctx;
 
-    // 扩展动量缓冲区
+    // 扩展动量缓冲区（可选，失败时静默跳过）
     if (state->grad_momentum_embed) {
         float* new_mom_e = (float*)realloc(state->grad_momentum_embed,
                                             new_vocab->size * embed_dim * sizeof(float));

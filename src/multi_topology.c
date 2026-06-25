@@ -208,17 +208,17 @@ int master_add_sub_topology(MasterTopology* master,
         master->sub_topologies = new_topos;
         master->sub_topo_capacity = new_capacity;
 
-        /* 同步扩容 active_node_ids 和 activation_levels，任一失败则回滚 */
-        int* new_node_ids = (int*)realloc(master->active_node_ids,
-                                          (size_t)new_capacity * sizeof(int));
-        float* new_act_lev = (float*)realloc(master->activation_levels,
-                                             (size_t)new_capacity * sizeof(float));
+        /* 同步扩容 active_node_ids 和 activation_levels，保守 malloc+memcpy 避免 realloc 部分成功 */
+        int* new_node_ids = (int*)malloc((size_t)new_capacity * sizeof(int));
+        float* new_act_lev = (float*)malloc((size_t)new_capacity * sizeof(float));
         if (!new_node_ids || !new_act_lev) {
-            /* 任一失败则两个都保持旧指针（realloc 失败时原内存不变） */
-            free(new_node_ids);  /* 如果 new_node_ids 成功了但 new_act_lev 失败 */
-            free(new_act_lev);
+            free(new_node_ids); free(new_act_lev);
             return -1;
         }
+        memcpy(new_node_ids, master->active_node_ids, master->sub_topology_count * sizeof(int));
+        memcpy(new_act_lev, master->activation_levels, master->sub_topology_count * sizeof(float));
+        free(master->active_node_ids);
+        free(master->activation_levels);
         master->active_node_ids = new_node_ids;
         master->activation_levels = new_act_lev;
     }
@@ -2977,7 +2977,7 @@ int master_add_training_data(MasterTopology* master, const char* input_text,
     LOG_INFO("[增量训练] 添加训练数据: 输入='%s', 输出='%s', 奖励=%.2f",
            input_text, response_text, reward);
     
-    char** tokens = NULL;
+    char* tokens[100];
     int token_count = utf8_tokenize(input_text, tokens, 100);
     if (token_count <= 0) {
         return -1;

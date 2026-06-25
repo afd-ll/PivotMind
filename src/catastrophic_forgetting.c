@@ -655,8 +655,8 @@ KnowledgeDomain* knowledge_domain_create(const char* name, const char* descripti
     static int next_domain_id = 1;
 
     domain->domain_id = next_domain_id++;
-    domain->name = name;
-    domain->description = description;
+    domain->name = name ? strdup(name) : NULL;
+    domain->description = description ? strdup(description) : NULL;
     domain->node_ids = (int*)malloc(initial_capacity * sizeof(int));
     domain->node_count = 0;
     domain->capacity = initial_capacity;
@@ -672,6 +672,8 @@ KnowledgeDomain* knowledge_domain_create(const char* name, const char* descripti
 
 void knowledge_domain_destroy(KnowledgeDomain* domain) {
     if (!domain) return;
+    free((void*)domain->name);
+    free((void*)domain->description);
     if (domain->node_ids) free(domain->node_ids);
     if (domain->domain_weights) free(domain->domain_weights);
     free(domain);

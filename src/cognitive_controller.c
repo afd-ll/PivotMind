@@ -91,7 +91,9 @@ void cognitive_controller_destroy(CognitiveController* cc) {
 void cognitive_controller_reset_round(CognitiveController* cc) {
     if (!cc) return;
     cc->retry_count = 0;
+    free((void*)cc->current_input);
     cc->current_input = NULL;
+    free((void*)cc->last_response);
     cc->last_response = NULL;
 }
 
@@ -99,8 +101,10 @@ void cognitive_controller_set_context(CognitiveController* cc,
                                        const char* input,
                                        const char* last_response) {
     if (!cc) return;
-    cc->current_input = input;
-    cc->last_response = last_response;
+    free((void*)cc->current_input);
+    cc->current_input = input ? strdup(input) : NULL;
+    free((void*)cc->last_response);
+    cc->last_response = last_response ? strdup(last_response) : NULL;
 }
 
 void cognitive_controller_set_intent(CognitiveController* cc, int intent_type) {
@@ -1133,9 +1137,11 @@ int cognitive_controller_scan_patterns(CognitiveController* cc) {
             if (found < 0) {
                 // 新增模式
                 if (cc->pattern_count >= cc->pattern_capacity) {
-                    cc->pattern_capacity *= 2;
+                    int new_cap = cc->pattern_capacity * 2;
                     cc->patterns = realloc(cc->patterns,
-                                           cc->pattern_capacity * sizeof(*cc->patterns));
+                                           new_cap * sizeof(*cc->patterns));
+                    if (!cc->patterns) return -1;
+                    cc->pattern_capacity = new_cap;
                     memset(&cc->patterns[cc->pattern_count], 0,
                            (cc->pattern_capacity - cc->pattern_count) * sizeof(*cc->patterns));
                 }
@@ -1200,9 +1206,11 @@ int cognitive_controller_scan_patterns(CognitiveController* cc) {
 
                     if (found3 < 0) {
                         if (cc->pattern_count >= cc->pattern_capacity) {
-                            cc->pattern_capacity *= 2;
+                            int new_cap3 = cc->pattern_capacity * 2;
                             cc->patterns = realloc(cc->patterns,
-                                                   cc->pattern_capacity * sizeof(*cc->patterns));
+                                                   new_cap3 * sizeof(*cc->patterns));
+                            if (!cc->patterns) return -1;
+                            cc->pattern_capacity = new_cap3;
                             memset(&cc->patterns[cc->pattern_count], 0,
                                    (cc->pattern_capacity - cc->pattern_count) * sizeof(*cc->patterns));
                         }

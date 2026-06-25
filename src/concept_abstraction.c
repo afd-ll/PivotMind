@@ -109,7 +109,8 @@ ConceptNode* concept_node_create(const char* name, ConceptLevel level) {
     if (!node) return NULL;
 
     node->concept_id = generate_concept_id();
-    node->name = name;
+    node->name = strdup(name);  /* 接管字符串所有权，防御调用方栈/临时缓冲区 */
+    if (!node->name) { free(node); return NULL; }
     node->level = level;
 
     // 使用宏进行安全的内存分配和初始化
@@ -143,6 +144,7 @@ ConceptNode* concept_node_create(const char* name, ConceptLevel level) {
 
 void concept_node_destroy(ConceptNode* node) {
     if (!node) return;
+    free((void*)node->name);
     if (node->concrete_nodes) free(node->concrete_nodes);
     if (node->child_ids) free(node->child_ids);
     free(node);
@@ -155,15 +157,18 @@ int concept_hierarchy_add(ConceptHierarchy* hierarchy, ConceptNode* concept) {
     if (hierarchy->node_count >= hierarchy->capacity) {
         int new_cap = hierarchy->capacity * 2;
 
-        ConceptNode** new_nodes = (ConceptNode**)realloc(
-            hierarchy->nodes, new_cap * sizeof(ConceptNode*));
-        if (!new_nodes) return -1;
-        hierarchy->nodes = new_nodes;
-
-        // 同时扩展 id_index 数组
+        /* 先扩展 id_index（失败时 nodes 未改，一致） */
         int* new_id_index = (int*)realloc(hierarchy->id_index, new_cap * sizeof(int));
         if (!new_id_index) return -1;
+
+        ConceptNode** new_nodes = (ConceptNode**)realloc(
+            hierarchy->nodes, new_cap * sizeof(ConceptNode*));
+        if (!new_nodes) { free(new_id_index); return -1; }
+
+        hierarchy->nodes = new_nodes;
         hierarchy->id_index = new_id_index;
+        hierarchy->capacity = new_cap;
+    }
 
         // 初始化新分配的索引为 -1
         for (int i = hierarchy->capacity; i < new_cap; i++) {

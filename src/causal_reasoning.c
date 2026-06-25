@@ -469,12 +469,16 @@ int add_causal_edge(CausalGraph* graph, int cause_id, int effect_id,
     graph->edges[graph->edge_count++] = edge;
 
     // 更新邻接表
-    graph->outgoing[cause_id] = (int*)realloc(
+    int* new_out = (int*)realloc(
         graph->outgoing[cause_id], (graph->outgoing_count[cause_id] + 1) * sizeof(int));
+    if (!new_out) return -1;
+    graph->outgoing[cause_id] = new_out;
     graph->outgoing[cause_id][graph->outgoing_count[cause_id]++] = effect_id;
 
-    graph->incoming[effect_id] = (int*)realloc(
+    int* new_in = (int*)realloc(
         graph->incoming[effect_id], (graph->incoming_count[effect_id] + 1) * sizeof(int));
+    if (!new_in) return -1;
+    graph->incoming[effect_id] = new_in;
     graph->incoming[effect_id][graph->incoming_count[effect_id]++] = cause_id;
 
     // 更新统计
@@ -501,8 +505,8 @@ int remove_causal_edge(CausalGraph* graph, int cause_id, int effect_id) {
     int edge_idx = find_edge_index(graph, cause_id, effect_id);
     if (edge_idx < 0) return -1;
 
-    CausalEdge* edge = graph->edges[edge_idx];
-    free(edge);
+    /* 边由 edge_pool 内存池分配（add_causal_edge:pool_alloc），
+       不可直接 free；pool_destroy 统一释放。仅置空标记删除。 */
     graph->edges[edge_idx] = NULL;
 
     // 调整边数组
@@ -801,6 +805,7 @@ CausalPath** find_all_causal_paths(CausalGraph* graph, int source,
     } State;
 
     State* queue = (State*)malloc(graph->node_count * max_length * sizeof(State));
+    if (!queue) return 0;
     int queue_front = 0, queue_back = 0;
 
     // 初始化队列
@@ -1519,11 +1524,16 @@ int causal_pattern_add_instance(CausalPattern* pattern, const char* cause,
     
     // 需要扩展
     if (pattern->instance_count >= pattern->max_instances) {
-        pattern->max_instances *= 2;
-        pattern->instance_cause = (char**)realloc(pattern->instance_cause,
-                  pattern->max_instances * sizeof(char*));
-        pattern->instance_effect = (char**)realloc(pattern->instance_effect,
-                  pattern->max_instances * sizeof(char*));
+        int new_max = pattern->max_instances * 2;
+        char** new_cause = (char**)realloc(pattern->instance_cause,
+                                           new_max * sizeof(char*));
+        if (!new_cause) return -1;
+        char** new_effect = (char**)realloc(pattern->instance_effect,
+                                            new_max * sizeof(char*));
+        if (!new_effect) { free(new_cause); return -1; }
+        pattern->instance_cause = new_cause;
+        pattern->instance_effect = new_effect;
+        pattern->max_instances = new_max;
     }
     
     pattern->instance_cause[pattern->instance_count] = strdup(cause);

@@ -282,16 +282,18 @@ TripletPrefixGroup* template_group_triplets(
         /* 添加到组 */
         TripletPrefixGroup* grp = &groups[gi];
         if (grp->size >= grp->capacity) {
-            grp->capacity *= 2;
-            int*   nc = (int*)realloc(grp->node_c_list, (size_t)grp->capacity * sizeof(int));
-            float* ir = (float*)realloc(grp->ir_ratios, (size_t)grp->capacity * sizeof(float));
-            int*   ct = (int*)realloc(grp->counts, (size_t)grp->capacity * sizeof(int));
+            int new_cap = grp->capacity * 2;
+            int*   nc = (int*)realloc(grp->node_c_list, (size_t)new_cap * sizeof(int));
+            float* ir = (float*)realloc(grp->ir_ratios, (size_t)new_cap * sizeof(float));
+            int*   ct = (int*)realloc(grp->counts, (size_t)new_cap * sizeof(int));
             if (!nc || !ir || !ct) {
+                free(nc); free(ir); free(ct);
                 template_free_groups(groups, gcount); return NULL;
             }
             grp->node_c_list = nc;
             grp->ir_ratios   = ir;
             grp->counts      = ct;
+            grp->capacity    = new_cap;
         }
         grp->node_c_list[grp->size] = r->node_c;
         grp->ir_ratios[grp->size]   = r->ir_ratio;
