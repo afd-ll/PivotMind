@@ -109,7 +109,8 @@ const char* string_pool_intern(StringPool* pool, const char* str) {
         pool->ref_counts = new_refs;
         pool->hash_values = new_hashes;
         pool->capacity = new_capacity;
-    
+    }
+
     // 复制字符串
     char* new_str = strdup(str);
     if (!new_str) return NULL;

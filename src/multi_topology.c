@@ -215,8 +215,8 @@ int master_add_sub_topology(MasterTopology* master,
             free(new_node_ids); free(new_act_lev);
             return -1;
         }
-        memcpy(new_node_ids, master->active_node_ids, master->sub_topology_count * sizeof(int));
-        memcpy(new_act_lev, master->activation_levels, master->sub_topology_count * sizeof(float));
+        memcpy(new_node_ids, master->active_node_ids, master->sub_topo_count * sizeof(int));
+        memcpy(new_act_lev, master->activation_levels, master->sub_topo_count * sizeof(float));
         free(master->active_node_ids);
         free(master->activation_levels);
         master->active_node_ids = new_node_ids;
@@ -2986,7 +2986,6 @@ int master_add_training_data(MasterTopology* master, const char* input_text,
     SubTopology* vocab_topo = master_get_sub_topology_by_type(master, TOPO_VOCABULARY);
     if (!vocab_topo) {
         for (int i = 0; i < token_count; i++) free(tokens[i]);
-        free(tokens);
         return -1;
     }
     
@@ -3006,8 +3005,7 @@ int master_add_training_data(MasterTopology* master, const char* input_text,
     }
     
     for (int i = 0; i < token_count; i++) free(tokens[i]);
-    free(tokens);
-    
+
     master->training_data_count++;
     
     return 0;

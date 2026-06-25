@@ -167,8 +167,6 @@ int concept_hierarchy_add(ConceptHierarchy* hierarchy, ConceptNode* concept) {
 
         hierarchy->nodes = new_nodes;
         hierarchy->id_index = new_id_index;
-        hierarchy->capacity = new_cap;
-    }
 
         // 初始化新分配的索引为 -1
         for (int i = hierarchy->capacity; i < new_cap; i++) {
