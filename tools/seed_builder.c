@@ -270,6 +270,7 @@ static void seed_memory(MemorySystem* memory, const char* question, const char* 
     char* data = strdup(answer);
     memory_store(memory, key, data, strlen(answer) + 1,
                  MEMORY_TYPE_STRING, 0.9f);
+    free(data);  /* memory_store 内部已拷贝 */
 
     // 也从问题中提取关键词单独存
     char q_copy[MAX_LINE];
@@ -287,6 +288,7 @@ static void seed_memory(MemorySystem* memory, const char* question, const char* 
                 char* d2 = strdup(answer);
                 memory_store(memory, k2, d2, strlen(answer) + 1,
                              MEMORY_TYPE_STRING, 0.7f);
+                free(d2);  /* memory_store 内部已拷贝 */
             }
         }
         token = strtok(NULL, delimiters);
@@ -392,6 +394,7 @@ int main(int argc, char* argv[]) {
                     char* d = strdup(answers[i]);
                     memory_store(memory, k, d, strlen(answers[i]) + 1,
                                  MEMORY_TYPE_STRING, 0.8f);
+                    free(d);  /* memory_store 内部已拷贝 */
                 }
             }
         }

@@ -537,6 +537,7 @@ void memory_consolidate(MemorySystem* memory) {
                        entry->key, entry->importance);
             }
             destroy_memory_entry(entry);
+            memory->context_memory->entries[i] = NULL;
         } else {
             if (write_idx != i) {
                 memory->context_memory->entries[write_idx] = entry;
@@ -563,6 +564,7 @@ void memory_consolidate(MemorySystem* memory) {
                        entry->key, entry->importance);
             }
             destroy_memory_entry(entry);
+            memory->short_term->entries[i] = NULL;
         } else {
             if (write_idx != i) {
                 memory->short_term->entries[write_idx] = entry;
@@ -603,6 +605,7 @@ void memory_update_confidence(MemorySystem* memory, const char* key, float new_c
             }
             memory->context_memory->size--;
             rebuild_stm_hash(memory->context_memory);  /* 压缩后重建哈希 */
+            destroy_memory_entry(entry);  /* stm_store 已拷贝，释放原条目 */
 
             printf("记忆升级：'%s' 从上下文记忆升级到短期记忆\n", key);
         }
@@ -625,6 +628,7 @@ void memory_update_confidence(MemorySystem* memory, const char* key, float new_c
             }
             memory->short_term->size--;
             rebuild_stm_hash(memory->short_term);  /* 压缩后重建哈希 */
+            destroy_memory_entry(entry);  /* ltm_store 已拷贝，释放原条目 */
 
             printf("记忆升级：'%s' 从短期记忆升级到永久记忆\n", key);
         } else if (new_confidence < memory->confidence_threshold_1) {
@@ -636,6 +640,8 @@ void memory_update_confidence(MemorySystem* memory, const char* key, float new_c
                 memory->short_term->entries[j] = memory->short_term->entries[j + 1];
             }
             memory->short_term->size--;
+            rebuild_stm_hash(memory->short_term);  /* 压缩后重建哈希 */
+            destroy_memory_entry(entry);  /* stm_store 已拷贝，释放原条目 */
 
             printf("记忆降级：'%s' 从短期记忆降级到上下文记忆\n", key);
         }

@@ -1,6 +1,6 @@
 /**
- * 走边路径生成测试
- * 测试 topology_walk_greedy 的路径连贯性、终点判断、跨起点重试
+ * 璧拌竟璺緞鐢熸垚娴嬭瘯
+ * 娴嬭瘯 topology_walk_greedy 鐨勮矾寰勮繛璐€с€佺粓鐐瑰垽鏂€佽法璧风偣閲嶈瘯
  */
 #include "multi_topology.h"
 #include "node_hash.h"
@@ -9,7 +9,7 @@
 #include <string.h>
 #include <math.h>
 
-// 辅助：向子拓扑添加节点，自动添加节点哈希
+// 杈呭姪锛氬悜瀛愭嫇鎵戞坊鍔犺妭鐐癸紝鑷姩娣诲姞鑺傜偣鍝堝笇
 static ReasoningNode* add_node(SubTopology* sub, const char* concept, float activation, float valence) {
     HuarongTopologyNet* net = sub->net;
     ReasoningNode* node = huarong_net_add_node(net, concept, NULL, 0);
@@ -21,21 +21,29 @@ static ReasoningNode* add_node(SubTopology* sub, const char* concept, float acti
     return node;
 }
 
-// 辅助：在两个节点之间添加双向�?static void add_edge(SubTopology* sub, ReasoningNode* from, ReasoningNode* to,
+// 杈呭姪锛氬湪涓や釜鑺傜偣涔嬮棿娣诲姞鍙屽悜杈?static void add_edge(SubTopology* sub, ReasoningNode* from, ReasoningNode* to,
                      float weight, float conf, float bias) {
     if (!from || !to) return;
     HuarongTopologyNet* net = sub->net;
 
-    // 确保 connection 数组有空间（简化版：直接替换已有连接）
+    // 纭繚 connection 鏁扮粍鏈夌┖闂达紙绠€鍖栫増锛氱洿鎺ユ浛鎹㈠凡鏈夎繛鎺ワ級
     int idx = from->connection_count;
     int cap = from->connection_capacity;
 
     if (idx >= cap) {
         int new_cap = cap == 0 ? 8 : cap * 2;
-        from->connections = realloc(from->connections, sizeof(ReasoningNode*) * new_cap);
-        from->connection_weights = realloc(from->connection_weights, sizeof(float) * new_cap);
-        from->connection_confidences = realloc(from->connection_confidences, sizeof(float) * new_cap);
-        from->connection_motivational_bias = realloc(from->connection_motivational_bias, sizeof(float) * new_cap);
+        ReasoningNode** conn = realloc(from->connections, sizeof(ReasoningNode*) * new_cap);
+        float* w = realloc(from->connection_weights, sizeof(float) * new_cap);
+        float* cf = realloc(from->connection_confidences, sizeof(float) * new_cap);
+        float* mb = realloc(from->connection_motivational_bias, sizeof(float) * new_cap);
+        if (!conn || !w || !cf || !mb) {
+            free(conn); free(w); free(cf); free(mb);
+            return;
+        }
+        from->connections = conn;
+        from->connection_weights = w;
+        from->connection_confidences = cf;
+        from->connection_motivational_bias = mb;
         from->connection_capacity = new_cap;
     }
 
@@ -47,12 +55,12 @@ static ReasoningNode* add_node(SubTopology* sub, const char* concept, float acti
 }
 
 static void print_path(SubTopology* sub, int* path, int len) {
-    printf("  路径(%d): ", len);
+    printf("  璺緞(%d): ", len);
     for (int i = 0; i < len; i++) {
         int nid = path[i];
         if (nid >= 0 && nid < sub->net->node_count && sub->net->nodes[nid]) {
             printf("%s", sub->net->nodes[nid]->concept);
-            if (i < len - 1) printf("�?);
+            if (i < len - 1) printf("鈫?);
         } else {
             printf("[?]");
         }
@@ -60,24 +68,24 @@ static void print_path(SubTopology* sub, int* path, int len) {
     printf("\n");
 }
 
-// ===== 测试1: 路径连贯�?=====
-// 构建 人→工→智→能→是→什→么 的链，看是否能完整走�?static void test_coherence() {
-    printf("\n========== 测试1: 路径连贯�?==========\n");
+// ===== 娴嬭瘯1: 璺緞杩炶疮鎬?=====
+// 鏋勫缓 浜衡啋宸モ啋鏅衡啋鑳解啋鏄啋浠€鈫掍箞 鐨勯摼锛岀湅鏄惁鑳藉畬鏁磋蛋鍑?static void test_coherence() {
+    printf("\n========== 娴嬭瘯1: 璺緞杩炶疮鎬?==========\n");
 
     MasterTopology* master = master_topology_create(10);
-    master_add_sub_topology(master, TOPO_VOCABULARY, "词汇拓扑", 100, 10);
+    master_add_sub_topology(master, TOPO_VOCABULARY, "璇嶆眹鎷撴墤", 100, 10);
     SubTopology* vocab = master_get_sub_topology_by_type(master, TOPO_VOCABULARY);
 
-    // 构建: 人→工→智→能→是→什→么 (高权重链)
-    ReasoningNode* ren   = add_node(vocab, "�?, 0.95f, 0.5f);
-    ReasoningNode* gong  = add_node(vocab, "�?, 0.90f, 0.4f);
-    ReasoningNode* zhi   = add_node(vocab, "�?, 0.85f, 0.6f);
-    ReasoningNode* neng  = add_node(vocab, "�?, 0.80f, 0.5f);
-    ReasoningNode* shi   = add_node(vocab, "�?, 0.75f, 0.3f);
-    ReasoningNode* shen  = add_node(vocab, "什", 0.70f, 0.2f);
-    ReasoningNode* me    = add_node(vocab, "�?, 0.65f, 0.1f);
+    // 鏋勫缓: 浜衡啋宸モ啋鏅衡啋鑳解啋鏄啋浠€鈫掍箞 (楂樻潈閲嶉摼)
+    ReasoningNode* ren   = add_node(vocab, "浜?, 0.95f, 0.5f);
+    ReasoningNode* gong  = add_node(vocab, "宸?, 0.90f, 0.4f);
+    ReasoningNode* zhi   = add_node(vocab, "鏅?, 0.85f, 0.6f);
+    ReasoningNode* neng  = add_node(vocab, "鑳?, 0.80f, 0.5f);
+    ReasoningNode* shi   = add_node(vocab, "鏄?, 0.75f, 0.3f);
+    ReasoningNode* shen  = add_node(vocab, "浠€", 0.70f, 0.2f);
+    ReasoningNode* me    = add_node(vocab, "涔?, 0.65f, 0.1f);
 
-    // 强连接链：主路径
+    // 寮鸿繛鎺ラ摼锛氫富璺緞
     add_edge(vocab, ren, gong, 0.9f, 0.95f, 0.5f);
     add_edge(vocab, gong, zhi, 0.85f, 0.90f, 0.5f);
     add_edge(vocab, zhi, neng, 0.80f, 0.88f, 0.5f);
@@ -85,82 +93,82 @@ static void print_path(SubTopology* sub, int* path, int len) {
     add_edge(vocab, shi, shen, 0.70f, 0.80f, 0.3f);
     add_edge(vocab, shen, me, 0.65f, 0.75f, 0.3f);
 
-    // 添加干扰边：人→A(不相关但激活高)
+    // 娣诲姞骞叉壈杈癸細浜衡啋A(涓嶇浉鍏充絾婵€娲婚珮)
     ReasoningNode* otherA = add_node(vocab, "A", 0.92f, -0.1f);
     ReasoningNode* otherB = add_node(vocab, "B", 0.88f, -0.2f);
-    add_edge(vocab, ren, otherA, 0.3f, 0.4f, 0.1f);  // 弱边但目标激活高
+    add_edge(vocab, ren, otherA, 0.3f, 0.4f, 0.1f);  // 寮辫竟浣嗙洰鏍囨縺娲婚珮
     add_edge(vocab, otherA, otherB, 0.2f, 0.3f, 0.1f);
 
-    // 反向边（低权重）
+    // 鍙嶅悜杈癸紙浣庢潈閲嶏級
     add_edge(vocab, gong, ren, 0.1f, 0.2f, 0.0f);
 
-    printf("从「人」出发走�?\n");
+    printf("浠庛€屼汉銆嶅嚭鍙戣蛋杈?\n");
     int path[20];
     float scores[20];
     int len = topology_walk_greedy(vocab, ren->node_id, path, scores, 10, NULL, 1.0f, NULL, NULL);
     print_path(vocab, path, len);
-    printf("  预期: 人→工→智→能→是→什→么\n");
-    printf("  不包�? A、B（干扰边得分低，应该被过滤掉）\n");
+    printf("  棰勬湡: 浜衡啋宸モ啋鏅衡啋鑳解啋鏄啋浠€鈫掍箞\n");
+    printf("  涓嶅寘鍚? A銆丅锛堝共鎵拌竟寰楀垎浣庯紝搴旇琚繃婊ゆ帀锛塡n");
 
-    // 从中间节点出�?    printf("\n从「智」出发走�?\n");
+    // 浠庝腑闂磋妭鐐瑰嚭鍙?    printf("\n浠庛€屾櫤銆嶅嚭鍙戣蛋杈?\n");
     len = topology_walk_greedy(vocab, zhi->node_id, path, scores, 10, NULL, 1.0f, NULL, NULL);
     print_path(vocab, path, len);
-    printf("  预期: 智→能→是→什→么\n");
+    printf("  棰勬湡: 鏅衡啋鑳解啋鏄啋浠€鈫掍箞\n");
 
     master_topology_destroy(master);
 }
 
-// ===== 测试2: 终点判断 =====
-// 构建不同长度的链，看阈�?.05是否合理
+// ===== 娴嬭瘯2: 缁堢偣鍒ゆ柇 =====
+// 鏋勫缓涓嶅悓闀垮害鐨勯摼锛岀湅闃堝€?.05鏄惁鍚堢悊
 static void test_termination() {
-    printf("\n========== 测试2: 终点判断 ==========\n");
+    printf("\n========== 娴嬭瘯2: 缁堢偣鍒ゆ柇 ==========\n");
 
     MasterTopology* master = master_topology_create(10);
-    master_add_sub_topology(master, TOPO_VOCABULARY, "词汇拓扑", 100, 10);
+    master_add_sub_topology(master, TOPO_VOCABULARY, "璇嶆眹鎷撴墤", 100, 10);
     SubTopology* vocab = master_get_sub_topology_by_type(master, TOPO_VOCABULARY);
 
-    // 构建 学→习→新→知→�?(依次递减的边权重，模拟末端自然结�?
-    ReasoningNode* xue  = add_node(vocab, "�?, 0.90f, 0.6f);
-    ReasoningNode* xi   = add_node(vocab, "�?, 0.85f, 0.5f);
-    ReasoningNode* xin  = add_node(vocab, "�?, 0.60f, 0.4f);
-    ReasoningNode* zhi  = add_node(vocab, "�?, 0.40f, 0.3f);
-    ReasoningNode* shi2 = add_node(vocab, "�?, 0.30f, 0.2f);
+    // 鏋勫缓 瀛︹啋涔犫啋鏂扳啋鐭モ啋璇?(渚濇閫掑噺鐨勮竟鏉冮噸锛屾ā鎷熸湯绔嚜鐒剁粨鏉?
+    ReasoningNode* xue  = add_node(vocab, "瀛?, 0.90f, 0.6f);
+    ReasoningNode* xi   = add_node(vocab, "涔?, 0.85f, 0.5f);
+    ReasoningNode* xin  = add_node(vocab, "鏂?, 0.60f, 0.4f);
+    ReasoningNode* zhi  = add_node(vocab, "鐭?, 0.40f, 0.3f);
+    ReasoningNode* shi2 = add_node(vocab, "璇?, 0.30f, 0.2f);
 
-    add_edge(vocab, xue, xi, 0.90f, 0.92f, 0.5f);   // �?    add_edge(vocab, xi, xin, 0.70f, 0.75f, 0.4f);    // �?    add_edge(vocab, xin, zhi, 0.30f, 0.35f, 0.2f);   // �?    add_edge(vocab, zhi, shi2, 0.08f, 0.10f, 0.1f);  // 极弱，接近阈�?
-    printf("从「学」出发走边（渐进弱化链）:\n");
+    add_edge(vocab, xue, xi, 0.90f, 0.92f, 0.5f);   // 寮?    add_edge(vocab, xi, xin, 0.70f, 0.75f, 0.4f);    // 涓?    add_edge(vocab, xin, zhi, 0.30f, 0.35f, 0.2f);   // 寮?    add_edge(vocab, zhi, shi2, 0.08f, 0.10f, 0.1f);  // 鏋佸急锛屾帴杩戦槇鍊?
+    printf("浠庛€屽銆嶅嚭鍙戣蛋杈癸紙娓愯繘寮卞寲閾撅級:\n");
     int path[20];
     float scores[20];
     int len = topology_walk_greedy(vocab, xue->node_id, path, scores, 10, NULL, 1.0f, NULL, NULL);
     print_path(vocab, path, len);
-    printf("  每步得分: ");
+    printf("  姣忔寰楀垎: ");
     for (int i = 0; i < len; i++) printf("%.4f ", scores[i]);
     printf("\n");
-    printf("  预期: 学→习→新→知（「识」的连接权重+激活值可能低�?.05阈值被截断）\n");
+    printf("  棰勬湡: 瀛︹啋涔犫啋鏂扳啋鐭ワ紙銆岃瘑銆嶇殑杩炴帴鏉冮噸+婵€娲诲€煎彲鑳戒綆浜?.05闃堝€艰鎴柇锛塡n");
 
-    // 无路可走的叶子节�?    ReasoningNode* leaf = add_node(vocab, "�?, 0.50f, 0.0f);
-    printf("\n从「叶」出发（无连接）：\n");
+    // 鏃犺矾鍙蛋鐨勫彾瀛愯妭鐐?    ReasoningNode* leaf = add_node(vocab, "鍙?, 0.50f, 0.0f);
+    printf("\n浠庛€屽彾銆嶅嚭鍙戯紙鏃犺繛鎺ワ級锛歕n");
     len = topology_walk_greedy(vocab, leaf->node_id, path, scores, 10, NULL, 1.0f, NULL, NULL);
     print_path(vocab, path, len);
-    printf("  预期: 叶（只有起点，无路径）\n");
+    printf("  棰勬湡: 鍙讹紙鍙湁璧风偣锛屾棤璺緞锛塡n");
 
     master_topology_destroy(master);
 }
 
-// ===== 测试3: 跨起点重�?=====
-// 第一起点走不长，换第二起�?static void test_multi_start() {
-    printf("\n========== 测试3: 跨起点重�?==========\n");
+// ===== 娴嬭瘯3: 璺ㄨ捣鐐归噸璇?=====
+// 绗竴璧风偣璧颁笉闀匡紝鎹㈢浜岃捣鐐?static void test_multi_start() {
+    printf("\n========== 娴嬭瘯3: 璺ㄨ捣鐐归噸璇?==========\n");
 
     MasterTopology* master = master_topology_create(10);
-    master_add_sub_topology(master, TOPO_VOCABULARY, "词汇拓扑", 100, 10);
+    master_add_sub_topology(master, TOPO_VOCABULARY, "璇嶆眹鎷撴墤", 100, 10);
     SubTopology* vocab = master_get_sub_topology_by_type(master, TOPO_VOCABULARY);
 
-    // 孤立起点A（只�?步连接）
+    // 瀛ょ珛璧风偣A锛堝彧鏈?姝ヨ繛鎺ワ級
     ReasoningNode* a1 = add_node(vocab, "A", 0.95f, 0.3f);
     ReasoningNode* a2 = add_node(vocab, "A2", 0.30f, 0.2f);
     add_edge(vocab, a1, a2, 0.5f, 0.5f, 0.3f);
-    // A->A2后就没路了（A2无出边）
+    // A->A2鍚庡氨娌¤矾浜嗭紙A2鏃犲嚭杈癸級
 
-    // 长链起点B（可以走很远�?    ReasoningNode* b1 = add_node(vocab, "B", 0.90f, 0.5f);
+    // 闀块摼璧风偣B锛堝彲浠ヨ蛋寰堣繙锛?    ReasoningNode* b1 = add_node(vocab, "B", 0.90f, 0.5f);
     ReasoningNode* b2 = add_node(vocab, "B2", 0.85f, 0.4f);
     ReasoningNode* b3 = add_node(vocab, "B3", 0.80f, 0.4f);
     ReasoningNode* b4 = add_node(vocab, "B4", 0.75f, 0.3f);
@@ -168,31 +176,31 @@ static void test_termination() {
     add_edge(vocab, b2, b3, 0.8f, 0.8f, 0.5f);
     add_edge(vocab, b3, b4, 0.7f, 0.7f, 0.4f);
 
-    printf("模拟: 排序后的起点列表 A(act=0.95) > B(act=0.90)\n");
-    printf("从A出发: 只能�?�?A→A2)\n");
-    printf("跨起点重�? 换B出发 �?可走B→B2→B3→B4\n\n");
+    printf("妯℃嫙: 鎺掑簭鍚庣殑璧风偣鍒楄〃 A(act=0.95) > B(act=0.90)\n");
+    printf("浠嶢鍑哄彂: 鍙兘璧?姝?A鈫扐2)\n");
+    printf("璺ㄨ捣鐐归噸璇? 鎹鍑哄彂 鈫?鍙蛋B鈫払2鈫払3鈫払4\n\n");
 
-    // 先走A
+    // 鍏堣蛋A
     int path[20];
     float scores[20];
     int len = topology_walk_greedy(vocab, a1->node_id, path, scores, 10, NULL, 1.0f, NULL, NULL);
-    printf("起点A:\n");
+    printf("璧风偣A:\n");
     print_path(vocab, path, len);
 
-    // 走B（用同一个visited bitmap也行，但不共享）
+    // 璧癇锛堢敤鍚屼竴涓獀isited bitmap涔熻锛屼絾涓嶅叡浜級
     len = topology_walk_greedy(vocab, b1->node_id, path, scores, 10, NULL, 1.0f, NULL, NULL);
-    printf("起点B:\n");
+    printf("璧风偣B:\n");
     print_path(vocab, path, len);
 
     master_topology_destroy(master);
 }
 
-// ===== 测试4: 三角环防循环 =====
-// 人↔工↔智↔人（循环），不能死循�?static void test_loop_prevention() {
-    printf("\n========== 测试4: 防循�?==========\n");
+// ===== 娴嬭瘯4: 涓夎鐜槻寰幆 =====
+// 浜衡啍宸モ啍鏅衡啍浜猴紙寰幆锛夛紝涓嶈兘姝诲惊鐜?static void test_loop_prevention() {
+    printf("\n========== 娴嬭瘯4: 闃插惊鐜?==========\n");
 
     MasterTopology* master = master_topology_create(10);
-    master_add_sub_topology(master, TOPO_VOCABULARY, "词汇拓扑", 100, 10);
+    master_add_sub_topology(master, TOPO_VOCABULARY, "璇嶆眹鎷撴墤", 100, 10);
     SubTopology* vocab = master_get_sub_topology_by_type(master, TOPO_VOCABULARY);
 
     ReasoningNode* a = add_node(vocab, "A", 0.90f, 0.5f);
@@ -200,29 +208,29 @@ static void test_termination() {
     ReasoningNode* c = add_node(vocab, "C", 0.80f, 0.3f);
     ReasoningNode* d = add_node(vocab, "D", 0.75f, 0.3f);
 
-    // 三角�? A→B→C→A
+    // 涓夎鐜? A鈫払鈫扖鈫扐
     add_edge(vocab, a, b, 0.9f, 0.9f, 0.5f);
     add_edge(vocab, b, c, 0.8f, 0.8f, 0.5f);
     add_edge(vocab, c, a, 0.7f, 0.7f, 0.5f);
-    // 分支: C→D（唯一出路�?    add_edge(vocab, c, d, 0.6f, 0.6f, 0.4f);
+    // 鍒嗘敮: C鈫扗锛堝敮涓€鍑鸿矾锛?    add_edge(vocab, c, d, 0.6f, 0.6f, 0.4f);
 
-    printf("三角�?A→B→C→A + 分支 C→D\n");
-    printf("不能死循环在A→B→C→A，必须走到D\n\n");
+    printf("涓夎鐜?A鈫払鈫扖鈫扐 + 鍒嗘敮 C鈫扗\n");
+    printf("涓嶈兘姝诲惊鐜湪A鈫払鈫扖鈫扐锛屽繀椤昏蛋鍒癉\n\n");
 
     int path[20];
     float scores[20];
     int len = topology_walk_greedy(vocab, a->node_id, path, scores, 10, NULL, 1.0f, NULL, NULL);
     print_path(vocab, path, len);
-    printf("  预期: A→B→C→D（不会回到A）\n");
+    printf("  棰勬湡: A鈫払鈫扖鈫扗锛堜笉浼氬洖鍒癆锛塡n");
 
     master_topology_destroy(master);
 }
 
 int main() {
     printf("========================================\n");
-    printf("  走边路径生成测试\n");
-    printf("  混合评分: 加法(边权�?边置�?边动�?目标激�?目标置信) × 效价乘法因子\n");
-    printf("  阈�? < 0.05 停止\n");
+    printf("  璧拌竟璺緞鐢熸垚娴嬭瘯\n");
+    printf("  娣峰悎璇勫垎: 鍔犳硶(杈规潈閲?杈圭疆淇?杈瑰姩鏈?鐩爣婵€娲?鐩爣缃俊) 脳 鏁堜环涔樻硶鍥犲瓙\n");
+    printf("  闃堝€? < 0.05 鍋滄\n");
     printf("========================================\n");
 
     test_coherence();
@@ -231,7 +239,7 @@ int main() {
     test_loop_prevention();
 
     printf("\n========================================\n");
-    printf("  测试完成\n");
+    printf("  娴嬭瘯瀹屾垚\n");
     printf("========================================\n");
     return 0;
 }
