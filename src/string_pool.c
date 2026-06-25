@@ -84,28 +84,31 @@ const char* string_pool_intern(StringPool* pool, const char* str) {
     // 检查容量，动态扩容
     if (pool->count >= pool->capacity) {
         int new_capacity = pool->capacity * 2;
-        
-        char** new_strings = (char**)realloc(pool->strings, 
-                                             new_capacity * sizeof(char*));
-        int* new_refs = (int*)realloc(pool->ref_counts, 
-                                      new_capacity * sizeof(int));
-        unsigned int* new_hashes = (unsigned int*)realloc(pool->hash_values, 
-                                                new_capacity * sizeof(unsigned int));
-        
+        int old_cap = pool->capacity;
+
+        /* malloc 新数组 + memcpy 再 free 旧数组，而非链式 realloc。
+           确保任一分配失败时旧数组完整，池不进入损坏状态。 */
+        char** new_strings = (char**)malloc(new_capacity * sizeof(char*));
+        int* new_refs = (int*)malloc(new_capacity * sizeof(int));
+        unsigned int* new_hashes = (unsigned int*)malloc(new_capacity * sizeof(unsigned int));
+
         if (!new_strings || !new_refs || !new_hashes) {
-            /* 部分 realloc 成功的内存必须释放 */
             free(new_strings); free(new_refs); free(new_hashes);
             return NULL;
         }
-        
-        int old_cap = pool->capacity;
+
+        memcpy(new_strings, pool->strings, old_cap * sizeof(char*));
+        memcpy(new_refs, pool->ref_counts, old_cap * sizeof(int));
+        memcpy(new_hashes, pool->hash_values, old_cap * sizeof(unsigned int));
+
+        free(pool->strings);
+        free(pool->ref_counts);
+        free(pool->hash_values);
+
         pool->strings = new_strings;
         pool->ref_counts = new_refs;
         pool->hash_values = new_hashes;
         pool->capacity = new_capacity;
-        
-        printf("[字符串池] 扩容: %d -> %d\n", old_cap, new_capacity);
-    }
     
     // 复制字符串
     char* new_str = strdup(str);
