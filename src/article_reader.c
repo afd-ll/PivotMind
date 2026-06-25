@@ -637,20 +637,21 @@ int article_flush(ArticleReader* ar, SubTopology* topo) {
         CharWordList* cwl = &first_char_map[first_byte];
         for (int wi2 = 0; wi2 < cwl->count; wi2++) {
             int widx2 = cwl->list[wi2];
+            if (wi == widx2) continue;  /* 用索引去重，防御 realloc */
             WordEntry* w2 = &ar->words[widx2];  /* 每次从最新 ar->words 取，防御 realloc */
-            if (w1 == w2 || w2->char_len < 1) continue;
+            if (w2->char_len < 1) continue;
 
             // 检查 pair_table 中该字对是否高频
             PairEntry* pe = _ar_find_pair(ar, last_c, w2->text);
             if (!pe || pe->co_count < ar->cfg.min_freq) continue;
 
-            // 合并
-            size_t w1len = strlen(w1->text);
+            // 合并 — w1 也每次从索引读，防御内层循环中 _ar_find_or_add_word 的 realloc
+            size_t w1len = strlen(ar->words[wi].text);
             size_t w2len = strlen(w2->text);
             if (w1len + w2len >= AR_WORD_MAX_LEN * 4 + 1) continue;
 
             char combined[AR_WORD_MAX_LEN * 4 + 1] = {0};
-            memcpy(combined, w1->text, w1len);
+            memcpy(combined, ar->words[wi].text, w1len);
             memcpy(combined + w1len, w2->text, w2len);
             combined[w1len + w2len] = 0;
 
