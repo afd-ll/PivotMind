@@ -694,7 +694,11 @@ static void handle_learn(GatewaySystem* gw, int fd, const char* body) {
             int nid = huarong_net_find_concept(vocab->net, tok);
             if (nid < 0 && vocab->net->node_count < vocab->net->max_nodes) {
                 nid = huarong_net_dynamic_add_node(vocab->net, tok, NULL, 0);
-                if (nid >= 0) added++;
+                if (nid >= 0) {
+                    added++;
+                    /* 同步注册到 node_hash，保证 master_generate_response 等路径可查 */
+                    node_hash_add(vocab->node_hash, vocab->net->nodes[nid]);
+                }
             }
             if (nid >= 0) {
                 vocab->net->nodes[nid]->activation += 0.1f;
