@@ -576,7 +576,6 @@ int pfe_solve_subgoal(PrefrontalExecutive* pfe, int goal_index) {
 
     /* 设置子问题为当前上下文 */
     cognitive_controller_set_context(cc, g->question, NULL);
-    cc->current_input = g->question;
     float ctx_activations[MAX_SUBTOPOS] = {0};
     calc_context_activations(cc, ctx_activations);
     compute_intent(cc, ctx_activations);

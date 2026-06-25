@@ -49,6 +49,8 @@ Tensor* tensor_create(DataType dtype, size_t ndim, const size_t* shape)
     tensor->shape = malloc(ndim * sizeof(size_t));
     tensor->strides = malloc(ndim * sizeof(size_t));
     if (!tensor->shape || !tensor->strides) {
+        free(tensor->shape);
+        free(tensor->strides);
         free(tensor);
         return NULL;
     }

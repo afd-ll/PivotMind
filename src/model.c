@@ -17,7 +17,9 @@ Model* model_create() {
 
 // 添加层到模型
 void model_add_layer(Model* model, Layer* layer) {
-    model->layers = realloc(model->layers, (model->num_layers + 1) * sizeof(Layer*));
+    Layer** tmp = realloc(model->layers, (model->num_layers + 1) * sizeof(Layer*));
+    if (!tmp) return;
+    model->layers = tmp;
     model->layers[model->num_layers] = layer;
     model->num_layers++;
 }

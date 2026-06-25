@@ -109,7 +109,9 @@ void clip_model_grads(Model* model, float max_norm, ClipMode mode) {
             // 收集权重和偏置的梯度
             if (layer->grad_weights || layer->grad_bias) {
                 size_t new_size = num_grads + 2;
-                grads = realloc(grads, new_size * sizeof(Tensor*));
+                Tensor** tmp = realloc(grads, new_size * sizeof(Tensor*));
+                if (!tmp) { free(grads); return; }
+                grads = tmp;
 
                 if (layer->grad_weights) {
                     grads[num_grads++] = layer->grad_weights;

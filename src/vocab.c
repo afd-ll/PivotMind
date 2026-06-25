@@ -15,11 +15,15 @@ static int _vocab_find(Vocab* vocab, const char* word) {
     return -1;
 }
 
-static void _vocab_grow(Vocab* vocab) {
-    if (vocab->size < vocab->capacity) return;
-    vocab->capacity *= 2;
-    vocab->entries = (VocabEntry*)realloc(vocab->entries,
-                                           vocab->capacity * sizeof(VocabEntry));
+static int _vocab_grow(Vocab* vocab) {
+    if (vocab->size < vocab->capacity) return 0;
+    int new_cap = vocab->capacity * 2;
+    VocabEntry* tmp = (VocabEntry*)realloc(vocab->entries,
+                                           new_cap * sizeof(VocabEntry));
+    if (!tmp) return -1;
+    vocab->entries = tmp;
+    vocab->capacity = new_cap;
+    return 0;
 }
 
 // ========== 词表API ==========
@@ -62,7 +66,7 @@ int vocab_add(Vocab* vocab, const char* word) {
         return vocab->entries[idx].id;
     }
 
-    _vocab_grow(vocab);
+    if (_vocab_grow(vocab) != 0) return -1;
 
     VocabEntry* e = &vocab->entries[vocab->size];
     e->word = strdup(word);
@@ -240,6 +244,8 @@ char* vocab_info(Vocab* vocab) {
 
 // ========== 词表构建器 ==========
 
+static void _free_lines(char** lines, int count);
+
 static int _read_file_lines(const char* filepath, char*** lines_out) {
     FILE* fp = fopen(filepath, "r");
     if (!fp) return -1;
@@ -259,8 +265,11 @@ static int _read_file_lines(const char* filepath, char*** lines_out) {
         if (len == 0 || line[0] == '#') continue;
 
         if (count >= capacity) {
-            capacity *= 2;
-            lines = (char**)realloc(lines, capacity * sizeof(char*));
+            int new_cap = capacity * 2;
+            char** tmp = (char**)realloc(lines, new_cap * sizeof(char*));
+            if (!tmp) { fclose(fp); _free_lines(lines, count); return -1; }
+            lines = tmp;
+            capacity = new_cap;
         }
         lines[count++] = strdup(line);
     }

@@ -443,9 +443,12 @@ int memory_cluster_split(ClusterManager* manager, int cluster_id,
 
     // 添加新簇
     if (manager->cluster_count >= manager->capacity) {
-        manager->clusters = (MemoryCluster**)realloc(
-            manager->clusters, manager->capacity * 2 * sizeof(MemoryCluster*));
-        manager->capacity *= 2;
+        int new_cap = manager->capacity * 2;
+        MemoryCluster** tmp = (MemoryCluster**)realloc(
+            manager->clusters, new_cap * sizeof(MemoryCluster*));
+        if (!tmp) { memory_cluster_destroy(new_cluster); return -1; }
+        manager->clusters = tmp;
+        manager->capacity = new_cap;
     }
     manager->clusters[manager->cluster_count++] = new_cluster;
 

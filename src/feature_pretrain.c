@@ -67,7 +67,8 @@ int feature_transfer_pretrained(MasterTopology* master, PretrainState* pretrain)
                     node->features = (float*)malloc(dst_dim * sizeof(float));
                 } else if (node->feature_dim < dst_dim) {
                     float* new_feat = (float*)realloc(node->features, dst_dim * sizeof(float));
-                    if (new_feat) node->features = new_feat;
+                    if (!new_feat) continue;  /* realloc 失败，旧指针仍有效但尺寸不足，跳过 */
+                    node->features = new_feat;
                 }
                 if (!node->features) continue;
                 node->feature_dim = dst_dim;

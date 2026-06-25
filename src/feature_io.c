@@ -134,12 +134,11 @@ int load_features(MasterTopology* master, const char* filepath) {
                 node->feature_dim = NODE_FEATURE_DIM;
             } else if (node->feature_dim < NODE_FEATURE_DIM) {
                 float* new_feat = (float*)realloc(node->features, NODE_FEATURE_DIM * sizeof(float));
-                if (new_feat) {
-                    node->features = new_feat;
-                    memset(node->features + node->feature_dim, 0,
-                           (NODE_FEATURE_DIM - node->feature_dim) * sizeof(float));
-                    node->feature_dim = NODE_FEATURE_DIM;
-                }
+                if (!new_feat) continue;  /* realloc 失败，旧指针仍有效，跳过 */
+                node->features = new_feat;
+                memset(node->features + node->feature_dim, 0,
+                       (NODE_FEATURE_DIM - node->feature_dim) * sizeof(float));
+                node->feature_dim = NODE_FEATURE_DIM;
             }
 
             if (loaded < to_load) {
@@ -194,7 +193,8 @@ int init_random_features(MasterTopology* master) {
                 node->features = (float*)malloc(NODE_FEATURE_DIM * sizeof(float));
             } else if (node->feature_dim < NODE_FEATURE_DIM) {
                 float* new_feat = (float*)realloc(node->features, NODE_FEATURE_DIM * sizeof(float));
-                if (new_feat) node->features = new_feat;
+                if (!new_feat) continue;  /* realloc 失败，旧指针仍有效但太小，跳过 */
+                node->features = new_feat;
             }
             node->feature_dim = NODE_FEATURE_DIM;
 
