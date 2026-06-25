@@ -55,6 +55,38 @@ static const char* pos_label_en(POSTag tag) {
 }
 
 /* ================================================================
+ *  种子词表 — 每个词类 5 个最典型词（仅本文件使用）
+ * ================================================================ */
+
+static const char* POS_CN_SEEDS[POS_COUNT][POS_ANCHOR_MAX_SEEDS] = {
+    /* POS_UNKNOWN */  {NULL, NULL, NULL, NULL, NULL},
+    /* POS_NOUN    */  {"苹果", "人",   "时间", "桌子", "思想"},
+    /* POS_VERB    */  {"吃",   "看",   "跑",   "想",   "说"  },
+    /* POS_ADJ     */  {"大",   "好",   "美",   "快",   "新"  },
+    /* POS_ADV     */  {"很",   "不",   "都",   "非常", "已经"},
+    /* POS_PRON    */  {"我",   "你",   "他",   "这",   "什么"},
+    /* POS_PREP    */  {"在",   "从",   "到",   "对",   "用"  },
+    /* POS_CONJ    */  {"和",   "但",   "因为", "所以", "如果"},
+    /* POS_NUM     */  {"一",   "十",   "百",   "个",   "次"  },
+    /* POS_PARTICLE*/  {"的",   "了",   "着",   "吗",   "吧"  },
+    /* POS_INTERJ  */  {"啊",   "哦",   "嗯",   "哈",   "哇"  },
+};
+
+static const char* POS_EN_SEEDS[POS_COUNT][POS_ANCHOR_MAX_SEEDS] = {
+    /* POS_UNKNOWN */  {NULL, NULL, NULL, NULL, NULL},
+    /* POS_NOUN    */  {"apple","time", "table","idea", "person"},
+    /* POS_VERB    */  {"eat",  "run",  "think","say",  "see" },
+    /* POS_ADJ     */  {"big",  "good", "fast", "new",  "beautiful"},
+    /* POS_ADV     */  {"very", "not",  "all",  "often","already"},
+    /* POS_PRON    */  {"I",    "you",  "he",   "this", "what"},
+    /* POS_PREP    */  {"in",   "from", "to",   "for",  "with"},
+    /* POS_CONJ    */  {"and",  "but",  "because","so", "if"  },
+    /* POS_NUM     */  {"one",  "ten",  "hundred","first","time"},
+    /* POS_PARTICLE*/  {"the",  "a",    "an",   "of",   "to"  },
+    /* POS_INTERJ  */  {"oh",   "ah",   "wow",  "hey",  "oops"},
+};
+
+/* ================================================================
  *  创建/销毁
  * ================================================================ */
 

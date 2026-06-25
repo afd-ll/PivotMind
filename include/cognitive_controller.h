@@ -123,7 +123,7 @@ typedef struct {
  * 每次对话回合，根据当前记忆状态计算意图向量，
  * 指导各子拓扑的搜索方向，并对产出草案进行内感受评估。
  */
-typedef struct {
+typedef struct CognitiveController {
     // ========== 1. 意图向量 ==========
     float intent_weights[MAX_SUBTOPOS];  // 喂给每个子拓扑的偏好系数
 
