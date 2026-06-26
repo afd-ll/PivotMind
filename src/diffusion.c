@@ -13,6 +13,110 @@
 #include <math.h>
 
 /* ================================================================
+ *  虚词/停用词检查
+ * ================================================================ */
+
+static int is_function_word(const char* word) {
+    if (!word || !word[0]) return 0;
+    static const char* stopwords[] = {
+        /* 英文虚词 */
+        "a", "an", "the",
+        "be", "is", "am", "are", "was", "were", "been", "being",
+        "have", "has", "had", "having",
+        "do", "does", "did", "doing",
+        "will", "would", "shall", "should", "may", "might", "must", "can", "could",
+        "of", "in", "to", "for", "with", "on", "at", "from", "by", "about", "into",
+        "through", "during", "before", "after", "above", "below",
+        "up", "down", "out", "off", "over", "under", "again", "then",
+        "here", "there", "when", "where", "why", "how",
+        "all", "both", "each", "every", "some", "more", "most", "other", "such",
+        "no", "nor", "not", "only", "same", "so", "than", "too", "very", "just",
+        "that", "this", "what", "which", "who",
+        "it", "they", "them", "he", "she", "we", "you",
+        "his", "her", "its", "their", "our", "my", "your",
+        "and", "but", "or", "if", "while", "because", "as", "until",
+        "also", "now", "well", "way", "even", "new", "make", "like",
+        "Mr", "Mrs", "Ms", "Dr", "Mr.",
+        /* 中文虚词 */
+        "\xe7\x9a\x84",   /* 的 */
+        "\xe4\xba\x86",   /* 了 */
+        "\xe5\x9c\xa8",   /* 在 */
+        "\xe6\x98\xaf",   /* 是 */
+        "\xe6\x88\x91",   /* 我 */
+        "\xe4\xbd\xa0",   /* 你 */
+        "\xe4\xbb\x96",   /* 他 */
+        "\xe5\xa5\xb9",   /* 她 */
+        "\xe5\xae\x83",   /* 它 */
+        "\xe4\xbb\xac",   /* 们 */
+        "\xe8\xbf\x99",   /* 这 */
+        "\xe9\x82\xa3",   /* 那 */
+        "\xe5\x93\xaa",   /* 哪 */
+        "\xe5\x92\x8c",   /* 和 */
+        "\xe4\xb8\x8e",   /* 与 */
+        "\xe6\x88\x96",   /* 或 */
+        "\xe4\xbd\x86",   /* 但 */
+        "\xe8\x80\x8c",   /* 而 */
+        "\xe4\xb8\x94",   /* 且 */
+        "\xe5\xb0\xb1",   /* 就 */
+        "\xe4\xb9\x9f",   /* 也 */
+        "\xe9\x83\xbd",   /* 都 */
+        "\xe5\xbe\x88",   /* 很 */
+        "\xe8\xbf\x98",   /* 还 */
+        "\xe8\xa6\x81",   /* 要 */
+        "\xe4\xbc\x9a",   /* 会 */
+        "\xe8\x83\xbd",   /* 能 */
+        "\xe5\x8f\xaf",   /* 可 */
+        "\xe4\xbb\xa5",   /* 以 */
+        "\xe6\x8a\x8a",   /* 把 */
+        "\xe8\xa2\xab",   /* 被 */
+        "\xe5\xaf\xb9",   /* 对 */
+        "\xe4\xbb\x8e",   /* 从 */
+        "\xe8\x87\xaa",   /* 自 */
+        "\xe5\x88\xb0",   /* 到 */
+        "\xe5\x90\x91",   /* 向 */
+        "\xe7\x94\xa8",   /* 用 */
+        "\xe7\x94\xb1",   /* 由 */
+        "\xe4\xb8\xba",   /* 为 */
+        "\xe7\xbb\x99",   /* 给 */
+        "\xe8\xae\xa9",   /* 让 */
+        "\xe5\x8f\xab",   /* 叫 */
+        "\xe4\xbd\xbf",   /* 使 */
+        "\xe4\xb8\x8a",   /* 上 */
+        "\xe4\xb8\xad",   /* 中 */
+        "\xe4\xb8\x8b",   /* 下 */
+        "\xe7\x9d\x80",   /* 着 */
+        "\xe8\xbf\x87",   /* 过 */
+        "\xe5\xbe\x97",   /* 得 */
+        "\xe4\xb9\x8b",   /* 之 */
+        "\xe6\x89\x80",   /* 所 */
+        "\xe5\xa6\x82",   /* 如 */
+        "\xe8\x8b\xa5",   /* 若 */
+        "\xe8\x99\xbd",   /* 虽 */
+        "\xe5\x9b\xa0",   /* 因 */
+        "\xe6\x95\x85",   /* 故 */
+        "\xe5\x90\x97",   /* 吗 */
+        "\xe5\x90\xa7",   /* 吧 */
+        "\xe5\x91\xa2",   /* 呢 */
+        "\xe5\x95\x8a",   /* 啊 */
+        "\xe5\x93\xa6",   /* 哦 */
+        "\xe5\x97\xaf",   /* 嗯 */
+        "\xe4\xb8\xaa",   /* 个 */
+        "\xe4\xba\x9b",   /* 些 */
+        "\xe7\xa7\x8d",   /* 种 */
+        "\xe6\xac\xa1",   /* 次 */
+        "\xe5\x9b\x9e",   /* 回 */
+        "\xe7\x82\xb9",   /* 点 */
+        "\xe9\x87\x8c",   /* 里 */
+        "\xe5\xa4\x96",   /* 外 */
+        "\xe8\xbe\xb9",   /* 边 */
+        NULL
+    };
+    for (const char** p = stopwords; *p; p++)
+        if (strcmp(word, *p) == 0) return 1;
+    return 0;
+}
+
+/* ================================================================
  *  初始化
  * ================================================================ */
 
@@ -268,14 +372,16 @@ int diffusion_generate(DiffusionCtx* ctx,
                             ctx->template, tpl_scores, cur_decay * 0.5f);
         }
 
-        /* 更新当前活跃集 = 本轮得分最高的 K 个词 */
+        /* 更新当前活跃集 = 本轮得分最高的 K 个词（跳过虚词） */
         DiffusionCandidate tmp[DIFF_MAX_CANDIDATES];
         int tmp_cnt = 0;
         for (int i = 0; i < vn && tmp_cnt < DIFF_MAX_CANDIDATES; i++) {
             if (vocab_scores[i] > 0.001f && ctx->vocab->net->nodes[i]) {
+                const char* concept = ctx->vocab->net->nodes[i]->concept;
+                if (concept && is_function_word(concept)) continue;
                 tmp[tmp_cnt].node_id     = i;
                 tmp[tmp_cnt].total_score = vocab_scores[i];
-                tmp[tmp_cnt].word        = ctx->vocab->net->nodes[i]->concept;
+                tmp[tmp_cnt].word        = concept;
                 tmp_cnt++;
             }
         }
@@ -287,24 +393,21 @@ int diffusion_generate(DiffusionCtx* ctx,
         }
     }
 
-    /* ── 第2步：收敛 → 加权综合评分 ── */
+    /* ── 第2步：收敛 → 综合评分（跳过虚词；跨层反馈已通过 _cross_by_name 回流至 vocab_scores） ── */
     DiffusionCandidate final[DIFF_MAX_CANDIDATES];
     int final_cnt = 0;
     for (int i = 0; i < vn && final_cnt < DIFF_MAX_CANDIDATES; i++) {
         if (vocab_scores[i] < 0.001f) continue;
         ReasoningNode* n = ctx->vocab->net->nodes[i];
         if (!n || !n->concept) continue;
+        if (is_function_word(n->concept)) continue;
 
         final[final_cnt].node_id       = i;
         final[final_cnt].vocab_score   = vocab_scores[i];
-        final[final_cnt].semantic_score = (sn && sem_scores) ? sem_scores[i % sn] : 0;
-        final[final_cnt].template_score = (tn && tpl_scores) ? tpl_scores[i % tn] : 0;
-        final[final_cnt].emotion_score  = (en && emo_scores) ? emo_scores[i % en] : 0;
-        final[final_cnt].total_score    =
-            vocab_scores[i] * 0.45f +
-            final[final_cnt].semantic_score * 0.25f +
-            final[final_cnt].template_score * 0.20f +
-            final[final_cnt].emotion_score  * 0.10f;
+        final[final_cnt].semantic_score = 0;
+        final[final_cnt].template_score = 0;
+        final[final_cnt].emotion_score  = 0;
+        final[final_cnt].total_score    = vocab_scores[i];  /* 已含跨层回流 */
         final[final_cnt].word = n->concept;
         final[final_cnt].used = 0;
         final_cnt++;
@@ -365,10 +468,11 @@ int diffusion_generate(DiffusionCtx* ctx,
     for (int i = 0; i < final_cnt && out < max_output; i++) {
         if (final[i].used) continue;
 
-        /* 过滤垃圾词: 单字、@符号、纯标点 */
+        /* 过滤垃圾词: 单字、@符号、纯标点、虚词 */
         if (!final[i].word || strlen(final[i].word) < 2) continue;
         if (final[i].word[0] == '@' || final[i].word[0] == '?' ||
             final[i].word[0] == 'H' && final[i].word[1] == 'e') continue;
+        if (is_function_word(final[i].word)) continue;
 
         int inhibited = 0;
         for (int s = 0; s < sel; s++) {
