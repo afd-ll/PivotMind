@@ -16,7 +16,7 @@ jobs:
       - name: Build (x86_64, OpenMP)
         run: make linux
       - name: Run tests (skip test-chinese — needs windows.h)
-        run: make test-tensor test-model test-metrics test-trainer test-io test-cc test-web-fetch
+        run: make test-tensor test-model test-metrics test-trainer test-io test-cc test-web-fetch test-dialog-unit test-diffusion-unit test-topology-unit test-memory-unit test-learner-unit test-causal-unit test-forgetting-unit test-integration
       - name: Show binaries
         run: file build/bin/*
 
