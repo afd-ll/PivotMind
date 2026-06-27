@@ -1,6 +1,6 @@
 # 玄枢 PivotMind 架构文档
 
-> 当前版本: **v0.4.1** — 10 脑区完整架构 + libcurl 爬虫引擎 + 海外合规
+> 当前版本: **v0.4.7** — 13 脑区完整架构 + 涌现式词类 + 配置系统 + 神经网络子系统
 
 ## 整体架构
 
@@ -10,31 +10,35 @@
 
 | 层级 | 职责 | 核心文件 |
 |------|------|---------|
-| **多拓扑网络层** | 11 层子拓扑接收输入，逐字分词后激活对应节点，跨拓扑传播 | `trace_wisdom_topology.c`, `multi_topology.c` |
+| **多拓扑网络层** | 11 层子拓扑接收输入，逐字分词后激活对应节点，跨拓扑传播 | `huarong_topology.c`, `multi_topology.c` |
 | **认知调度层** | 意图向量计算、满意度评估、retry 循环、在线学习调整 | `cognitive_controller.c` |
 | **对话学习层** | 联想推理、回复生成、赫布在线学习、状态持久化 | `dialog_system.c`, `autonomic_learner.c` |
 | **推理编排层** (v0.3) | 6 模式推理编排、任务分解、子目标调度、多候选竞争、冲突检测 | `prefrontal_executive.c`, `idea_arena.c` |
 | **脑干节律层** (v0.4) | 昼夜心跳、激活衰减、自发激活、存盘调度、堆监控 | `brainstem.c` |
+| **配置管理层** (v0.4.7) | 运行时 JSON 配置加载、脑区启停控制 | `json_config.c` |
 
-## 脑区划分 (v0.4)
+---
 
-玄枢按哺乳动物大脑皮层的功能分区建模，13 个脑区/子系统各司其职，通过丘脑信号总线通信：
+## 脑区划分
 
-| 脑区 | 系统模块 | 子拓扑归属 | 功能 | 状态 |
-|------|---------|----------|------|------|
-| **前额叶 (Prefrontal)** | 对话/决策 | 词汇、语义、语用、概念 | 对话生成，diffusion → ACC 评估 | 🟢 |
-| **前额叶执行器 (PFE)** | 推理编排 | 跨 CC 复用 | 6 模式推理编排、任务分解 | 🟢 |
-| **海马体 (Hippocampus)** | 学习/记忆/巩固 | 上下文、领域 | 记忆巩固、QA 重放、感知联动 | 🟢 |
-| **DMN** | 梦境/联想 | — | 默认模式网络：梦境联想、闲暇探索 | 🟢 |
-| **杏仁核 (Amygdala)** | 情绪/效价调控 | 情绪、文化 | 情绪效价采样、探索/利用平衡 | 🟢 |
-| **感知皮层 (Perception)** | 联网搜索/好奇探索 | — | 联网搜索、article_reader 语义管线 | 🟢 |
-| **布罗卡区 (Broca)** | 句式生成/模板 | 语法、模板(v0.4) | 模板自动构建与衰减调度(v0.4 升级) | 🟢 |
-| **小脑 (Cerebellum)** | 微调/BPTT | — (全局监控) | BPTT 微调、硬件资源保护 | 🟢 |
-| **下丘脑 (Hypothalamus)** | 需求驱动 | — | 需求动态调控(好奇/获取/社交/舒适)、昼夜耦合 | 🟢 (v0.4) |
-| **丘脑 (Thalamus)** | 信号总线 | — | 信号总线、资源门控、脑区间通信路由 | 🟢 |
-| **脑干 (Brainstem)** | 节律/心跳 | — | 昼夜节律、激活衰减、自发激活、堆监控 | 🟢 (v0.4) |
-| **扣带回 (ACC)** | 序列评估 | — | 四维序列评估(语义+模板+情绪+长度) | 🟢 |
-| **想法竞技场 (IdeaArena)** | 多候选竞争 | — | 多候选五维竞争选择 | 🟢 |
+玄枢按哺乳动物大脑皮层的功能分区建模，13 个脑区/子系统各司其职，通过丘脑信号总线通信。**全部脑区均已完整实现，无占位代码。**
+
+| 脑区 | 文件 | 行数 | 子拓扑归属 | 功能 |
+|------|------|------|----------|------|
+| **前额叶 (Prefrontal)** | `prefrontal.c` | 132 | 词汇、语义、语用、概念 | 对话生成，diffusion → ACC 自适应门控 |
+| **前额叶执行器 (PFE)** | `prefrontal_executive.c` | 1,502 | 跨 CC 复用 | 6 模式推理编排、任务分解、冲突检测、子目标调度 |
+| **海马体 (Hippocampus)** | `hippocampus.c` | 135 | 上下文、领域 | 记忆巩固、QA 重放、感知联动 |
+| **DMN** | `dmn.c` | 46 | — | 默认模式网络：梦境联想、闲暇探索 |
+| **杏仁核 (Amygdala)** | `amygdala.c` | 97 | 情绪、文化 | 情绪效价采样、探索/利用平衡 |
+| **感知皮层 (Perception)** | `perception.c` | 838 | — | Sogou+Bing 双 provider 联网搜索、article_reader 语义管线 |
+| **布罗卡区 (Broca)** | `broca.c` | 56 | 语法、模板 | 模板自动构建与衰减调度 |
+| **小脑 (Cerebellum)** | `cerebellum.c` | 80 | — (全局监控) | 硬件资源保护、CPU/内存限速 |
+| **下丘脑 (Hypothalamus)** | `hypothalamus.c` | 149 | — | 四维需求驱动(好奇/获取/社交/舒适)、昼夜耦合 |
+| **丘脑 (Thalamus)** | `thalamus.c` | 540 | — | 信号总线、资源门控、脑区间通信路由、脑区启停管理 |
+| **脑干 (Brainstem)** | `brainstem.c` | 613 | — | 昼夜节律、激活衰减、自发激活、堆监控 |
+| **扣带回 (ACC)** | `cingulate.c` | 223 | — | 四维序列评估(语义+模板+情绪+长度) |
+| **想法竞技场 (IdeaArena)** | `idea_arena.c` | 722 | — | 多候选五维竞争选择、侧抑制、多巴胺调节 |
+| **网状激活系统 (Reticular)** | `reticular.c` | 133 | — | 觉醒/警觉水平调节 |
 
 ## 三大核心模块
 
@@ -42,34 +46,38 @@
 
 ### 1. 拓扑网络层
 
-**核心文件**: `src/trace_wisdom_topology.c`, `src/multi_topology.c`, `include/trace_wisdom_topology.h`, `include/multi_topology.h`
+**核心文件**: `src/huarong_topology.c`, `src/multi_topology.c`, `include/huarong_topology.h`, `include/multi_topology.h`
 
 **职责**: 节点/边管理、跨拓扑连接、激活传播、拓扑排序
 
 **关键 API**:
-- `trace_wisdom_net_find_or_create_node()` — 查找或创建节点
-- `topology_walk_greedy()` — 贪心走边
+- `huarong_net_find_or_create_node()` — 查找或创建节点
+- `topology_walk_greedy()` — 贪心走边（五维评分）
+- `topology_walk_beam()` — Beam Search（K=3）
 - `master_add_cross_link()` — 添加跨拓扑连接
+- `master_reevaluate_cross_links()` — 跨拓扑连接质量重评估
 
 ### 2. 认知调度层
 
 **核心文件**: `src/cognitive_controller.c`, `include/cognitive_controller.h`
 
-**职责**: 意图向量计算、满意度评估、retry 循环、在线学习
+**职责**: 意图向量计算、满意度评估、retry 循环、涌现式词类、BPTT 置信度接入
 
 **关键 API**:
-- `cognitive_controller_compute_intent()` — 计算意图向量
-- `cognitive_controller_satisfy()` — 评估满意度
+- `compute_intent()` — 计算意图向量（含 NN 置信度因子）
+- `evaluate_draft()` — 评估草案质量
+- `emergent_pos_classify()` — 涌现式词类分类
 
 ### 3. 对话学习层
 
-**核心文件**: `src/dialog_system.c`, `src/autonomic_learner.c`, `src/dialog_generate.c`
+**核心文件**: `src/dialog_system.c`, `src/autonomic_learner.c`, `src/dialog_generate.c`, `src/diffusion.c`
 
-**职责**: 分词解析、联想推理、回复生成、赫布学习
+**职责**: 分词解析、联想推理、回复生成、赫布学习、多层扩散
 
 **关键 API**:
 - `dialog_input_create()` — 创建对话输入
-- `autonomic_learn_from_dialog()` — 在线学习
+- `autonomic_learn_from_dialog()` — 赫布在线学习
+- `diffusion_generate()` — 多层扩散回复生成
 
 ---
 
@@ -104,12 +112,14 @@ typedef struct SubTopology {
     int topo_id;                    // 拓扑唯一 ID
     TopologyType type;              // 拓扑类型枚举
     const char* name;               // 拓扑名称
-    TraceWisdomNetwork* net;        // 底层拓扑网络
+    HuarongTopologyNet* net;        // 底层拓扑网络
     NodeHashTable* node_hash;       // 节点哈希表（加速按名查找）
     int priority;                   // 推理优先级 (1-10)
     float weight;                   // 在主拓扑中的权重
     float recent_activation;        // leaky integrator 衰减
     time_t last_used;
+    bool is_active;                 // 是否激活
+    pthread_rwlock_t rwlock;        // 子拓扑级读写锁
 } SubTopology;
 ```
 
@@ -119,7 +129,7 @@ typedef struct SubTopology {
 typedef struct ReasoningNode {
     int node_id;                            // 节点唯一标识
     char* concept;                          // 概念名称/字符
-    float* features;                        // 24维语义向量 (NODE_FEATURE_DIM=24)
+    float* features;                        // 512 维语义向量 (NODE_FEATURE_DIM=512)
     int feature_dim;
 
     // 连接边（动态数组，预分配 DEFAULT_CONNECTION_CAPACITY=10）
@@ -138,6 +148,11 @@ typedef struct ReasoningNode {
     float heat;                             // 热度（路径多样性）
     int selection_count;                    // 被贪心走边选中次数
     NodeType node_type;                     // 功能词/普通词/专有名词
+
+    // 涌现式词类（v0.4.3）
+    int   emergent_class_count;
+    int   emergent_class_ids[4];
+    float emergent_class_confs[4];
 } ReasoningNode;
 ```
 
@@ -148,10 +163,10 @@ typedef struct CrossTopologyLink {
     int link_id;
     int from_topo_id, from_node_id;         // 源拓扑+节点
     int to_topo_id, to_node_id;             // 目标拓扑+节点
-    float weight;
+    float weight;                           // 动态权重（use_count 提升）
     const char* relation;                   // 关系类型
     int bidirectional;                      // 是否双向
-    float transfer_rate;                    // 跨拓扑激活传递率
+    float transfer_rate;                    // 跨拓扑激活传递率（重评估动态更新）
     time_t created_time;
     int use_count;                          // 使用次数（动态权重学习）
 } CrossTopologyLink;
@@ -175,7 +190,7 @@ typedef struct CrossTopologyLink {
 | TOPO_CULTURE (7) | 文化拓扑 | 文化背景关联，影响特定文化语境下的联想 |
 | TOPO_CONCEPT (8) | 概念拓扑 | 数值、规则、实体等高抽象概念 |
 | TOPO_MASTER (9) | 主拓扑 | 全局调度与优先级管理 |
-| TOPO_TEMPLATE (10) | 模板拓扑 | 句式模板，路径编码递归抽象 (v0.4) |
+| TOPO_TEMPLATE (10) | 模板拓扑 | 句式模板，路径编码递归抽象 |
 
 ### 拓扑间关系
 
@@ -191,7 +206,17 @@ typedef struct CrossTopologyLink {
        概念拓扑
 ```
 
-跨拓扑连接在训练后通过 `rebuild_cross_connections()` 批量重建，基于节点特征（24维语义向量）的余弦相似度。动态新建跨拓扑连接通过 `CrossTopoHitRecord` 跟踪。
+跨拓扑连接在训练后通过 `rebuild_cross_connections()` 批量重建，基于节点特征（512 维语义向量）的余弦相似度、精确名称匹配和最左子串匹配三种策略。动态新建跨拓扑连接通过 `CrossTopoHitRecord` 跟踪。
+
+### 跨拓扑连接质量重评估 (v0.4.7)
+
+每 600 tick（约 10 分钟）通过 `master_reevaluate_cross_links()` 重算 `transfer_rate`：
+
+```c
+transfer_rate = 0.4 + 0.6 × min(2.0, use_count / expected_use) × weight
+```
+
+高频使用的连接提升传导效率，低频连接降低但保留最低传导能力（0.4）。
 
 ### 跨拓扑连接机制
 
@@ -208,7 +233,7 @@ while (entry) {
 }
 ```
 
-激活传递公式：`new_activation = activation × link->weight × link->transfer_rate × DECAY_RATE`
+激活传递公式：`new_activation = src_activation × link->weight × link->transfer_rate × motivation × valence`
 
 ---
 
@@ -223,14 +248,14 @@ for (int n = 0; n < sub->net->node_count; n++) {
     ReasoningNode* node = sub->net->nodes[n];
     if (node->activation < 0.15f) continue;
 
-    for (int c = 0; c < node->connection_count; c++) {
-        ReasoningNode* connected = node->connections[c];
+    for (int c = 0; c < node->edge_count; c++) {
+        Edge* edge = &node->edges[c];
         float new_activation =
-            node->connection_weights[c]     // 边权重
+            edge->weight                    // 边权重
             × node->activation              // 源激活
             × confidence_factor             // 置信度因子
             × activation_multiplier         // 低置信放大(1.3x) / 高置信抑制(0.7x)
-            × embed_factor                  // 特征向量余弦相似度
+            × embed_factor                  // 512 维特征向量余弦相似度
             × DECAY_RATE;                   // 0.7 衰减系数
 
         if (new_activation > ACTIVATION_THRESHOLD) {
@@ -250,7 +275,10 @@ for (int n = 0; n < sub->net->node_count; n++) {
 int topology_walk_greedy(SubTopology* sub, int start_node_id,
                          int* path_out, float* scores_out,
                          int max_len, unsigned char* visited,
-                         float intent_weight);
+                         float intent_weight,
+                         MasterTopology* master,
+                         const float* query_anchor,
+                         void* cc_ptr);
 ```
 
 **评分公式（五维加法混合）**:
@@ -290,11 +318,33 @@ score = 0.28 × edge_weight
 
 ---
 
+## 多层扩散引擎
+
+### 虚词过滤 (v0.4.7)
+
+`diffusion.c` 内置 `is_function_word()` 检查约 130 个中英文虚词，在三层过滤：
+
+1. **活跃集更新**: 扩散每轮的 top-K 跳过虚词
+2. **加权评分**: 虚词不进入候选表
+3. **输出阶段**: 兜底再次过滤
+
+防止 "the be not to have are..." 或 "的了是在……" 虚词串污染输出。
+
+### 扩散流程
+
+```
+输入分词 → vocab 节点激活 → 3 跳扩散 (vocab↔semantic, vocab→template)
+         → 加权排序: total = vocab×0.45 + sem×0.25 + tpl×0.20 + emo×0.10
+         → 模板导向 → 侧抑制去重 → 输出
+```
+
+---
+
 ## 对话系统
 
 ### 两层意图识别
 
-位于 `src/dialog_intent.c`：
+位于 `src/dialog_system.c`：
 
 **第一层：关键词分类**
 ```c
@@ -313,20 +363,7 @@ INTENT_CHAT_WORDS    = {"你好","嗨","在吗","嘿","喂"}
 new_activation *= intent_weights[sub->type];  // 乘性调节
 ```
 
-### 实体提取
-
-位于 `src/dialog_entities.c`：
-```c
-typedef struct {
-    char* text;             // 原文
-    char* normalized;       // 归一化
-    EntityType type;        // OBJECT/ACTION/ATTRIBUTE/CONCEPT/CAUSAL
-    float confidence;
-    int start_pos, end_pos;
-} DialogEntity;
-```
-
-### 回复生成流程（`src/dialog_generate.c`）
+### 回复生成流程
 
 1. **精确匹配检查**：`memory_retrieve(memory, "response:{完整输入}")` → 命中则直接返回
 2. **拓扑驱动生成**：`master_generate_response()` → 跨拓扑走边 → 生成概念序列
@@ -335,84 +372,121 @@ typedef struct {
 
 ---
 
-## v0.4.0 新增脑区
+## 涌现式词类系统 (Emergent POS) **v0.4.3**
 
-> 详见 v0.4.1 changelog: [035-v0.4.1-web-fetch-refactor.md](changelogs/035-v0.4.1-web-fetch-refactor.md)
+### 设计理念
 
-## v0.4.0 新增脑区（历史）
+不硬编码词性字典。人类只提供每词类 3-5 个"种子锚点"词（中英各 ~50 个）。
+系统用种子词的 512 维 Hebbian 特征向量初始化锚点中心。
 
-### 下丘脑 (Hypothalamus) — 需求驱动系统
+### 运行机制
 
-**核心文件**: `src/hypothalamus.c`
+1. **分类**: 新词通过余弦相似度自动归入最接近的词类（阈值 0.50）
+2. **微调**: 归类成功后以 EMA（学习率 0.001）微调锚点中心
+3. **涌现**: 未分类词 ≥ 10 个 → 贪婪聚类（sim > 0.65，簇 ≥ 5 成员）→ 涌现新词类
 
-下丘脑管理四维基本需求，驱动系统的自主探索行为：
+### 三层路由
 
-| 需求 | 英文 | 默认值 | 作用 |
-|------|------|--------|------|
-| 好奇 | Curiosity | 0.50 | 探索新概念、主动检索 |
-| 获取 | Acquisition | 0.30 | 吸收语料、喂料学习 |
-| 社交 | Social | 0.40 | 触发对话、主动提问 |
-| 舒适 | Comfort | 0.50 | 节能模式、降低推理强度 |
+```
+词性标注:
+  1. 涌现锚点（特征向量余弦相似度 + 中心微调）  ← 优先
+  2. 跨拓扑连接 vocab → TOPO_SYNTAX              ← 辅助
+  3. 硬编码 chinese_pos_lookup 字典               ← 冷启动兜底
+```
 
-需求值受昼夜节律影响（夜间活跃度降低），各脑区行动按需求优先级排序。
+### 跨语言
 
-### 脑干 (Brainstem) — 昼夜节律与心跳
+Hebbian 学习让中文"苹果"和英文"apple"的 512 维向量自然趋近，天然跨语言。
 
-**核心文件**: `src/brainstem.c`
+### 持久化
 
-脑干提供全局后台时钟（`tick=1000ms`），驱动系统的生命节律：
+锚点中心保存到 `emergent_pos.bin`（magic="PMEP"），重启不丢失。
 
-- **昼夜周期**: 24 小时映射为活跃度曲线，高峰段(09:00-12:00 / 15:00-18:00)和低谷段(01:00-06:00)
-- **激活衰减**: 每心跳轮次，所有节点的激活值按 `DECAY_RATE` 衰减（默认 0.7）
-- **自发激活**: 低活跃期自动触发低强度激活扩散（模拟'走神'）
-- **堆监控**: 每 30 tick 记录节点/连接数 + RSS/VSZ 内存，超阈值告警
-- **定期存档**: 配置存档间隔，自动保存状态
+---
 
-### 丘脑 (Thalamus) — 信号总线
+## 学习系统
 
-**核心文件**: `src/thalamus.c`
+### 预训练 (Skip-gram/CBOW)
 
-丘脑作为信号中枢，负责脑区间的通信路由与资源门控：
+**核心文件**: `src/pretrain.c` (1,624 行)
 
-- **信号总线**: 9 脑区通过丘脑注册通信槽位
-- **资源门控**: 根据当前负载限制高开销操作（如联网搜索）
-- **路由规则**: 跨脑区消息动态寻址，避免环回风暴
-- **5 工具槽**: 预分配推理/学习/搜索/模板/存档专用通道
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| embedding_dim | 64 | 嵌入维度 |
+| window_size | 5 | 窗口大小（最大 10） |
+| negative_samples | 5 | 负采样数 |
+| learning_rate | 0.025 → 0.0001 | 线性衰减 |
+| momentum | 0.9 | 动量加速 |
+| grad_clip | 5.0 | 梯度裁剪 |
 
-### 内感受自检 (Interoceptive Self-Monitoring)
+### 学习器矩阵
 
-持续监测 RSS 内存、连接增速、推理延迟，三级响应机制：
+| 学习器 | 文件 | 方式 | 说明 |
+|--------|------|------|------|
+| **自主学习者** | `autonomic_learner.c` | 赫布在线 | 共现即强化，16 分片并发更新 |
+| **主动学习者** | `active_learner.c` | 7×24 后台 | 自动获取新知识，分析概念关系 |
+| **自我学习者** | `self_learner.c` | 好奇驱动 | 好奇心采样 → 深度游走 → 知识审查 → 自纠错 |
+| **BPTT 学习者** | `bptt_learner.c` | 时序反向传播 | RNN + Linear，Adam 优化器（lr=0.001） |
 
-| 级别 | 条件 | 动作 |
+### BPTT ↔ 拓扑桥接
+
+`bptt_learner.c` 实现神经网络与拓扑网络的双向桥接：
+
+- **训练方向**: 拓扑节点特征向量 → RNN(512→256) → Linear(256→512) → MSE 损失
+- **反馈方向**: RNN 预测输出 → 余弦相似度匹配词汇节点 → 预激活 top-8 节点（偏置 0.25）
+- **调度接入** (v0.4.7): `bptt_get_confidence()` → `cognitive_controller.nn_confidence` → 意图权重因子
+
+### 灾难性遗忘防护
+
+**核心文件**: `src/catastrophic_forgetting.c` (1,385 行)
+
+基于 EWC（弹性权重巩固）：Fisher 信息矩阵标记参数重要性，新学习时选择性保护已有知识。
+默认 λ=1000.0，支持在线 EWC 衰减（gamma=0.9）。
+
+---
+
+## 神经网络子系统
+
+玄枢内置完整的轻量级神经网络引擎，可配合拓扑系统使用：
+
+| 模块 | 文件 | 说明 |
 |------|------|------|
-| 🟢 GREEN | 正常 | 正常运行 |
-| 🟡 YELLOW | 预警 | 日志告警 + 提高学习门槛 |
-| 🔴 RED | 紧急 | 存档 + 批量修剪弱边 |
+| 张量运算 | `tensor.c` | 多维张量 create/destroy/broadcast/clone/view |
+| 矩阵运算 | `matrix_ops.c` | 矩阵乘/转置/加/缩放 |
+| 层级层 | `layer.c` | 8 种层类型 (LINEAR/RELU/SIGMOID/TANH/SOFTMAX/DROPOUT/EMBEDDING/SIMPLE_RNN) |
+| LSTM | `layer_lstm.c` | 完整 LSTM：W/R 矩阵、bias、双向、层归一化 |
+| GRU | `layer_gru.c` | 完整 GRU：更新/重置门、双向、层归一化 |
+| RNN | `layer_rnn.c` | Simple RNN 前向/反向 + Embedding 层 |
+| 模型 | `model.c` | 多层堆叠、前向传播、MSE 损失、序列化 |
+| 生成模型 | `generative_model.c` | 词汇表 (PAD/SOS/EOS/UNK) + 文本生成 |
+| 训练器 | `trainer.c` | Mini-batch 训练、学习率调度 |
+| 优化器 | `optimizer.c` | SGD / Adam (β1=0.9, β2=0.999) / RMSprop |
+| 量化 | `quantization.c` | FP16/INT8/INT4/INT2 |
+| 剪枝 | `pruning.c` | MAGNITUDE/RANDOM/GRADIENT/STRUCTURED |
+| 注意力 | `attention.c` | Bahdanau/Luong/Self-Attention/Multi-Head |
 
-### 布罗卡区升级 (Broca v0.4)
+---
 
-**核心文件**: `src/broca.c`
+## 运行时配置系统 (v0.4.7)
 
-v0.4 对布罗卡区进行重写，从'被动句式匹配'升级为'主动模板生成'：
+### 配置文件
 
-- **模板自动构建**: 从句式槽位提取 POS 序列，构建 `TOPO_TEMPLATE` 节点
-- **衰减调度**: 低频模板自动降权回收，节省节点容量
-- **模板推理**: 跨拓扑连接将模板节点与词汇/语义关联，提升句式多样性
+`pivotmind_config.json`（可选），缺失时全部回退 constants.h 默认值。
 
-### PFE 推理编排 (v0.4 更新)
+```json
+{
+    "topology": { "feature_dim": 512, "max_nodes_per_topo": 10000 },
+    "learning": { "decay_rate": 0.7, "learn_rate": 0.005 },
+    "inference": { "max_response_len": 2048, "default_hop_count": 3 },
+    "clock": { "tick_interval_ms": 1000, "decay_per_tick": 0.97 },
+    "brain_regions": { "perception": true, "hypothalamus": true }
+}
+```
 
-前额叶执行器自动判断问题复杂度，匹配 6 种推理模式：
+### 脑区生命周期管理
 
-| 模式 | 触发关键词 | 策略 |
-|------|-----------|------|
-| DIRECT | 默认 | 单次扩散联想 |
-| DECOMPOSE | why / because / 为什么 | 定义 → 因果 → 综合 |
-| COMPARE | compare / difference / 比较 | 属性提取 → 对比 |
-| HOWTO | how to / 怎么/如何 | 前置条件 → 步骤序列 |
-| ABDUCE | what if / 如果/假设 | 基线 → 连锁反应 |
-| ANALOGY | analogy / similar / 类比 | 结构映射 |
-
-子目标递归分解（深度可配），冲突检测 + IdeaArena 竞争选出最佳路径，输出可解释推理链。
+Thalamus 新增 `enabled[THAL_SUBSYSTEM_COUNT]` 标志和 `thalamus_enable_region()` API。
+Brainstem 各 tick 函数检查 enabled 状态，禁用脑区的 tick 完全跳过。
 
 ---
 
@@ -420,13 +494,18 @@ v0.4 对布罗卡区进行重写，从'被动句式匹配'升级为'主动模板
 
 ### 意图向量计算
 
-三因子融合公式：
+完整的因子融合公式（v0.4.7 增加 NN 置信度）：
+
 ```c
-final_weight[t] = base_weight
-    × (1.0 + context_bias × ctx_activations[t])     // 上下文关联度
-    × (1.0 + novelty_bias × novelty_factors[t])      // 新颖性（刚用过的拓扑降权）
-    × learned_base[t];                                // 在线学习调整因子
+float w = intent_base[i] * (1.0 + tanh(learned_base[i] - 1.0) * 0.3)  // 在线学习
+        × (1.0 + context_bias × ctx_activations[i])                     // 上下文关联
+        × (1.0 + novelty_bias × (novelty[i] - 1.0))                     // 新颖性
+        × (1.0 + valence_bias × (valence_p[i] - 1.0))                   // 效价
+        × (1.0 + coherence_scale × (coherence[i] - 1.0))               // 连贯性
+        × (1.0 + 0.1 × nn_confidence);                                  // NN 置信度 (v0.4.7)
 ```
+
+`nn_confidence = 1.0 / (1.0 + avg_loss)`，未训练时 = 0，乘法因子 = 1.0，无影响。
 
 ### 上下文关联度
 
@@ -436,14 +515,9 @@ final_weight[t] = base_weight
 
 ### 新颖性因子
 
-`leaky integrator`：`recent_activation` 每节点激活+0.2，每轮×0.8衰减
+`leaky integrator`：`recent_activation` 每节点激活+0.2，每轮×0.8 衰减
 - 公式：`novelty = 1.0 / (1.0 + 10.0 × recent_activation)`
 - 最近未用（≈0）→ novelty≈1.0；频繁用（≈1.0）→ novelty≈0.09
-
-### 在线学习调整
-
-- 正反馈（满意）→ 对应拓扑的 learned_base 上升
-- 负反馈（不满意）→ 对应拓扑的 learned_base 下降
 
 ### Retry 循环
 
@@ -454,9 +528,6 @@ typedef enum {
     RETRY_WITH_SEARCH  = 2,   // 缩域重搜（需重建 dialog_reasoning）
     RETRY_FAILED       = -1   // 已达上限，强制输出
 } RetryStatus;
-
-// satisfaction < threshold → retry_count++
-// retry_count ≥ max_retry → RETRY_FAILED
 ```
 
 ---
@@ -471,9 +542,9 @@ typedef enum {
 
 ```
 [1/4] 加载拓扑
-      master_load_state() / master_create()
+      master_load_state() / master_topology_create()
 
-[2/4] 解析 QA 数据
+[2/4] 解析 QA 数据 (hermes_knowledge_base.json, 25MB)
       JSON 格式 → questions[] / answers[]
 
 [3/4] OpenMP 并行学习（N 轮）
@@ -486,10 +557,11 @@ typedef enum {
 [4/4] 保存状态
       master_save_state(master, "pivotmind_state.dat")
       save_features(master, "features.bin")
+      save_cross_edges(master, "cross_edges.bin")
 ```
 
 **并行安全机制**：
-- `trace_wisdom_net_add_connection()` 内部有 `net->mutex`（递归锁）保护
+- `huarong_net_add_connection()` 内部有 `net->mutex`（递归锁）保护
 - 赫布学习用 thread-local buffer 收集激活对，barrier 后批量更新
 - 边更新按哈希分片（`AUTONOMIC_SHARD_COUNT=16`），各 shard 独立 mutex
 - 刷盘操作有 `flush_lock`（double-check 模式）
@@ -501,7 +573,9 @@ typedef enum {
 ```c
 void autonomic_learn_from_dialog(MasterTopology* master,
                                   const char* input, const char* output,
-                                  AutonomicState* state) {
+                                  AutonomicState* state,
+                                  void* causal_graph,
+                                  MemorySystem* memory) {
     // 1. 提取输入/输出中的不重复单字
     // 2. 查找或创建对应节点
     // 3. 同时激活 → 涨边置信度 / 建新边
@@ -509,7 +583,7 @@ void autonomic_learn_from_dialog(MasterTopology* master,
         if edge exists:
             confidence += 0.05;         // 涨置信
         else:
-            trace_wisdom_net_add_connection(... , 0.3);  // 新边初始0.3
+            huarong_net_add_connection(... , 0.3);  // 新边初始0.3
 }
 ```
 
@@ -535,7 +609,7 @@ void autonomic_learn_from_dialog(MasterTopology* master,
 | v1 | 基础节点+连接二进制 |
 | v2 | 增加 topo_type 字段 |
 | v3 | 增加 activation 字段 |
-| v4 | 增加 features 特征向量（24维） |
+| v4 | 增加 features 特征向量（512 维） |
 | v5 | 增加 sentinel(-1) + 魔数(0xDEADBEEF) 分隔节点区和跨连接区 |
 
 ### 当前格式（v5）
@@ -544,7 +618,7 @@ void autonomic_learn_from_dialog(MasterTopology* master,
 [int fmt_ver] [ver_len] [version_string]
 [节点流]:
   [topo_type(int)] [node_id(int)] [concept_len(int)] [concept(char*)]
-  [activation(float)] [feat_dim(int)] [features(float×24)]
+  [activation(float)] [feat_dim(int)] [features(float×512)]
   [conn_count(int)]
   [连接...]:
     [tgt_concept_len(int)] [tgt_concept(char*)] [weight(float)] [bias(float)] [confidence(float)]
@@ -558,11 +632,11 @@ void autonomic_learn_from_dialog(MasterTopology* master,
 
 ### save/load 机制
 
-- `master_save_state()`：先写临时文件 → rename 覆盖（原子写入）
+- `master_save_state()`：先写临时文件 → rename 覆盖（原子写入，单文件无 .bak）
 - `master_load_state()`：读取全部节点和连接，sentinel 检测 + 魔数验证 + 旧格式回退
-- `save_features()`：独立存储节点特征向量到 `features.bin`
+- `save_features()`：独立存储 512 维节点特征向量到 `features.bin`
 - `save_cross_edges()`：独立存储跨拓扑边到 `cross_edges.bin`
-- 备份机制：写盘前先 rename 原文件为 `.bak`
+- 涌现式词类锚点中心保存到 `emergent_pos.bin`
 
 ---
 
@@ -570,7 +644,7 @@ void autonomic_learn_from_dialog(MasterTopology* master,
 
 ### 拓扑排序（Kahn 队列算法）
 
-位于 `src/trace_wisdom_topology.c`：
+位于 `src/huarong_topology.c`：
 
 ```
 1. 预建节点指针→索引查找表（二分查找 O(log N)）
@@ -599,7 +673,7 @@ unsigned int hash_string(const char* str, int bucket_count) {
 
 ### A* 因果路径搜索
 
-位于 `src/causal_reasoning.c`，用于因果推理：
+位于 `src/causal_reasoning.c`：
 ```c
 float causal_astar_search(CausalGraph* graph, int start, int goal) {
     // open_set 使用最小堆（priority_queue）
@@ -620,85 +694,106 @@ confidence = base_score × 0.4
 
 ## 代码组织
 
-``` 
+```
 PivotMind/
-├── src/                    # 核心源文件（82个 .c）
-│   ├── trace_wisdom_topology.c           # 底层拓扑网络：节点/边/哈希/拓扑排序
-│   ├── multi_topology.c             # 多拓扑管理：SubTopology/MasterTopology/走边
-│   ├── cognitive_controller.c       # 认知调度中心：意图向量/retry/满意度
-│   ├── dialog_system.c              # 对话管线：激活传播/联想记录
-│   ├── dialog_intent.c              # 意图识别：关键词→意图枚举
-│   ├── dialog_generate.c            # 回复生成：走边→文本/记忆缓存
-│   ├── dialog_semantic.c            # 语义引擎
-│   ├── dialog_verify.c              # 回复验证
-│   ├── associative_reasoning.c      # 联想推理：激活扩散/递归传播
-│   ├── autonomic_learner.c          # 自主学习：赫布/刷盘/边分片更新
-│   ├── memory_system.c              # 三级记忆：STM/LTM/工作记忆
-│   ├── causal_reasoning.c           # 因果推理：A*搜索/因果置信度
-│   ├── feature_io.c                 # 特征向量持久化
-│   ├── cross_edge_io.c              # 跨拓扑边持久化
-│   ├── node_hash.c                  # 节点哈希表（DJB2，链地址法）
-│   ├── topology_growth.c            # 拓扑增长：密度检测/冷却触发
-│   ├── catastrophic_forgetting.c    # 灾难性遗忘防护
-│   ├── memory_consolidation.c       # 记忆巩固：STM→LTM
-│   ├── concept_abstraction.c        # 概念抽象
-│   ├── concept_processor.c          # 概念处理
-│   ├── enhanced_generator.c         # 增强生成
-│   ├── attention.c                  # 注意力机制
-│   ├── thread_pool.c                # 线程池
-│   ├── metrics.c                    # 指标统计
-│   ├── string_pool.c                # 共享字符串池
-│   ├── chinese.c / vocab.c / utf8_tokenizer.c         # 中文处理
+├── src/                    # 核心源文件（86个 .c, ~48,600 行）
+│   ├── huarong_topology.c             # 底层拓扑网络：节点/边/哈希/拓扑排序
+│   ├── multi_topology.c               # 多拓扑管理：SubTopology/MasterTopology/走边
+│   ├── cognitive_controller.c         # 认知调度中心：意图向量/retry/满意度
+│   ├── dialog_system.c                # 对话管线：激活传播/联想记录
+│   ├── dialog_generate.c              # 回复生成：走边→文本/记忆缓存
+│   ├── dialog_system.h → intent 部分    # 意图识别：关键词→意图枚举
+│   ├── diffusion.c                    # 多层扩散引擎（v0.4.7 虚词过滤）
+│   ├── associative_reasoning.c        # 联想推理：激活扩散/递归传播
+│   ├── autonomic_learner.c            # 自主学习：赫布/刷盘/边分片更新
+│   ├── memory_system.c                # 三级记忆：STM/LTM/工作记忆
+│   ├── causal_reasoning.c             # 因果推理：A*搜索/因果置信度
+│   ├── feature_io.c                   # 特征向量持久化
+│   ├── cross_edge_io.c                # 跨拓扑边持久化+重建
+│   ├── node_hash.c                    # 节点哈希表（DJB2，链地址法）
+│   ├── topology_growth.c              # 拓扑增长：密度检测/冷却触发
+│   ├── catastrophic_forgetting.c      # 灾难性遗忘防护（EWC）
+│   ├── memory_consolidation.c         # 记忆巩固：STM→LTM
+│   ├── concept_abstraction.c          # 概念抽象（7层抽象层级）
+│   ├── attention.c                    # 注意力机制（4种）
+│   ├── thread_pool.c                  # 线程池
+│   ├── metrics.c                      # 指标统计
+│   ├── string_pool.c                  # 共享字符串池
+│   ├── json_config.c                  # 运行时 JSON 配置加载
+│   ├── chinese.c / vocab.c / utf8_tokenizer.c        # 中文+英文处理
 │   │
-│   ├── 脑区模块 (v0.4):
-│   │   ├── prefrontal.c                # 前额叶：对话策略选择
-│   │   ├── prefrontal_executive.c      # 前额叶执行器：PFE 6模式推理
-│   │   ├── hippocampus.c               # 海马体：记忆巩固/重放
-│   │   ├── dmn.c                       # 默认模式网络：梦境/闲暇
-│   │   ├── amygdala.c                  # 杏仁核：情绪效价
-│   │   ├── perception.c                # 感知皮层：联网搜索
-│   │   ├── broca.c                     # 布罗卡区：模板生成 (v0.4升级)
-│   │   ├── cerebellum.c               # 小脑：BPTT/资源保护
-│   │   ├── hypothalamus.c              # 下丘脑：需求驱动 (v0.4新增)
-│   │   ├── thalamus.c                 # 丘脑：信号总线 (v0.4新增)
-│   │   ├── brainstem.c                # 脑干：昼夜节律 (v0.4新增)
-│   │   ├── cingulate.c                # 扣带回：ACC评估
-│   │   └── idea_arena.c              # 想法竞技场：候选竞争
+│   ├── 脑区模块:
+│   │   ├── prefrontal.c                  # 前额叶：对话策略 + ACC 自适应门控
+│   │   ├── prefrontal_executive.c        # 前额叶执行器：PFE 6 模式推理
+│   │   ├── hippocampus.c                 # 海马体：记忆巩固/重放
+│   │   ├── dmn.c                         # 默认模式网络：梦境/闲暇
+│   │   ├── amygdala.c                    # 杏仁核：情绪效价
+│   │   ├── perception.c                  # 感知皮层：Sogou+Bing 联网搜索
+│   │   ├── broca.c                       # 布罗卡区：模板生成
+│   │   ├── cerebellum.c                  # 小脑：资源保护
+│   │   ├── hypothalamus.c                # 下丘脑：需求驱动
+│   │   ├── thalamus.c                    # 丘脑：信号总线 + 脑区启停
+│   │   ├── brainstem.c                   # 脑干：昼夜节律 + 心跳循环
+│   │   ├── cingulate.c                   # 扣带回：ACC 评估
+│   │   ├── idea_arena.c                  # 想法竞技场：候选竞争
+│   │   └── reticular.c                   # 网状激活系统：觉醒调节
 │   │
-│   └── ...                          # 其他辅助模块
+│   ├── 涌现式词类:
+│   │   └── emergent_pos.c                # 种子锚点 + 512 维特征聚类
+│   │
+│   ├── 学习器:
+│   │   ├── active_learner.c              # 主动学习器（7×24 后台）
+│   │   ├── self_learner.c                # 自我学习器（好奇驱动）
+│   │   └── bptt_learner.c               # BPTT 学习器（RNN 反向传播）
+│   │
+│   ├── 神经网络子系统:
+│   │   ├── tensor.c                      # 张量运算
+│   │   ├── matrix_ops.c                  # 矩阵运算
+│   │   ├── gradient_ops.c                # 梯度计算
+│   │   ├── layer.c / layer_lstm.c / layer_gru.c / layer_rnn*.c
+│   │   ├── model.c / model_io.c / generative_model.c
+│   │   ├── trainer.c / optimizer.c / scheduler.c
+│   │   ├── pretrain.c / feature_learn.c / feature_pretrain.c
+│   │   ├── quantization.c / pruning.c
+│   │   └── memory_arena.c / tensor_pool.c
+│   │
+│   └── ...                              # 其他辅助模块
 │
-├── include/                # 头文件（86个 .h）
-│   ├── multi_topology.h          # MasterTopology / SubTopology / CrossTopologyLink
-│   ├── trace_wisdom_topology.h        # ReasoningNode / TraceWisdomNetwork
-│   ├── cognitive_controller.h    # CognitiveController / intent_weights / retry
-│   ├── dialog_system.h           # DialogSystem / DialogReasoning / IntentType
-│   ├── memory_system.h           # MemoryEntry / STM / LTM
-│   ├── causal_reasoning.h        # CausalGraph / 因果置信度
-│   ├── cognitive_params.h        # CognitiveConfidence / EdgeWeightDual
-│   ├── brainstem.h               # 脑干：昼夜定义/节律接口
-│   ├── thalamus.h                # 丘脑：信号总线/路由
-│   ├── hypothalamus.h            # 下丘脑：需求驱动
-│   ├── template_builder.h        # 布罗卡区/模板构建
-│   ├── common.h                  # 全局常量/宏
+├── include/                # 头文件（89个 .h, ~12,600 行）
+│   ├── multi_topology.h              # MasterTopology / SubTopology / CrossTopologyLink
+│   ├── huarong_topology.h            # ReasoningNode / HuarongTopologyNet
+│   ├── cognitive_controller.h        # CognitiveController / intent_weights / retry
+│   ├── dialog_system.h               # DialogSystem / DialogReasoning / IntentType
+│   ├── memory_system.h               # MemoryEntry / STM / LTM
+│   ├── causal_reasoning.h            # CausalGraph / 因果置信度
+│   ├── emergent_pos.h                # POSAnchor / EmergentPOS
+│   ├── json_config.h                 # ConfigContext 运行时配置
+│   ├── bptt_learner.h                # BPTT 学习器
 │   └── ...
 │
-├── tools/                  # 命令行工具
-│   ├── batch_learn.c              # 批量训练（OpenMP 并行，核心工具）
-│   ├── batch_learn_lowmem.c       # 低内存版（禁用跨拓扑重建）
-│   ├── seed_builder.c             # 种子拓扑构建（共现建边）
-│   ├── corpus_train.c             # 语料训练
-│   ├── test_dialog.c              # 对话测试工具
-│   └── merge_states.py            # 多机训练结果合并脚本
+├── tools/                  # 命令行工具（57 文件）
+│   ├── batch_learn.c                 # 批量训练（OpenMP 并行，核心工具）
+│   ├── seed_builder.c                # 种子拓扑构建（共现建边）
+│   ├── corpus_train.c                # 语料训练
+│   ├── template_build.c              # 模板构建工具
+│   └── merge_states.py               # 多机训练结果合并脚本
 │
 ├── demos/                  # 演示程序
-│   ├── pivotmind_gateway.c        # HTTP 网关 (推荐入口)
-│   └── digital_life.c             # 命令行交互演示
+│   ├── pivotmind_gateway.c           # HTTP 网关（推荐入口）
+│   └── digital_life.c                # 命令行交互演示
 │
-├── scripts/                # 自动化脚本
-├── tests/                  # 测试用例 (23项PFE测试, 100%通过)
-├── changelogs/             # 改动记录
+├── tests/                  # 测试
+│   ├── unit/                         # 单元测试（17 项）
+│   ├── regression/                   # 回归测试套件（32 项）
+│   ├── integration/                  # 集成测试
+│   └── test_pfe_unit.c               # PFE 专项测试（23 项）
+│
+├── scripts/                # 自动化脚本（12 文件）
+├── changelogs/             # 改动记录（45 编号）
+├── reports/                # 审查报告
 ├── docs/                   # 补充文档
-├── Makefile                # 构建系统
+├── data/                   # 运行时数据（hermes 知识库 25MB）
+├── Makefile                # 构建系统（12 二进制 + 15 测试目标）
 └── ARCHITECTURE.md         # 本文档
 ```
 
@@ -708,31 +803,37 @@ PivotMind/
 
 | Bug | 修复方式 | 相关文件 |
 |-----|---------|---------|
-| 走边 O(n²) | 预建节点指针→索引二分查找表，拓扑排序 O(N²)→O(N log N+E) | trace_wisdom_topology.c |
-| strstr 误匹配 | 循环变量未使用 + 包含匹配导致"人"匹配"人民"→改用 strcmp 精确匹配 | cognitive_controller.c |
+| 走边 O(n²) | 预建节点指针→索引二分查找表，拓扑排序 O(N²)→O(N log N+E) | huarong_topology.c |
+| strstr 误匹配 | 改用 strcmp 精确匹配 | cognitive_controller.c |
 | 跨拓扑冷启动 | 实现动态跨拓扑建边（CrossTopoHitRecord 跟踪） | multi_topology.c |
-| 并发建边竞态 | trace_wisdom_net_add_connection 内部加 net->mutex 递归锁 | trace_wisdom_topology.c |
-| 刷盘数据丢失 | 先备份 .bak 再 rename 覆盖（原子写入） | autonomic_learner.c |
+| 并发建边竞态 | net->mutex 递归锁保护 | huarong_topology.c |
+| 刷盘数据丢失 | 原子写入（写临时文件→rename），撤销 .bak 双副本 | autonomic_learner.c |
 | 循环激活栈溢出 | 递归传播加 recursion_depth 硬上限（MAX_RECURSION_DEPTH=1000） | associative_reasoning.c |
 | 跨连接读写断裂 | sentinel(-1) + 魔数(0xDEADBEEF) 分隔节点区和跨连接区 | multi_topology.c |
+| realloc 悬空指针 | 索引替代裸指针 + strdup 接管 + malloc+memcpy+free 替代链式 realloc | article_reader.c, huarong_topology.c 等 |
+| double-free 退役竞态 | swap-before-retire + NULL-before-free 模式 | huarong_topology.c, node_cache.c |
+| 扩散引擎虚词污染 | is_function_word() ~130 词三层过滤 | diffusion.c |
 
 ## 设计决策记录
 
 | 决策 | 原因 |
 |------|------|
 | 逐字分词，不做词语拓扑 | 无词表边界，新组合自动适应；"学习"=「学」+「习」同时激活 |
-| 不引入神经网络层 | 验证拓扑联想路线，NN 层源码保留在磁盘 |
+| 拓扑联想为主，NN 层为辅 | BPTT 桥接提供 NN 反馈，拓扑走边仍是生成主路径 |
+| 512 维特征向量（NODE_FEATURE_DIM） | 余弦相似度区分度好，128/256 维下锚点聚类效果不理想 |
 | 二进制状态格式 | 加载/保存毫秒级，250MB 文件可秒读 |
 | 边数不设上限 | 让拓扑自由生长，剪枝策略留给后续 |
 | 并行用 OpenMP 而非 pthread | 代码侵入性低，适合 for 循环并行模式 |
 | 锁策略：net->mutex 粗粒度 | 简单可靠，竞态比死锁更难调试 |
+| 涌现而非编码 | POS 从种子涌现、跨拓扑从使用模式中自适应 |
 
 ## 待优化方向
 
 | 方向 | 目标 | 关键文件 |
 |------|------|---------|
-| 拓扑剪枝 | 置信度低于阈值或热度耗尽的边自动删除 | catastrophic_forgetting.c |
-| 动态图索引 | 用邻接矩阵替代邻接表，加速高度数节点走边 | multi_topology.c |
+| 跨架构状态格式 | 迁移到 JSON/MessagePack，支持 ARM↔x86 互通 | feature_io.c, multi_topology.c |
 | 参数自动调优 | 用强化学习或贝叶斯优化调参 intent_weights | cognitive_controller.c |
-| 文本格式持久化 | 迁移到 JSON/MessagePack，支持跨架构互换 | feature_io.c |
+| 训练效果追踪 | 固定测试集的量化回复质量指标 | tests/regression/ |
+| 分布式多节点 | 丘脑信号总线延伸到跨机路由 | thalamus.c, multi_topology.c |
 | 语音/图像拓扑 | 扩展到多模态（预留 thread_pool 框架） | multi_topology.c |
+| FPGA 部署 | 硬件级神经形态计算 | roadmap |
