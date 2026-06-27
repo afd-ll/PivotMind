@@ -1,0 +1,12 @@
+[
+    {"q": "你好", "lang": "zh"},
+    {"q": "什么是意识", "lang": "zh"},
+    {"q": "人工智能是什么", "lang": "zh"},
+    {"q": "学习有什么用", "lang": "zh"},
+    {"q": "hello", "lang": "en"},
+    {"q": "what is learning", "lang": "en"},
+    {"q": "how does brain work", "lang": "en"},
+    {"q": "科学", "lang": "zh", "note": "single concept"},
+    {"q": "知识", "lang": "zh", "note": "single concept"},
+    {"q": "life", "lang": "en", "note": "single concept"}
+]
