@@ -7,12 +7,12 @@
 ```
 P0 核心检测 (每次提交必须通过)
 ├── 编译检测    gcc -Wall -Wextra 零错误
-├── CI 检测     GitHub Actions x86_64 + ARM 交叉编译
-├── 单元测试    make test (14 模块)
+├── CI 检测     GitHub Actions x86_64 + ARM 交叉编译 (16 项)
+├── 单元测试    make test (15 模块) + Unicode 专项 (13 项)
 └── 冒烟测试    /health /status 基础响应
 
 P1 功能检测 (发版/PR 前必须通过)  
-├── 回归测试    对话质量 + 虚词过滤
+├── 回归测试    对话质量 + 虚词过滤 (32 项)
 ├── 状态完整性  边计数 + 格式校验 + uXXXX 零残留
 ├── 认知控制器  test-cc + test-cc-full
 └── 集成测试    test-integration
@@ -22,6 +22,22 @@ P2 压力检测 (重大变更前运行)
 ├── 训练追踪    train_track.py 趋势
 └── 内存检测    网关 RSS 监控
 ```
+
+### v0.4.8 实测基线
+
+| 指标 | 实测值 | 来源 |
+|------|-------|------|
+| 状态文件节点 | 30,021 (30000 词汇 + 6 语义 + 15 语法) | convert_state.py |
+| 状态文件边 | 84,202 | convert_state.py |
+| 平均度 | 2.8 edges/node | convert_state.py |
+| 状态文件大小 | 67,501 KB (~66 MB) | ls -lh |
+| 格式版本 / 特征维度 | v5 / 512-dim | convert_state.py |
+| 加载边恢复率 | 84,196/84,202 = 99.99% | gateway Pass 2 日志 |
+| 加载耗时 | ~1 秒 | gateway 日志 |
+| uXXXX 残留 | 0 (全文件扫描) | clean_unicode_escapes.py |
+| 网关节点 (运行时) | 30,027 | /status |
+| 网关 RSS | ~100 MB (空闲) | health_monitor |
+| 网关版本 | 0.4.8 | /status |
 
 ---
 
@@ -38,12 +54,12 @@ P2 压力检测 (重大变更前运行)
 
 | 项目 | 触发条件 | 通过标准 |
 |------|---------|---------|
-| build-x86_64 | 每次 push | 编译通过 + 7 核心测试全绿 |
+| build-x86_64 | 每次 push | 编译通过 + 16 核心测试全绿 |
 | build-arm | 每次 push | ARM 交叉编译 + readelf 验证 ELF |
 
-CI 当前覆盖的测试: `test-tensor, test-model, test-metrics, test-trainer, test-io, test-cc, test-web-fetch`
+CI 当前覆盖的测试: `make test-tensor, test-model, test-metrics, test-trainer, test-io, test-cc, test-web-fetch, test-dialog-unit, test-diffusion-unit, test-topology-unit, test-memory-unit, test-learner-unit, test-causal-unit, test-forgetting-unit, test-integration`
 
-### 2.3 单元测试 (make test)
+### 2.3 单元测试 (make test — 15 项，全部 PASS)
 
 | # | 目标 | 模块 | 检测内容 | 通过标准 |
 |---|------|------|---------|---------|
@@ -61,8 +77,7 @@ CI 当前覆盖的测试: `test-tensor, test-model, test-metrics, test-trainer, 
 | 12 | `test-learner-unit` | Hebbian 学习器 | online learning/create-update | 所有用例 PASS |
 | 13 | `test-causal-unit` | 因果推理 | graph lifecycle/edge/query | 所有用例 PASS |
 | 14 | `test-forgetting-unit` | 灾难性遗忘 | EWC config/defaults | 所有用例 PASS |
-
-**注意**: #8-#14 当前未在 `make test` 聚合目标和 CI 中。**v0.4.8 应补上。**
+| 15 | `test-integration` | 集成 | model pipeline create→train→save→load→verify | 所有用例 PASS |
 
 ### 2.4 冒烟检测 (回归套件 — smoke)
 
@@ -78,16 +93,18 @@ CI 当前覆盖的测试: `test-tensor, test-model, test-metrics, test-trainer, 
 
 ### 3.1 状态文件完整性
 
+**v0.4.8 基线**: 30,021 节点, 84,202 边, 2.8 avg, 67MB, uXXXX=0
+
 | 项目 | 检测方法 | 通过标准 |
 |------|---------|---------|
-| 格式版本 | `convert_state.py --info` 零 WARN | format_version ≥ 5 |
-| 节点数 | 同上 | 30000 ± 10% (词汇拓扑) |
-| 边数 | 同上 | ≥ 80000 (训练后) 或 ≥ 当前基线的 95% |
-| 平均度 | 同上 | ≥ 2.0 edges/node |
-| uXXXX 残留 | `clean_unicode_escapes.py --dry-run` | cleaned = 0 |
+| 格式版本 | `convert_state.py --info` 零 WARN | format_version ≥ 5, feature_dim = 512 |
+| 节点数 | 同上 | 30,000 ± 10% (词汇拓扑) |
+| 边数 | 同上 | ≥ 80,000 或 ≥ 当前基线的 95% (84,202 × 0.95 = 79,992) |
+| 平均度 | 同上 | ≥ 2.0 edges/node (基线 2.8) |
+| uXXXX 残留 | `clean_unicode_escapes.py --dry-run` | 节点修复 = 0, 边修复 = 0 |
 | concept_len | 无 `bad concept_len` 警告 | 零 WARN |
-| 二进制完整 | `master_load_state` 日志 | Pass 2 恢复边数 ≥ 全量的 99% |
-| 二遍加载边恢复率 | 重启网关 + 检查日志 | Pass 2: 恢复边 ≥ 文件总边数 × 0.99 |
+| 加载边恢复率 | 网关 Pass 2 日志 | 恢复边 ≥ 文件总边数 × 0.99 (基线 99.99%) |
+| 文件大小 | `ls -lh` | 60-70 MB |
 
 ### 3.2 对话质量
 
@@ -203,9 +220,7 @@ python3 tests/regression/train_track.py --rounds 10  # 训练追踪
 
 | 优先级 | 项目 | 说明 |
 |--------|------|------|
-| P0 | ~~CI 覆盖全部 15 个 make test 目标 + test-integration~~ | 已修复 — CI 现在跑 16 个测试 |
-| P0 | CI 覆盖全部 14 个单元测试 + integration | 当前 CI 只跑 7 个，需补 8 个 |
-| P1 | 集成 test-cc-full 到 CI | 需要有效的 state file |
+| P1 | 集成 test-cc-full 到 CI | 需要有效的 state file 作为测试 fixture |
 | P1 | 新增 pre-push hook | `.git/hooks/pre-push` 跑 `make test` |
 | P2 | 新增状态文件基准测试 | 比较 save→load→save 的边数守恒 |
 | P2 | 新增 \uXXXX 格式自动化回归 | CI 中检测状态文件零 uXXXX |
