@@ -76,6 +76,27 @@ NNN-简短描述.md
 | 优化 | 性能优化 |
 | 清理 | 代码清理、删除死代码 |
 
+## 报告规则
+
+当先出审查/诊断报告时，报告文件存放在 `reports/` 目录，命名与 changelogs 同编号：
+
+```
+reports/NNN-简短描述.md
+```
+
+如果后续基于该报告进行了修复：
+- 修复内容写入对应的 `changelogs/NNN-修复描述.md`
+- **同步更新报告文件**，在原报告末尾追加已完成项的标记和修复提交信息
+
+示例：
+```
+reports/044-architecture-review.md     ← 先出审查报告
+changelogs/044-p0-dialog-test.md       ← 修复 P0 项后写 changelog
+reports/044-architecture-review.md     ← 在原报告中追加"P0 已完成，提交 abc1234"
+```
+
+---
+
 ## 架构演进
 
 | 架构 | 版本范围 | 核心特征 |
