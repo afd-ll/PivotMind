@@ -3429,7 +3429,8 @@ int master_load_state(MasterTopology* master, const char* file_path) {
     int loaded_links = 0;
     time_t last_report = t0;
 
-    /* === 节点加载循环 === */
+    /* === 节点加载循环 (Pass 1: 创建所有节点，跳过边数据) === */
+    const uint8_t* node_section_start = p;
     while (1) {
         int topo_type;
         if (fmt_ver >= 2) {
@@ -3542,43 +3543,16 @@ int master_load_state(MasterTopology* master, const char* file_path) {
             }
         }
 
-        // 连接数据处理
+        // 连接数据：Pass 1 全部跳过，Pass 2 统一恢复
         if (fmt_ver >= 3) {
-            // [v3] 按概念名恢复连接
             for (int c = 0; c < conn_count && conn_count > 0; c++) {
                 int tgt_concept_len;
                 if (p + (int)sizeof(int) > end) break;
                 READ(&tgt_concept_len, sizeof(int));
                 if (tgt_concept_len > 0 && tgt_concept_len <= 4096) {
-                    char tgt_concept[4096];
-                    if (p + tgt_concept_len > end) break;
-                    READ(tgt_concept, tgt_concept_len);
-                    tgt_concept[tgt_concept_len - 1] = '\0';
-
-                    float conn_w, conn_b, conn_c;
-                    if (p + 3 * (int)sizeof(float) > end) break;
-                    READ(&conn_w, sizeof(float));
-                    READ(&conn_b, sizeof(float));
-                    READ(&conn_c, sizeof(float));
-
-                    if (node && target_topo->net) {
-                        ReasoningNode* tgt = node_hash_find(target_topo->node_hash, tgt_concept);
-                        if (tgt && tgt != node) {
-                            int ret = huarong_net_add_connection(target_topo->net,
-                                node->node_id, tgt->node_id, conn_w);
-                            if (ret == 0) {
-                                int idx = node->edge_count - 1;
-                                if (idx >= 0 && node->edges) {
-                                    node->edges[idx].motivational_bias = conn_b;
-                                    node->edges[idx].confidence = conn_c;
-                                }
-                            }
-                        }
-                    }
-                } else {
-                    // tgt_concept_len == 0: 跳过
-                    SKIP(3 * (int)sizeof(float));
+                    SKIP(tgt_concept_len);
                 }
+                SKIP(3 * (int)sizeof(float));
             }
         } else if (fmt_ver >= 2) {
             // [v2] 跳过连接数据
@@ -3594,6 +3568,122 @@ int master_load_state(MasterTopology* master, const char* file_path) {
                     loaded_nodes, (long)(now - last_report));
             last_report = now;
         }
+    }
+
+    /* === Pass 2: 所有节点已创建，回退重新遍历恢复边连接 === */
+    if (fmt_ver >= 3) {
+        const uint8_t* pass1_end = p;
+        p = node_section_start;
+        int restored_edges = 0;
+
+        while (p < pass1_end) {
+            int topo_type;
+            if (fmt_ver >= 2) {
+                if (p + (int)sizeof(int) > end) break;
+                READ(&topo_type, sizeof(int));
+                if (topo_type < 0 || topo_type > 255) {
+                    p -= sizeof(int);
+                    break;
+                }
+            } else {
+                topo_type = TOPO_VOCABULARY;
+            }
+
+            int node_id;
+            if (p + (int)sizeof(int) > end) break;
+            READ(&node_id, sizeof(int));
+            (void)node_id;  // Pass 2 用概念名哈希查找，不依赖文件 node_id
+
+            int concept_len;
+            if (p + (int)sizeof(int) > end) break;
+            READ(&concept_len, sizeof(int));
+            if (concept_len <= 0 || concept_len > 4096) break;
+
+            char concept[4096];
+            if (p + concept_len > end) break;
+            READ(concept, concept_len);
+            concept[concept_len - 1] = '\0';
+
+            // 跳过 activation
+            SKIP((int)sizeof(float));
+
+            // 跳过特征 (v4+)
+            if (fmt_ver >= 4) {
+                int feat_dim;
+                if (p + (int)sizeof(int) > end) break;
+                READ(&feat_dim, sizeof(int));
+                SKIP(NODE_FEATURE_DIM * (int)sizeof(float));
+            }
+
+            int conn_count;
+            if (p + (int)sizeof(int) > end) break;
+            READ(&conn_count, sizeof(int));
+
+            // 找到拓扑和节点（用概念名哈希查找，不用文件 node_id）
+            SubTopology* p2_topo = NULL;
+            for (int t = 0; t < master->sub_topo_count; t++) {
+                SubTopology* sub = master->sub_topologies[t];
+                if (sub && (int)sub->type == topo_type) { p2_topo = sub; break; }
+            }
+
+            if (p2_topo && p2_topo->net && p2_topo->node_hash && conn_count > 0) {
+                ReasoningNode* node = node_hash_find(p2_topo->node_hash, concept);
+                for (int c = 0; c < conn_count; c++) {
+                    int tgt_concept_len;
+                    if (p + (int)sizeof(int) > end) break;
+                    READ(&tgt_concept_len, sizeof(int));
+
+                    if (tgt_concept_len > 0 && tgt_concept_len <= 4096) {
+                        char tgt_concept[4096];
+                        if (p + tgt_concept_len > end) break;
+                        READ(tgt_concept, tgt_concept_len);
+                        tgt_concept[tgt_concept_len - 1] = '\0';
+
+                        float conn_w, conn_b, conn_c;
+                        if (p + 3 * (int)sizeof(float) > end) break;
+                        READ(&conn_w, sizeof(float));
+                        READ(&conn_b, sizeof(float));
+                        READ(&conn_c, sizeof(float));
+
+                        if (node && p2_topo->node_hash) {
+                            ReasoningNode* tgt = node_hash_find(
+                                p2_topo->node_hash, tgt_concept);
+                            if (tgt && tgt != node) {
+                                int ret = huarong_net_add_connection(
+                                    p2_topo->net, node->node_id, tgt->node_id, conn_w);
+                                if (ret == 0) {
+                                    int idx = node->edge_count - 1;
+                                    if (idx >= 0 && node->edges) {
+                                        node->edges[idx].motivational_bias = conn_b;
+                                        node->edges[idx].confidence = conn_c;
+                                    }
+                                }
+                                restored_edges++;
+                                loaded_links++;
+                            }
+                        }
+                    } else {
+                        if (p + 3 * (int)sizeof(float) > end) break;
+                        SKIP(3 * (int)sizeof(float));
+                    }
+                }
+            } else {
+                // 跳过边数据
+                for (int c = 0; c < conn_count; c++) {
+                    int tgt_concept_len;
+                    if (p + (int)sizeof(int) > end) break;
+                    READ(&tgt_concept_len, sizeof(int));
+                    if (tgt_concept_len > 0 && tgt_concept_len <= 4096) {
+                        SKIP(tgt_concept_len);
+                    }
+                    if (p + 3 * (int)sizeof(float) > end) break;
+                    SKIP(3 * (int)sizeof(float));
+                }
+            }
+        }
+
+        p = pass1_end;  // 恢复到跨拓扑段前
+        fprintf(stderr, "[状态加载] Pass 2 完成: 恢复 %d 条边\n", restored_edges);
     }
 
     /* === 跨拓扑连接加载 === */
