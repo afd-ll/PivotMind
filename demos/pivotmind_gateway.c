@@ -56,6 +56,7 @@
 #include "prefrontal_executive.h"  /* v0.3 前额叶执行器 — 推理编排 */
 #include "idea_arena.h"            /* v0.3 想法竞争竞技场 */
 #include "hypothalamus.h"          /* v0.4 下丘脑 — 需求/动机调控 */
+#include "json_config.h"           /* v0.4.7 运行时配置 */
 #include "web_fetch.h"             /* 爬虫框架 */
 
 // ==================== 配置 ====================
@@ -112,6 +113,7 @@ typedef struct {
     // 网关配置
     int   port;
     char  workdir[512];
+    ConfigContext* config;       /* 运行时配置 */
 } GatewaySystem;
 
 static GatewaySystem* g_gw = NULL;
@@ -554,6 +556,7 @@ static void gw_system_shutdown(GatewaySystem* gw) {
     if (gw->causal_graph) causal_graph_destroy(gw->causal_graph);
     if (gw->topology)    master_topology_destroy(gw->topology);
     if (gw->memory)      memory_system_destroy(gw->memory);
+    if (gw->config)      config_destroy(gw->config);
 
     printf("[gateway] 已关闭 (运行 %lld 秒, 对话 %lld 轮)\n",
            (long long)(time(NULL) - gw->start_time), (long long)gw->total_dialogs);
@@ -1232,6 +1235,9 @@ int main(int argc, char* argv[]) {
     g_gw = &gw;
     gw.port = port;
     strncpy(gw.workdir, workdir, sizeof(gw.workdir) - 1);
+
+    /* load runtime config (optional; defaults if file missing) */
+    gw.config = config_load(NULL);
 
     // 信号处理
     signal(SIGINT, gw_signal_handler);
