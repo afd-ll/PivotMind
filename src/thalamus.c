@@ -37,6 +37,7 @@ Thalamus* thalamus_create(void) {
     /* 默认：所有子系统全速 */
     for (int i = 0; i < THAL_SUBSYSTEM_COUNT; i++) {
         th->throttle[i] = 1.0f;
+        th->enabled[i] = 1;   /* 默认全部启用 */
     }
 
     /* 可配置默认值 */
@@ -502,6 +503,23 @@ float thalamus_get_throttle(Thalamus* th, ThalamusSubsystem subsystem) {
     float val;
     pthread_mutex_lock(&th->lock);
     val = th->throttle[subsystem];
+    pthread_mutex_unlock(&th->lock);
+    return val;
+}
+
+void thalamus_enable_region(Thalamus* th, ThalamusSubsystem subsystem, int enabled) {
+    if (!th || subsystem < 0 || subsystem >= THAL_SUBSYSTEM_COUNT) return;
+    pthread_mutex_lock(&th->lock);
+    th->enabled[subsystem] = enabled ? 1 : 0;
+    if (!enabled) th->throttle[subsystem] = 0.0f;  /* 禁用时 throttle 归零 */
+    pthread_mutex_unlock(&th->lock);
+}
+
+int thalamus_is_region_enabled(Thalamus* th, ThalamusSubsystem subsystem) {
+    if (!th || subsystem < 0 || subsystem >= THAL_SUBSYSTEM_COUNT) return 0;
+    int val;
+    pthread_mutex_lock(&th->lock);
+    val = th->enabled[subsystem];
     pthread_mutex_unlock(&th->lock);
     return val;
 }

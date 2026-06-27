@@ -91,4 +91,10 @@ void bptt_learner_stats(BpttLearner* bl, float* out_avg_loss, int* out_steps);
  */
 int bptt_bias_vocab_activation(BpttLearner* bl, const char* input_text);
 
+/**
+ * 获取 BPTT 模型的置信度（基于最近训练的 loss 归一化）
+ * @return 0.0~1.0，未训练时返回 0
+ */
+float bptt_get_confidence(BpttLearner* bl);
+
 #endif // BPTT_LEARNER_H

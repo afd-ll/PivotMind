@@ -198,6 +198,7 @@ typedef struct CognitiveController {
 
     // ========== 8. 在线学习 ==========
     float learned_base[MAX_SUBTOPOS];    // 意图基准在线学习因子 (1.0=未调整)
+    float nn_confidence;                 // BPTT 神经网络置信度 (0.0~1.0, 0=未训练)
 
     // ========== 10. 涌现式词类系统 ==========
     EmergentPOS* emergent_pos;           // 种子锚点 + 特征向量聚类词类系统

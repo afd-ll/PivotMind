@@ -495,6 +495,35 @@ int master_prune_cross_links(MasterTopology* master, float min_weight, int min_u
     return pruned;
 }
 
+int master_reevaluate_cross_links(MasterTopology* master, float expected_use) {
+    if (!master || !master->cross_links || expected_use <= 0) return 0;
+
+    pthread_rwlock_wrlock(&master->rwlock);
+
+    int updated = 0;
+    for (int i = 0; i < master->cross_link_count; i++) {
+        CrossTopologyLink* link = master->cross_links[i];
+        if (!link) continue;
+        /* Normalize use_count against expected, clamp to [0, 2]
+         * High-use links get transfer_rate boost, low-use get penalty.
+         * Floor at 0.4 ensures even cold links can still conduct */
+        float norm = (float)link->use_count / expected_use;
+        if (norm > 2.0f) norm = 2.0f;
+        float new_rate = 0.4f + 0.6f * norm * link->weight;
+        if (new_rate != link->transfer_rate) {
+            link->transfer_rate = new_rate;
+            updated++;
+        }
+    }
+
+    pthread_rwlock_unlock(&master->rwlock);
+
+    if (updated > 0)
+        LOG_INFO("[跨拓扑重评估] 更新 %d 条连接的 transfer_rate (expected_use=%.1f)",
+               updated, expected_use);
+    return updated;
+}
+
 // ==================== 动态跨拓扑建边跟踪 ====================
 
 /** 哈希函数：四元组映射到 [0, CROSS_HIT_TABLE_SIZE) */

@@ -418,6 +418,17 @@ static int gw_system_init(GatewaySystem* gw) {
     thalamus_register_utility(gw->thalamus, THAL_UTIL_TOPO_BRAIN,     NULL);  /* topo_brain 在后面注册 */
     thalamus_register_utility(gw->thalamus, THAL_UTIL_IDEA_ARENA,      gw->arena); /* v0.3 */
 
+    /* 根据运行时配置禁用脑区 */
+    if (gw->config && gw->config->loaded) {
+        if (!gw->config->brain_regions.perception)   thalamus_enable_region(gw->thalamus, THAL_PERCEPTION, 0);
+        if (!gw->config->brain_regions.hippocampus)  thalamus_enable_region(gw->thalamus, THAL_HIPPOCAMPUS, 0);
+        if (!gw->config->brain_regions.dmn)          thalamus_enable_region(gw->thalamus, THAL_DMN, 0);
+        if (!gw->config->brain_regions.broca)        thalamus_enable_region(gw->thalamus, THAL_BROCA, 0);
+        if (!gw->config->brain_regions.cerebellum)   thalamus_enable_region(gw->thalamus, THAL_CEREBELLUM, 0);
+        if (!gw->config->brain_regions.amygdala)     thalamus_enable_region(gw->thalamus, THAL_AMYGDALA, 0);
+        if (!gw->config->brain_regions.hypothalamus) thalamus_enable_region(gw->thalamus, THAL_HYPOTHALAMUS, 0);
+    }
+
     // 设置子拓扑按脑区归属（每个脑区只负责自己的子拓扑）
     {
         int prefrontal_topo[]  = {TOPO_VOCABULARY, TOPO_SEMANTIC, TOPO_PRAGMA, TOPO_CONCEPT};

@@ -340,3 +340,11 @@ int bptt_bias_vocab_activation(BpttLearner* bl, const char* input_text) {
 
     return biased;
 }
+
+float bptt_get_confidence(BpttLearner* bl) {
+    if (!bl || bl->steps < BPTT_BIAS_MIN_STEPS) return 0.0f;
+    /* 平均 loss 转置信度: loss→0 时 confidence→1, loss→∞ 时 confidence→0 */
+    float avg_loss = (bl->steps > 0) ? bl->total_loss / bl->steps : 1.0f;
+    float conf = 1.0f / (1.0f + avg_loss);
+    return conf > 1.0f ? 1.0f : conf;
+}

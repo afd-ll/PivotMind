@@ -149,6 +149,7 @@ typedef struct Thalamus {
 
     /* ── 决策输出 ── */
     float throttle[THAL_SUBSYSTEM_COUNT];  /* 0.0=暂停, 0.5=半速, 1.0=全速 */
+    int   enabled[THAL_SUBSYSTEM_COUNT];   /* 1=启用, 0=禁用（比 throttle=0 更强, tick 全跳过） */
     int   active_subsystem;                /* 当前活跃的子系统 */
 
     /* ── 小脑保护系数（来自 cerebellum_tick，硬件级安全限速） ── */
@@ -294,6 +295,8 @@ void thalamus_record_dialog(Thalamus* th);
 
 void thalamus_tick(Thalamus* th);
 float thalamus_get_throttle(Thalamus* th, ThalamusSubsystem subsystem);
+void thalamus_enable_region(Thalamus* th, ThalamusSubsystem subsystem, int enabled);
+int  thalamus_is_region_enabled(Thalamus* th, ThalamusSubsystem subsystem);
 const char* thalamus_phase_description(Thalamus* th);
 const char* thalamus_decision_reason(Thalamus* th);
 

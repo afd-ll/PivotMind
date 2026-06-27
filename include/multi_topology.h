@@ -510,4 +510,12 @@ void master_clear_cross_links(MasterTopology* master);
  */
 int master_prune_cross_links(MasterTopology* master, float min_weight, int min_use_count);
 
+/**
+ * 跨拓扑连接重评估：周期性更新 transfer_rate
+ * 基于 use_count 和 weight 动态调整传导效率。
+ * @param expected_use 期望使用次数（用于归一化 use_count）
+ * @return 更新的连接数
+ */
+int master_reevaluate_cross_links(MasterTopology* master, float expected_use);
+
 #endif // MULTI_TOPOLOGY_H

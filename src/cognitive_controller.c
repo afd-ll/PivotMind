@@ -67,6 +67,7 @@ CognitiveController* cognitive_controller_create(MasterTopology* master,
         cc->prev_intent_weights[i] = cc->intent_weights[i];
         cc->learned_base[i] = 1.0f;  // 在线学习因子初始=无调整
     }
+    cc->nn_confidence = 0.0f;    // BPTT 未训练时置信度为 0
     cc->prev_satisfaction = 0.0f;
 
     /* 涌现式词类系统: 轻量创建，尝试加载持久化中心，失败则懒初始化 */
@@ -486,7 +487,13 @@ void compute_intent_local(CognitiveController* cc,
         float ctx_f = ctx_activations
                         ? (1.0f + cc->context_bias * ctx_activations[i])
                         : 1.0f;
-        float w = base * ctx_f * nf * vf * cf;
+
+        /* NN confidence factor — BPTT model confidence boosts intent weights
+         * Default nn_confidence=0 → nf=1.0 (no effect)
+         * Trained nn_confidence=1 → nf≈1.10 (gentle boost) */
+        float nn_f = 1.0f + 0.1f * cc->nn_confidence;
+
+        float w = base * ctx_f * nf * vf * cf * nn_f;
 
         /* NaN/Inf 防护：任何异常值安全修复为0 */
         if (!isfinite(w)) w = 0.0f;

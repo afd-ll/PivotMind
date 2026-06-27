@@ -261,7 +261,7 @@ static void brainstem_tick_subcortical(Brainstem* bs, const CircadianParams* cp)
     Thalamus* th = bs->thalamus;
     if (!th) return;
 
-    if (bs->tick_count % 10 == 0) {
+    if (bs->tick_count % 10 == 0 && thalamus_is_region_enabled(th, THAL_CEREBELLUM)) {
         Cerebellum* cb = (Cerebellum*)thalamus_get_region(th, THAL_CEREBELLUM);
         if (cb) {
             float mem_gb = pm_get_rss_mb() / 1024.0f;
@@ -289,10 +289,12 @@ static void brainstem_tick_subcortical(Brainstem* bs, const CircadianParams* cp)
         thalamus_tick(th);
 
         /* 下丘脑：需求/动机调控 — 与丘脑调度同频 */
-        Hypothalamus* hypo = (Hypothalamus*)thalamus_get_region(th, THAL_HYPOTHALAMUS);
-        if (hypo) {
-            hypothalamus_set_circadian(hypo, cp->circadian);
-            hypothalamus_tick(hypo);
+        if (thalamus_is_region_enabled(th, THAL_HYPOTHALAMUS)) {
+            Hypothalamus* hypo = (Hypothalamus*)thalamus_get_region(th, THAL_HYPOTHALAMUS);
+            if (hypo) {
+                hypothalamus_set_circadian(hypo, cp->circadian);
+                hypothalamus_tick(hypo);
+            }
         }
     }
 }
@@ -301,6 +303,7 @@ static void brainstem_tick_subcortical(Brainstem* bs, const CircadianParams* cp)
 static int brainstem_tick_perception(Brainstem* bs) {
     Thalamus* th = bs->thalamus;
     if (!th) return 0;
+    if (!thalamus_is_region_enabled(th, THAL_PERCEPTION)) return 0;
     int work = 0;
     float p_throttle = thalamus_get_throttle(th, THAL_PERCEPTION);
     Perception* p = (Perception*)thalamus_get_region(th, THAL_PERCEPTION);
@@ -372,6 +375,11 @@ static void brainstem_tick_synapse_scale(Brainstem* bs) {
     }
     if (decayed > 0 || released > 0)
         LOG_INFO("[突触缩放] 衰减%d条 释放%d条", decayed, released);
+
+    /* 跨拓扑连接质量重评估：每 600 tick 更新 transfer_rate */
+    if (bs->master) {
+        master_reevaluate_cross_links(bs->master, 10.0f);
+    }
 }
 
 /* 海马体巩固 + DMN梦境 */
@@ -379,7 +387,7 @@ static int brainstem_tick_memory_dream(Brainstem* bs, const CircadianParams* cp)
     Thalamus* th = bs->thalamus;
     int dmn_work = 0;
 
-    if (th && bs->tick_count % bs->consolidate_every_n_ticks == 0) {
+    if (th && thalamus_is_region_enabled(th, THAL_HIPPOCAMPUS) && bs->tick_count % bs->consolidate_every_n_ticks == 0) {
         Hippocampus* hc = (Hippocampus*)thalamus_get_region(th, THAL_HIPPOCAMPUS);
         if (hc) hippocampus_consolidate(hc);
     }
@@ -388,7 +396,8 @@ static int brainstem_tick_memory_dream(Brainstem* bs, const CircadianParams* cp)
         DmnConfig dmn_cfg = DMN_DEFAULT_CONFIG;
         dmn_cfg.verbose = bs->verbose;
         float dmn_throttle = th ? thalamus_get_throttle(th, THAL_DMN) : 1.0f;
-        dmn_work = dmn_cycle(bs->master, bs->memory, &dmn_cfg, dmn_throttle);
+        if (!th || thalamus_is_region_enabled(th, THAL_DMN))
+            dmn_work = dmn_cycle(bs->master, bs->memory, &dmn_cfg, dmn_throttle);
     }
     return dmn_work;
 }
@@ -428,7 +437,7 @@ static void brainstem_tick_learning_scan(Brainstem* bs, const CircadianParams* c
     }
 
     /* 布罗卡区：委托给 Broca 自己的 tick 调度（不再硬编码 interval） */
-    {
+    if (thalamus_is_region_enabled(th, THAL_BROCA)) {
         Broca* broca = (Broca*)thalamus_get_region(th, THAL_BROCA);
         if (broca) {
             int built = broca_tick(broca);
