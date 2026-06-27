@@ -878,6 +878,7 @@ PivotMind/
 │   ├── seed_builder.c                # 种子拓扑构建（共现建边）
 │   ├── corpus_train.c                # 语料训练
 │   ├── template_build.c              # 模板构建工具
+│   ├── convert_state.py              # 跨架构状态转换 (二进制 ↔ JSON)
 │   └── merge_states.py               # 多机训练结果合并脚本
 │
 ├── demos/                  # 演示程序
@@ -886,7 +887,7 @@ PivotMind/
 │
 ├── tests/                  # 测试
 │   ├── unit/                         # 单元测试（17 项）
-│   ├── regression/                   # 回归测试套件（32 项）
+│   ├── regression/                   # 回归测试套件（32 项）+ 训练追踪
 │   ├── integration/                  # 集成测试
 │   └── test_pfe_unit.c               # PFE 专项测试（23 项）
 │
@@ -933,9 +934,9 @@ PivotMind/
 
 | 方向 | 目标 | 关键文件 |
 |------|------|---------|
-| 跨架构状态格式 | 迁移到 JSON/MessagePack，支持 ARM↔x86 互通 | feature_io.c, multi_topology.c |
 | 参数自动调优 | 用强化学习或贝叶斯优化调参 intent_weights | cognitive_controller.c |
-| 训练效果追踪 | 固定测试集的量化回复质量指标 | tests/regression/ |
+| 训练效果追踪 | 固定测试集的量化回复质量指标 | tests/regression/train_track.py ✅ |
 | 分布式多节点 | 丘脑信号总线延伸到跨机路由 | thalamus.c, multi_topology.c |
 | 语音/图像拓扑 | 扩展到多模态（预留 thread_pool 框架） | multi_topology.c |
 | FPGA 部署 | 硬件级神经形态计算 | roadmap |
+| ~~跨架构状态格式~~ | ~~JSON/MessagePack~~ → **已实现**: `tools/convert_state.py` | feature_io.c, multi_topology.c |
