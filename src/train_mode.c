@@ -784,8 +784,6 @@ static void train_do_auto_save(TrainMode* tm, const char* workdir) {
     printf("[训练] 强制存盘 (已喂%ld条)...\n", tm->progress.total_fed);
     int saved = master_save_state(tm->topology, "pivotmind_state.dat");
     if (saved > 0) printf("[训练]   已保存 %d 节点\n", saved);
-    /* 备份一份防崩 */
-    master_save_state(tm->topology, "pivotmind_state.bak");
 }
 
 // ==================== 辅助函数 ====================

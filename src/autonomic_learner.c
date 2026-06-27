@@ -205,17 +205,7 @@ static void do_flush_work(AutonomicState* state, MasterTopology* master, time_t 
         char path[PM_PATH_BUF];
         snprintf(path, sizeof(path), "pivotmind_state.dat");
 
-        // 备份：如果已有状态文件，先重命名，防止刷盘过程中崩了丢数据
-        FILE* existing = fopen(path, "rb");
-        if (existing) {
-            fclose(existing);
-            char bak_path[PM_PATH_BUF + 4]; /* +4 容纳 ".bak" 后缀 */
-            snprintf(bak_path, sizeof(bak_path), "%s.bak", path);
-            remove(bak_path);
-            rename(path, bak_path);
-        }
-
-        // 持久化拓扑
+        // 持久化拓扑（单一文件，不备份）
         int saved = master_save_state(master, path);
         if (saved > 0) {
             LOG_INFO("[自主学习刷盘] ✓ 已保存到 %s (%d 节点)", path, saved);

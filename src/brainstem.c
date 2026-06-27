@@ -506,8 +506,6 @@ static void* brainstem_loop(void* arg) {
             int saved = master_save_state(bs->master, "pivotmind_state.dat");
             if (saved > 0 && bs->verbose)
                 LOG_INFO("[存盘] tick=%d 已保存 %d 节点", bs->tick_count, saved);
-            /* 双副本防写盘过程中断电 */
-            master_save_state(bs->master, "pivotmind_state.bak");
         }
     }
 
