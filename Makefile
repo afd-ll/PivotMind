@@ -176,6 +176,9 @@ $(BUILD_DIR)/test_dialog_unit: tests/unit/test_dialog.c $(LIB_NAME)
 $(BUILD_DIR)/test_diffusion_unit: tests/unit/test_diffusion.c $(LIB_NAME)
 	$(CC) $(CFLAGS) -I. -o $@ tests/unit/test_diffusion.c -L. -lpivotmind $(LDFLAGS)
 
+$(BUILD_DIR)/test_topology_unit: tests/unit/test_topology.c $(LIB_NAME)
+	$(CC) $(CFLAGS) -I. -o $@ tests/unit/test_topology.c -L. -lpivotmind $(LDFLAGS)
+
 $(BUILD_DIR)/test_integration: tests/integration/test_integration.c $(LIB_NAME)
 	$(CC) $(CFLAGS) -I. -o $@ tests/integration/test_integration.c -L. -lpivotmind $(LDFLAGS)
 
@@ -195,6 +198,7 @@ test-io: $(BUILD_DIR)/test_io
 test-web-fetch: $(BUILD_DIR)/test_web_fetch
 test-dialog-unit: $(BUILD_DIR)/test_dialog_unit
 test-diffusion-unit: $(BUILD_DIR)/test_diffusion_unit
+test-topology-unit: $(BUILD_DIR)/test_topology_unit
 test-integration: $(BUILD_DIR)/test_integration
 test-cc: $(BUILD_DIR)/test_cognitive_controller
 test-cc-full: $(BUILD_DIR)/test_cognitive_full
@@ -206,9 +210,9 @@ $(BUILD_DIR)/test_runner: tests/test_runner.c $(LIB_NAME)
 test-runner: $(BUILD_DIR)/test_runner
 
 # 运行所有测试
-test: test-tensor test-model test-metrics test-trainer test-chinese test-io test-cc test-web-fetch test-dialog-unit test-diffusion-unit
+test: test-tensor test-model test-metrics test-trainer test-chinese test-io test-cc test-web-fetch test-dialog-unit test-diffusion-unit test-topology-unit
 	@echo "╔══════════════════════════════════════╗"
 	@echo "║  所有单元测试已完成                  ║"
 	@echo "╚══════════════════════════════════════╝"
 
-.PHONY: all linux debug asan digital-life gateway seed-builder debug-seed test-dialog corpus-train batch-learn batch-learn-lowmem template-build path-analyze compare-templates eval-templates run clean install test test-tensor test-model test-metrics test-trainer test-chinese test-io test-web-fetch test-dialog-unit test-diffusion-unit test-integration test-cc test-cc-full test-runner
+.PHONY: all linux debug asan digital-life gateway seed-builder debug-seed test-dialog corpus-train batch-learn batch-learn-lowmem template-build path-analyze compare-templates eval-templates run clean install test test-tensor test-model test-metrics test-trainer test-chinese test-io test-web-fetch test-dialog-unit test-diffusion-unit test-topology-unit test-integration test-cc test-cc-full test-runner
