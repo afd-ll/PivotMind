@@ -278,7 +278,7 @@ pivotmind/
 ├── include/           # 89 header files (~12,600 lines)
 ├── demos/             # Gateway and interactive entry
 ├── tools/             # 57 tools (training/debugging/data processing/corpus download)
-├── tests/             # Unit tests + integration tests + fixture data
+├── tests/             # Unit tests + integration tests + regression suite
 ├── scripts/           # Automation scripts (feeding, knowledge download, etc.)
 ├── changelogs/        # 44 version changelogs (000-043)
 ├── docs/              # Architecture documentation and diagrams

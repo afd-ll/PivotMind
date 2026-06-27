@@ -214,3 +214,12 @@ create_prefrontal() → create_brainstem() → create_thalamus()
 - `include/multi_topology.h` / `src/multi_topology.c` — 新增 master_reevaluate_cross_links()
 - `src/brainstem.c` — synapse_scale 每 600 tick 调用重评估
 
+### P0+: 回归测试套件 — 已完成 ✅
+- 提交: `4e001fa`
+- `tests/regression/run_all.py` — 主入口 (--smoke/--response/--filter/--stress)
+- `tests/regression/test_smoke.py` — 启动/健康/状态/基础对话 (11 项)
+- `tests/regression/test_response.py` — 回复质量检查 (12 项)
+- `tests/regression/test_filter.py` — 虚词过滤验证 (6 项)
+- `tests/regression/test_stress.py` — 并发稳定性 (3 项)
+- 全部 32/32 测试通过，冷启动兼容
+
