@@ -19,12 +19,13 @@ void log_message(LogLevel level, const char* file, int line, const char* fmt, ..
         return;
     }
 
-    // 获取当前时间
+    // 获取当前时间（localtime_r 线程安全）
     time_t now;
     time(&now);
-    struct tm* tm_info = localtime(&now);
+    struct tm tm_info;
+    localtime_r(&now, &tm_info);
     char time_buffer[26];
-    strftime(time_buffer, 26, "%Y-%m-%d %H:%M:%S", tm_info);
+    strftime(time_buffer, 26, "%Y-%m-%d %H:%M:%S", &tm_info);
 
     // 日志级别字符串
     const char* level_str;

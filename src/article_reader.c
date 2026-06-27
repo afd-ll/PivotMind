@@ -24,6 +24,7 @@
 #include <string.h>
 #include <math.h>
 #include <float.h>
+#include <pthread.h>
 
 // ==================== 内部常量 ====================
 
@@ -76,6 +77,8 @@ typedef struct {
 struct ArticleReader {
     MasterTopology*    master;
     ArticleReaderConfig cfg;
+
+    pthread_mutex_t mutex;     /* 保护本 reader 内所有哈希表 + 缓冲区 */
 
     // 字符频率表（开放定址哈希）
     CharEntry   char_table[AR_CHAR_HASH_SIZE];
@@ -370,6 +373,8 @@ ArticleReader* article_reader_create(MasterTopology* master,
     ArticleReader* ar = (ArticleReader*)calloc(1, sizeof(ArticleReader));
     if (!ar) return NULL;
 
+    pthread_mutex_init(&ar->mutex, NULL);
+
     ar->master = master;
     if (cfg) {
         ar->cfg = *cfg;
@@ -433,6 +438,7 @@ ArticleReader* article_reader_create(MasterTopology* master,
 
 void article_reader_destroy(ArticleReader* ar) {
     if (!ar) return;
+    pthread_mutex_destroy(&ar->mutex);
     free(ar->words);
     free(ar->word_hash);
     free(ar->seq);       // 堆分配的字符序列缓冲区
@@ -443,9 +449,11 @@ void article_reader_destroy(ArticleReader* ar) {
 int article_process_line(ArticleReader* ar, const char* line) {
     if (!ar || !line) return -1;
 
+    pthread_mutex_lock(&ar->mutex);
+
     // 提取有效字符序列
     int n = _ar_extract_chars(ar, line);
-    if (n < 2) return 0;
+    if (n < 2) { pthread_mutex_unlock(&ar->mutex); return 0; }
 
     // 追加到全局序列缓冲区（供 flush 时正向扫描）
     int remain = ar->seq_capacity - ar->seq_len;
@@ -471,18 +479,22 @@ int article_process_line(ArticleReader* ar, const char* line) {
 
     ar->lines_buffered++;
 
-    // 达到 batch 大小则触发词发现
+    // 达到 batch 大小则触发词发现（先解锁避免 article_flush 内部加锁时死锁）
     if (ar->lines_buffered >= ar->cfg.batch_size) {
+        pthread_mutex_unlock(&ar->mutex);
         int found = article_flush(ar, NULL);
+        pthread_mutex_lock(&ar->mutex);
         ar->lines_buffered = 0;
         ar->last_flush_added = found > 0 ? found : 0;
-        return found > 0 ? found : 0;  // 返回实际新增词数
+        pthread_mutex_unlock(&ar->mutex);
+        return found > 0 ? found : 0;
     }
 
+    pthread_mutex_unlock(&ar->mutex);
     return 0;
 }
 
-int article_flush(ArticleReader* ar, SubTopology* topo) {
+int _article_flush_locked(ArticleReader* ar, SubTopology* topo) {
     if (!ar) return -1;
 
     // 使用缓存词汇拓扑（避免每次遍历 master）
@@ -728,6 +740,14 @@ int article_flush(ArticleReader* ar, SubTopology* topo) {
     return new_words;
 }
 
+int article_flush(ArticleReader* ar, SubTopology* topo) {
+    if (!ar) return -1;
+    pthread_mutex_lock(&ar->mutex);
+    int result = _article_flush_locked(ar, topo);
+    pthread_mutex_unlock(&ar->mutex);
+    return result;
+}
+
 void article_set_progress_ptr(ArticleReader* ar,
                               long* total_added_nodes_ptr,
                               long* total_added_edges_ptr) {
@@ -743,12 +763,17 @@ void article_reader_set_thalamus(ArticleReader* ar, Thalamus* th) {
 void article_get_stats(ArticleReader* ar,
                        int* out_chars, int* out_pairs, int* out_words) {
     if (!ar) return;
+    pthread_mutex_lock(&ar->mutex);
     if (out_chars) *out_chars = ar->char_count;
     if (out_pairs) *out_pairs = ar->pair_count;
     if (out_words) *out_words = ar->word_count;
+    pthread_mutex_unlock(&ar->mutex);
 }
 
 int article_get_last_flush_added(ArticleReader* ar) {
     if (!ar) return -1;
-    return ar->last_flush_added;
+    pthread_mutex_lock(&ar->mutex);
+    int val = ar->last_flush_added;
+    pthread_mutex_unlock(&ar->mutex);
+    return val;
 }

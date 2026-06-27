@@ -9,7 +9,9 @@
  *   4. 跨拓扑：语义相关但无连接的节点对创建跨拓扑连接
  *   5. 清理：全局衰减梦境激活
  *
- * 线程安全：联想引擎为梦境独立实例，边修改使用 node_locks[256]
+ * 线程安全：联想引擎为梦境独立实例，边修改使用 node_locks[256]；
+ * 读路径通过 huarong_net_enter_reader/leave_reader 注册活跃读者，
+ * 防止并发的 add_connection 扩容释放旧边数组导致 use-after-free
  */
 
 #include "dream_engine.h"
@@ -82,6 +84,13 @@ int dream_cycle(MasterTopology* master, MemorySystem* memory,
     PICK(semantic, cfg.sample_semantic);
     PICK(emotion,  cfg.sample_emotion);
     #undef PICK
+
+    /* EBR 读保护：注册活跃读者，防止并发的 add_connection 扩容
+     * 在活跃读者存在期间，cleanup_retired 不会释放退役的旧边数组 */
+    for (int i = 0; i < master->sub_topo_count; i++) {
+        SubTopology* sub = master->sub_topologies[i];
+        if (sub && sub->net) huarong_net_enter_reader(sub->net);
+    }
 
     if (cfg.verbose) {
         fprintf(stderr, "[梦境] 采样 %d 个起始节点, 启动联想引擎...\n", seed_count);
@@ -208,6 +217,12 @@ int dream_cycle(MasterTopology* master, MemorySystem* memory,
     if (cfg.verbose && total_mods > 0) {
         fprintf(stderr, "[梦境] 完成: 强化 %d 条弱边, 固化 %d 条跨拓扑连接\n",
                 edge_boosted, cross_created);
+    }
+
+    /* 退出读临界区：最后离开的读线程自动触发延迟释放清理 */
+    for (int i = 0; i < master->sub_topo_count; i++) {
+        SubTopology* sub = master->sub_topologies[i];
+        if (sub && sub->net) huarong_net_leave_reader(sub->net);
     }
 
     return total_mods;

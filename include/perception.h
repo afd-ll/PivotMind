@@ -78,6 +78,8 @@ typedef struct Perception {
     struct ArticleReader* ar;          /* 文章阅读器 — 搜索结果语义理解管线 */
     PerceptionConfig cfg;
 
+    pthread_mutex_t   mutex;           /* 保护本结构体内所有可变状态的并发访问 */
+
     /* 搜索缓存 */
     SearchCacheEntry* cache_head;      /* LRU 缓存链表头 */
     int               cache_size;      /* 当前缓存条目数 */

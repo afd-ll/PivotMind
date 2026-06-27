@@ -89,8 +89,9 @@ static float circadian_activity(int hour) {
 }
 
 static int current_hour(time_t t) {
-    struct tm* tm_info = localtime(&t);
-    return tm_info ? tm_info->tm_hour : 12;
+    struct tm tm_info;
+    localtime_r(&t, &tm_info);
+    return tm_info.tm_hour;
 }
 
 /* ================================================================

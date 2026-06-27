@@ -184,6 +184,8 @@ Perception* perception_create(MasterTopology* topology,
     Perception* p = (Perception*)calloc(1, sizeof(Perception));
     if (!p) return NULL;
 
+    pthread_mutex_init(&p->mutex, NULL);
+
     p->topology = topology;
     p->memory   = memory;
     p->learner  = learner;
@@ -237,6 +239,7 @@ void perception_destroy(Perception* p) {
     /* 销毁文章阅读器 */
     if (p->ar) article_reader_destroy(p->ar);
     if (g_perception == p) g_perception = NULL;
+    pthread_mutex_destroy(&p->mutex);
     free(p);
 }
 
@@ -657,15 +660,17 @@ int perception_tick(Perception* p, float throttle) {
     (void)throttle;  /* 纯随机模式不再需要 throttle 抽签 */
     if (!p) return 0;
 
+    pthread_mutex_lock(&p->mutex);
+
     p->tick_counter++;
 
     /* 按配置的周期（默认60秒）触发一次纯随机搜索 */
-    if (p->tick_counter < p->cfg.cycle_interval_ticks) return 0;
+    if (p->tick_counter < p->cfg.cycle_interval_ticks) { pthread_mutex_unlock(&p->mutex); return 0; }
     p->tick_counter = 0;
 
     /* 从词汇拓扑中随机选节点进行搜索 */
     SubTopology* vocab = master_get_sub_topology_by_type(p->topology, TOPO_VOCABULARY);
-    if (!vocab || !vocab->net || vocab->net->node_count == 0) return 0;
+    if (!vocab || !vocab->net || vocab->net->node_count == 0) { pthread_mutex_unlock(&p->mutex); return 0; }
 
     int max_searches = p->cfg.max_searches_per_cycle;
     if (max_searches < 1) max_searches = 1;
@@ -683,19 +688,19 @@ int perception_tick(Perception* p, float throttle) {
         }
     }
 
+    pthread_mutex_unlock(&p->mutex);
     return searched;
 }
 
 /* ================================================================ */
 
-int perception_learn_concept(Perception* p, const char* concept) {
-    if (!p || !concept) return -1;
+/* ── 带锁包装的公共 API ── */
+
+static int _perception_learn_concept_locked(Perception* p, const char* concept) {
     return search_and_learn(p, concept, PERCEPT_DIALOG);
 }
 
-int perception_consolidate_node(Perception* p, int node_id) {
-    if (!p) return -1;
-
+static int _perception_consolidate_node_locked(Perception* p, int node_id) {
     SubTopology* vocab = master_get_sub_topology_by_type(p->topology, TOPO_VOCABULARY);
     if (!vocab || !vocab->net || node_id < 0 || node_id >= vocab->net->node_count) return -1;
 
@@ -705,16 +710,34 @@ int perception_consolidate_node(Perception* p, int node_id) {
     return search_and_learn(p, node->concept, PERCEPT_CONSOLIDATE);
 }
 
+int perception_learn_concept(Perception* p, const char* concept) {
+    if (!p || !concept) return -1;
+    pthread_mutex_lock(&p->mutex);
+    int r = _perception_learn_concept_locked(p, concept);
+    pthread_mutex_unlock(&p->mutex);
+    return r;
+}
+
+int perception_consolidate_node(Perception* p, int node_id) {
+    if (!p) return -1;
+    pthread_mutex_lock(&p->mutex);
+    int r = _perception_consolidate_node_locked(p, node_id);
+    pthread_mutex_unlock(&p->mutex);
+    return r;
+}
+
 /**
  * 批量提交对话缺口查询
  */
 int perception_suggest_queries(Perception* p, const char** queries) {
     if (!p || !queries) return 0;
+    pthread_mutex_lock(&p->mutex);
     int learned = 0;
     for (int i = 0; queries[i] != NULL; i++) {
         if (search_and_learn(p, queries[i], PERCEPT_DIALOG) > 0)
             learned++;
     }
+    pthread_mutex_unlock(&p->mutex);
     return learned;
 }
 
@@ -725,10 +748,13 @@ int perception_suggest_queries(Perception* p, const char** queries) {
 int perception_search_news(Perception* p) {
     if (!p || !p->ar) return 0;
 
+    pthread_mutex_lock(&p->mutex);
+
     /* 根据当前小时选择新闻主题 */
     time_t now = time(NULL);
-    struct tm* tm_info = localtime(&now);
-    int hour = tm_info ? tm_info->tm_hour : 12;
+    struct tm tm_info;
+    localtime_r(&now, &tm_info);
+    int hour = tm_info.tm_hour;
 
     const char* topic;
     if (hour >= 6 && hour < 10)       topic = "科技";
@@ -748,6 +774,7 @@ int perception_search_news(Perception* p) {
     if (!_provider_available(p, PROV_SOGOU)) {
         if (p->cfg.verbose)
             fprintf(stderr, "[感觉皮层] 搜狗搜索 冷却中，跳过新闻\n");
+        pthread_mutex_unlock(&p->mutex);
         return 0;
     }
 
@@ -759,6 +786,7 @@ int perception_search_news(Perception* p) {
         } else {
             _provider_result(p, PROV_SOGOU, 0);
         }
+        pthread_mutex_unlock(&p->mutex);
         return 0;
     }
 
@@ -769,7 +797,7 @@ int perception_search_news(Perception* p) {
     int body_len = wr->body_len;
     if (body_len > 16384) body_len = 16384;
     char* text = (char*)malloc(body_len + 1);
-    if (!text) { web_result_free(wr); return 0; }
+    if (!text) { web_result_free(wr); pthread_mutex_unlock(&p->mutex); return 0; }
 
     int text_len = web_extract_text(wr->body, text, body_len);
     text[text_len] = '\0';
@@ -824,15 +852,18 @@ int perception_search_news(Perception* p) {
         learn_from_dialog(p->learner, topic, "", "");
 
     if (p->cfg.verbose)
-        fprintf(stderr, "[感觉皮层] 📰 新闻 '%s' 处理 %d 行, +%d 新词\n",
+        fprintf(stderr, "[感觉皮层]  新闻 '%s' 处理 %d 行, +%d 新词\n",
                 topic, lines_processed, new_words);
 
+    pthread_mutex_unlock(&p->mutex);
     return (new_words > 0) ? new_words : 1;
 }
 
 void perception_stats(Perception* p, long* searches, long* learned, long* new_conns) {
     if (!p) return;
+    pthread_mutex_lock(&p->mutex);
     if (searches) *searches = p->total_searches;
     if (learned)  *learned  = p->total_concepts_learned;
     if (new_conns) *new_conns = p->total_new_connections;
+    pthread_mutex_unlock(&p->mutex);
 }

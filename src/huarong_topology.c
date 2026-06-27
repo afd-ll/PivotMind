@@ -459,11 +459,13 @@ void node_conn_hash_free(ReasoningNode* node) {
  *   2) 再将旧数组挂到 net 的退役链表上
  *   3) epoch 结束时由调用方统一 cleanup_retired 释放
  *
- *  安全保证来自两步：
+ *  安全保证来自三步：
  *   a) swap-before-retire 时序：活指针在 retire 之前已切换到新数组，
  *      故此间任何读线程通过 from_node->edges 访问的都是新数组。
  *   b) 调用方纪律：cleanup 只在 epoch 间隙（所有训练线程已返回）
  *      或 net 销毁时调用，不与 add_connection 并发。
+ *   c) EBR 安全门：cleanup 检查 active_readers > 0 时推迟释放，
+ *      防止读线程持有 from_node->edges 快照期间旧数组被 free。
  * ================================================================ */
 
 void huarong_net_cleanup_retired(HuarongTopologyNet* net) {
@@ -474,6 +476,12 @@ void huarong_net_cleanup_retired(HuarongTopologyNet* net) {
     /* double-check：持锁后再次确认（防止 unlock→lock 之间被其他线程清空） */
     if (!net->retired_conns) {
         net->retired_pending = 0;
+        pthread_mutex_unlock(&net->retire_mutex);
+        return;
+    }
+    /* EBR 安全门：有活跃读线程时推迟清理，防止 use-after-free。
+     * 保持 retired_pending=1，下次 leave_reader 触发或 net 销毁时重试。 */
+    if (net->active_readers > 0) {
         pthread_mutex_unlock(&net->retire_mutex);
         return;
     }
