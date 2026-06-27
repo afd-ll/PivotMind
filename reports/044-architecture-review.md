@@ -1,6 +1,6 @@
-# 044-A — v0.4.7 架构审查报告
+# 044 — v0.4.7 架构审查报告
 
-> **日期**: 2026-06-27 | **状态**: 待处理
+> **日期**: 2026-06-27 | **状态**: 已完成
 
 ---
 
@@ -177,3 +177,40 @@ create_prefrontal() → create_brainstem() → create_thalamus()
 - 构建系统、测试、工具、changelogs 全部已核
 
 审查方法：静态代码分析 + 架构文档对照 + 数据流追踪，未涉及运行时性能 profiling。
+
+---
+
+## 六、修复完成记录
+
+> 完成日期: 2026-06-27
+
+### P0: 测试覆盖 — 已完成 ✅
+- 提交: `5e56827`
+- `tests/unit/test_dialog.c` — 5 项测试 (input create/destroy, empty, NULL, 单字, 标点)
+- `tests/unit/test_diffusion.c` — 3 项测试 (NULL safety, uninitialized master, constants)
+- Makefile: 新增 test-dialog-unit, test-diffusion-unit 目标
+- 全部 8/8 测试通过
+
+### P1: 统一配置系统 — 已完成 ✅
+- 提交: `9c60dbf`
+- `include/json_config.h` — ConfigContext 结构体 (topology/learning/inference/clock/brain_regions)
+- `src/json_config.c` — 最小化 JSON 解析器 + config_load/config_write_default
+- `demos/pivotmind_gateway.c` — 启动时加载配置
+- 配置文件缺失时全部回退 constants.h 默认值
+
+### P1: 脑区生命周期管理 — 已完成 ✅
+- 提交: `1137ead`
+- `include/thalamus.h` / `src/thalamus.c` — enabled[9] 标志 + enable_region/is_region_enabled API
+- `src/brainstem.c` — perception/DMN/hippocampus/cerebellum/hypothalamus/broca tick 检查 enabled
+- `demos/pivotmind_gateway.c` — 启动时按配置禁用脑区
+
+### P2: BPTT 桥接增强 — 已完成 ✅
+- 提交: `1137ead`
+- `include/bptt_learner.h` / `src/bptt_learner.c` — 新增 bptt_get_confidence()
+- `include/cognitive_controller.h` / `src/cognitive_controller.c` — nn_confidence 字段 + compute_intent nn 因子
+
+### P2: 跨拓扑连接质量重评估 — 已完成 ✅
+- 提交: `1137ead`
+- `include/multi_topology.h` / `src/multi_topology.c` — 新增 master_reevaluate_cross_links()
+- `src/brainstem.c` — synapse_scale 每 600 tick 调用重评估
+
