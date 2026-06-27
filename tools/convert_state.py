@@ -61,7 +61,7 @@ def read_binary(path):
         topo_type, node_id, concept_len = struct.unpack_from("<iii", data, pos)
         pos += 12
 
-        if concept_len <= 0 or concept_len > 1024:
+        if concept_len <= 0 or concept_len > 4096:
             print(f"  WARN: bad concept_len={concept_len} at pos {pos-4}, trying to recover")
             concept_len = 1
 

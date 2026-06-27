@@ -7,7 +7,7 @@
 
 [English](README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [Русский](README.ru.md)
 
-[![Version](https://img.shields.io/badge/version-v0.4.7-blue.svg)](changelogs/)
+[![Version](https://img.shields.io/badge/version-v0.4.8-blue.svg)](changelogs/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green.svg)](LICENSE)
 [![Language](https://img.shields.io/badge/C-99%2B-orange.svg)](https://zh.wikipedia.org/wiki/C99)
 [![Platform](https://img.shields.io/badge/ARM-RK3399%20%7C%20x86__64-lightgrey.svg)](#运行平台)
@@ -29,7 +29,7 @@
 没有 Transformer 外部依赖，没有预训练 embedding 向量。
 节点、边、激活、衰减 —— 以及一个永不停歇的后台时钟驱动整个系统。
 
-**当前版本：v0.4.7** —— 13 脑区完整架构、涌现式词类系统、多学习器并行、PFE 推理编排、500 维特征向量。
+**当前版本：v0.4.8** —— 13 脑区完整架构、涌现式词类系统、多学习器并行、PFE 推理编排、500 维特征向量。
 
 **代码规模：85 个源文件（~48,600 行 C） + 89 个头文件（~12,600 行） + 工具/测试/演示（~13,000 行）= 约 74,000 行。**
 
@@ -108,7 +108,7 @@
 - **模板层** —— 识别句式模式，指导连接词插入
 - **情绪层** —— valence × arousal 加权，影响候选优先级
 
-**v0.4.7 改进**：虚词过滤——扩散引擎内置 `is_function_word()` 检查（~130 个中英文虚词），在三层过滤（活跃集更新、加权评分、输出）中拦截高连接度虚词，防止 "the be not to have are..." 或 "的了是在……" 这类虚词串污染输出。侧抑制机制保证内容词输出多样性。
+**v0.4.8 改进**：虚词过滤——扩散引擎内置 `is_function_word()` 检查（~130 个中英文虚词），在三层过滤（活跃集更新、加权评分、输出）中拦截高连接度虚词，防止 "the be not to have are..." 或 "的了是在……" 这类虚词串污染输出。侧抑制机制保证内容词输出多样性。
 
 ### 推理编排 (PFE)
 
@@ -296,9 +296,9 @@ pivotmind/
 | **v0.4.1** | 爬虫引擎重构（libcurl）、Bing 搜索 provider、定时新闻、海外合规 |
 | **v0.4.2** | realloc 悬空指针全面修复（跨 15+ 处）、三轮内存安全审计 |
 | **v0.4.3** | **涌现式词类系统** — 种子锚点 + 512 维特征聚类，语法从数据中涌现 |
-| **v0.4.7** | 扩散引擎虚词过滤（~130 中英文词）、跨层索引修复、double-free 竞态修复 |
+| **v0.4.8** | 扩散引擎虚词过滤（~130 中英文词）、跨层索引修复、double-free 竞态修复 |
 
-> 详细变更：v0.3.0 → [changelogs/032-v0.3.0-reasoning-architecture.md](changelogs/032-v0.3.0-reasoning-architecture.md) ｜ v0.4.0 → [changelogs/034-v0.4.0-code-simplify-brain-boundary.md](changelogs/034-v0.4.0-code-simplify-brain-boundary.md) ｜ v0.4.3 → [changelogs/042-emergent-pos-anchor.md](changelogs/042-emergent-pos-anchor.md) ｜ v0.4.7 → [changelogs/043-diffusion-function-word-filter.md](changelogs/043-diffusion-function-word-filter.md)
+> 详细变更：v0.3.0 → [changelogs/032-v0.3.0-reasoning-architecture.md](changelogs/032-v0.3.0-reasoning-architecture.md) ｜ v0.4.0 → [changelogs/034-v0.4.0-code-simplify-brain-boundary.md](changelogs/034-v0.4.0-code-simplify-brain-boundary.md) ｜ v0.4.3 → [changelogs/042-emergent-pos-anchor.md](changelogs/042-emergent-pos-anchor.md) ｜ v0.4.8 → [changelogs/043-diffusion-function-word-filter.md](changelogs/043-diffusion-function-word-filter.md)
 
 ---
 

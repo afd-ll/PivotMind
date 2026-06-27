@@ -21,6 +21,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 #include <unistd.h>
 #include <signal.h>
 #include <errno.h>
@@ -171,6 +172,35 @@ static char* json_extract_string(const char* json, const char* key, char* buf, i
     while (*pos && *pos != '"' && i < buf_size - 1) {
         if (*pos == '\\' && *(pos + 1)) {
             pos++;
+            /* \uXXXX → UTF-8 解码：读 4 位 hex，编码为 UTF-8 字节 */
+            if (*pos == 'u') {
+                unsigned int cp = 0;
+                int valid = 1;
+                for (int k = 1; k <= 4; k++) {
+                    unsigned char hc = (unsigned char)pos[k];
+                    if (!hc || !isxdigit(hc)) { valid = 0; break; }
+                    cp = cp * 16 + (unsigned int)(hc >= '0' && hc <= '9' ? hc - '0' :
+                                                  hc >= 'a' && hc <= 'f' ? hc - 'a' + 10 :
+                                                  hc >= 'A' && hc <= 'F' ? hc - 'A' + 10 : 0);
+                }
+                if (valid && cp > 0) {
+                    if (cp < 0x80) {
+                        if (i + 1 >= buf_size) break;
+                        buf[i++] = (char)cp;
+                    } else if (cp < 0x800) {
+                        if (i + 2 >= buf_size) break;
+                        buf[i++] = (char)(0xC0 | (cp >> 6));
+                        buf[i++] = (char)(0x80 | (cp & 0x3F));
+                    } else {
+                        if (i + 3 >= buf_size) break;
+                        buf[i++] = (char)(0xE0 | (cp >> 12));
+                        buf[i++] = (char)(0x80 | ((cp >> 6) & 0x3F));
+                        buf[i++] = (char)(0x80 | (cp & 0x3F));
+                    }
+                }
+                pos += 5;  /* 跳过 'u' + 4 位 hex */
+                continue;  /* 跳过循环尾部的 pos++ */
+            }
             switch (*pos) {
                 case 'n':  buf[i++] = '\n'; break;
                 case 'r':  buf[i++] = '\r'; break;

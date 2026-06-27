@@ -97,9 +97,43 @@ static int json_read_string_literal(FILE* f, char* buf, int buf_size) {
                 case '"': buf[i++] = '"'; break;
                 case '/': buf[i++] = '/'; break;
                 case 'u':
-                    // Unicode转义，简单跳过4位
-                    for (int u = 0; u < 4; u++) fgetc(f);
-                    buf[i++] = '?'; // 占位
+                    // Unicode转义 \uXXXX → UTF-8
+                    {
+                        char hex[4] = {0};
+                        int valid = 1;
+                        for (int u = 0; u < 4; u++) {
+                            int h = fgetc(f);
+                            if (h == EOF || !isxdigit(h)) valid = 0;
+                            hex[u] = (char)h;
+                        }
+                        if (valid) {
+                            unsigned int cp = 0;
+                            for (int u = 0; u < 4; u++) {
+                                cp = cp * 16 + (unsigned int)(
+                                    hex[u] >= '0' && hex[u] <= '9' ? hex[u] - '0' :
+                                    hex[u] >= 'a' && hex[u] <= 'f' ? hex[u] - 'a' + 10 :
+                                    hex[u] >= 'A' && hex[u] <= 'F' ? hex[u] - 'A' + 10 : 0);
+                            }
+                            if (cp > 0) {
+                                if (cp < 0x80) {
+                                    if (i + 1 < buf_size) buf[i++] = (char)cp;
+                                } else if (cp < 0x800) {
+                                    if (i + 2 < buf_size) {
+                                        buf[i++] = (char)(0xC0 | (cp >> 6));
+                                        buf[i++] = (char)(0x80 | (cp & 0x3F));
+                                    }
+                                } else {
+                                    if (i + 3 < buf_size) {
+                                        buf[i++] = (char)(0xE0 | (cp >> 12));
+                                        buf[i++] = (char)(0x80 | ((cp >> 6) & 0x3F));
+                                        buf[i++] = (char)(0x80 | (cp & 0x3F));
+                                    }
+                                }
+                            }
+                        } else {
+                            buf[i++] = '?';  // 无效 hex 用占位符
+                        }
+                    }
                     break;
                 default: buf[i++] = ch; break;
             }
