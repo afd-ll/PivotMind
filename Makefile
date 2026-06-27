@@ -170,6 +170,12 @@ $(BUILD_DIR)/test_io: tests/unit/test_io.c $(LIB_NAME)
 $(BUILD_DIR)/test_web_fetch: tests/unit/test_web_fetch.c $(LIB_NAME)
 	$(CC) $(CFLAGS) -I. -o $@ tests/unit/test_web_fetch.c -L. -lpivotmind $(LDFLAGS)
 
+$(BUILD_DIR)/test_dialog_unit: tests/unit/test_dialog.c $(LIB_NAME)
+	$(CC) $(CFLAGS) -I. -o $@ tests/unit/test_dialog.c -L. -lpivotmind $(LDFLAGS)
+
+$(BUILD_DIR)/test_diffusion_unit: tests/unit/test_diffusion.c $(LIB_NAME)
+	$(CC) $(CFLAGS) -I. -o $@ tests/unit/test_diffusion.c -L. -lpivotmind $(LDFLAGS)
+
 $(BUILD_DIR)/test_integration: tests/integration/test_integration.c $(LIB_NAME)
 	$(CC) $(CFLAGS) -I. -o $@ tests/integration/test_integration.c -L. -lpivotmind $(LDFLAGS)
 
@@ -187,6 +193,8 @@ test-trainer: $(BUILD_DIR)/test_trainer
 test-chinese: $(BUILD_DIR)/test_chinese
 test-io: $(BUILD_DIR)/test_io
 test-web-fetch: $(BUILD_DIR)/test_web_fetch
+test-dialog-unit: $(BUILD_DIR)/test_dialog_unit
+test-diffusion-unit: $(BUILD_DIR)/test_diffusion_unit
 test-integration: $(BUILD_DIR)/test_integration
 test-cc: $(BUILD_DIR)/test_cognitive_controller
 test-cc-full: $(BUILD_DIR)/test_cognitive_full
@@ -198,9 +206,9 @@ $(BUILD_DIR)/test_runner: tests/test_runner.c $(LIB_NAME)
 test-runner: $(BUILD_DIR)/test_runner
 
 # 运行所有测试
-test: test-tensor test-model test-metrics test-trainer test-chinese test-io test-cc test-web-fetch
+test: test-tensor test-model test-metrics test-trainer test-chinese test-io test-cc test-web-fetch test-dialog-unit test-diffusion-unit
 	@echo "╔══════════════════════════════════════╗"
 	@echo "║  所有单元测试已完成                  ║"
 	@echo "╚══════════════════════════════════════╝"
 
-.PHONY: all linux debug asan digital-life gateway seed-builder debug-seed test-dialog corpus-train batch-learn batch-learn-lowmem template-build path-analyze compare-templates eval-templates run clean install test test-tensor test-model test-metrics test-trainer test-chinese test-io test-web-fetch test-integration test-cc test-cc-full test-runner
+.PHONY: all linux debug asan digital-life gateway seed-builder debug-seed test-dialog corpus-train batch-learn batch-learn-lowmem template-build path-analyze compare-templates eval-templates run clean install test test-tensor test-model test-metrics test-trainer test-chinese test-io test-web-fetch test-dialog-unit test-diffusion-unit test-integration test-cc test-cc-full test-runner
