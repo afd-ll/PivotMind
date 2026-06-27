@@ -893,7 +893,7 @@ static void handle_root(GatewaySystem* gw, int fd) {
         ".sl{font-size:9px;color:#475569;margin-top:2px;letter-spacing:.5px}"
         ".er{color:#ef4444;font-size:11px;text-align:center;margin-top:12px;word-break:break-all}"
         "@media(max-width:640px){body{padding:10px}.rw{grid-template-columns:1fr}}</style></head><body>"
-        "<h1>玄枢</h1><div class=sub>PivotMind v0.2.7</div>"
+        "<h1>玄枢</h1><div class=sub>PivotMind v" PIVOTMIND_VERSION "</div>"
         "<div class=gw id=ca></div>"
         "<div class=rw>"
         "<div class=cd><div class=lb>学习调度器</div><div id=s><div class=cy vl>加载中...</div></div></div>"
