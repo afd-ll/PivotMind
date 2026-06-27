@@ -124,11 +124,11 @@ int diffusion_init(DiffusionCtx* ctx, MasterTopology* master) {
     if (!ctx || !master) return -1;
     memset(ctx, 0, sizeof(*ctx));
     ctx->master = master;
-    ctx->depth  = 3;
-    ctx->top_k  = 8;
+    ctx->depth  = 1;
+    ctx->top_k  = 5;
     ctx->output_len = 20;
     ctx->decay  = 0.7f;
-    ctx->temperature = 0.15f;  // 默认温度扰动
+    ctx->temperature = 0.03f;
 
     for (int t = 0; t < master->sub_topo_count; t++) {
         SubTopology* sub = master->sub_topologies[t];
@@ -174,6 +174,7 @@ int diffusion_spread(SubTopology* layer,
             int tid = node->edges[c].target ? node->edges[c].target->node_id : -1;
             if (tid < 0 || tid >= layer->net->node_count) continue;
             float w = node->edges[c].weight * decay;
+            if (node->edge_count > 0) w /= sqrtf((float)node->edge_count);
             // 温度扰动：如果 temperature > 0，添加随机噪声
             if (temperature > 0.0f) {
                 float noise = ((float)(rand() % 201) - 100.0f) / 100.0f;  // -1.0 ~ 1.0
