@@ -469,24 +469,126 @@ Hebbian 学习让中文"苹果"和英文"apple"的 512 维向量自然趋近，�
 
 ## 运行时配置系统 (v0.4.7)
 
-### 配置文件
+### 概述
 
-`pivotmind_config.json`（可选），缺失时全部回退 constants.h 默认值。
+`pivotmind_config.json`（可选，缺失时全部回退 constants.h 默认值）。采用最小化 JSON 解析器，零外部依赖。
+
+配置五大类：拓扑、学习、推理、时钟、脑区开关。
+
+### 可调参数全表
+
+#### 拓扑参数 (topology)
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `feature_dim` | int | 512 | 节点特征向量维度（影响跨拓扑余弦相似度精度） |
+| `max_nodes_per_topo` | int | 10000 | 单子拓扑最大节点数 |
+| `cross_hit_table_size` | int | 2048 | 跨拓扑动态建边跟踪表大小 |
+
+#### 学习参数 (learning)
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `decay_rate` | float | 0.7 | 激活传播每跳衰减系数（降低=联想更远，升高=更聚焦） |
+| `learn_rate` | float | 0.005 | 在线学习 EMA 基准速率 |
+| `autonomic_shard_count` | int | 16 | 赫布学习边更新分片数（影响并行度） |
+| `active_learner_interval` | int | 300 | 主动学习器后台扫描间隔（秒） |
+| `max_connections` | int | 8000 | 自主学习刷盘触发连接数上限 |
+| `flush_threshold` | int | 50 | 自主学习刷盘触发更新次数 |
+| `idle_flush_seconds` | int | 30 | 自主学习空闲刷盘间隔（秒） |
+
+#### 推理参数 (inference)
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `max_response_len` | int | 2048 | 回复文本最大长度（字节） |
+| `default_hop_count` | int | 3 | 走边默认跳数 |
+| `max_associations` | int | 100 | 单次推理最大联想记录数 |
+| `max_hops_reasoning` | int | 200 | 递归激活传播硬上限（防栈溢出） |
+
+#### 后台时钟参数 (clock)
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `tick_interval_ms` | int | 1000 | 脑干心跳间隔（毫秒） |
+| `decay_per_tick` | float | 0.97 | 每 tick 激活值衰减系数 |
+| `spontaneous_prob` | float | 0.0001 | 自发激活概率（模拟'走神'） |
+| `spontaneous_strength` | float | 0.15 | 自发激活强度 |
+| `consolidate_interval` | int | 10 | 记忆巩固间隔（tick 数） |
+
+#### 脑区开关 (brain_regions)
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `prefrontal` | bool | true | 前额叶：对话与决策 |
+| `hippocampus` | bool | true | 海马体：记忆巩固与感知联动 |
+| `dmn` | bool | true | 默认模式网络：梦境联想 |
+| `perception` | bool | true | 感知皮层：联网搜索（网络断开时建议禁用） |
+| `broca` | bool | true | 布罗卡区：模板构建 |
+| `cerebellum` | bool | true | 小脑：CPU/内存硬件保护 |
+| `amygdala` | bool | true | 杏仁核：情绪调控 |
+| `hypothalamus` | bool | true | 下丘脑：四维需求驱动 |
+
+### 完整配置示例
 
 ```json
 {
-    "topology": { "feature_dim": 512, "max_nodes_per_topo": 10000 },
-    "learning": { "decay_rate": 0.7, "learn_rate": 0.005 },
-    "inference": { "max_response_len": 2048, "default_hop_count": 3 },
-    "clock": { "tick_interval_ms": 1000, "decay_per_tick": 0.97 },
-    "brain_regions": { "perception": true, "hypothalamus": true }
+    "topology": {
+        "feature_dim": 512,
+        "max_nodes_per_topo": 10000,
+        "cross_hit_table_size": 2048
+    },
+    "learning": {
+        "decay_rate": 0.7,
+        "learn_rate": 0.005,
+        "autonomic_shard_count": 16,
+        "active_learner_interval": 300,
+        "max_connections": 8000,
+        "flush_threshold": 50,
+        "idle_flush_seconds": 30
+    },
+    "inference": {
+        "max_response_len": 2048,
+        "default_hop_count": 3,
+        "max_associations": 100,
+        "max_hops_reasoning": 200
+    },
+    "clock": {
+        "tick_interval_ms": 1000,
+        "decay_per_tick": 0.97,
+        "spontaneous_prob": 0.0001,
+        "spontaneous_strength": 0.15,
+        "consolidate_interval": 10
+    },
+    "brain_regions": {
+        "prefrontal": true,
+        "hippocampus": true,
+        "dmn": true,
+        "perception": true,
+        "broca": true,
+        "cerebellum": true,
+        "amygdala": true,
+        "hypothalamus": true
+    }
+}
+```
+
+### 低配 ARM 调优建议
+
+```json
+{
+    "topology": { "max_nodes_per_topo": 3000 },
+    "learning": { "active_learner_interval": 600, "max_connections": 3000 },
+    "clock": { "tick_interval_ms": 2000, "spontaneous_prob": 0.00005 },
+    "brain_regions": { "perception": false, "dmn": false }
 }
 ```
 
 ### 脑区生命周期管理
 
-Thalamus 新增 `enabled[THAL_SUBSYSTEM_COUNT]` 标志和 `thalamus_enable_region()` API。
-Brainstem 各 tick 函数检查 enabled 状态，禁用脑区的 tick 完全跳过。
+Thalamus 新增 `enabled[THAL_SUBSYSTEM_COUNT]` 标志和 `thalamus_enable_region()` / `thalamus_is_region_enabled()` API。
+Brainstem 各 tick 函数检查 enabled 状态，禁用脑区的 tick 完全跳过——不初始化、不调度、不消耗 CPU。
+禁用感知皮层同时避免无网络环境下的连接超时等待。
 
 ---
 
