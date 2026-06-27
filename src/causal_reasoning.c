@@ -804,7 +804,8 @@ CausalPath** find_all_causal_paths(CausalGraph* graph, int source,
         float strength;
     } State;
 
-    State* queue = (State*)malloc(graph->node_count * max_length * sizeof(State));
+    int queue_capacity = graph->node_count * max_length;
+    State* queue = (State*)malloc(queue_capacity * sizeof(State));
     if (!queue) return 0;
     int queue_front = 0, queue_back = 0;
 
@@ -847,6 +848,20 @@ CausalPath** find_all_causal_paths(CausalGraph* graph, int source,
                 }
             }
             if (in_path) continue;
+
+            if (queue_back >= queue_capacity) {
+                /* 队列满 -- 图密集时路径爆炸，截断防止堆越界 */
+                free(current.path);
+                free(queue);
+                for (int k = 0; k < count; k++) {
+                    free(paths[k]->edge_strengths);
+                    free(paths[k]->node_ids);
+                    free(paths[k]);
+                }
+                free(paths);
+                *path_count = 0;
+                return NULL;
+            }
 
             CausalEdge* edge = get_causal_edge(graph, current.node, next_node);
             float edge_strength = edge ? edge->strength : 0.5f;

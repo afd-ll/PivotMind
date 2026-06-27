@@ -142,7 +142,10 @@ void add_association(AssociativeEngine* engine, const char* concept,
     }
     
     // 添加新联想
-    strncpy(engine->associations[engine->assoc_count].concept, concept, 255);
+    strncpy(engine->associations[engine->assoc_count].concept, concept,
+            sizeof(engine->associations[engine->assoc_count].concept) - 1);
+    engine->associations[engine->assoc_count].concept[
+        sizeof(engine->associations[engine->assoc_count].concept) - 1] = '\0';
     engine->associations[engine->assoc_count].activation = activation;
     engine->associations[engine->assoc_count].topo_type = topo_type;
     engine->associations[engine->assoc_count].hop_count = hop_count;
