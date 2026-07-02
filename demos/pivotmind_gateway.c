@@ -756,6 +756,24 @@ static void handle_chat(GatewaySystem* gw, int fd, const char* body) {
             gw->dialog_context_ready = 1;
         }
 
+        /* v0.4.3: AI回复也纳入词汇拓扑 — 双向在线学习 */
+        {
+            SubTopology* vocab = NULL;
+            for (int t = 0; t < gw->topology->sub_topo_count; t++) {
+                if (gw->topology->sub_topologies[t] &&
+                    gw->topology->sub_topologies[t]->type == TOPO_VOCABULARY)
+                    { vocab = gw->topology->sub_topologies[t]; break; }
+            }
+            if (vocab && vocab->net && response) {
+                EmergentPOS* ep = (gw->prefrontal && gw->prefrontal->controller)
+                                  ? gw->prefrontal->controller->emergent_pos : NULL;
+                int prev_id = -1;
+                int learned = _learn_tokens(vocab, response, &prev_id, ep);
+                if (learned > 0)
+                    printf("[gateway] 回复中学习: +%d 个新词\n", learned);
+            }
+        }
+
         /* 海马体记下这次对话 — 巩固时自动建 QA 连接 */
         if (gw->hippocampus) hippocampus_log_dialog(gw->hippocampus, msg, response);
 

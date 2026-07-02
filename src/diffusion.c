@@ -40,6 +40,11 @@ static int is_function_word(const char* word) {
         "also", "now", "well", "way", "even", "new", "make", "like",
         "Mr", "Mrs", "Ms", "Dr", "Mr.",
         /* 中文虚词 */
+        "\xe4\xb8\x8d",   /* 不 */
+        "\xe4\xb8\x80",   /* 一 */
+        "\xe6\x9c\x80",   /* 最 */
+        "\xe6\x9b\xb4",   /* 更 */
+        "\xe5\x9c\xb0",   /* 地 */
         "\xe7\x9a\x84",   /* 的 */
         "\xe4\xba\x86",   /* 了 */
         "\xe5\x9c\xa8",   /* 在 */
@@ -271,10 +276,64 @@ static int pool_take(const char** word_buf, POSTag* word_pos, int word_count,
  *   4. 添加句末助词(了/呢/啊)、标点
  *   5. 如果无合适谓语，回退到旧骨架模式
  */
+/* ================================================================
+ *  动词配价自动推断 — 从拓扑边统计替代硬编码配价表
+ *
+ *  当动词不在硬编码配价表中时，分析其词汇拓扑节点的出边
+ *  来推断配价属性。
+ * ================================================================ */
+static VerbValency diffusion_infer_valency(const char* verb,
+                                           DiffusionCtx* ctx) {
+    VerbValency vv = {"", 0,0,0,0,0,0,0,0};
+    if (!verb || !ctx || !ctx->vocab || !ctx->vocab->net) return vv;
+
+    int node_id = huarong_net_find_concept(ctx->vocab->net, verb);
+    if (node_id < 0 || node_id >= ctx->vocab->net->node_count) return vv;
+
+    ReasoningNode* node = ctx->vocab->net->nodes[node_id];
+    if (!node || node->edge_count == 0) return vv;
+
+    /* 统计出边目标节点的涌现词类分布 */
+    int noun_edges = 0, adj_edges = 0, adv_edges = 0, total = 0;
+    for (int e = 0; e < node->edge_count && e < 32; e++) {
+        ReasoningNode* tgt = node->edges[e].target;
+        if (!tgt) continue;
+        if (tgt->emergent_class_count == 0) continue;
+        total++;
+        int cls = tgt->emergent_class_ids[0];
+        if      (cls == (int)POS_NOUN) noun_edges++;
+        else if (cls == (int)POS_ADJ)  adj_edges++;
+        else if (cls == (int)POS_ADV)  adv_edges++;
+    }
+
+    /* Heuristic 推断 */
+    if (total >= 2) {
+        float noun_ratio = (float)noun_edges / (float)total;
+        float adj_ratio  = (float)adj_edges  / (float)total;
+
+        if (noun_ratio > 0.35f) vv.needs_object = 1;  /* 及物 */
+        if (adj_ratio  > 0.35f) vv.is_descriptive = 1; /* 描述性 */
+        if (adj_ratio > 0.15f)  vv.allows_complement = 1; /* 可带补语 */
+    }
+
+    /* 特殊词硬识别 (跨语言通用) */
+    if (strcmp(verb, "是") == 0 || strcasecmp(verb, "be") == 0 ||
+        strcasecmp(verb, "is") == 0 || strcasecmp(verb, "am") == 0 ||
+        strcasecmp(verb, "are") == 0) {
+        vv.is_copula = 1; vv.needs_object = 0; vv.is_descriptive = 0;
+    }
+    if (strcmp(verb, "有") == 0 || strcasecmp(verb, "have") == 0 ||
+        strcasecmp(verb, "has") == 0 || strcasecmp(verb, "had") == 0) {
+        vv.is_you = 1; vv.needs_object = 0;
+    }
+
+    return vv;
+}
+
 static int diffusion_assemble_grammar(
     const char** word_buf, POSTag* word_pos, int word_count,
     const char** output_words, int max_output,
-    int is_english) {
+    int is_english, DiffusionCtx* ctx) {
     int out = 0;
     if (word_count < 2 || !word_buf || !output_words) return 0;
 
@@ -348,8 +407,21 @@ static int diffusion_assemble_grammar(
     }
 
     if (verb_idx < 0) return 0;
-    const VerbValency* vv = (verb_val >= 0 && !is_english)
-                            ? &CHINESE_VERB_VALENCY[verb_val] : en_vv;
+
+    /* 配价来源优先级: 硬编码表 > 拓扑边推断 > NULL(默认行为) */
+    const VerbValency* vv = NULL;
+    static VerbValency inferred_vv;  /* 静态避免栈地址失效 */
+    if (verb_val >= 0 && !is_english)
+        vv = &CHINESE_VERB_VALENCY[verb_val];
+    else if (en_vv)
+        vv = en_vv;
+    else if (ctx && verb_idx >= 0 && word_buf[verb_idx]) {
+        /* 硬编码未命中 → 从拓扑边推断配价 */
+        inferred_vv = diffusion_infer_valency(word_buf[verb_idx], ctx);
+        if (inferred_vv.needs_object || inferred_vv.is_copula ||
+            inferred_vv.is_you || inferred_vv.is_descriptive)
+            vv = &inferred_vv;
+    }
 
     used[verb_idx] = 1;  /* 标记谓语已用 */
 
@@ -1077,7 +1149,8 @@ int diffusion_generate(DiffusionCtx* ctx,
 
         /* 动词配价驱动 */
         out = diffusion_assemble_grammar(word_buf, word_pos, word_count,
-                                          output_words, max_output, lang_en);
+                                          output_words, max_output,
+                                          lang_en, ctx);
 
         /* 语法组装失败 → 回退名词短语 */
         if (out < 1) {
