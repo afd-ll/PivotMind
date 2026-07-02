@@ -269,6 +269,7 @@ Model* model_load(const char* filepath) {
     // 读取每层参数
     for (int32_t i = 0; i < num_layers; i++) {
         int32_t layer_type, trainable;
+        int32_t has_weights, has_bias;
 
         if (fread(&layer_type, sizeof(int32_t), 1, fp) != 1) {
             LOG_ERROR("Failed to read layer_type for layer %d", i);
@@ -280,17 +281,16 @@ Model* model_load(const char* filepath) {
             goto cleanup;
         }
 
+        // 所有层都读取 has_weights/has_bias（与 save 对称）
+        if (fread(&has_weights, sizeof(int32_t), 1, fp) != 1) {
+            LOG_ERROR("Failed to read has_weights for layer %d", i);
+            goto cleanup;
+        }
+
         Layer* layer = NULL;
 
         // 根据层类型创建相应的层
         if (layer_type == LAYER_LINEAR) {
-            // 读取权重维度
-            int32_t has_weights;
-            if (fread(&has_weights, sizeof(int32_t), 1, fp) != 1) {
-                LOG_ERROR("Failed to read has_weights for layer %d", i);
-                goto cleanup;
-            }
-
             size_t input_size = 0;
             size_t output_size = 0;
 
@@ -321,10 +321,21 @@ Model* model_load(const char* filepath) {
                 output_size = shape_weights[1];
                 free(shape_weights);
                 shape_weights = NULL;
+
+                // 读取权重数据（紧跟 shape 之后）
+                size_t weight_size = input_size * output_size;
+                weight_data = malloc(weight_size * sizeof(float));
+                if (!weight_data) {
+                    LOG_ERROR("Failed to allocate memory for weight data");
+                    goto cleanup;
+                }
+                if (fread(weight_data, sizeof(float), weight_size, fp) != weight_size) {
+                    LOG_ERROR("Failed to read weight data for layer %d", i);
+                    goto cleanup;
+                }
             }
 
-            // 读取偏置维度（用于验证）
-            int32_t has_bias;
+            // 读取偏置
             if (fread(&has_bias, sizeof(int32_t), 1, fp) != 1) {
                 LOG_ERROR("Failed to read has_bias for layer %d", i);
                 goto cleanup;
@@ -348,8 +359,20 @@ Model* model_load(const char* filepath) {
                     goto cleanup;
                 }
 
+                size_t bias_size = shape_bias[0];
                 free(shape_bias);
                 shape_bias = NULL;
+
+                // 读取偏置数据（紧跟 shape 之后）
+                bias_data = malloc(bias_size * sizeof(float));
+                if (!bias_data) {
+                    LOG_ERROR("Failed to allocate memory for bias data");
+                    goto cleanup;
+                }
+                if (fread(bias_data, sizeof(float), bias_size, fp) != bias_size) {
+                    LOG_ERROR("Failed to read bias data for layer %d", i);
+                    goto cleanup;
+                }
             }
 
             // 创建线性层
@@ -359,22 +382,10 @@ Model* model_load(const char* filepath) {
                 goto cleanup;
             }
 
-            // 读取并填充权重数据
-            if (has_weights && layer && layer->weights) {
-                size_t weight_size = input_size * output_size;
-                weight_data = malloc(weight_size * sizeof(float));
-                if (!weight_data) {
-                    LOG_ERROR("Failed to allocate memory for weight data");
-                    goto cleanup;
-                }
-
-                if (fread(weight_data, sizeof(float), weight_size, fp) != weight_size) {
-                    LOG_ERROR("Failed to read complete weight data for layer %d", i);
-                    goto cleanup;
-                }
-
-                // 复制到层的权重张量
+            // 复制权重数据到层
+            if (weight_data && layer->weights) {
                 float* layer_weight_data = (float*)layer->weights->data;
+                size_t weight_size = input_size * output_size;
                 for (size_t j = 0; j < weight_size; j++) {
                     layer_weight_data[j] = weight_data[j];
                 }
@@ -382,53 +393,50 @@ Model* model_load(const char* filepath) {
                 weight_data = NULL;
             }
 
-            // 读取并填充偏置数据
-            if (has_bias && layer && layer->bias) {
-                size_t bias_size = output_size;
-                bias_data = malloc(bias_size * sizeof(float));
-                if (!bias_data) {
-                    LOG_ERROR("Failed to allocate memory for bias data");
-                    goto cleanup;
-                }
-
-                if (fread(bias_data, sizeof(float), bias_size, fp) != bias_size) {
-                    LOG_ERROR("Failed to read complete bias data for layer %d", i);
-                    goto cleanup;
-                }
-
-                // 复制到层的偏置张量
+            // 复制偏置数据到层
+            if (bias_data && layer->bias) {
                 float* layer_bias_data = (float*)layer->bias->data;
+                size_t bias_size = layer->bias->size;
                 for (size_t j = 0; j < bias_size; j++) {
                     layer_bias_data[j] = bias_data[j];
                 }
                 free(bias_data);
                 bias_data = NULL;
             }
-        } else if (layer_type == LAYER_RELU) {
+        } else {
+            // 非线性层：跳过 has_bias（已在上面读了 has_weights）
+            if (fread(&has_bias, sizeof(int32_t), 1, fp) != 1) {
+                LOG_ERROR("Failed to read has_bias for layer %d", i);
+                goto cleanup;
+            }
+        }
+
+        // 非线性层类型匹配（LAYER_LINEAR 已在上面创建）
+        if (!layer && layer_type == LAYER_RELU) {
             layer = layer_create_relu();
             if (!layer) {
                 LOG_ERROR("Failed to create ReLU layer %d", i);
                 goto cleanup;
             }
-        } else if (layer_type == LAYER_SIGMOID) {
+        } else if (!layer && layer_type == LAYER_SIGMOID) {
             layer = layer_create_sigmoid();
             if (!layer) {
                 LOG_ERROR("Failed to create Sigmoid layer %d", i);
                 goto cleanup;
             }
-        } else if (layer_type == LAYER_TANH) {
+        } else if (!layer && layer_type == LAYER_TANH) {
             layer = layer_create_tanh();
             if (!layer) {
                 LOG_ERROR("Failed to create Tanh layer %d", i);
                 goto cleanup;
             }
-        } else if (layer_type == LAYER_SOFTMAX) {
+        } else if (!layer && layer_type == LAYER_SOFTMAX) {
             layer = layer_create_softmax();
             if (!layer) {
                 LOG_ERROR("Failed to create Softmax layer %d", i);
                 goto cleanup;
             }
-        } else {
+        } else if (!layer) {
             LOG_ERROR("Unsupported layer type: %d for layer %d", layer_type, i);
             goto cleanup;
         }
