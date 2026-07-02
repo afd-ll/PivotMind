@@ -1490,10 +1490,10 @@ static POSTag chinese_pos_lookup(const char* word) {
     return POS_UNKNOWN;
 }
 
-/** 判断字符串是否以 suffix 结尾（不区分大小写） */
-static int str_ends_with(const char* str, const char* suffix) {
-    if (!str || !suffix) return 0;
-    int slen = strlen(str), suflen = strlen(suffix);
+/** 判断字符串是否以 suffix 结尾 — 调用者提供 slen 避免重复 strlen */
+static int str_ends_with_fast(const char* str, int slen, const char* suffix) {
+    if (!str || !suffix || slen <= 0) return 0;
+    int suflen = (int)strlen(suffix);
     if (slen < suflen) return 0;
     for (int i = 0; i < suflen; i++) {
         char a = str[slen - suflen + i];
@@ -1503,6 +1503,11 @@ static int str_ends_with(const char* str, const char* suffix) {
         if (a != b) return 0;
     }
     return 1;
+}
+
+static int str_ends_with(const char* str, const char* suffix) {
+    if (!str || !suffix) return 0;
+    return str_ends_with_fast(str, (int)strlen(str), suffix);
 }
 
 /** 判断是否为纯 ASCII 词（含字母） */
@@ -1648,57 +1653,53 @@ POSTag english_pos_lookup(const char* word) {
     /* ── 后缀规则（优先级从高到低）── */
 
     /* 副词: -ly (排除 -ly 结尾的名词如 "family") */
-    if (str_ends_with(word, "ly") && len > 4) {
-        /* 排除 family, ally, rely, holy, ugly 等 */
-        if (str_ends_with(word, "ily") || str_ends_with(word, "ally"))
+    if (str_ends_with_fast(word, len, "ly") && len > 4) {
+        if (str_ends_with_fast(word, len, "ily") || str_ends_with_fast(word, len, "ally"))
             return POS_ADV;
-        if (str_ends_with(word, "ly") && !str_ends_with(word, "ily") &&
-            !str_ends_with(word, "lly") && str_ends_with(word, "ly"))
+        if (str_ends_with_fast(word, len, "ly") && !str_ends_with_fast(word, len, "ily") &&
+            !str_ends_with_fast(word, len, "lly"))
             return POS_ADV;
     }
 
     /* 形容词: -ful, -less, -ous, -ive, -able, -ible, -al, -ant/-ent, -ary, -ic, -y */
-    if (str_ends_with(word, "ful") || str_ends_with(word, "less") ||
-        str_ends_with(word, "ous") || str_ends_with(word, "ive") ||
-        str_ends_with(word, "able") || str_ends_with(word, "ible") ||
-        str_ends_with(word, "ant") || str_ends_with(word, "ent") ||
-        str_ends_with(word, "ary") || str_ends_with(word, "ical") ||
-        str_ends_with(word, "istic") || str_ends_with(word, "like"))
+    if (str_ends_with_fast(word, len, "ful") || str_ends_with_fast(word, len, "less") ||
+        str_ends_with_fast(word, len, "ous") || str_ends_with_fast(word, len, "ive") ||
+        str_ends_with_fast(word, len, "able") || str_ends_with_fast(word, len, "ible") ||
+        str_ends_with_fast(word, len, "ant") || str_ends_with_fast(word, len, "ent") ||
+        str_ends_with_fast(word, len, "ary") || str_ends_with_fast(word, len, "ical") ||
+        str_ends_with_fast(word, len, "istic") || str_ends_with_fast(word, len, "like"))
         return POS_ADJ;
-    if (str_ends_with(word, "al") || str_ends_with(word, "ic")) {
-        /* 排除 final, total, metal, trial 等 — 这些不是形容词为主 */
+    if (str_ends_with_fast(word, len, "al") || str_ends_with_fast(word, len, "ic")) {
         if (len > 4) return POS_ADJ;
     }
-    if (str_ends_with(word, "y") && len > 3) {
-        /* 排除 day, way, boy, lay, pay, say 等短词 */
+    if (str_ends_with_fast(word, len, "y") && len > 3) {
         return POS_ADJ;
     }
 
     /* 名词: -tion, -sion, -ment, -ness, -ity, -ence, -ance, -ism, -ology, -cy, -ure, -ist, -er(人), -ee, -ship */
-    if (str_ends_with(word, "tion") || str_ends_with(word, "sion") ||
-        str_ends_with(word, "ment") || str_ends_with(word, "ness") ||
-        str_ends_with(word, "ity") || str_ends_with(word, "ence") ||
-        str_ends_with(word, "ance") || str_ends_with(word, "ism") ||
-        str_ends_with(word, "logy") || str_ends_with(word, "graphy") ||
-        str_ends_with(word, "cy") || str_ends_with(word, "ure") ||
-        str_ends_with(word, "ship") || str_ends_with(word, "dom") ||
-        str_ends_with(word, "tude") || str_ends_with(word, "ery") ||
-        str_ends_with(word, "ise") || str_ends_with(word, "sis"))
+    if (str_ends_with_fast(word, len, "tion") || str_ends_with_fast(word, len, "sion") ||
+        str_ends_with_fast(word, len, "ment") || str_ends_with_fast(word, len, "ness") ||
+        str_ends_with_fast(word, len, "ity") || str_ends_with_fast(word, len, "ence") ||
+        str_ends_with_fast(word, len, "ance") || str_ends_with_fast(word, len, "ism") ||
+        str_ends_with_fast(word, len, "logy") || str_ends_with_fast(word, len, "graphy") ||
+        str_ends_with_fast(word, len, "cy") || str_ends_with_fast(word, len, "ure") ||
+        str_ends_with_fast(word, len, "ship") || str_ends_with_fast(word, len, "dom") ||
+        str_ends_with_fast(word, len, "tude") || str_ends_with_fast(word, len, "ery") ||
+        str_ends_with_fast(word, len, "ise") || str_ends_with_fast(word, len, "sis"))
         return POS_NOUN;
-    if (str_ends_with(word, "ist") || str_ends_with(word, "ee"))
+    if (str_ends_with_fast(word, len, "ist") || str_ends_with_fast(word, len, "ee"))
         return POS_NOUN;
-    if (str_ends_with(word, "er") || str_ends_with(word, "or")) {
-        /* -er/-or 可能是动词比较级或名词（人/工具）→ 默认为名词 */
+    if (str_ends_with_fast(word, len, "er") || str_ends_with_fast(word, len, "or")) {
         if (len > 5) return POS_NOUN;
     }
 
     /* 动词形态: -ing, -ed, -ize, -ise, -ate, -ify, -en */
-    if (str_ends_with(word, "ing")) return POS_VERB;
-    if (str_ends_with(word, "ed") && len > 3) return POS_VERB;
-    if (str_ends_with(word, "ize") || str_ends_with(word, "ise") ||
-        str_ends_with(word, "ify") || str_ends_with(word, "en"))
+    if (str_ends_with_fast(word, len, "ing")) return POS_VERB;
+    if (str_ends_with_fast(word, len, "ed") && len > 3) return POS_VERB;
+    if (str_ends_with_fast(word, len, "ize") || str_ends_with_fast(word, len, "ise") ||
+        str_ends_with_fast(word, len, "ify") || str_ends_with_fast(word, len, "en"))
         return POS_VERB;
-    if (str_ends_with(word, "ate") && len > 5) return POS_VERB;
+    if (str_ends_with_fast(word, len, "ate") && len > 5) return POS_VERB;
 
     /* 动词第三人称: -ses, -es, 但排除 -ness, -less 等已判定过的 */
     /* 不要重复判定 — 这会在后缀规则末尾 catch 少量词 */

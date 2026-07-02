@@ -28,6 +28,7 @@
 #include "autonomic_learner.h"
 #include "active_learner.h"
 #include "cognitive_controller.h"
+#include "diffusion.h"
 #include "perception.h"
 
 #include "error.h"
@@ -349,16 +350,8 @@ int extract_key_concepts(SemanticUnderstanding* sem, char** concepts, int max_co
 
     // 如果实体不够，从分词中提取
     for (int i = 0; i < sem->token_count && count < max_concepts; i++) {
-        // 跳过停用词
-        const char* stop_words[] = {"的", "了", "在", "是", "我", "你", "他", "它", "这", "那"};
-        int is_stop = 0;
-        for (int j = 0; j < 10; j++) {
-            if (strcmp(sem->tokens[i], stop_words[j]) == 0) {
-                is_stop = 1;
-                break;
-            }
-        }
-        if (!is_stop && strlen(sem->tokens[i]) >= 2) {
+        // 跳过停用词（复用 diffusion 统一虚词表）
+        if (!diffusion_is_stop_word(sem->tokens[i]) && strlen(sem->tokens[i]) >= 2) {
             // 检查是否已存在
             int exists = 0;
             for (int k = 0; k < count; k++) {

@@ -618,8 +618,9 @@ static int diffusion_assemble_grammar(
                 output_words[out++] = word_buf[obj];
         }
     } else {
-        if (vv->is_copula || vv->is_you) {
-            /* 系词/有字句: 宾语 = NOUN/ADJ */
+        /* 中文: vv 可能为 NULL（硬编码未命中且拓扑边也推断不出来） */
+        if (!vv || vv->is_copula || vv->is_you) {
+            /* 系词/有字句 或 无配价: 宾语 = NOUN/ADJ */
             int obj = pool_take(word_buf, word_pos, word_count, used,
                                 POS_NOUN, post_verb, post_cnt);
             if (obj < 0)
