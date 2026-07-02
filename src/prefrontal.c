@@ -48,6 +48,59 @@ void prefrontal_destroy(Prefrontal* pf) {
 char* prefrontal_chat(Prefrontal* pf, const char* input) {
     if (!pf || !pf->dialog || !input) return NULL;
 
+    /* ── 社交礼仪快速路由：概念名驱动扩散，从网络取回复 ── */
+    {
+        const char* trimmed = input;
+        while (*trimmed == ' ' || *trimmed == '\t') trimmed++;
+
+        const char* social_seed = NULL;
+
+        /* 问候 */
+        if ((strncmp(trimmed, "你好", 4) == 0 && (!trimmed[4] || trimmed[4] == ' ' || trimmed[4] == '!'))
+            || strncmp(trimmed, "嗨", 2) == 0
+            || (strstr(trimmed, "在吗") && strlen(trimmed) <= 8)
+            || strncmp(trimmed, "早上好", 6) == 0
+            || strncmp(trimmed, "晚上好", 6) == 0
+            || strncmp(trimmed, "hello", 5) == 0
+            || strncmp(trimmed, "hi", 2) == 0) {
+            social_seed = "问候与打招呼";
+        }
+
+        /* 告别 */
+        if (!social_seed && (strstr(trimmed, "再见")
+            || strstr(trimmed, "拜拜")
+            || strstr(trimmed, "bye")
+            || strstr(trimmed, "晚安"))) {
+            social_seed = "告别与道别";
+        }
+
+        /* 感谢 */
+        if (!social_seed && (strstr(trimmed, "谢谢") || strstr(trimmed, "感谢"))) {
+            social_seed = "感谢与礼貌回应";
+        }
+
+        if (social_seed) {
+            /* 轻度扩散：单次低温，不经过 ACC 回溯循环 */
+            GeneratedSequence seq = {0};
+            int n = cingulate_diffusion_evaluate(pf->topology, social_seed, 0.08f,
+                                                   pf->controller ? pf->controller->emergent_pos : NULL,
+                                                   &seq);
+            if (n >= 2) {
+                char buf[512];
+                int pos = 0;
+                for (int w = 0; w < seq.count && pos < 500; w++) {
+                    int need = snprintf(buf + pos, sizeof(buf) - pos, "%s", seq.words[w]);
+                    if (pos + need > 500) break;
+                    pos += need;
+                }
+                buf[pos] = '\0';
+                if (buf[0]) return strdup(buf);
+            }
+            /* 网络尚无相关概念时的退化态：极简单字，无模板 */
+            return strdup("。");
+        }
+    }
+
     /* 意图推断 */
     cognitive_controller_set_context(pf->controller, input, NULL);
     float ctx_activations[MAX_SUBTOPOS] = {0};

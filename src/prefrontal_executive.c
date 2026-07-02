@@ -15,6 +15,7 @@
 #include "error.h"
 #include "constants.h"
 #include "cingulate.h"   /* 包含 cingulate_diffusion_evaluate */
+#include "causal_reasoning.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -579,6 +580,70 @@ int pfe_solve_subgoal(PrefrontalExecutive* pfe, int goal_index) {
     float ctx_activations[MAX_SUBTOPOS] = {0};
     calc_context_activations(cc, ctx_activations);
     compute_intent(cc, ctx_activations);
+
+    /* ── DECOMPOSE 模式：因果子目标优先走因果联想搜索 ── */
+    {
+        PFEReasonWorkspace* ws = &pfe->workspace;
+        if (ws->mode == PFE_MODE_DECOMPOSE &&
+            (strstr(g->question, "为什么") || strstr(g->question, "原因"))) {
+
+            int causal_count = 0;
+            CausalSearchResult* results = causal_associative_search(
+                pfe->master, g->question, /*max_hops=*/5, /*max_results=*/3, &causal_count);
+
+            if (results && causal_count > 0 && results[0].total_strength > 0.25f) {
+                /* 重建因果图以解析节点名 */
+                CausalGraph* cg = infer_causal_graph_from_master_topology(pfe->master, 0.2f);
+                SubTopology* vocab = master_get_sub_topology_by_type(pfe->master, TOPO_VOCABULARY);
+
+                int pos = 0;
+                pos += snprintf(g->answer_text + pos,
+                    sizeof(g->answer_text) - (size_t)pos,
+                    "因果链分析：");
+
+                for (int r = 0; r < causal_count && pos < (int)sizeof(g->answer_text) - 60; r++) {
+                    CausalPath* path = results[r].path;
+                    if (!path || path->length == 0) continue;
+
+                    pos += snprintf(g->answer_text + pos,
+                        sizeof(g->answer_text) - (size_t)pos,
+                        "%s[路径%u 强度%.2f] ", r > 0 ? "；" : "", r + 1, path->total_strength);
+
+                    for (int n = 0; n < path->length && pos < (int)sizeof(g->answer_text) - 20; n++) {
+                        int cg_id = path->node_ids[n];
+                        const char* name = "?";
+                        if (cg && cg_id >= 0 && cg_id < cg->node_count) {
+                            int topo_id = cg->node_mapping[cg_id];
+                            if (vocab && vocab->net && topo_id >= 0 &&
+                                topo_id < vocab->net->node_count &&
+                                vocab->net->nodes[topo_id] &&
+                                vocab->net->nodes[topo_id]->concept) {
+                                name = vocab->net->nodes[topo_id]->concept;
+                            }
+                        }
+                        pos += snprintf(g->answer_text + pos,
+                            sizeof(g->answer_text) - (size_t)pos,
+                            "%s%s", name, n < path->length - 1 ? "→" : "");
+                    }
+                }
+
+                if (cg) causal_graph_destroy(cg);
+
+                g->answer_score = 0.55f + results[0].total_strength * 0.35f;
+                if (g->answer_score > 0.95f) g->answer_score = 0.95f;
+                g->status = PFE_GOAL_SOLVED;
+                g->answer_len = (causal_count > 0) ? 1 : 0;
+
+                causal_search_results_free(results, causal_count);
+                LOG_INFO("[PFE] 因果搜索求解子目标%d 成功 (%d条路径, 最高强度=%.2f)",
+                         goal_index, causal_count, results[0].total_strength);
+                return 0;
+            }
+
+            /* 因果搜索无结果 → 回退到扩散引擎 */
+            if (results) causal_search_results_free(results, causal_count);
+        }
+    }
 
     /* ── Phase 2: 真实扩散走边 + ACC 评估 ── */
     const int MAX_RETRIES = pfe->max_subgoal_retries;
