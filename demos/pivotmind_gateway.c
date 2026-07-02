@@ -62,6 +62,9 @@
 #include "json_config.h"           /* v0.4.7 运行时配置 */
 #include "web_fetch.h"             /* 爬虫框架 */
 
+// 前向声明
+static int _learn_tokens(SubTopology* vocab, const char* text, int* p_prev_id, EmergentPOS* ep);
+
 // ==================== 配置 ====================
 
 #define GW_DEFAULT_PORT    8080
