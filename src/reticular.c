@@ -26,7 +26,7 @@ static struct {
     int   tick_stamp;  /* 递增时间戳，getter 可判断是否过期 */
 } _attention_buf = {0};
 
-static int _tick_counter = 0;
+static int _tick_counter = 0;  /* 仅 brainstem 串行调用, 无竞态 */
 
 typedef struct {
     int node_id;

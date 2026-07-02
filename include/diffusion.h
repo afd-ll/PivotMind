@@ -101,6 +101,9 @@ void diffusion_side_inhibit(DiffusionCandidate* cands, int count,
 float diffusion_template_score(DiffusionCtx* ctx,
                                 const char** words, int count);
 
+/** 虚词/停用词检查 — 复用 diffusion 统一虚词表，供 dialog_generate 等模块调用 */
+int diffusion_is_stop_word(const char* word);
+
 #ifdef __cplusplus
 }
 #endif

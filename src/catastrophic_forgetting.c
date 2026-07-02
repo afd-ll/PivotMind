@@ -9,6 +9,8 @@
 
 // ==================== 宏定义 ====================
 
+static int _next_domain_id = 1;  /* atomic via __sync_fetch_and_add */
+
 #define DEFAULT_EWC_LAMBDA 1000.0f
 #define DEFAULT_EWC_DAMPING 1e-8f
 #define DEFAULT_FISHER_UPDATE_INTERVAL 100
@@ -652,9 +654,7 @@ KnowledgeDomain* knowledge_domain_create(const char* name, const char* descripti
     KnowledgeDomain* domain = (KnowledgeDomain*)malloc(sizeof(KnowledgeDomain));
     if (!domain) return NULL;
 
-    static int next_domain_id = 1;
-
-    domain->domain_id = next_domain_id++;
+    domain->domain_id = __sync_fetch_and_add(&_next_domain_id, 1);
     domain->name = name ? strdup(name) : NULL;
     domain->description = description ? strdup(description) : NULL;
     domain->node_ids = (int*)malloc(initial_capacity * sizeof(int));

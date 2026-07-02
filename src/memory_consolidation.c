@@ -8,6 +8,8 @@
 
 // ==================== 宏定义 ====================
 
+static int _next_cluster_id = 1;  /* atomic via __sync_fetch_and_add */
+
 #define DEFAULT_SIMILARITY_THRESHOLD 0.75f
 #define DEFAULT_MIN_ACCESS_COUNT 3
 #define DEFAULT_DECAY_RATE 0.01f
@@ -431,8 +433,8 @@ int memory_cluster_split(ClusterManager* manager, int cluster_id,
     if (!original) return -1;
 
     // 创建新簇
-    static int next_cluster_id = 1;
-    MemoryCluster* new_cluster = memory_cluster_create(next_cluster_id++, original->capacity);
+    MemoryCluster* new_cluster = memory_cluster_create(
+        __sync_fetch_and_add(&_next_cluster_id, 1), original->capacity);
     if (!new_cluster) return -1;
 
     // 分配节点到新簇

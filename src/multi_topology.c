@@ -3158,7 +3158,17 @@ int master_batch_train(MasterTopology* master, const char* train_file_path) {
 
 // ==================== 特征相似度边重建 ====================
 
+/* 前向声明 */
+int master_rebuild_edges_batch(MasterTopology* master, float threshold,
+                                int max_connections, int batch_nodes);
+
 int master_rebuild_edges_by_similarity(MasterTopology* master, float threshold, int max_connections) {
+    return master_rebuild_edges_batch(master, threshold, max_connections, -1);
+}
+
+/* v0.4.12: 分批版本 — batch_nodes=-1 表示全部, >0 表示每次最多处理 N 个源节点 */
+int master_rebuild_edges_batch(MasterTopology* master, float threshold,
+                                int max_connections, int batch_nodes) {
     if (!master) return -1;
     if (threshold <= 0.0f) threshold = 0.35f;
     if (max_connections <= 0) max_connections = 8;
@@ -3170,38 +3180,38 @@ int master_rebuild_edges_by_similarity(MasterTopology* master, float threshold, 
         if (!sub || !sub->net || !sub->node_hash) continue;
 
         HuarongTopologyNet* net = sub->net;
-        if (net->node_count < 2) continue;
+        int nc = net->node_count;
+        if (nc < 2) continue;
 
-        // 用 top-N 选择（保持一个固定大小的数组，只在有新高分时插入）
         typedef struct { int idx; float sim; } SimEntry;
+        int processed = 0;
 
-        for (int n = 0; n < net->node_count; n++) {
+        for (int n = 0; n < nc; n++) {
+            if (batch_nodes > 0 && processed >= batch_nodes) break;
+
             ReasoningNode* src = net->nodes[n];
             if (!src || !src->features || src->feature_dim <= 0) continue;
 
-            // top-N 候选（初始化为低分）
             SimEntry top[64];
             int top_count = 0;
             int max_t = max_connections > 64 ? 64 : max_connections;
+            processed++;
 
-            for (int m = n + 1; m < net->node_count; m++) {
+            for (int m = n + 1; m < nc; m++) {
                 ReasoningNode* tgt = net->nodes[m];
                 if (!tgt || !tgt->features || tgt->feature_dim != src->feature_dim) continue;
                 float sim = cosine_similarity(src->features, tgt->features, src->feature_dim);
                 if (isnan(sim) || isinf(sim)) sim = 0.0f;
                 if (sim <= 0.0f || sim < threshold) continue;
 
-                // 插入到 top-N 的合适位置
                 if (top_count < max_t) {
                     top[top_count].idx = m;
                     top[top_count].sim = sim;
                     top_count++;
                 } else {
-                    // 替换最低分
                     int min_idx = 0;
-                    for (int k = 1; k < top_count; k++) {
+                    for (int k = 1; k < top_count; k++)
                         if (top[k].sim < top[min_idx].sim) min_idx = k;
-                    }
                     if (sim > top[min_idx].sim) {
                         top[min_idx].idx = m;
                         top[min_idx].sim = sim;
@@ -3209,7 +3219,6 @@ int master_rebuild_edges_by_similarity(MasterTopology* master, float threshold, 
                 }
             }
 
-            // 建边
             for (int p = 0; p < top_count; p++) {
                 int ret = huarong_net_add_connection(net, n, top[p].idx, top[p].sim);
                 if (ret == 0) total_edges++;

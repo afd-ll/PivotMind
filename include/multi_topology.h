@@ -481,6 +481,10 @@ int master_load_state(MasterTopology* master, const char* file_path);
  */
 int master_rebuild_edges_by_similarity(MasterTopology* master, float threshold, int max_connections);
 
+/** 分批版本: batch_nodes=-1 全量, >0 每次最多处理 N 个源节点, 可分多次调用 */
+int master_rebuild_edges_batch(MasterTopology* master, float threshold,
+                                int max_connections, int batch_nodes);
+
 // ========== 动态跨拓扑建边 ==========
 
 /**

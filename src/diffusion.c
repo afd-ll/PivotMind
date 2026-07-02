@@ -116,11 +116,32 @@ static int is_function_word(const char* word) {
         "\xe9\x87\x8c",   /* 里 */
         "\xe5\xa4\x96",   /* 外 */
         "\xe8\xbe\xb9",   /* 边 */
+        /* dialog_generate 停用词合并 */
+        "\xe6\x9c\x89",   /* 有 */
+        "\xe5\x8f\x8a",   /* 及 */
+        "\xe5\x8e\xbb",   /* 去 */
+        "\xe6\x9d\xa5",   /* 来 */
+        "\xe4\xb8\xba",   /* 为 */
+        "\xe6\xaf\x94",   /* 比 */
+        "\xe5\x8f\x88",   /* 又 */
+        "\xe5\x86\x8d",   /* 再 */
+        "\xe6\x89\x8d",   /* 才 */
+        "\xe5\x93\x88",   /* 哈 */
+        "\xe5\x91\x80",   /* 呀 */
+        "\xe5\x98\x9b",   /* 嘛 */
+        "\xe5\x95\xa6",   /* 啦 */
+        "\xe5\x93\x87",   /* 哇 */
         NULL
     };
     for (const char** p = stopwords; *p; p++)
         if (strcmp(word, *p) == 0) return 1;
     return 0;
+}
+
+/* 公共接口 — 供 dialog_generate 等模块复用 */
+int diffusion_is_stop_word(const char* word) {
+    if (!word || strlen(word) == 0) return 1;
+    return is_function_word(word);
 }
 
 /* ================================================================

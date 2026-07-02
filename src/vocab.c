@@ -236,7 +236,7 @@ int vocab_size(Vocab* vocab) {
 }
 
 char* vocab_info(Vocab* vocab) {
-    static char buf[256];
+    static _Thread_local char buf[256];
     if (!vocab) { buf[0] = '\0'; return buf; }
     snprintf(buf, sizeof(buf), "vocab_size=%d, max_freq=%d", vocab->size, vocab->max_freq);
     return buf;

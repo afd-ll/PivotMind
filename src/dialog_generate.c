@@ -10,6 +10,7 @@
 #include "huarong_topology.h"
 #include "cognitive_params.h"
 #include "cognitive_controller.h"
+#include "diffusion.h"
 #include "utf8_tokenizer.h"
 #include "string_pool.h"
 #include "common.h"
@@ -396,29 +397,16 @@ char* dialog_generate(DialogReasoning* reasoning, const char* input,
 // 真正的学习应该像人脑一样，通过对话自然发生，而不是人为预先连接神经回路
 // 实现：从对话文本中提取有意义的概念，加入拓扑网络并建立共现连接
 
-// 中文停用词（过滤高频无意义字词）
-static const char* STOP_WORDS[] = {
-    "的", "了", "是", "在", "有", "和", "就", "不", "都", "而",
-    "及", "与", "着", "或", "也", "很", "会", "可", "但", "这",
-    "那", "上", "下", "到", "去", "来", "为", "以", "能", "要",
-    "我", "你", "他", "她", "它", "们", "个", "之", "对", "被",
-    "把", "让", "向", "从", "比", "还", "又", "再", "才", "啊",
-    "吧", "吗", "呢", "哈", "呀", "哦", "嗯", "嘛", "啦", "哇",
-    // 注：疑问词（什么/怎么/为什么/如何）已从停用词移除 — 它们是语义核心载体
-    // 标点符号
+// 标点符号检查（单独保留，diffusion 虚词表不处理标点）
+static const char* PUNCT_CHARS[] = {
     "，", "。", "、", "；", "：", "？", "！", "…", "—", "～",
     "·", "．", "（", "）", "【", "】", "《", "》", """, """,
     "'", "'", "　"
 };
-#define STOP_WORDS_COUNT (sizeof(STOP_WORDS) / sizeof(STOP_WORDS[0]))
+#define PUNCT_COUNT (sizeof(PUNCT_CHARS) / sizeof(PUNCT_CHARS[0]))
 
-static int is_stop_word(const char* word) {
-    if (!word || strlen(word) == 0) return 1;
-    for (int i = 0; i < (int)STOP_WORDS_COUNT; i++) {
-        if (strcmp(word, STOP_WORDS[i]) == 0) return 1;
-    }
-    return 0;
-}
+/* 复用 diffusion 统一虚词表，消除重复维护 */
+#define is_stop_word(w) diffusion_is_stop_word(w)
 
 // 检查字符串是否包含中文或英文标点
 static int contains_punctuation(const char* s) {
