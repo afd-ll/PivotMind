@@ -117,7 +117,6 @@ static float emotion_consistency(GeneratedSequence* seq, MasterTopology* topo) {
         ReasoningNode* n = emo->net->nodes[i];
         if (n) { valence_sum += n->valence; valence_sq += n->valence * n->valence; vn++; }
     }
-    float mean = vn > 0 ? valence_sum / vn : 0;
     float variance = vn > 1 ? (valence_sq - valence_sum * valence_sum / vn) / (vn - 1) : 0;
 
     /* 方差越小 = 情绪越一致 */

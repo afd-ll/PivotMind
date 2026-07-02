@@ -753,7 +753,11 @@ int perception_search_news(Perception* p) {
     /* 根据当前小时选择新闻主题 */
     time_t now = time(NULL);
     struct tm tm_info;
+#ifdef _WIN32
+    localtime_s(&tm_info, &now);
+#else
     localtime_r(&now, &tm_info);
+#endif
     int hour = tm_info.tm_hour;
 
     const char* topic;

@@ -7,7 +7,7 @@
 
 [English](README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [Русский](README.ru.md)
 
-[![Version](https://img.shields.io/badge/version-v0.4.8-blue.svg)](changelogs/)
+[![Version](https://img.shields.io/badge/version-v0.4.13-blue.svg)](changelogs/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green.svg)](LICENSE)
 [![Language](https://img.shields.io/badge/C-99%2B-orange.svg)](https://en.wikipedia.org/wiki/C99)
 [![Platform](https://img.shields.io/badge/ARM-RK3399%20%7C%20x86__64-lightgrey.svg)](#running-on)
@@ -29,7 +29,7 @@ PivotMind is a **brain-inspired cognitive engine** built on
 No external Transformer dependencies. No pretrained embedding vectors.
 Just nodes, edges, activation, and decay — powered by a relentless background clock.
 
-**Current Version: v0.4.8** — 13 fully-implemented brain regions, emergent POS system, parallel multi-learner, PFE reasoning orchestration, 512-dim feature vectors.
+**Current Version: v0.4.13** — 13 fully-implemented brain regions, emergent POS system, parallel multi-learner, PFE reasoning orchestration, 512-dim feature vectors, POS grammar mapping, edge specificity weighting, zero compile warnings.
 
 **Codebase: 85 source files (~48,600 lines C) + 89 headers (~12,600 lines) + tools/tests/demos (~13,000 lines) = ~74,000 total lines.**
 
@@ -280,7 +280,7 @@ pivotmind/
 ├── tools/             # 57 tools (training/debugging/data processing/corpus download)
 ├── tests/             # Unit tests + integration tests + regression suite
 ├── scripts/           # Automation scripts (feeding, knowledge download, etc.)
-├── changelogs/        # 44 version changelogs (000-043)
+├── changelogs/        # 55 version changelogs (000-054)
 ├── docs/              # Architecture documentation and diagrams
 ├── data/              # Runtime data (hermes knowledge base 25MB, etc.)
 └── libs/              # Third-party libraries
@@ -300,6 +300,9 @@ pivotmind/
 | **v0.4.2** | Comprehensive realloc dangling pointer fix (15+ sites), 4-round memory safety audit |
 | **v0.4.3** | **Emergent POS** — seed anchors + 512-dim feature clustering, grammar emerges from data |
 | **v0.4.8** | Diffusion function word filter (~130 words), cross-layer index fix, double-free race fix |
+| **v0.4.11** | Bilingual grammar engine (verb valency + English POS + diffusion activation optimization) |
+| **v0.4.12** | Chat quality overhaul (online learning + multi-turn context + output length control) |
+| **v0.4.13** | POS grammar mapping, edge specificity weighting, zero compile warnings (10 files, 14 warnings fixed) |
 
 > Detailed changelogs: v0.3.0 → [changelogs/032-v0.3.0-reasoning-architecture.md](changelogs/032-v0.3.0-reasoning-architecture.md) ｜ v0.4.0 → [changelogs/034-v0.4.0-code-simplify-brain-boundary.md](changelogs/034-v0.4.0-code-simplify-brain-boundary.md) ｜ v0.4.3 → [changelogs/042-emergent-pos-anchor.md](changelogs/042-emergent-pos-anchor.md) ｜ v0.4.8 → [changelogs/043-diffusion-function-word-filter.md](changelogs/043-diffusion-function-word-filter.md)
 

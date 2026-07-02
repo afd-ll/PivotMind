@@ -90,7 +90,11 @@ static float circadian_activity(int hour) {
 
 static int current_hour(time_t t) {
     struct tm tm_info;
+#ifdef _WIN32
+    localtime_s(&tm_info, &t);
+#else
     localtime_r(&t, &tm_info);
+#endif
     return tm_info.tm_hour;
 }
 

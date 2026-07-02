@@ -7,7 +7,7 @@
 
 [English](README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [Русский](README.ru.md)
 
-[![Version](https://img.shields.io/badge/version-v0.4.8-blue.svg)](changelogs/)
+[![Version](https://img.shields.io/badge/version-v0.4.13-blue.svg)](changelogs/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green.svg)](LICENSE)
 [![Language](https://img.shields.io/badge/C-99%2B-orange.svg)](https://zh.wikipedia.org/wiki/C99)
 [![Platform](https://img.shields.io/badge/ARM-RK3399%20%7C%20x86__64-lightgrey.svg)](#运行平台)
@@ -29,7 +29,7 @@
 没有 Transformer 外部依赖，没有预训练 embedding 向量。
 节点、边、激活、衰减 —— 以及一个永不停歇的后台时钟驱动整个系统。
 
-**当前版本：v0.4.8** —— 13 脑区完整架构、涌现式词类系统、多学习器并行、PFE 推理编排、500 维特征向量。
+**当前版本：v0.4.13** —— 13 脑区完整架构、涌现式词类系统、多学习器并行、PFE 推理编排、512 维特征向量、POS 语法映射、边特异性权重、编译零警告。
 
 **代码规模：85 个源文件（~48,600 行 C） + 89 个头文件（~12,600 行） + 工具/测试/演示（~13,000 行）= 约 74,000 行。**
 
@@ -277,7 +277,7 @@ pivotmind/
 ├── tools/             # 57 个工具（训练/调试/数据处理/语料下载）
 ├── tests/             # 单元测试 + 集成测试 + 回归测试套件
 ├── scripts/           # 自动化脚本（喂料、下载知识库等）
-├── changelogs/        # 44 个版本变更记录（000-043）
+├── changelogs/        # 55 个版本变更记录（000-054）
 ├── docs/              # 架构文档与图片
 ├── data/              # 运行时数据（hermes 知识库 25MB 等）
 └── libs/              # 第三方库
@@ -297,6 +297,9 @@ pivotmind/
 | **v0.4.2** | realloc 悬空指针全面修复（跨 15+ 处）、三轮内存安全审计 |
 | **v0.4.3** | **涌现式词类系统** — 种子锚点 + 512 维特征聚类，语法从数据中涌现 |
 | **v0.4.8** | 扩散引擎虚词过滤（~130 中英文词）、跨层索引修复、double-free 竞态修复 |
+| **v0.4.11** | 双语语法引擎 (动词配价 + 英文 POS + 扩散激活优化) |
+| **v0.4.12** | 对话质量全线攻坚 (在线词汇学习 + 多轮上下文 + 输出长度控制) |
+| **v0.4.13** | POS 语法映射、边特异性权重、编译警告清零（10 文件 14 处） |
 
 > 详细变更：v0.3.0 → [changelogs/032-v0.3.0-reasoning-architecture.md](changelogs/032-v0.3.0-reasoning-architecture.md) ｜ v0.4.0 → [changelogs/034-v0.4.0-code-simplify-brain-boundary.md](changelogs/034-v0.4.0-code-simplify-brain-boundary.md) ｜ v0.4.3 → [changelogs/042-emergent-pos-anchor.md](changelogs/042-emergent-pos-anchor.md) ｜ v0.4.8 → [changelogs/043-diffusion-function-word-filter.md](changelogs/043-diffusion-function-word-filter.md)
 

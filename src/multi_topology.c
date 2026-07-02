@@ -1328,7 +1328,7 @@ char* master_generate_response(MasterTopology* master,
                     path_nodes, path_scores,
                     20, global_visited, 1.0f, master, NULL, NULL);
                 
-                // 模板增强输出：起点概念 + 模板连接词 + 后续概念
+                // 路径转输出：模板 + POS语法关系 三级回退
                 {
                     // 先输出起点概念（路径[0]）
                     if (path_len > 0) {
@@ -1339,33 +1339,37 @@ char* master_generate_response(MasterTopology* master,
                                 pos += snprintf(response + pos, max_output_len - pos, "%s", sn->concept);
                         }
                     }
-                    // 从路径[1]开始，用模板连接词衔接
+                    // 从路径[1]开始，三级回退选连接词
                     for (int p = 1; p < path_len && pos < max_output_len - 10; p++) {
                         int nid = path_nodes[p];
                         if (nid < 0 || nid >= node_count) continue;
                         ReasoningNode* node = vocab_sub->net->nodes[nid];
                         if (!node || !node->concept || !concept_is_printable(node->concept)) continue;
 
-                        // 模板衔接：查找 prev → cur 的语法连接词
                         const char* connector = NULL;
-                        if (master->use_template_voting) {
-                            int prev_nid = path_nodes[p - 1];
-                            if (prev_nid >= 0 && prev_nid < node_count) {
-                                int tpl_id = master_find_template_for_pair_nolock(
-                                    master, 0, prev_nid, nid);
-                                if (tpl_id >= 0)
-                                    connector = template_get_connector(master, tpl_id, 0);
-                                // 内置 POS 映射兜底
-                                if (!connector || !connector[0]) {
-                                    ReasoningNode* pn = vocab_sub->net->nodes[prev_nid];
-                                    POSTag pa = pn ? pos_tag_emergent(
-                                        master->cognitive_controller, pn->concept) : POS_UNKNOWN;
-                                    POSTag pb = pos_tag_emergent(
-                                        master->cognitive_controller, node->concept);
-                                    connector = pos_connector_map((int)pa, (int)pb);
-                                }
-                            }
+                        int prev_nid = path_nodes[p - 1];
+                        
+                        // Level 1: 模板匹配（需启用模板投票）
+                        if (master->use_template_voting
+                            && prev_nid >= 0 && prev_nid < node_count) {
+                            int tpl_id = master_find_template_for_pair_nolock(
+                                master, 0, prev_nid, nid);
+                            if (tpl_id >= 0)
+                                connector = template_get_connector(master, tpl_id, 0);
                         }
+                        
+                        // Level 2: POS语法关系映射（始终尝试，不依赖模板投票）
+                        if (!connector || !connector[0]) {
+                            ReasoningNode* pn = (prev_nid >= 0 && prev_nid < node_count)
+                                ? vocab_sub->net->nodes[prev_nid] : NULL;
+                            POSTag pa = pn ? pos_tag_emergent(
+                                master->cognitive_controller, pn->concept) : POS_UNKNOWN;
+                            POSTag pb = pos_tag_emergent(
+                                master->cognitive_controller, node->concept);
+                            connector = pos_connector_map((int)pa, (int)pb);
+                        }
+                        
+                        // Level 3: 输出
                         if (connector && connector[0])
                             pos += snprintf(response + pos, max_output_len - pos, "%s", connector);
                         pos += snprintf(response + pos, max_output_len - pos, "%s", node->concept);
@@ -1937,6 +1941,28 @@ int topology_walk_greedy(SubTopology* sub, int start_node_id,
             // 软下限5%确保即使热门节点也有基础分
             float heat_mod = 0.05f + 0.95f * target->heat;
             score *= heat_mod;
+
+            // 边特异性权重：区分语义关联 vs 偶然共现
+            // 原理：词共现图中的边来自赫布学习（共现即建边）。
+            // 一个词如果与许多词有均匀权重的边 → 该词是"hub"词，共现是偶然的
+            // 一个词如果只有少数几条高权重边 → 共现是强语义关联
+            // 用边权重集中度（max_w / sum_all_w）来区分这两种情况
+            if (current->edge_count > 4) {
+                float max_w = 0.0f, sum_w = 0.0f;
+                for (int e = 0; e < current->edge_count; e++) {
+                    float w = current->edges[e].weight;
+                    if (w > max_w) max_w = w;
+                    sum_w += w;
+                }
+                if (sum_w > 0.01f) {
+                    float concentration = max_w / sum_w;
+                    float expected = 1.0f / (float)current->edge_count;
+                    // concentration >> expected → 语义专一 → 接近 1.0
+                    // concentration ~ expected → 噪音共现 → 接近 0.55
+                    float edge_spec = 0.55f + 0.45f * (concentration / (concentration + expected));
+                    score *= edge_spec;
+                }
+            }
 
             // 三元组链式奖励：如果 prev->current->target 构成两步链，额外加分
             if (path_len > 1 && edge_weight > 0.2f) {

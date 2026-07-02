@@ -229,16 +229,16 @@ char* dialog_generate(DialogReasoning* reasoning, const char* input,
                 if (satisfaction < dsys->controller->satisfaction_threshold) continue;
             }
 
-            // ===== 路径转输出：模板驱动结构化 =====
-            // 对相邻概念对 (path[p-1], path[p]) 查模板匹配。
-            // 匹配 → 用模板代表概念作为桥梁，输出 "A的[代表概念]是B"
-            // 无匹配 → 纯拼接 + 连接词兜底
+            // ===== 路径转输出：POS语法关系驱动的连接词映射 =====
+            // 三级回退策略：
+            //   1. 模板匹配 → 使用学习到的模板连接词
+            //   2. POS对映射 → pos_connector_map 按语法角色决定连接词
+            //      （定中→"的", 状中→"地", 主谓→"", 动宾→"", 等）
+            //   3. 无连接词 → 直接拼接（语法上天然不需连接词的组合）
             const char* last_concept = NULL;
-            const char* connectives[] = {"", "的", "是", "和", "了", "在"};
-            int conn_count = sizeof(connectives)/sizeof(connectives[0]);
-            int conn_idx = 0;
+            CognitiveController* cc_dg = dsys ? dsys->controller : NULL;
 
-            // 先输出路径起点本身的语义
+            // 先输出路径起点
             {
                 ReasoningNode* start_node = (path_nodes[0] >= 0 && path_nodes[0] < sub->net->node_count)
                     ? sub->net->nodes[path_nodes[0]] : NULL;
@@ -257,37 +257,39 @@ char* dialog_generate(DialogReasoning* reasoning, const char* input,
                 // 去重
                 if (last_concept && strcmp(last_concept, node->concept) == 0) continue;
                 
-                // --- 模板锚点对匹配 ---
                 int prev_nid = path_nodes[p-1];
-                int tpl_id = -1;
+                const char* connector = NULL;
+                
+                // --- Level 1: 模板匹配 ---
                 if (dsys && dsys->master && dsys->master->use_template_voting
                     && prev_nid >= 0 && prev_nid < sub->net->node_count) {
-                    tpl_id = master_find_template_for_pair(
+                    int tpl_id = master_find_template_for_pair(
                         dsys->master, sub->topo_id, prev_nid, nid);
+                    if (tpl_id >= 0)
+                        connector = template_get_connector(dsys->master, tpl_id, 0);
                 }
-
-                if (tpl_id >= 0) {
-                    // 语法模板匹配：使用模板的连接词连接当前节点
-                    const char* connector = template_get_connector(
-                        dsys->master, tpl_id, 0);
-                    if (connector && connector[0]) {
-                        // 先输出连接词，再输出当前概念（如 "的苹果"）
-                        pos += snprintf(response + pos, max_len - pos,
-                            "%s%s", connector, node->concept);
-                    } else {
-                        // 无连接词：直接拼接（如主谓/动宾结构）
-                        pos += snprintf(response + pos, max_len - pos,
-                            "%s", node->concept);
+                
+                // --- Level 2: POS语法关系映射（替代硬编码连接词轮换）---
+                if (!connector || !connector[0]) {
+                    ReasoningNode* prev_node = (prev_nid >= 0 && prev_nid < sub->net->node_count)
+                        ? sub->net->nodes[prev_nid] : NULL;
+                    POSTag prev_pos = POS_UNKNOWN;
+                    POSTag curr_pos = POS_UNKNOWN;
+                    if (cc_dg) {
+                        prev_pos = pos_tag_emergent(cc_dg,
+                            prev_node ? prev_node->concept : NULL);
+                        curr_pos = pos_tag_emergent(cc_dg, node->concept);
                     }
+                    connector = pos_connector_map((int)prev_pos, (int)curr_pos);
+                }
+                
+                // --- Level 3: 输出 ---
+                if (connector && connector[0]) {
+                    pos += snprintf(response + pos, max_len - pos,
+                        "%s%s", connector, node->concept);
                 } else {
-                    // 无模板匹配：连接词兜底
-                    if (p > 1 && p < path_len - 1 && (p % 3 == 0)
-                        && strlen(connectives[conn_idx]) > 0) {
-                        pos += snprintf(response + pos, max_len - pos, "%s",
-                                        connectives[conn_idx]);
-                        conn_idx = (conn_idx + 1) % conn_count;
-                    }
-                    pos += snprintf(response + pos, max_len - pos, "%s", node->concept);
+                    pos += snprintf(response + pos, max_len - pos,
+                        "%s", node->concept);
                 }
                 
                 last_concept = node->concept;
@@ -396,14 +398,6 @@ char* dialog_generate(DialogReasoning* reasoning, const char* input,
 // ==================== 自动学习概念到拓扑网络 ====================
 // 真正的学习应该像人脑一样，通过对话自然发生，而不是人为预先连接神经回路
 // 实现：从对话文本中提取有意义的概念，加入拓扑网络并建立共现连接
-
-// 标点符号检查（单独保留，diffusion 虚词表不处理标点）
-static const char* PUNCT_CHARS[] = {
-    "，", "。", "、", "；", "：", "？", "！", "…", "—", "～",
-    "·", "．", "（", "）", "【", "】", "《", "》", """, """,
-    "'", "'", "　"
-};
-#define PUNCT_COUNT (sizeof(PUNCT_CHARS) / sizeof(PUNCT_CHARS[0]))
 
 /* 复用 diffusion 统一虚词表，消除重复维护 */
 #define is_stop_word(w) diffusion_is_stop_word(w)

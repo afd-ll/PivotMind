@@ -1,6 +1,6 @@
 # 玄枢 PivotMind 架构文档
 
-> 当前版本: **v0.4.8** — 13 脑区完整架构 + 涌现式词类 + 配置系统 + 神经网络子系统 + JSON Unicode 修复
+> 当前版本: **v0.4.13** — 13 脑区完整架构 + POS 语法映射 + 边特异性权重 + 涌现式词类 + 配置系统 + 神经网络子系统 + 编译零警告
 
 ## 整体架构
 
@@ -12,7 +12,7 @@
 |------|------|---------|
 | **多拓扑网络层** | 11 层子拓扑接收输入，逐字分词后激活对应节点，跨拓扑传播 | `huarong_topology.c`, `multi_topology.c` |
 | **认知调度层** | 意图向量计算、满意度评估、retry 循环、在线学习调整 | `cognitive_controller.c` |
-| **对话学习层** | 联想推理、回复生成、赫布在线学习、状态持久化 | `dialog_system.c`, `autonomic_learner.c` |
+| **对话学习层** | 联想推理、回复生成、赫布在线学习、状态持久化、POS 语法映射 | `dialog_system.c`, `autonomic_learner.c`, `dialog_generate.c` |
 | **推理编排层** (v0.3) | 6 模式推理编排、任务分解、子目标调度、多候选竞争、冲突检测 | `prefrontal_executive.c`, `idea_arena.c` |
 | **脑干节律层** (v0.4) | 昼夜心跳、激活衰减、自发激活、存盘调度、堆监控 | `brainstem.c` |
 | **配置管理层** (v0.4.7) | 运行时 JSON 配置加载、脑区启停控制 | `json_config.c` |
@@ -52,7 +52,7 @@
 
 **关键 API**:
 - `huarong_net_find_or_create_node()` — 查找或创建节点
-- `topology_walk_greedy()` — 贪心走边（五维评分）
+- `topology_walk_greedy()` — 贪心走边（五维评分 + 边特异性折扣）
 - `topology_walk_beam()` — Beam Search（K=3）
 - `master_add_cross_link()` — 添加跨拓扑连接
 - `master_reevaluate_cross_links()` — 跨拓扑连接质量重评估
@@ -288,8 +288,22 @@ score = 0.28 × edge_weight
       + 0.11 × edge_motivational_bias
       + 0.28 × target_activation
       + 0.11 × target_confidence
-最终 × (1.0 + 0.6 × target_valence)
+最终 × (1.0 + 0.6 × target_valence) × edge_spec
 ```
+
+**边特异性权重 (v0.4.13)**:
+
+当节点出边 > 4 条时，计算边权重集中度，区分语义专一边与均匀 hub 边：
+
+```c
+concentration = max_w / sum_w_all;           // 最强边占比
+expected = 1.0 / edge_count;                 // 均匀分布期望
+edge_spec = 0.55 + 0.45 × (concentration / (concentration + expected));
+```
+
+- 高集中度（少数强边支配，如"苹果"→"吃"） → edge_spec → 1.0（不打折）
+- 低集中度（hub 词均匀分布，如"你"→8000条弱边） → edge_spec → 0.55（55折）
+- 效果：强语义关联边权重不受影响，弱随机共现边被压制。
 
 **热度衰减机制（路径多样性）**:
 - 节点被选中后 `selection_count++`，`heat = 1.0 / (1.0 + 0.1 × selection_count)`
@@ -330,6 +344,29 @@ score = 0.28 × edge_weight
 
 防止 "the be not to have are..." 或 "的了是在……" 虚词串污染输出。
 
+### 连接词 POS 语法关系映射 (v0.4.13)
+
+扩散输出连接词由 POS 词类对动态映射，替代硬编码轮换。三级回退机制：
+
+```
+Level1: 模板匹配（按需）
+Level2: pos_connector_map(prev_pos, curr_pos) — 按词类对返回语法连接词
+Level3: 直接拼接（无连接词）
+```
+
+`pos_connector_map` 核心映射：
+
+| prev_pos | curr_pos | 连接词 | 说明 |
+|----------|----------|--------|------|
+| N | N | `的` | 名词修饰：人类的语言 |
+| Adj | N | `的` | 形容词修饰：美丽的风景 |
+| Adv | V | `地` | 状语修饰：快速地运行 |
+| N | Adj | `是` | 谓语句：天空是蓝色 |
+| N | V | `""` | 主谓结构：太阳升起 |
+| V | N | `""` | 动宾结构：吃苹果 |
+
+**效果**：输出从无语法关系的词序列升级为符合语法规则的句子片段。
+
 ### 扩散流程
 
 ```
@@ -366,7 +403,7 @@ new_activation *= intent_weights[sub->type];  // 乘性调节
 ### 回复生成流程
 
 1. **精确匹配检查**：`memory_retrieve(memory, "response:{完整输入}")` → 命中则直接返回
-2. **拓扑驱动生成**：`master_generate_response()` → 跨拓扑走边 → 生成概念序列
+2. **拓扑驱动生成**：`master_generate_response()` → 跨拓扑走边 → POS 语法映射连接 → 生成概念序列
 3. **联想兜底**：从 top-5 激活节点出发，`topology_walk_greedy()` 生成回复
 4. **自动学习**：`autonomic_learn_from_dialog(input, output)`
 
@@ -798,7 +835,7 @@ confidence = base_score × 0.4
 
 ```
 PivotMind/
-├── src/                    # 核心源文件（86个 .c, ~48,600 行）
+├── src/                    # 核心源文件（86个 .c, ~48,600 行，编译零警告）
 │   ├── huarong_topology.c             # 底层拓扑网络：节点/边/哈希/拓扑排序
 │   ├── multi_topology.c               # 多拓扑管理：SubTopology/MasterTopology/走边
 │   ├── cognitive_controller.c         # 认知调度中心：意图向量/retry/满意度
@@ -892,7 +929,7 @@ PivotMind/
 │   └── test_pfe_unit.c               # PFE 专项测试（23 项）
 │
 ├── scripts/                # 自动化脚本（12 文件）
-├── changelogs/             # 改动记录（45 编号）
+├── changelogs/             # 改动记录（55 编号）
 ├── reports/                # 审查报告
 ├── docs/                   # 补充文档
 ├── data/                   # 运行时数据（hermes 知识库 25MB）
@@ -916,6 +953,10 @@ PivotMind/
 | realloc 悬空指针 | 索引替代裸指针 + strdup 接管 + malloc+memcpy+free 替代链式 realloc | article_reader.c, huarong_topology.c 等 |
 | double-free 退役竞态 | swap-before-retire + NULL-before-free 模式 | huarong_topology.c, node_cache.c |
 | 扩散引擎虚词污染 | is_function_word() ~130 词三层过滤 | diffusion.c |
+| strchr 多字符常量 bug | strchr → strstr（单字符→子串匹配） | json_config.c |
+| 编译警告全项目 | 10 文件 14 处警告清零 (`-Wall -Wextra`) | 见 changelogs/054 |
+| Windows localtime_r | `#ifdef _WIN32` → localtime_s | brainstem.c, error.c, perception.c |
+| strncpy 截断 | → snprintf 安全替代 | web_fetch.c |
 
 ## 设计决策记录
 
@@ -929,6 +970,7 @@ PivotMind/
 | 并行用 OpenMP 而非 pthread | 代码侵入性低，适合 for 循环并行模式 |
 | 锁策略：net->mutex 粗粒度 | 简单可靠，竞态比死锁更难调试 |
 | 涌现而非编码 | POS 从种子涌现、跨拓扑从使用模式中自适应 |
+| 语法连接词 POS 映射 | 按(prev_pos, curr_pos)词类对决定连接词，比硬编码轮换更准确 |
 
 ## 待优化方向
 

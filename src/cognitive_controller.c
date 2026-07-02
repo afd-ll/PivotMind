@@ -1505,6 +1505,7 @@ static int str_ends_with_fast(const char* str, int slen, const char* suffix) {
     return 1;
 }
 
+__attribute__((unused))
 static int str_ends_with(const char* str, const char* suffix) {
     if (!str || !suffix) return 0;
     return str_ends_with_fast(str, (int)strlen(str), suffix);

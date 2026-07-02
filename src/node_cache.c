@@ -190,6 +190,7 @@ static int nc_serialize_node(ReasoningNode* node, uint8_t* buf, int buf_sz) {
 
 /** 写入节点到文件的指定偏移 */
 static int nc_write_node_at(NodeCache* nc, HuarongTopologyNet* net, ReasoningNode* node, int64_t offset) {
+    (void)net;
     int size = nc_node_data_size(node);
     if (size <= 0 || size > (1<<24)) return -1;  /* 16MB 上限 */
 

@@ -23,7 +23,11 @@ void log_message(LogLevel level, const char* file, int line, const char* fmt, ..
     time_t now;
     time(&now);
     struct tm tm_info;
+#ifdef _WIN32
+    localtime_s(&tm_info, &now);
+#else
     localtime_r(&now, &tm_info);
+#endif
     char time_buffer[26];
     strftime(time_buffer, 26, "%Y-%m-%d %H:%M:%S", &tm_info);
 

@@ -197,7 +197,6 @@ static int parse_config(const char* json, ConfigContext* ctx) {
         skip_ws(&p);
         if (!*p || *p == '}') break;
 
-        char closing = '\0';
         if (*p == ',' ) { p++; continue; }
 
         if (*p == '"') {
@@ -238,8 +237,8 @@ static int parse_config(const char* json, ConfigContext* ctx) {
                         } else if (isdigit((unsigned char)*p) || *p == '-' || *p == '.') {
                             float v = read_number(&p);
                             /* int or float? */
-                            if (strchr(key, 'rate') || strchr(key, 'prob') || strchr(key, 'strength') ||
-                                strchr(key, 'decay')) {
+                            if (strstr(key, "rate") || strstr(key, "prob") || strstr(key, "strength") ||
+                                strstr(key, "decay")) {
                                 set_float_field(ctx, group, key, v);
                             } else {
                                 set_int_field(ctx, group, key, v);

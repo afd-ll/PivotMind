@@ -142,6 +142,7 @@ char* prefrontal_chat(Prefrontal* pf, const char* input) {
 
 void prefrontal_feedback(Prefrontal* pf, const char* input,
                           const char* response, const char* rating) {
+    (void)response;
     if (!pf || !pf->dialog || !rating) return;
 
     float confidence = (strcmp(rating, "correct") == 0 || strcmp(rating, "对") == 0) ? 0.95f : 0.2f;

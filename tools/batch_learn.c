@@ -7,7 +7,7 @@
  * 通过自主学习器的同时激活机制自动建边涨置信度
  *
  * 编译: gcc -std=gnu99 -O2 -Iinclude -I. -Ilibs -D_USE_MATH_DEFINES -pthread
- *        -o build/bin/batch_learn tools/batch_learn.c src/*.c -lm -fopenmp
+ *        -o build/bin/batch_learn tools/batch_learn.c src/ *.c -lm -fopenmp
  *        (排除 network_tool.c)
  * 用法: ./build/bin/batch_learn [状态文件] [QA文件] [epochs]
  *       默认: pivotmind_state.dat  data/hermes_knowledge_base.json  1
@@ -328,7 +328,7 @@ int main(int argc, char* argv[]) {
             fclose(df);
             DictTable* dt = dict_table_create(524288);
             if (dt && dict_load_jieba(dt, dict_path) > 0) {
-                master->ext_dict = dt;
+                master->ext_dict = (struct ExternalDict*)dt;
                 printf("  ✓ 词典已加载 (%d 条), 启用词级建模\n", dict_table_size(dt));
             }
         } else {

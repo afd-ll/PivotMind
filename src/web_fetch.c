@@ -157,8 +157,7 @@ static void domain_throttle(const char* domain) {
             rec->in_use = 1;
             rec->last_request = 0;
             rec->cooldown_until = 0;
-            strncpy(rec->domain, domain, DOMAIN_MAX_LEN - 1);
-            rec->domain[DOMAIN_MAX_LEN - 1] = '\0';
+            snprintf(rec->domain, DOMAIN_MAX_LEN, "%s", domain);
             break;
         }
         if (strcmp(g_domain_table[idx].domain, domain) == 0) {
@@ -179,8 +178,7 @@ static void domain_throttle(const char* domain) {
         }
         if (oldest_idx >= 0) {
             rec = &g_domain_table[oldest_idx];
-            strncpy(rec->domain, domain, DOMAIN_MAX_LEN - 1);
-            rec->domain[DOMAIN_MAX_LEN - 1] = '\0';
+            snprintf(rec->domain, DOMAIN_MAX_LEN, "%s", domain);
         }
     }
 
@@ -289,8 +287,7 @@ static RobotsCache* robots_cache_alloc(const char* domain) {
         if (!g_robots_cache[idx].in_use) {
             memset(&g_robots_cache[idx], 0, sizeof(RobotsCache));
             g_robots_cache[idx].in_use = 1;
-            strncpy(g_robots_cache[idx].domain, domain, DOMAIN_MAX_LEN - 1);
-            g_robots_cache[idx].domain[DOMAIN_MAX_LEN - 1] = '\0';
+            snprintf(g_robots_cache[idx].domain, DOMAIN_MAX_LEN, "%s", domain);
             return &g_robots_cache[idx];
         }
     }
