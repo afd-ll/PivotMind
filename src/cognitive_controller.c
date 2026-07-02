@@ -1301,109 +1301,189 @@ int cognitive_controller_pattern_count(CognitiveController* cc) {
 
 // ==================== 词性标注 (from pm) ====================
 
+/* 哈希表: 中文词 → POS 标签，O(1) 查找替代原 150+ strcmp 链 */
+#define POS_HASH_SIZE 4099  /* 质数 */
+
+static struct { const char* word; POSTag tag; } _pos_hash[POS_HASH_SIZE];
+static int _pos_hash_init = 0;
+
+static uint32_t _djb2(const char* s) {
+    uint32_t h = 5381;
+    for (unsigned char c = (unsigned char)*s; c; c = (unsigned char)*(++s))
+        h = (h * 33) ^ c;
+    return h;
+}
+
+static void _pos_hash_put(const char* word, POSTag tag) {
+    uint32_t h = _djb2(word);
+    for (int i = 0; i < POS_HASH_SIZE; i++) {
+        uint32_t idx = (h + (uint32_t)i) % POS_HASH_SIZE;
+        if (!_pos_hash[idx].word) {
+            _pos_hash[idx].word = word;
+            _pos_hash[idx].tag  = tag;
+            return;
+        }
+    }
+}
+
+static POSTag _pos_hash_get(const char* word) {
+    uint32_t h = _djb2(word);
+    for (int i = 0; i < POS_HASH_SIZE; i++) {
+        uint32_t idx = (h + (uint32_t)i) % POS_HASH_SIZE;
+        if (!_pos_hash[idx].word) return POS_UNKNOWN;
+        if (strcmp(_pos_hash[idx].word, word) == 0)
+            return _pos_hash[idx].tag;
+    }
+    return POS_UNKNOWN;
+}
+
+static void _pos_hash_init_once(void) {
+    if (_pos_hash_init) return;
+    memset(_pos_hash, 0, sizeof(_pos_hash));
+    /* 代词 */
+    _pos_hash_put("我", POS_PRON); _pos_hash_put("你", POS_PRON);
+    _pos_hash_put("他", POS_PRON); _pos_hash_put("她", POS_PRON);
+    _pos_hash_put("它", POS_PRON); _pos_hash_put("我们", POS_PRON);
+    _pos_hash_put("你们", POS_PRON); _pos_hash_put("他们", POS_PRON);
+    _pos_hash_put("她们", POS_PRON); _pos_hash_put("自己", POS_PRON);
+    _pos_hash_put("谁", POS_PRON); _pos_hash_put("什么", POS_PRON);
+    _pos_hash_put("这", POS_PRON); _pos_hash_put("那", POS_PRON);
+    _pos_hash_put("哪", POS_PRON); _pos_hash_put("怎么", POS_PRON);
+    _pos_hash_put("这样", POS_PRON); _pos_hash_put("那样", POS_PRON);
+    /* 助词 */
+    _pos_hash_put("的", POS_PARTICLE); _pos_hash_put("了", POS_PARTICLE);
+    _pos_hash_put("着", POS_PARTICLE); _pos_hash_put("过", POS_PARTICLE);
+    _pos_hash_put("地", POS_PARTICLE); _pos_hash_put("得", POS_PARTICLE);
+    _pos_hash_put("吗", POS_PARTICLE); _pos_hash_put("呢", POS_PARTICLE);
+    _pos_hash_put("吧", POS_PARTICLE); _pos_hash_put("啊", POS_PARTICLE);
+    _pos_hash_put("嘛", POS_PARTICLE); _pos_hash_put("呀", POS_PARTICLE);
+    _pos_hash_put("所", POS_PARTICLE); _pos_hash_put("被", POS_PARTICLE);
+    _pos_hash_put("把", POS_PARTICLE); _pos_hash_put("将", POS_PARTICLE);
+    _pos_hash_put("之", POS_PARTICLE);
+    /* 连词 */
+    _pos_hash_put("和", POS_CONJ); _pos_hash_put("与", POS_CONJ);
+    _pos_hash_put("或", POS_CONJ); _pos_hash_put("而", POS_CONJ);
+    _pos_hash_put("且", POS_CONJ); _pos_hash_put("但", POS_CONJ);
+    _pos_hash_put("却", POS_CONJ); _pos_hash_put("并", POS_CONJ);
+    _pos_hash_put("也", POS_CONJ); _pos_hash_put("又", POS_CONJ);
+    _pos_hash_put("还", POS_CONJ); _pos_hash_put("就", POS_CONJ);
+    _pos_hash_put("才", POS_CONJ); _pos_hash_put("则", POS_CONJ);
+    _pos_hash_put("虽然", POS_CONJ); _pos_hash_put("但是", POS_CONJ);
+    _pos_hash_put("因为", POS_CONJ); _pos_hash_put("所以", POS_CONJ);
+    _pos_hash_put("如果", POS_CONJ); _pos_hash_put("即使", POS_CONJ);
+    _pos_hash_put("只要", POS_CONJ);
+    /* 介词 */
+    _pos_hash_put("在", POS_PREP); _pos_hash_put("从", POS_PREP);
+    _pos_hash_put("到", POS_PREP); _pos_hash_put("对", POS_PREP);
+    _pos_hash_put("向", POS_PREP); _pos_hash_put("往", POS_PREP);
+    _pos_hash_put("比", POS_PREP); _pos_hash_put("给", POS_PREP);
+    _pos_hash_put("让", POS_PREP); _pos_hash_put("用", POS_PREP);
+    _pos_hash_put("以", POS_PREP); _pos_hash_put("为", POS_PREP);
+    _pos_hash_put("于", POS_PREP); _pos_hash_put("关于", POS_PREP);
+    _pos_hash_put("按照", POS_PREP); _pos_hash_put("根据", POS_PREP);
+    _pos_hash_put("通过", POS_PREP); _pos_hash_put("为了", POS_PREP);
+    /* 副词 */
+    _pos_hash_put("很", POS_ADV); _pos_hash_put("太", POS_ADV);
+    _pos_hash_put("最", POS_ADV); _pos_hash_put("更", POS_ADV);
+    _pos_hash_put("非常", POS_ADV); _pos_hash_put("都", POS_ADV);
+    _pos_hash_put("只", POS_ADV); _pos_hash_put("再", POS_ADV);
+    _pos_hash_put("已经", POS_ADV); _pos_hash_put("正在", POS_ADV);
+    _pos_hash_put("一直", POS_ADV); _pos_hash_put("可能", POS_ADV);
+    _pos_hash_put("不", POS_ADV); _pos_hash_put("没", POS_ADV);
+    _pos_hash_put("没有", POS_ADV); _pos_hash_put("会", POS_ADV);
+    _pos_hash_put("能", POS_ADV); _pos_hash_put("可以", POS_ADV);
+    _pos_hash_put("要", POS_ADV); _pos_hash_put("应该", POS_ADV);
+    _pos_hash_put("一定", POS_ADV);
+    /* 数词/量词 */
+    _pos_hash_put("一", POS_NUM); _pos_hash_put("二", POS_NUM);
+    _pos_hash_put("三", POS_NUM); _pos_hash_put("四", POS_NUM);
+    _pos_hash_put("五", POS_NUM); _pos_hash_put("六", POS_NUM);
+    _pos_hash_put("七", POS_NUM); _pos_hash_put("八", POS_NUM);
+    _pos_hash_put("九", POS_NUM); _pos_hash_put("十", POS_NUM);
+    _pos_hash_put("百", POS_NUM); _pos_hash_put("千", POS_NUM);
+    _pos_hash_put("万", POS_NUM); _pos_hash_put("个", POS_NUM);
+    _pos_hash_put("只", POS_NUM); _pos_hash_put("条", POS_NUM);
+    _pos_hash_put("本", POS_NUM); _pos_hash_put("次", POS_NUM);
+    _pos_hash_put("遍", POS_NUM); _pos_hash_put("趟", POS_NUM);
+    _pos_hash_put("回", POS_NUM); _pos_hash_put("些", POS_NUM);
+    _pos_hash_put("多", POS_NUM); _pos_hash_put("少", POS_NUM);
+    _pos_hash_put("两", POS_NUM); _pos_hash_put("几", POS_NUM);
+    _pos_hash_put("各", POS_NUM); _pos_hash_put("每", POS_NUM);
+    _pos_hash_put("全", POS_NUM); _pos_hash_put("所有", POS_NUM);
+    /* 叹词 */
+    _pos_hash_put("哦", POS_INTERJ); _pos_hash_put("嗯", POS_INTERJ);
+    _pos_hash_put("唉", POS_INTERJ); _pos_hash_put("喂", POS_INTERJ);
+    _pos_hash_put("嗨", POS_INTERJ); _pos_hash_put("哇", POS_INTERJ);
+    _pos_hash_put("哈哈", POS_INTERJ); _pos_hash_put("嘿嘿", POS_INTERJ);
+    _pos_hash_put("哼", POS_INTERJ);
+    /* 形容词 */
+    _pos_hash_put("好", POS_ADJ); _pos_hash_put("坏", POS_ADJ);
+    _pos_hash_put("大", POS_ADJ); _pos_hash_put("小", POS_ADJ);
+    _pos_hash_put("新", POS_ADJ); _pos_hash_put("旧", POS_ADJ);
+    _pos_hash_put("高", POS_ADJ); _pos_hash_put("低", POS_ADJ);
+    _pos_hash_put("快", POS_ADJ); _pos_hash_put("慢", POS_ADJ);
+    _pos_hash_put("长", POS_ADJ); _pos_hash_put("短", POS_ADJ);
+    _pos_hash_put("冷", POS_ADJ); _pos_hash_put("热", POS_ADJ);
+    _pos_hash_put("难", POS_ADJ); _pos_hash_put("易", POS_ADJ);
+    _pos_hash_put("重", POS_ADJ); _pos_hash_put("轻", POS_ADJ);
+    _pos_hash_put("深", POS_ADJ); _pos_hash_put("浅", POS_ADJ);
+    _pos_hash_put("美", POS_ADJ); _pos_hash_put("真", POS_ADJ);
+    _pos_hash_put("假", POS_ADJ); _pos_hash_put("对", POS_ADJ);
+    _pos_hash_put("错", POS_ADJ);
+    /* 动词 */
+    _pos_hash_put("是", POS_VERB); _pos_hash_put("有", POS_VERB);
+    _pos_hash_put("说", POS_VERB); _pos_hash_put("看", POS_VERB);
+    _pos_hash_put("做", POS_VERB); _pos_hash_put("来", POS_VERB);
+    _pos_hash_put("去", POS_VERB); _pos_hash_put("上", POS_VERB);
+    _pos_hash_put("下", POS_VERB); _pos_hash_put("进", POS_VERB);
+    _pos_hash_put("出", POS_VERB); _pos_hash_put("吃", POS_VERB);
+    _pos_hash_put("喝", POS_VERB); _pos_hash_put("走", POS_VERB);
+    _pos_hash_put("跑", POS_VERB); _pos_hash_put("写", POS_VERB);
+    _pos_hash_put("读", POS_VERB); _pos_hash_put("学", POS_VERB);
+    _pos_hash_put("教", POS_VERB); _pos_hash_put("买", POS_VERB);
+    _pos_hash_put("卖", POS_VERB); _pos_hash_put("开", POS_VERB);
+    _pos_hash_put("关", POS_VERB); _pos_hash_put("打", POS_VERB);
+    _pos_hash_put("听", POS_VERB); _pos_hash_put("想", POS_VERB);
+    _pos_hash_put("知", POS_VERB); _pos_hash_put("问", POS_VERB);
+    _pos_hash_put("答", POS_VERB); _pos_hash_put("给", POS_VERB);
+    _pos_hash_put("拿", POS_VERB); _pos_hash_put("放", POS_VERB);
+    _pos_hash_put("找", POS_VERB); _pos_hash_put("见", POS_VERB);
+    _pos_hash_put("叫", POS_VERB); _pos_hash_put("使", POS_VERB);
+    _pos_hash_put("帮", POS_VERB); _pos_hash_put("爱", POS_VERB);
+    _pos_hash_put("恨", POS_VERB); _pos_hash_put("喜", POS_VERB);
+    _pos_hash_put("谢", POS_VERB); _pos_hash_put("送", POS_VERB);
+    _pos_hash_put("回", POS_VERB); _pos_hash_put("带", POS_VERB);
+    _pos_hash_put("变", POS_VERB); _pos_hash_put("成", POS_VERB);
+    _pos_hash_put("算", POS_VERB); _pos_hash_put("试", POS_VERB);
+    _pos_hash_put("练", POS_VERB); _pos_hash_put("记", POS_VERB);
+    _pos_hash_put("忘", POS_VERB); _pos_hash_put("理", POS_VERB);
+    _pos_hash_put("解", POS_VERB); _pos_hash_put("判断", POS_VERB);
+    _pos_hash_put("思考", POS_VERB); _pos_hash_put("表示", POS_VERB);
+    _pos_hash_put("发生", POS_VERB); _pos_hash_put("存在", POS_VERB);
+    _pos_hash_put("产生", POS_VERB); _pos_hash_put("包括", POS_VERB);
+    _pos_hash_put("需要", POS_VERB);
+    _pos_hash_init = 1;
+}
+
 static POSTag chinese_pos_lookup(const char* word) {
     if (!word || !word[0]) return POS_UNKNOWN;
 
-    const char* c = word;
+    _pos_hash_init_once();
+    POSTag tag = _pos_hash_get(word);
+    if (tag != POS_UNKNOWN) return tag;
 
-    // 代词
-    if (strcmp(c, "我") == 0 || strcmp(c, "你") == 0 || strcmp(c, "他") == 0 ||
-        strcmp(c, "她") == 0 || strcmp(c, "它") == 0 || strcmp(c, "我们") == 0 ||
-        strcmp(c, "你们") == 0 || strcmp(c, "他们") == 0 || strcmp(c, "她们") == 0 ||
-        strcmp(c, "自己") == 0 || strcmp(c, "谁") == 0 || strcmp(c, "什么") == 0 ||
-        strcmp(c, "这") == 0 || strcmp(c, "那") == 0 || strcmp(c, "哪") == 0 ||
-        strcmp(c, "怎么") == 0 || strcmp(c, "这样") == 0 || strcmp(c, "那样") == 0)
-        return POS_PRON;
-    if (strcmp(c, "的") == 0 || strcmp(c, "了") == 0 || strcmp(c, "着") == 0 ||
-        strcmp(c, "过") == 0 || strcmp(c, "地") == 0 || strcmp(c, "得") == 0 ||
-        strcmp(c, "吗") == 0 || strcmp(c, "呢") == 0 || strcmp(c, "吧") == 0 ||
-        strcmp(c, "啊") == 0 || strcmp(c, "嘛") == 0 || strcmp(c, "呀") == 0 ||
-        strcmp(c, "所") == 0 || strcmp(c, "被") == 0 || strcmp(c, "把") == 0 ||
-        strcmp(c, "将") == 0 || strcmp(c, "之") == 0)
-        return POS_PARTICLE;
-    if (strcmp(c, "和") == 0 || strcmp(c, "与") == 0 || strcmp(c, "或") == 0 ||
-        strcmp(c, "而") == 0 || strcmp(c, "且") == 0 || strcmp(c, "但") == 0 ||
-        strcmp(c, "却") == 0 || strcmp(c, "并") == 0 || strcmp(c, "也") == 0 ||
-        strcmp(c, "又") == 0 || strcmp(c, "还") == 0 || strcmp(c, "就") == 0 ||
-        strcmp(c, "才") == 0 || strcmp(c, "则") == 0 || strcmp(c, "虽然") == 0 ||
-        strcmp(c, "但是") == 0 || strcmp(c, "因为") == 0 || strcmp(c, "所以") == 0 ||
-        strcmp(c, "如果") == 0 || strcmp(c, "即使") == 0 || strcmp(c, "只要") == 0)
-        return POS_CONJ;
-    if (strcmp(c, "在") == 0 || strcmp(c, "从") == 0 || strcmp(c, "到") == 0 ||
-        strcmp(c, "对") == 0 || strcmp(c, "向") == 0 || strcmp(c, "往") == 0 ||
-        strcmp(c, "比") == 0 || strcmp(c, "给") == 0 || strcmp(c, "让") == 0 ||
-        strcmp(c, "用") == 0 || strcmp(c, "以") == 0 || strcmp(c, "为") == 0 ||
-        strcmp(c, "于") == 0 || strcmp(c, "关于") == 0 || strcmp(c, "按照") == 0 ||
-        strcmp(c, "根据") == 0 || strcmp(c, "通过") == 0 || strcmp(c, "为了") == 0)
-        return POS_PREP;
-    if (strcmp(c, "很") == 0 || strcmp(c, "太") == 0 || strcmp(c, "最") == 0 ||
-        strcmp(c, "更") == 0 || strcmp(c, "非常") == 0 || strcmp(c, "都") == 0 ||
-        strcmp(c, "只") == 0 || strcmp(c, "再") == 0 || strcmp(c, "已经") == 0 ||
-        strcmp(c, "正在") == 0 || strcmp(c, "一直") == 0 || strcmp(c, "可能") == 0 ||
-        strcmp(c, "不") == 0 || strcmp(c, "没") == 0 || strcmp(c, "没有") == 0 ||
-        strcmp(c, "会") == 0 || strcmp(c, "能") == 0 || strcmp(c, "可以") == 0 ||
-        strcmp(c, "要") == 0 || strcmp(c, "应该") == 0 || strcmp(c, "一定") == 0)
-        return POS_ADV;
-    if (strcmp(c, "一") == 0 || strcmp(c, "二") == 0 || strcmp(c, "三") == 0 ||
-        strcmp(c, "四") == 0 || strcmp(c, "五") == 0 || strcmp(c, "六") == 0 ||
-        strcmp(c, "七") == 0 || strcmp(c, "八") == 0 || strcmp(c, "九") == 0 ||
-        strcmp(c, "十") == 0 || strcmp(c, "百") == 0 || strcmp(c, "千") == 0 ||
-        strcmp(c, "万") == 0 || strcmp(c, "个") == 0 || strcmp(c, "只") == 0 ||
-        strcmp(c, "条") == 0 || strcmp(c, "本") == 0 || strcmp(c, "次") == 0 ||
-        strcmp(c, "遍") == 0 || strcmp(c, "趟") == 0 || strcmp(c, "回") == 0 ||
-        strcmp(c, "些") == 0 || strcmp(c, "多") == 0 || strcmp(c, "少") == 0 ||
-        strcmp(c, "两") == 0 || strcmp(c, "几") == 0 || strcmp(c, "各") == 0 ||
-        strcmp(c, "每") == 0 || strcmp(c, "全") == 0 || strcmp(c, "所有") == 0)
-        return POS_NUM;
-    if (strcmp(c, "哦") == 0 || strcmp(c, "嗯") == 0 || strcmp(c, "唉") == 0 ||
-        strcmp(c, "喂") == 0 || strcmp(c, "嗨") == 0 || strcmp(c, "哇") == 0 ||
-        strcmp(c, "哈哈") == 0 || strcmp(c, "嘿嘿") == 0 || strcmp(c, "哼") == 0)
-        return POS_INTERJ;
-    if (strcmp(c, "好") == 0 || strcmp(c, "坏") == 0 || strcmp(c, "大") == 0 ||
-        strcmp(c, "小") == 0 || strcmp(c, "新") == 0 || strcmp(c, "旧") == 0 ||
-        strcmp(c, "高") == 0 || strcmp(c, "低") == 0 || strcmp(c, "快") == 0 ||
-        strcmp(c, "慢") == 0 || strcmp(c, "长") == 0 || strcmp(c, "短") == 0 ||
-        strcmp(c, "多") == 0 || strcmp(c, "少") == 0 || strcmp(c, "冷") == 0 ||
-        strcmp(c, "热") == 0 || strcmp(c, "难") == 0 || strcmp(c, "易") == 0 ||
-        strcmp(c, "重") == 0 || strcmp(c, "轻") == 0 || strcmp(c, "深") == 0 ||
-        strcmp(c, "浅") == 0 || strcmp(c, "美") == 0 || strcmp(c, "真") == 0 ||
-        strcmp(c, "假") == 0 || strcmp(c, "对") == 0 || strcmp(c, "错") == 0)
-        return POS_ADJ;
-    if (strcmp(c, "是") == 0 || strcmp(c, "有") == 0 || strcmp(c, "说") == 0 ||
-        strcmp(c, "看") == 0 || strcmp(c, "做") == 0 || strcmp(c, "来") == 0 ||
-        strcmp(c, "去") == 0 || strcmp(c, "上") == 0 || strcmp(c, "下") == 0 ||
-        strcmp(c, "进") == 0 || strcmp(c, "出") == 0 || strcmp(c, "吃") == 0 ||
-        strcmp(c, "喝") == 0 || strcmp(c, "走") == 0 || strcmp(c, "跑") == 0 ||
-        strcmp(c, "写") == 0 || strcmp(c, "读") == 0 || strcmp(c, "学") == 0 ||
-        strcmp(c, "教") == 0 || strcmp(c, "买") == 0 || strcmp(c, "卖") == 0 ||
-        strcmp(c, "开") == 0 || strcmp(c, "关") == 0 || strcmp(c, "打") == 0 ||
-        strcmp(c, "听") == 0 || strcmp(c, "想") == 0 || strcmp(c, "知") == 0 ||
-        strcmp(c, "问") == 0 || strcmp(c, "答") == 0 || strcmp(c, "给") == 0 ||
-        strcmp(c, "拿") == 0 || strcmp(c, "放") == 0 || strcmp(c, "用") == 0 ||
-        strcmp(c, "找") == 0 || strcmp(c, "见") == 0 || strcmp(c, "叫") == 0 ||
-        strcmp(c, "让") == 0 || strcmp(c, "使") == 0 || strcmp(c, "帮") == 0 ||
-        strcmp(c, "爱") == 0 || strcmp(c, "恨") == 0 || strcmp(c, "喜") == 0 ||
-        strcmp(c, "谢") == 0 || strcmp(c, "送") == 0 || strcmp(c, "回") == 0 ||
-        strcmp(c, "带") == 0 || strcmp(c, "变") == 0 || strcmp(c, "成") == 0 ||
-        strcmp(c, "算") == 0 || strcmp(c, "试") == 0 || strcmp(c, "练") == 0 ||
-        strcmp(c, "记") == 0 || strcmp(c, "忘") == 0 || strcmp(c, "理") == 0 ||
-        strcmp(c, "解") == 0 || strcmp(c, "判断") == 0 || strcmp(c, "思考") == 0 ||
-        strcmp(c, "表示") == 0 || strcmp(c, "发生") == 0 || strcmp(c, "存在") == 0 ||
-        strcmp(c, "产生") == 0 || strcmp(c, "包括") == 0 || strcmp(c, "需要") == 0 ||
-        strcmp(c, "可能") == 0 || strcmp(c, "可以") == 0 || strcmp(c, "应该") == 0)
-        return POS_VERB;
-
-    int len = strlen(c);
+    /* 后缀规则: 名词检测 (仍用后缀表做兜底) */
+    int len = (int)strlen(word);
     if (len >= 2) {
-        const char* noun_suffixes[] = {"子","头","者","员","家","机","器",
-                                        "学","法","性","化","体","部","品",
-                                        "物","人","生","日","月","年","天",
-                                        "地","水","火","风","山","海","树",
-                                        "花","鸟","鱼","虫","心","手","眼",
-                                        NULL};
+        static const char* noun_suffixes[] = {"子","头","者","员","家","机","器",
+            "学","法","性","化","体","部","品",
+            "物","人","生","日","月","年","天",
+            "地","水","火","风","山","海","树",
+            "花","鸟","鱼","虫","心","手","眼",
+            NULL};
         for (int si = 0; noun_suffixes[si]; si++) {
-            int slen = strlen(noun_suffixes[si]);
-            if (len >= slen && strcmp(c + len - slen, noun_suffixes[si]) == 0)
+            int slen = (int)strlen(noun_suffixes[si]);
+            if (len >= slen && strcmp(word + len - slen, noun_suffixes[si]) == 0)
                 return POS_NOUN;
         }
     }

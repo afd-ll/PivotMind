@@ -764,14 +764,18 @@ void autonomic_learn_from_dialog(MasterTopology* master,
             ReasoningNode* tgt_input[MAX_CHARS_PER_TEXT];
             ReasoningNode* tgt_response[MAX_CHARS_PER_TEXT];
 
+            /* 语法拓扑: 用涌现词类替代硬编码词典 */
+            CognitiveController* cc = master->cognitive_controller;
             for (int i = 0; i < input_count; i++) {
                 const char* name = input_chars[i];
-                if (is_syntax) name = pos_tag_name(pos_tag_chinese(name));
+                if (is_syntax) name = pos_tag_name(
+                    cc ? pos_tag_emergent(cc, name) : pos_tag_chinese(name));
                 tgt_input[i] = huarong_net_find_or_create_node(tgt->net, name, NULL, 0, tgt->node_hash);
             }
             for (int i = 0; i < response_count; i++) {
                 const char* name = response_chars[i];
-                if (is_syntax) name = pos_tag_name(pos_tag_chinese(name));
+                if (is_syntax) name = pos_tag_name(
+                    cc ? pos_tag_emergent(cc, name) : pos_tag_chinese(name));
                 tgt_response[i] = huarong_net_find_or_create_node(tgt->net, name, NULL, 0, tgt->node_hash);
             }
 

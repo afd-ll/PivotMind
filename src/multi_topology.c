@@ -1513,13 +1513,15 @@ int master_get_node_pos_tag(MasterTopology* master,
     }
 
 fallback_hardcoded:
-    /* === 第三层：硬编码字典兜底（冷启动期）=== */
+    /* === 第三层：涌现词类 + 硬编码字典兜底 === */
     {
         SubTopology* vocab = master_get_sub_topology_by_type(master, TOPO_VOCABULARY);
         if (vocab && vocab->net && node_id >= 0 && node_id < vocab->net->node_count) {
             ReasoningNode* node = vocab->net->nodes[node_id];
             if (node && node->concept) {
-                POSTag tag = pos_tag_chinese(node->concept);
+                POSTag tag = master->cognitive_controller
+                    ? pos_tag_emergent(master->cognitive_controller, node->concept)
+                    : pos_tag_chinese(node->concept);
                 if (tag != POS_UNKNOWN) return (int)tag;
             }
         }
