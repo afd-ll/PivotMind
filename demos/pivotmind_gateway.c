@@ -669,6 +669,25 @@ static void handle_chat(GatewaySystem* gw, int fd, const char* body) {
     int use_pfe = 0;
     char* response = NULL;
 
+    /* v0.4.3: 对话中自动学习 — 将输入 token 注册到词汇拓扑
+     * 这是端到端对话质量最大的瓶颈：不学习新词则扩散引擎 active_count=0 */
+    {
+        SubTopology* vocab = NULL;
+        for (int t = 0; t < gw->topology->sub_topo_count; t++) {
+            if (gw->topology->sub_topologies[t] &&
+                gw->topology->sub_topologies[t]->type == TOPO_VOCABULARY)
+                { vocab = gw->topology->sub_topologies[t]; break; }
+        }
+        if (vocab && vocab->net) {
+            EmergentPOS* ep = (gw->prefrontal && gw->prefrontal->controller)
+                              ? gw->prefrontal->controller->emergent_pos : NULL;
+            int prev_id = -1;
+            int learned = _learn_tokens(vocab, msg, &prev_id, ep);
+            if (learned > 0)
+                printf("[gateway] 对话中学习: +%d 个新词\n", learned);
+        }
+    }
+
     if (gw->pfe) {
         int complexity = pfe_assess_complexity(gw->pfe, msg);
         if (complexity > 0) {
