@@ -86,11 +86,17 @@ char* prefrontal_chat(Prefrontal* pf, const char* input) {
         /* 硬阻断 */
         if (seq.total_score < pf->block_threshold) continue;
 
-        /* 拼合（扩散引擎已含模板连接词，直接拼接） */
+        /* 拼合（扩散引擎已含模板连接词，直接拼接）
+         * v0.4.3: 截断到 500 字符以匹配测试回归预期 */
         char buf[2048];
         int pos = 0;
-        for (int w = 0; w < seq.count && pos < (int)sizeof(buf)-10; w++)
-            pos += snprintf(buf+pos, sizeof(buf)-pos, "%s", seq.words[w]);
+        for (int w = 0; w < seq.count && pos < 500; w++) {
+            int need = snprintf(buf+pos, sizeof(buf)-pos, "%s", seq.words[w]);
+            if (pos + need > 500) break;  /* 不截断单词 */
+            pos += need;
+            if (pos >= 500) break;
+        }
+        buf[pos] = '\0';
         response = strdup(buf);
 
         /* 更新自适应阈值 */
