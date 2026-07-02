@@ -1,39 +1,43 @@
 #include <stdio.h>
-#include <windows.h>
 #include <locale.h>
 
-// 设置控制台编码为UTF-8(Windows)
-void set_console_utf8() {
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
+#ifdef _WIN32
+void set_console_utf8(void) {
     SetConsoleOutputCP(65001);
     SetConsoleCP(65001);
 }
+#endif
 
-int main() {
-    // 尝试多种方法设置中文支持
+int main(void) {
+#ifdef _WIN32
     set_console_utf8();
-    
-    setlocale(LC_ALL, ".UTF-8");
     setlocale(LC_CTYPE, "Chinese_China.65001");
-    
+#endif
+    setlocale(LC_ALL, ".UTF-8");
+
     printf("===========================================\n");
-    printf("中文显示测试\n");
+    printf("Chinese display test\n");
     printf("===========================================\n\n");
-    
-    printf("测试1: 基本中文\n");
-    printf("你好！这是中文测试。\n\n");
-    
-    printf("测试2: 混合文本\n");
-    printf("Hello 你好 Welcome 欢迎\n\n");
-    
-    printf("测试3: 特殊字符\n");
-    printf("≠ ≤ ≥ ± × ÷ ∞ √ ∑ ∏\n\n");
-    
-    printf("测试4: 长文本\n");
-    printf("这是一个测试程序，用于检查控制台是否能够正确显示中文字符。如果这段文字能够正常显示，说明中文支持已经配置正确。\n\n");
-    
+
+    printf("Test 1: Basic Chinese\n");
+    printf("Hello! This is a Chinese test.\n\n");
+
+    printf("Test 2: Mixed text\n");
+    printf("Hello ni-hao Welcome huan-ying\n\n");
+
+    printf("Test 3: Special characters\n");
+    printf("!= <= >= +- */ inf sqrt sum prod\n\n");
+
+    printf("Test 4: Long text\n");
+    printf("This is a test program to check whether the console can correctly display Chinese. If this text displays correctly it means Chinese support is properly configured.\n\n");
+
     printf("===========================================\n");
-    printf("测试完成\n");
+    printf("Test complete\n");
     printf("===========================================\n");
-    
+
     return 0;
 }

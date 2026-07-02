@@ -17,6 +17,7 @@
 #include "node_hash.h"
 #include "utf8_tokenizer.h"
 #include "cognitive_params.h"
+#include "constants.h"
 
 // 本地防回声辅助函数
 static int char_in_avoid_set(const char* ch, const char* set) {
@@ -56,7 +57,7 @@ typedef struct {
     int assoc_count;
     
     // 激活历史（用于防止循环）
-    int visited_nodes[1000];
+    int visited_nodes[8000];  /* was 1000 — 30K+ 节点下严重不足 */
     int visited_count;
     
     // 联想缓存
@@ -120,7 +121,7 @@ bool is_visited(AssociativeEngine* engine, int topo_id, int node_id) {
 
 // 标记节点已访问
 void mark_visited(AssociativeEngine* engine, int topo_id, int node_id) {
-    if (engine->visited_count < 1000) {
+    if (engine->visited_count < 8000) {
         engine->visited_nodes[engine->visited_count++] = topo_id * MAX_NODES_PER_TOPO + node_id;
     }
 }
@@ -205,11 +206,16 @@ void propagate_association(AssociativeEngine* engine,
     }
 
     // 通过拓扑内部连接传播
-    if (topo->net && node->edges) {
-        for (int i = 0; i < node->edge_count; i++) {
-            if (node->edges[i].target) {
-                float new_activation = activation * node->edges[i].weight;
-                propagate_association(engine, topo_id, node->edges[i].target->node_id,
+    // ★ 原子快照：防止 ARM 弱内存序下读到 edges 与 edge_count 不一致
+    //   (add_connection 用 RELEASE 写 edges 指针，此处 ACQUIRE 读保证有序)
+    int ec = __atomic_load_n(&node->edge_count, __ATOMIC_ACQUIRE);
+    Edge* edges_ptr = __atomic_load_n(&node->edges, __ATOMIC_ACQUIRE);
+    if (topo->net && edges_ptr) {
+        int max_safe = ec < PM_AUTONOMIC_MAX_CONN ? ec : PM_AUTONOMIC_MAX_CONN;
+        for (int i = 0; i < max_safe; i++) {
+            if (edges_ptr[i].target) {
+                float new_activation = activation * edges_ptr[i].weight;
+                propagate_association(engine, topo_id, edges_ptr[i].target->node_id,
                                      new_activation * DECAY_RATE,
                                      hop_count + 1, max_hops);
             }

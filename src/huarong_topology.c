@@ -572,10 +572,10 @@ int huarong_net_add_connection(HuarongTopologyNet* net,
             new_edges[i].confidence = 0.5f;
         }
 
-        /* ★ 先 swap 活指针，再 retire 旧数组。
-         * 此后 from_node->edges 永远指向新数组，读线程安全。 */
+        /* ★ 先 swap 活指针（RELEASE 序），再 retire 旧数组。
+         * 读侧用 ACQUIRE 序读取 edges 指针+edge_count，ARM 弱内存序安全。 */
         Edge* old_edges_save = from_node->edges;
-        from_node->edges = new_edges;
+        __atomic_store_n(&from_node->edges, new_edges, __ATOMIC_RELEASE);
         from_node->edge_capacity = new_cap;
 
         /* 旧数组延迟释放：训练线程可能在无锁读取 from_node->edges，
@@ -602,7 +602,8 @@ int huarong_net_add_connection(HuarongTopologyNet* net,
     from_node->edges[from_node->edge_count].motivational_bias = 0.5f;
     from_node->edges[from_node->edge_count].confidence = 0.5f;
     node_conn_hash_insert(net, from_node, to_node, from_node->edge_count);
-    from_node->edge_count++;
+    /* RELEASE 序：读线程 ACQUIRE 读到此值后，保证看到完整边数组 */
+    __atomic_fetch_add(&from_node->edge_count, 1, __ATOMIC_RELEASE);
 
     pthread_mutex_unlock(&net->node_locks[li]);
     return 0;
@@ -646,7 +647,7 @@ int huarong_net_add_bidirectional_connection(HuarongTopologyNet* net,
         a->edges[a->edge_count].weight = clamp(weight, 0.0f, 1.0f);
         a->edges[a->edge_count].motivational_bias = 0.5f;
         a->edges[a->edge_count].confidence = 0.5f;
-        a->edge_count++;
+        __atomic_fetch_add(&a->edge_count, 1, __ATOMIC_RELEASE);
     } else {
         a->edges[a_has_b].weight = clamp(weight, 0.0f, 1.0f);
     }
@@ -659,7 +660,7 @@ int huarong_net_add_bidirectional_connection(HuarongTopologyNet* net,
         b->edges[b->edge_count].weight = clamp(weight, 0.0f, 1.0f);
         b->edges[b->edge_count].motivational_bias = 0.5f;
         b->edges[b->edge_count].confidence = 0.5f;
-        b->edge_count++;
+        __atomic_fetch_add(&b->edge_count, 1, __ATOMIC_RELEASE);
     } else {
         b->edges[b_has_a].weight = clamp(weight, 0.0f, 1.0f);
     }
@@ -811,7 +812,7 @@ int huarong_net_dynamic_remove_node(HuarongTopologyNet* net, int node_id) {
                 kept++;
             }
         }
-        other->edge_count = kept;
+        __atomic_store_n(&other->edge_count, kept, __ATOMIC_RELEASE);
         /* 边压缩后重建 conn_hash，索引已变化。
          * 先置 NULL 再 free，防止无锁读 node_conn_hash_lookup 踩悬空指针 */
         {
@@ -869,7 +870,7 @@ void huarong_net_optimize(HuarongTopologyNet* net) {
             }
         }
         
-        node->edge_count = new_edge_count;
+        __atomic_store_n(&node->edge_count, new_edge_count, __ATOMIC_RELEASE);
         /* 边压缩后重建 conn_hash，索引已变化。
          * 先置 NULL 再 free，防止无锁读 node_conn_hash_lookup 踩悬空指针 */
         {
@@ -921,7 +922,7 @@ int huarong_net_prune_edges(HuarongTopologyNet* net, float min_confidence, float
                     total_pruned++;
                 }
             }
-            node->edge_count = kept;
+            __atomic_store_n(&node->edge_count, kept, __ATOMIC_RELEASE);
             /* 边压缩后重建 conn_hash，索引已变化。
              * 先置 NULL 再 free，防止无锁读 node_conn_hash_lookup 踩悬空指针 */
             {

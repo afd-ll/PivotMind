@@ -593,7 +593,9 @@ int pfe_solve_subgoal(PrefrontalExecutive* pfe, int goal_index) {
         float temperature = pfe->temperature_base + (float)retry * pfe->temperature_increment;
 
         GeneratedSequence seq = {0};
-        int n = cingulate_diffusion_evaluate(pfe->master, g->question, temperature, &seq);
+        int n = cingulate_diffusion_evaluate(pfe->master, g->question, temperature,
+                                               NULL,  /* PFE 无 CognitiveController */
+                                               &seq);
 
         if (n < 2) continue;
 

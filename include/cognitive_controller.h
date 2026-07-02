@@ -486,6 +486,12 @@ int cc_init_emergent_pos(CognitiveController* cc, const char* lang);
 POSTag pos_tag_emergent(CognitiveController* cc, const char* word);
 
 /**
+ * 英文硬编码 POS 查找（后缀规则 + 小词典）
+ * 用于 EmergentPOS 无法分类英文词时的兜底
+ */
+POSTag english_pos_lookup(const char* word);
+
+/**
  * 涌现式软标注 — 返回多个候选词类（支持多义词）
  */
 void pos_tag_emergent_soft(CognitiveController* cc, const char* word,

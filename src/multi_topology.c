@@ -1657,7 +1657,7 @@ const char* template_get_connector(MasterTopology* master, int tpl_node_id, int 
     return tn->tpl_connectors[slot];
 }
 
-/* 内置 POS 对 → 连接词映射（用于自动填充模板连接词） */
+/* 内置 POS 对 → 连接词映射（中文） */
 const char* pos_connector_map(int a, int b) {
     if (a == POS_ADJ  && b == POS_NOUN) return "的";   /* 美丽的+的+花朵 */
     if (a == POS_NOUN && b == POS_NOUN) return "的";   /* 中国+的+首都 */
@@ -1669,6 +1669,20 @@ const char* pos_connector_map(int a, int b) {
     if (a == POS_VERB && b == POS_VERB) return "和";   /* 唱歌和跳舞 */
     if (a == POS_NUM  && b == POS_NOUN) return "个";   /* 三+个+苹果 */
     return "";  /* 默认无连接词 */
+}
+
+/* 内置 POS 对 → 连接词映射（英文） */
+const char* english_connector_map(int a, int b) {
+    if (a == POS_ADJ  && b == POS_NOUN) return " ";    /* beautiful world — 空格 */
+    if (a == POS_NOUN && b == POS_NOUN) return " of ";  /* capital of China */
+    if (a == POS_ADV  && b == POS_VERB) return " ";     /* quickly run — 空格 */
+    if (a == POS_VERB && b == POS_NOUN) return " ";     /* eat apple — 空格 */
+    if (a == POS_NOUN && b == POS_VERB) return " ";     /* I eat — 空格 */
+    if (a == POS_NOUN && b == POS_ADJ)  return " is ";  /* apple is red */
+    if (a == POS_VERB && b == POS_ADV)  return " ";     /* run fast */
+    if (a == POS_VERB && b == POS_VERB) return " and "; /* sing and dance */
+    if (a == POS_NUM  && b == POS_NOUN) return " ";     /* three apples — 空格 */
+    return " ";  /* 英文默认空格 */
 }
 
 int topology_walk_greedy(SubTopology* sub, int start_node_id,

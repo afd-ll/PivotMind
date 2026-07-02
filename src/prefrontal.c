@@ -5,6 +5,7 @@
 
 #include "prefrontal.h"
 #include "cingulate.h"
+#include "associative_reasoning.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -62,7 +63,9 @@ char* prefrontal_chat(Prefrontal* pf, const char* input) {
         float temperature = 0.15f + attempt * 0.12f;
 
         GeneratedSequence seq = {0};
-        int n = cingulate_diffusion_evaluate(pf->topology, input, temperature, &seq);
+        int n = cingulate_diffusion_evaluate(pf->topology, input, temperature,
+                                               pf->controller ? pf->controller->emergent_pos : NULL,
+                                               &seq);
         if (n < 2) continue;
 
         char gate_buf[128];
@@ -107,6 +110,24 @@ char* prefrontal_chat(Prefrontal* pf, const char* input) {
 
         /* 传递 ACC 真实评分，替代硬编码 0.5 */
         cognitive_controller_snapshot(pf->controller, seq.total_score);
+        return response;
+    }
+
+    /* ── 二段联想扩散 fallback（扩散无产出时）── */
+    {
+        printf("[前额叶] 扩散无产出, 尝试联想推理...\n");
+        AssociativeEngine* assoc = assoc_engine_create(pf->topology);
+        if (assoc) {
+            int ac = associate_from_text(assoc, input, 0);  /* 0 = 动态深度 */
+            if (ac > 1) {
+                response = generate_from_associations(assoc, 2048, input, ctx_activations);
+                if (response) {
+                    printf("[前额叶] 联想推理产出 (%d 候选)\n", ac);
+                }
+            }
+            assoc_engine_free(assoc);
+        }
+        if (!response) return NULL;
         return response;
     }
 

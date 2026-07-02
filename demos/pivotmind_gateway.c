@@ -40,6 +40,7 @@
 #include "hippocampus.h"
 #include "cerebellum.h"
 #include "prefrontal.h"
+#include "qa_memory.h"
 #include "amygdala.h"
 #include "multi_topology.h"
 #include "memory_system.h"
@@ -83,6 +84,7 @@ typedef struct {
     Perception*      perception;    /* 感觉皮层 — 自主搜索学习 */
     Hippocampus*     hippocampus;   /* 海马体 — 记忆+巩固 */
     Cerebellum*      cerebellum;    /* 小脑 — 资源平衡 */
+    QAMemory*        qa_memory;     /* QA 记忆 — 检索式回复 fallback */
     NodeCache*       brain_cache;   /* 大脑式节点冷热缓存 */
     SelfLearner*     self_learner;  /* 自主学习器 — 用于析构时释放 */
     Amygdala*        amygdala;      /* 杏仁核 — 情绪/文化调控 */
@@ -132,11 +134,47 @@ static void gw_signal_handler(int signum) {
 
 // ==================== JSON 工具 ====================
 
-// 简易 JSON 字符串转义 (处理 " \ \n \r \t)
+// 返回 UTF-8 序列长度：1/2/3/4，0=无效字节
+static int utf8_seq_len(unsigned char c) {
+    if (c < 0x80) return 1;
+    if ((c & 0xC0) == 0x80) return 0;   /* 孤立的续字节 */
+    if ((c & 0xE0) == 0xC0) return 2;
+    if ((c & 0xF0) == 0xE0) return 3;
+    if ((c & 0xF8) == 0xF0) return 4;
+    return 0;
+}
+
+static int utf8_valid(const unsigned char* s) {
+    int len = utf8_seq_len(s[0]);
+    if (len == 0) return 0;
+    for (int k = 1; k < len; k++)
+        if (!s[k] || (s[k] & 0xC0) != 0x80) return 0;
+    return len;
+}
+
+// 简易 JSON 字符串转义 + UTF-8 校验 (跳过无效字节避免 JSON 崩坏)
 static int json_escape(const char* src, char* dst, int dst_size) {
     if (!src || !dst || dst_size < 2) return -1;
     int j = 0;
-    for (int i = 0; src[i] && j < dst_size - 2; i++) {
+    for (int i = 0; src[i] && j < dst_size - 8; i++) {
+        unsigned char c = (unsigned char)src[i];
+
+        /* 控制字符 (0x00-0x1F, 不包括 \t \n \r) → \uXXXX */
+        if (c < 0x20 && c != '\n' && c != '\r' && c != '\t') {
+            j += snprintf(dst + j, 8, "\\u%04x", c);
+            continue;
+        }
+
+        /* 多字节 UTF-8 校验 */
+        if (c >= 0x80) {
+            int len = utf8_valid((const unsigned char*)&src[i]);
+            if (len <= 1) continue;  /* 无效 UTF-8 → 跳过 */
+            for (int k = 0; k < len && j < dst_size - 2; k++)
+                dst[j++] = src[i + k];
+            i += len - 1;
+            continue;
+        }
+
         switch (src[i]) {
             case '"':  if (j + 2 >= dst_size) goto done; dst[j++] = '\\'; dst[j++] = '"';  break;
             case '\\': if (j + 2 >= dst_size) goto done; dst[j++] = '\\'; dst[j++] = '\\'; break;
@@ -317,6 +355,14 @@ static int gw_system_init(GatewaySystem* gw) {
     if (!gw->prefrontal) { fprintf(stderr, "[gateway] 前额叶创建失败\n"); return -1; }
     gw->dialog = prefrontal_dialog(gw->prefrontal);  /* 兼容旧代码 */
     printf("[gateway]   前额叶就绪\n");
+
+    // 5b. QA 记忆检索（扩散/prefrontal 无产出时的兜底）
+    gw->qa_memory = qa_memory_create("corpus/xiaohuangji_pipe.txt", 500000);
+    if (!gw->qa_memory) {
+        printf("[gateway]   QA记忆: 未找到语料或加载失败，继续运行\n");
+    } else {
+        printf("[gateway]   QA记忆就绪 (%d 对)\n", qa_memory_count(gw->qa_memory));
+    }
 
     // 脑干
     gw->brainstem = brainstem_create(gw->topology, gw->memory, gw->dialog->cognitive_state);
@@ -584,6 +630,7 @@ static void gw_system_shutdown(GatewaySystem* gw) {
     if (gw->amygdala)    amygdala_destroy(gw->amygdala);
     if (gw->hippocampus) hippocampus_destroy(gw->hippocampus);
     if (gw->cerebellum)  cerebellum_destroy(gw->cerebellum);
+    if (gw->qa_memory)   qa_memory_destroy(gw->qa_memory);
     if (gw->thalamus)     thalamus_destroy(gw->thalamus);
     if (gw->perception)   perception_destroy(gw->perception);
     web_fetch_destroy();  /* 爬虫框架 */
@@ -636,6 +683,15 @@ static void handle_chat(GatewaySystem* gw, int fd, const char* body) {
     /* 回退到旧路径：简单问题或 PFE 失败 */
     if (!response) {
         response = prefrontal_chat(gw->prefrontal, msg);
+    }
+
+    /* 最终兜底：QA 记忆检索（扩散和联想推理都无产出） */
+    if (!response && gw->qa_memory) {
+        const char* qa_answer = qa_memory_query(gw->qa_memory, msg);
+        if (qa_answer) {
+            response = strdup(qa_answer);
+            printf("[gateway] QA记忆命中\n");
+        }
     }
 
     if (response) {

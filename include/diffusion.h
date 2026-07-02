@@ -29,6 +29,9 @@ extern "C" {
 #define DIFF_MAX_PATH_DEPTH  5
 #define DIFF_MAX_SEQUENCE     32
 
+/* 前向声明 — 避免引入 emergent_pos.h 循环依赖 */
+typedef struct EmergentPOS EmergentPOS;
+
 /** 单个候选词的多维评分 */
 typedef struct {
     int    node_id;
@@ -63,6 +66,9 @@ typedef struct {
 
     /* 温度扰动参数 (0=关闭, >0 添加随机扰动, 默认0.15) */
     float   temperature;
+
+    /* EmergentPOS* — 涌现式词类系统引用，用于输出词性标注和句式重排（NULL=不启用） */
+    struct EmergentPOS* emergent_pos;
 } DiffusionCtx;
 
 /** 从输入文本生成序列 */

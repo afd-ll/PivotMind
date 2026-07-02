@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <math.h>
 
 // 前向声明
@@ -1409,6 +1410,222 @@ static POSTag chinese_pos_lookup(const char* word) {
     return POS_UNKNOWN;
 }
 
+/** 判断字符串是否以 suffix 结尾（不区分大小写） */
+static int str_ends_with(const char* str, const char* suffix) {
+    if (!str || !suffix) return 0;
+    int slen = strlen(str), suflen = strlen(suffix);
+    if (slen < suflen) return 0;
+    for (int i = 0; i < suflen; i++) {
+        char a = str[slen - suflen + i];
+        char b = suffix[i];
+        if (a >= 'A' && a <= 'Z') a += 32;
+        if (b >= 'A' && b <= 'Z') b += 32;
+        if (a != b) return 0;
+    }
+    return 1;
+}
+
+/** 判断是否为纯 ASCII 词（含字母） */
+static int is_ascii_word(const char* word) {
+    if (!word || !word[0]) return 0;
+    for (const char* p = word; *p; p++)
+        if ((unsigned char)*p > 0x7F) return 0;
+    return 1;
+}
+
+/** 英文 POS 查找 — 规则 + 小词典 */
+POSTag english_pos_lookup(const char* word) {
+    if (!word || !word[0]) return POS_UNKNOWN;
+
+    /* ── 小词典：功能词（不区分大小写）── */
+    #define EQ(w) (strcasecmp(word, w) == 0)
+
+    /* 代词 */
+    if (EQ("i") || EQ("you") || EQ("he") || EQ("she") || EQ("it") ||
+        EQ("we") || EQ("they") || EQ("me") || EQ("him") || EQ("her") ||
+        EQ("us") || EQ("them") || EQ("my") || EQ("your") || EQ("his") ||
+        EQ("its") || EQ("our") || EQ("their") || EQ("mine") || EQ("yours") ||
+        EQ("hers") || EQ("ours") || EQ("theirs") || EQ("who") || EQ("what") ||
+        EQ("which") || EQ("this") || EQ("that") || EQ("these") || EQ("those") ||
+        EQ("myself") || EQ("yourself") || EQ("himself") || EQ("herself") ||
+        EQ("itself") || EQ("ourselves") || EQ("themselves") ||
+        EQ("someone") || EQ("anyone") || EQ("everyone") || EQ("nobody"))
+        return POS_PRON;
+
+    /* 助词/冠词 */
+    if (EQ("the") || EQ("a") || EQ("an") || EQ("of") || EQ("to") ||
+        EQ("s"))
+        return POS_PARTICLE;
+
+    /* 介词 */
+    if (EQ("in") || EQ("on") || EQ("at") || EQ("from") || EQ("for") ||
+        EQ("with") || EQ("by") || EQ("about") || EQ("into") || EQ("through") ||
+        EQ("during") || EQ("before") || EQ("after") || EQ("above") ||
+        EQ("below") || EQ("between") || EQ("under") || EQ("over") ||
+        EQ("without") || EQ("until") || EQ("within") || EQ("along") ||
+        EQ("across") || EQ("behind") || EQ("beyond") || EQ("toward") ||
+        EQ("towards") || EQ("against") || EQ("upon") || EQ("among") ||
+        EQ("around") || EQ("since") || EQ("than") || EQ("per") ||
+        EQ("via") || EQ("off") || EQ("up") || EQ("down") || EQ("out"))
+        return POS_PREP;
+
+    /* 连词 */
+    if (EQ("and") || EQ("but") || EQ("or") || EQ("nor") || EQ("so") ||
+        EQ("yet") || EQ("because") || EQ("although") || EQ("though") ||
+        EQ("while") || EQ("if") || EQ("when") || EQ("where") || EQ("whether") ||
+        EQ("unless") || EQ("since") || EQ("as") || EQ("once") || EQ("until") ||
+        EQ("then") || EQ("also") || EQ("however") || EQ("therefore") ||
+        EQ("moreover") || EQ("instead") || EQ("otherwise") || EQ("besides") ||
+        EQ("either") || EQ("neither"))
+        return POS_CONJ;
+
+    /* 副词 */
+    if (EQ("not") || EQ("very") || EQ("too") || EQ("quite") || EQ("just") ||
+        EQ("only") || EQ("already") || EQ("always") || EQ("never") ||
+        EQ("often") || EQ("sometimes") || EQ("usually") || EQ("still") ||
+        EQ("now") || EQ("here") || EQ("there") || EQ("well") || EQ("really") ||
+        EQ("almost") || EQ("enough") || EQ("perhaps") || EQ("maybe") ||
+        EQ("even") || EQ("ever") || EQ("soon") || EQ("again") || EQ("also") ||
+        EQ("much") || EQ("more") || EQ("most") || EQ("all") || EQ("any"))
+        return POS_ADV;
+
+    /* 数词 */
+    if (EQ("one") || EQ("two") || EQ("three") || EQ("four") || EQ("five") ||
+        EQ("six") || EQ("seven") || EQ("eight") || EQ("nine") || EQ("ten") ||
+        EQ("hundred") || EQ("thousand") || EQ("million") || EQ("billion") ||
+        EQ("first") || EQ("second") || EQ("third") || EQ("many") || EQ("few") ||
+        EQ("several") || EQ("some") || EQ("each") || EQ("every") || EQ("no"))
+        return POS_NUM;
+
+    /* 叹词 */
+    if (EQ("oh") || EQ("ah") || EQ("wow") || EQ("hey") || EQ("hi") ||
+        EQ("hello") || EQ("oops") || EQ("yeah") || EQ("yes") || EQ("no") ||
+        EQ("ok") || EQ("okay") || EQ("please") || EQ("sorry") || EQ("thanks") ||
+        EQ("bye") || EQ("goodbye") || EQ("hmm") || EQ("eh") || EQ("ha") ||
+        EQ("haha"))
+        return POS_INTERJ;
+
+    /* Be 动词 */
+    if (EQ("be") || EQ("am") || EQ("is") || EQ("are") || EQ("was") ||
+        EQ("were") || EQ("been") || EQ("being"))
+        return POS_VERB;
+
+    /* 常用形容词（不常以后缀出现）*/
+    if (EQ("good") || EQ("bad") || EQ("big") || EQ("small") || EQ("new") ||
+        EQ("old") || EQ("high") || EQ("low") || EQ("long") || EQ("short") ||
+        EQ("great") || EQ("little") || EQ("right") || EQ("wrong") ||
+        EQ("different") || EQ("same") || EQ("whole") || EQ("certain") ||
+        EQ("true") || EQ("false") || EQ("real") || EQ("human") ||
+        EQ("public") || EQ("social") || EQ("political") || EQ("economic") ||
+        EQ("important") || EQ("possible") || EQ("available") || EQ("natural") ||
+        EQ("special") || EQ("particular") || EQ("common"))
+        return POS_ADJ;
+
+    /* 常用动词（不常以后缀出现）*/
+    if (EQ("go") || EQ("come") || EQ("get") || EQ("make") || EQ("take") ||
+        EQ("give") || EQ("know") || EQ("think") || EQ("see") || EQ("want") ||
+        EQ("tell") || EQ("ask") || EQ("work") || EQ("seem") || EQ("feel") ||
+        EQ("try") || EQ("ask") || EQ("leave") || EQ("call") || EQ("keep") ||
+        EQ("let") || EQ("begin") || EQ("put") || EQ("set") || EQ("find") ||
+        EQ("run") || EQ("move") || EQ("live") || EQ("believe") || EQ("hold") ||
+        EQ("bring") || EQ("happen") || EQ("write") || EQ("provide") ||
+        EQ("sit") || EQ("stand") || EQ("lose") || EQ("pay") || EQ("meet") ||
+        EQ("talk") || EQ("read") || EQ("show") || EQ("lead") || EQ("grow") ||
+        EQ("produce") || EQ("send") || EQ("expect") || EQ("build") ||
+        EQ("stay") || EQ("fall") || EQ("cut") || EQ("speak") || EQ("eat") ||
+        EQ("drink") || EQ("walk") || EQ("sleep") || EQ("play") || EQ("sing"))
+        return POS_VERB;
+
+    /* 常用名词（不常以后缀出现）*/
+    if (EQ("time") || EQ("day") || EQ("man") || EQ("woman") || EQ("child") ||
+        EQ("world") || EQ("life") || EQ("hand") || EQ("part") || EQ("year") ||
+        EQ("place") || EQ("case") || EQ("week") || EQ("company") ||
+        EQ("system") || EQ("program") || EQ("question") || EQ("work") ||
+        EQ("number") || EQ("night") || EQ("point") || EQ("home") ||
+        EQ("water") || EQ("room") || EQ("mother") || EQ("father") ||
+        EQ("area") || EQ("money") || EQ("story") || EQ("fact") || EQ("month") ||
+        EQ("lot") || EQ("right") || EQ("study") || EQ("book") || EQ("eye") ||
+        EQ("job") || EQ("word") || EQ("business") || EQ("issue") || EQ("side") ||
+        EQ("kind") || EQ("head") || EQ("house") || EQ("service") ||
+        EQ("friend") || EQ("power") || EQ("hour") || EQ("game") || EQ("line") ||
+        EQ("end") || EQ("member") || EQ("law") || EQ("car") || EQ("city") ||
+        EQ("community") || EQ("name") || EQ("president") || EQ("team") ||
+        EQ("minute") || EQ("idea") || EQ("body") || EQ("person") ||
+        EQ("student") || EQ("parent") || EQ("music") || EQ("food") ||
+        EQ("family") || EQ("school") || EQ("reason") || EQ("result") ||
+        EQ("history") || EQ("research") || EQ("moment") || EQ("war") ||
+        EQ("art") || EQ("door") || EQ("force") || EQ("sun") || EQ("star") ||
+        EQ("tree") || EQ("river") || EQ("animal") || EQ("dog") || EQ("cat") ||
+        EQ("bird") || EQ("fish") || EQ("love") || EQ("air") || EQ("fire") ||
+        EQ("earth") || EQ("soul") || EQ("mind") || EQ("voice") || EQ("dream"))
+        return POS_NOUN;
+
+    #undef EQ
+
+    int len = strlen(word);
+    if (len < 3) return POS_UNKNOWN;  /* 太短无法通过后缀推断 */
+
+    /* ── 后缀规则（优先级从高到低）── */
+
+    /* 副词: -ly (排除 -ly 结尾的名词如 "family") */
+    if (str_ends_with(word, "ly") && len > 4) {
+        /* 排除 family, ally, rely, holy, ugly 等 */
+        if (str_ends_with(word, "ily") || str_ends_with(word, "ally"))
+            return POS_ADV;
+        if (str_ends_with(word, "ly") && !str_ends_with(word, "ily") &&
+            !str_ends_with(word, "lly") && str_ends_with(word, "ly"))
+            return POS_ADV;
+    }
+
+    /* 形容词: -ful, -less, -ous, -ive, -able, -ible, -al, -ant/-ent, -ary, -ic, -y */
+    if (str_ends_with(word, "ful") || str_ends_with(word, "less") ||
+        str_ends_with(word, "ous") || str_ends_with(word, "ive") ||
+        str_ends_with(word, "able") || str_ends_with(word, "ible") ||
+        str_ends_with(word, "ant") || str_ends_with(word, "ent") ||
+        str_ends_with(word, "ary") || str_ends_with(word, "ical") ||
+        str_ends_with(word, "istic") || str_ends_with(word, "like"))
+        return POS_ADJ;
+    if (str_ends_with(word, "al") || str_ends_with(word, "ic")) {
+        /* 排除 final, total, metal, trial 等 — 这些不是形容词为主 */
+        if (len > 4) return POS_ADJ;
+    }
+    if (str_ends_with(word, "y") && len > 3) {
+        /* 排除 day, way, boy, lay, pay, say 等短词 */
+        return POS_ADJ;
+    }
+
+    /* 名词: -tion, -sion, -ment, -ness, -ity, -ence, -ance, -ism, -ology, -cy, -ure, -ist, -er(人), -ee, -ship */
+    if (str_ends_with(word, "tion") || str_ends_with(word, "sion") ||
+        str_ends_with(word, "ment") || str_ends_with(word, "ness") ||
+        str_ends_with(word, "ity") || str_ends_with(word, "ence") ||
+        str_ends_with(word, "ance") || str_ends_with(word, "ism") ||
+        str_ends_with(word, "logy") || str_ends_with(word, "graphy") ||
+        str_ends_with(word, "cy") || str_ends_with(word, "ure") ||
+        str_ends_with(word, "ship") || str_ends_with(word, "dom") ||
+        str_ends_with(word, "tude") || str_ends_with(word, "ery") ||
+        str_ends_with(word, "ise") || str_ends_with(word, "sis"))
+        return POS_NOUN;
+    if (str_ends_with(word, "ist") || str_ends_with(word, "ee"))
+        return POS_NOUN;
+    if (str_ends_with(word, "er") || str_ends_with(word, "or")) {
+        /* -er/-or 可能是动词比较级或名词（人/工具）→ 默认为名词 */
+        if (len > 5) return POS_NOUN;
+    }
+
+    /* 动词形态: -ing, -ed, -ize, -ise, -ate, -ify, -en */
+    if (str_ends_with(word, "ing")) return POS_VERB;
+    if (str_ends_with(word, "ed") && len > 3) return POS_VERB;
+    if (str_ends_with(word, "ize") || str_ends_with(word, "ise") ||
+        str_ends_with(word, "ify") || str_ends_with(word, "en"))
+        return POS_VERB;
+    if (str_ends_with(word, "ate") && len > 5) return POS_VERB;
+
+    /* 动词第三人称: -ses, -es, 但排除 -ness, -less 等已判定过的 */
+    /* 不要重复判定 — 这会在后缀规则末尾 catch 少量词 */
+
+    return POS_UNKNOWN;
+}
+
 const char* pos_tag_name(POSTag tag) {
     static const char* names[] = {
         "UNK", "NOUN", "VERB", "ADJ", "ADV",
@@ -1448,7 +1665,16 @@ POSTag pos_tag_emergent(CognitiveController* cc, const char* word) {
     }
 
     /* 兜底: 硬编码字典（冷启动期保证可用） */
-    return chinese_pos_lookup(word);
+    POSTag tag = chinese_pos_lookup(word);
+    if (tag != POS_UNKNOWN) return tag;
+
+    /* 英文兜底: 如果词是纯 ASCII，尝试英文后缀规则 */
+    if (is_ascii_word(word)) {
+        tag = english_pos_lookup(word);
+        if (tag != POS_UNKNOWN) return tag;
+    }
+
+    return POS_UNKNOWN;
 }
 
 void pos_tag_emergent_soft(CognitiveController* cc, const char* word,

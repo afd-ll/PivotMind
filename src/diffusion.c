@@ -7,6 +7,8 @@
  */
 
 #include "diffusion.h"
+#include "emergent_pos.h"
+#include "cognitive_controller.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -117,6 +119,528 @@ static int is_function_word(const char* word) {
 }
 
 /* ================================================================
+ *  语法组装 — 动词配价驱动，生成主谓宾结构句子
+ * ================================================================ */
+
+/** 中文动词配价需求 */
+typedef struct {
+    const char* verb;       /* 动词 */
+    int needs_object:1;     /* 需要宾语 (及物) */
+    int needs_double:1;     /* 需要双宾语 */
+    int allows_complement:1;/* 可带补语 (得/完/好) */
+    int is_copula:1;        /* 是/为(系词): 需要表语 */
+    int is_you:1;           /* 有: NP+有+NP */
+    int is_descriptive:1;   /* 状态描述: 很+ADJ */
+    int is_motion:1;        /* 移动动词: 进/来/去/回 */
+    int is_speech:1;        /* 言说动词: 说/问/告诉/叫 */
+} VerbValency;
+
+static const VerbValency CHINESE_VERB_VALENCY[] = {
+    /* 常用及物动词 */
+    {"吃",    1,0,1,0,0,0,0,0},  {"喝",    1,0,1,0,0,0,0,0},
+    {"看",    1,0,1,0,0,0,0,0},  {"听",    1,0,1,0,0,0,0,0},
+    {"说",    1,0,1,0,0,0,0,1},  {"问",    1,0,1,0,0,0,0,1},
+    {"爱",    1,0,0,0,0,0,0,0},  {"想",    1,0,0,0,0,0,0,0},
+    {"做",    1,0,1,0,0,0,0,0},  {"写",    1,0,1,0,0,0,0,0},
+    {"走",    1,0,1,0,0,0,1,0},  {"跑",    1,0,1,0,0,0,1,0},
+    {"知道",  1,0,0,0,0,0,0,0},  {"认识",  1,0,0,0,0,0,0,0},
+    {"喜欢",  1,0,1,0,0,0,0,0},  {"需要",  1,0,0,0,0,0,0,0},
+    {"得到",  1,0,0,0,0,0,0,0},  {"发现",  1,0,0,0,0,0,0,0},
+    {"觉得",  1,0,0,0,0,0,0,0},  {"开始",  1,0,0,0,0,0,0,0},
+    {"变成",  1,0,0,0,0,0,0,0},  {"发生",  1,0,0,0,0,0,0,0},
+    {"学习",  1,0,1,0,0,0,0,0},  {"工作",  0,0,0,0,0,0,0,0},
+    {"生活",  0,0,0,0,0,0,0,0},  {"幸福",  0,0,0,0,0,1,0,0},
+    {"快乐",  0,0,0,0,0,1,0,0},  {"美丽",  0,0,0,0,0,1,0,0},
+    {"重要",  0,0,0,0,0,1,0,0},  {"伟大",  0,0,0,0,0,1,0,0},
+    {"特别",  0,0,0,0,0,1,0,0},
+
+    /* 系词 / "有" 字 */
+    {"是",    0,0,0,1,0,0,0,0},  {"有",    0,0,0,0,1,0,0,0},
+    {"成为",  0,0,0,1,0,0,0,0},  {"像",    0,0,0,1,0,0,0,0},
+
+    /* 双宾动词 */
+    {"给",    0,1,0,0,0,0,0,1},  {"送",    0,1,0,0,0,0,0,0},
+    {"告诉",  0,1,0,0,0,0,0,1},  {"教",    0,1,0,0,0,0,0,0},
+
+    /* 补语动词 */
+    {"会",    0,0,1,0,0,0,0,0},  {"能",    0,0,1,0,0,0,0,0},
+    {"好",    0,0,1,0,0,0,0,0},  {"懂",    0,0,1,0,0,0,0,0},
+
+    /* 常用形容词作谓语 (很X) */
+    {"好",    0,0,0,0,0,1,0,0},  {"大",    0,0,0,0,0,1,0,0},
+    {"多",    0,0,0,0,0,1,0,0},  {"难",    0,0,0,0,0,1,0,0},
+    {"高",    0,0,0,0,0,1,0,0},  {"快",    0,0,0,0,0,1,0,0},
+    {"真",    0,0,0,0,0,1,0,0},  {"对",    0,0,0,0,0,1,0,0},
+    {0}
+};
+
+/** 英文动词配价需求 */
+/* 注: 复用 VerbValency 结构体，字段含义稍作调整:
+ *   is_copula    →  be 动词 (am/is/are/was/were/been/being)
+ *   is_you       →  have 动词 (have/has/had)
+ *   is_descriptive → feel/become/seem (系动词 + Adj)
+ */
+static const VerbValency ENGLISH_VERB_VALENCY[] = {
+    /* Be 动词 (copula) */
+    {"be",   0,0,0,1,0,0,0,0},  {"am",    0,0,0,1,0,0,0,0},
+    {"is",   0,0,0,1,0,0,0,0},  {"are",   0,0,0,1,0,0,0,0},
+    {"was",  0,0,0,1,0,0,0,0},  {"were",  0,0,0,1,0,0,0,0},
+    {"been", 0,0,0,1,0,0,0,0},  {"being", 0,0,0,1,0,0,0,0},
+
+    /* Have 动词 */
+    {"have", 1,0,0,0,1,0,0,0},  {"has",   1,0,0,0,1,0,0,0},
+    {"had",  1,0,0,0,1,0,0,0},
+
+    /* 系动词 (形容词表语) */
+    {"feel",  0,0,0,0,0,1,0,0}, {"become", 0,0,0,0,0,1,0,0},
+    {"seem",  0,0,0,0,0,1,0,0}, {"sound",  0,0,0,0,0,1,0,0},
+    {"look",  0,0,0,0,0,1,0,0}, {"appear", 0,0,0,0,0,1,0,0},
+    {"get",   0,0,0,0,0,1,0,0}, {"stay",   0,0,0,0,0,1,0,0},
+    {"remain",0,0,0,0,0,1,0,0}, {"prove",  0,0,0,0,0,1,0,0},
+
+    /* 及物动词 (needs_object) */
+    {"know",  1,0,0,0,0,0,0,0}, {"think",  1,0,0,0,0,0,0,0},
+    {"want",  1,0,0,0,0,0,0,0}, {"love",   1,0,0,0,0,0,0,0},
+    {"like",  1,0,0,0,0,0,0,0}, {"need",   1,0,0,0,0,0,0,0},
+    {"see",   1,0,0,0,0,0,0,0}, {"show",   1,0,0,0,0,0,0,0},
+    {"tell",  1,0,0,0,0,0,0,0}, {"give",   1,0,0,0,0,0,0,0},
+    {"take",  1,0,0,0,0,0,0,0}, {"make",   1,0,0,0,0,0,0,0},
+    {"find",  1,0,0,0,0,0,0,0}, {"believe",1,0,0,0,0,0,0,0},
+    {"hear",  1,0,0,0,0,0,0,0}, {"meet",   1,0,0,0,0,0,0,0},
+    {"bring", 1,0,0,0,0,0,0,0}, {"put",    1,0,0,0,0,0,0,0},
+    {"set",   1,0,0,0,0,0,0,0}, {"keep",   1,0,0,0,0,0,0,0},
+    {"hold",  1,0,0,0,0,0,0,0}, {"call",   1,0,0,0,0,0,0,0},
+    {"help",  1,0,0,0,0,0,0,0}, {"leave",  1,0,0,0,0,0,0,0},
+    {"send",  1,0,0,0,0,0,0,0}, {"spend",  1,0,0,0,0,0,0,0},
+    {"use",   1,0,0,0,0,0,0,0}, {"hope",   1,0,0,0,0,0,0,0},
+    {"mean",  1,0,0,0,0,0,0,0}, {"expect", 1,0,0,0,0,0,0,0},
+    {"continue",1,0,0,0,0,0,0,0}, {"consider",1,0,0,0,0,0,0,0},
+    {"provide",1,0,0,0,0,0,0,0}, {"receive", 1,0,0,0,0,0,0,0},
+    {"imagine",1,0,0,0,0,0,0,0}, {"realize", 1,0,0,0,0,0,0,0},
+    {"remember",1,0,0,0,0,0,0,0}, {"suppose", 1,0,0,0,0,0,0,0},
+
+    /* 不及物 / 可带宾语 + 补语 */
+    {"talk",  1,0,1,0,0,0,0,0}, {"speak",  1,0,1,0,0,0,0,0},
+    {"walk",  1,0,1,0,0,0,0,0}, {"run",    0,0,1,0,0,0,0,0},
+    {"come",  0,0,0,0,0,0,0,0}, {"go",     0,0,1,0,0,0,0,0},
+    {"live",  0,0,0,0,0,0,0,0}, {"work",   0,0,0,0,0,0,0,0},
+    {"begin", 1,0,0,0,0,0,0,0}, {"start",  1,0,0,0,0,0,0,0},
+    {"try",   1,0,0,0,0,0,0,0}, {"continue",1,0,0,0,0,0,0,0},
+    {"seem",  0,0,0,0,0,1,0,0}, {"happen", 0,0,0,0,0,0,0,0},
+    {"change",1,0,0,0,0,0,0,0}, {"move",   1,0,0,0,0,0,0,0},
+    {"turn",  1,0,0,0,0,0,0,0}, {"lead",   1,0,0,0,0,0,0,0},
+    {"follow",1,0,0,0,0,0,0,0}, {"serve",  1,0,0,0,0,0,0,0},
+    {"grow",  1,0,0,0,0,0,0,0}, {"die",    0,0,0,0,0,0,0,0},
+    {"agree", 1,0,0,0,0,0,0,0},
+
+    /* 情态 / 助动词 */
+    {"can",   0,0,1,0,0,0,0,0}, {"could",  0,0,1,0,0,0,0,0},
+    {"will",  0,0,1,0,0,0,0,0}, {"would",  0,0,1,0,0,0,0,0},
+    {"may",   0,0,1,0,0,0,0,0}, {"might",  0,0,1,0,0,0,0,0},
+    {"must",  0,0,1,0,0,0,0,0}, {"should", 0,0,1,0,0,0,0,0},
+    {"shall", 0,0,1,0,0,0,0,0}, {"do",     0,0,1,0,0,0,0,0},
+    {"does",  0,0,1,0,0,0,0,0}, {"did",    0,0,1,0,0,0,0,0},
+    {0}
+};
+
+/** 从候选词池中取一个指定 POS 且未使用的词，返回下标，-1 表示没有 */
+static int pool_take(const char** word_buf, POSTag* word_pos, int word_count,
+                     int* used, POSTag want, int prefer_wrd[DIFF_MAX_SEQUENCE],
+                     int prefer_cnt) {
+    /* 优先从 prefer 列表中选 */
+    for (int p = 0; p < prefer_cnt; p++) {
+        int w = prefer_wrd[p];
+        if (w < 0 || w >= word_count) continue;
+        if (used[w] || !word_buf[w]) continue;
+        if (word_pos[w] == want) { used[w] = 1; return w; }
+    }
+    /* 兜底: 遍历所有 */
+    for (int w = 0; w < word_count; w++) {
+        if (used[w] || !word_buf[w]) continue;
+        if (word_pos[w] == want) { used[w] = 1; return w; }
+    }
+    return -1;
+}
+
+/**
+ * 动词配价驱动的语法组装
+ * 流程:
+ *   1. 从候选词找最佳动词/形容词谓语
+ *   2. 分配主语（NP）
+ *   3. 分配宾语/补语
+ *   4. 添加句末助词(了/呢/啊)、标点
+ *   5. 如果无合适谓语，回退到旧骨架模式
+ */
+static int diffusion_assemble_grammar(
+    const char** word_buf, POSTag* word_pos, int word_count,
+    const char** output_words, int max_output,
+    int is_english) {
+    int out = 0;
+    if (word_count < 2 || !word_buf || !output_words) return 0;
+
+    int used[DIFF_MAX_SEQUENCE] = {0};
+
+    /* ── Step 1: 找谓语核心 ── */
+    int verb_idx = -1, verb_val = -1;
+    const VerbValency* en_vv = NULL;
+
+    /* 选择配价表 */
+    const VerbValency* valency_table = is_english ? ENGLISH_VERB_VALENCY
+                                                    : CHINESE_VERB_VALENCY;
+
+    for (int w = 0; w < word_count; w++) {
+        if (!word_buf[w] || word_pos[w] != POS_VERB) continue;
+
+        /* 查配价表 */
+        for (int v = 0; valency_table[v].verb; v++) {
+            const char* vname = valency_table[v].verb;
+            /* 英文不区分大小写 */
+            int match = is_english
+                ? (strcasecmp(word_buf[w], vname) == 0)
+                : (strcmp(word_buf[w], vname) == 0);
+            if (!match) continue;
+
+            const VerbValency* vv = &valency_table[v];
+            verb_idx = w;
+            verb_val = v;
+            if (is_english) en_vv = vv;
+            break;
+        }
+        if (verb_idx >= 0) break;  /* 找到配价项 */
+    }
+
+    /* 如果没找到配价表中的动词，选任意动词 */
+    if (verb_idx < 0) {
+        for (int w = 0; w < word_count; w++) {
+            if (!word_buf[w] || word_pos[w] != POS_VERB) continue;
+            verb_idx = w;
+            break;
+        }
+    }
+
+    /* ── 无动词 → 尝试形容词谓语 ── */
+    if (verb_idx < 0) {
+        for (int w = 0; w < word_count; w++) {
+            if (!word_buf[w]) continue;
+            if (word_pos[w] != POS_ADJ) continue;
+            /* 检查是否是配价表中的描述性形容词 */
+            for (int v = 0; valency_table[v].verb; v++) {
+                int match = is_english
+                    ? (strcasecmp(word_buf[w], valency_table[v].verb) == 0)
+                    : (strcmp(word_buf[w], valency_table[v].verb) == 0);
+                if (match && valency_table[v].is_descriptive) {
+                    verb_idx = w; verb_val = v;
+                    if (is_english) en_vv = &valency_table[v];
+                    break;
+                }
+            }
+            if (verb_idx >= 0) break;
+        }
+    }
+
+    /* ── 还是无谓语 → 用任意 ADJ ── */
+    if (verb_idx < 0) {
+        for (int w = 0; w < word_count; w++) {
+            if (!word_buf[w] || word_pos[w] != POS_ADJ) continue;
+            verb_idx = w;
+            break;
+        }
+    }
+
+    if (verb_idx < 0) return 0;
+    const VerbValency* vv = (verb_val >= 0 && !is_english)
+                            ? &CHINESE_VERB_VALENCY[verb_val] : en_vv;
+
+    used[verb_idx] = 1;  /* 标记谓语已用 */
+
+    /* 构建 preference 列表: 动词前最近的词、动词后最近的词 */
+    int pre_verb[DIFF_MAX_SEQUENCE], pre_cnt = 0;
+    int post_verb[DIFF_MAX_SEQUENCE], post_cnt = 0;
+    for (int w = 0; w < word_count; w++) {
+        if (w == verb_idx || !word_buf[w]) continue;
+        if (w < verb_idx && pre_cnt < DIFF_MAX_SEQUENCE) pre_verb[pre_cnt++] = w;
+        if (w > verb_idx && post_cnt < DIFF_MAX_SEQUENCE) post_verb[post_cnt++] = w;
+    }
+
+    /* ── Step 2: 主语 (ADV + NOUN/PRON) ── */
+    if (is_english) {
+        /* 英文: 主语 = PRON > NOUN，前缀可加 ADV，排除宾格/反身代词 */
+        int subj = -1;
+        /* 主格代词白名单 */
+        static const char* subj_pron[] = {
+            "i","you","he","she","we","they","it",
+            "this","that","these","those","who","what","which",
+            "someone","anyone","everyone","nobody","somebody","anybody",
+            "everybody","everything","nothing","something","anything",
+            NULL
+        };
+        /* 优先从 pre_verb 中找合适代词 */
+        for (int p = 0; p < pre_cnt; p++) {
+            int w = pre_verb[p];
+            if (used[w] || !word_buf[w] || word_pos[w] != POS_PRON) continue;
+            for (int s = 0; subj_pron[s]; s++)
+                if (strcasecmp(word_buf[w], subj_pron[s]) == 0)
+                    { subj = w; used[w] = 1; break; }
+            if (subj >= 0) break;
+        }
+        /* 兜底: 从所有候选词中找合适代词 */
+        if (subj < 0) {
+            for (int w = 0; w < word_count; w++) {
+                if (used[w] || !word_buf[w] || word_pos[w] != POS_PRON) continue;
+                for (int s = 0; subj_pron[s]; s++)
+                    if (strcasecmp(word_buf[w], subj_pron[s]) == 0)
+                        { subj = w; used[w] = 1; break; }
+                if (subj >= 0) break;
+            }
+        }
+        /* 如果没有代词，用 NOUN */
+        if (subj < 0) {
+            subj = pool_take(word_buf, word_pos, word_count, used,
+                             POS_NOUN, pre_verb, pre_cnt);
+        }
+        if (subj >= 0) {
+            int adv = pool_take(word_buf, word_pos, word_count, used,
+                                POS_ADV, pre_verb, pre_cnt);
+            if (adv >= 0 && out < max_output - 1) {
+                output_words[out++] = word_buf[adv];
+                if (out < max_output - 1) output_words[out++] = " ";
+            }
+            output_words[out++] = word_buf[subj];
+            if (out < max_output - 1) output_words[out++] = " ";
+        }
+    } else {
+        /* 中文: 主语 = PRON > NOUN，前缀可加 ADV */
+        int subj = pool_take(word_buf, word_pos, word_count, used,
+                             POS_PRON, pre_verb, pre_cnt);
+        if (subj < 0)
+            subj = pool_take(word_buf, word_pos, word_count, used,
+                             POS_NOUN, pre_verb, pre_cnt);
+        if (subj >= 0) {
+            /* 状语前置: 如果主语前有 ADJ 或 ADV，加在主语前面 */
+            int adv = pool_take(word_buf, word_pos, word_count, used,
+                                POS_ADV, pre_verb, pre_cnt);
+            if (adv >= 0) output_words[out++] = word_buf[adv];
+            output_words[out++] = word_buf[subj];
+        }
+    }
+
+    /* ── Step 3: 谓语动词 / 形容词 ── */
+    if (is_english && vv && vv->is_copula && out < max_output - 1) {
+        /* 英文系词: "is" 不特殊处理，直接输出 */
+        output_words[out++] = word_buf[verb_idx];
+    } else if (is_english && vv && vv->is_you && out < max_output - 1) {
+        /* have/has/had */
+        output_words[out++] = word_buf[verb_idx];
+    } else if (is_english && vv && vv->is_descriptive && out < max_output - 2) {
+        /* 系动词+形容词: feel good, become happy */
+        output_words[out++] = word_buf[verb_idx];
+    } else if (is_english && vv && vv->allows_complement && out < max_output - 1) {
+        /* 情态动词: can/must/should — 后面直接跟动词 */
+        output_words[out++] = word_buf[verb_idx];
+        /* 找另一个动词跟在后面 */
+        int main_v = pool_take(word_buf, word_pos, word_count, used,
+                                POS_VERB, post_verb, post_cnt);
+        if (main_v >= 0 && out < max_output - 1) {
+            if (out < max_output - 1) output_words[out++] = " ";
+            output_words[out++] = word_buf[main_v];
+        }
+    } else if (!is_english && vv && vv->is_you && out < max_output - 1) {
+        output_words[out++] = word_buf[verb_idx];
+    } else if (!is_english && vv && vv->is_copula && out < max_output - 1) {
+        output_words[out++] = word_buf[verb_idx];
+    } else if (!is_english && vv && vv->is_descriptive && out < max_output - 2) {
+        output_words[out++] = "\xe5\xbe\x88";  /* "很" */
+        output_words[out++] = word_buf[verb_idx];
+    } else {
+        if (out < max_output - 1) output_words[out++] = word_buf[verb_idx];
+    }
+
+    /* ── Step 4: 宾语 / 补语 / 表语 ── */
+    if (is_english) {
+        /* ═══ 英文: 宾语 / 表语 / 补语 ═══ */
+        if (vv && vv->is_copula) {
+            /* Be 动词: 表语 = NOUN > ADJ */
+            if (out < max_output - 1) output_words[out++] = " ";
+            int obj = pool_take(word_buf, word_pos, word_count, used,
+                                POS_NOUN, post_verb, post_cnt);
+            if (obj < 0)
+                obj = pool_take(word_buf, word_pos, word_count, used,
+                                POS_ADJ, post_verb, post_cnt);
+            if (obj >= 0 && out < max_output - 1) {
+                /* 可加冠词 */
+                const char* article = (word_buf[obj][0] == 'a' ||
+                    word_buf[obj][0] == 'e' || word_buf[obj][0] == 'i' ||
+                    word_buf[obj][0] == 'o' || word_buf[obj][0] == 'u') ? "an" : "a";
+                /* 简化: 单字母代词不加冠词 */
+                int need_article = (strlen(word_buf[obj]) > 1 &&
+                    word_pos[obj] == POS_NOUN);
+                if (need_article && out < max_output - 1)
+                    output_words[out++] = article;
+                output_words[out++] = word_buf[obj];
+            }
+        } else if (vv && vv->is_descriptive) {
+            /* feel/become + Adj */
+            if (out < max_output - 1) output_words[out++] = " ";
+            int obj = pool_take(word_buf, word_pos, word_count, used,
+                                POS_ADJ, post_verb, post_cnt);
+            if (obj >= 0 && out < max_output - 1)
+                output_words[out++] = word_buf[obj];
+        } else if (vv && vv->needs_object) {
+            /* 及物动词: 宾语, 前面可加 Adj */
+            if (out < max_output - 1) output_words[out++] = " ";
+            int adj_obj = pool_take(word_buf, word_pos, word_count, used,
+                                     POS_ADJ, post_verb, post_cnt);
+            if (adj_obj >= 0 && out < max_output - 1) {
+                output_words[out++] = word_buf[adj_obj];
+                if (out < max_output - 1) output_words[out++] = " ";
+            }
+            int obj = pool_take(word_buf, word_pos, word_count, used,
+                                POS_NOUN, post_verb, post_cnt);
+            if (obj < 0)
+                obj = pool_take(word_buf, word_pos, word_count, used,
+                                POS_PRON, post_verb, post_cnt);
+            if (obj < 0)
+                obj = pool_take(word_buf, word_pos, word_count, used,
+                                POS_ADJ, post_verb, post_cnt);
+            if (obj >= 0 && out < max_output - 1)
+                output_words[out++] = word_buf[obj];
+        } else if (vv && vv->is_you) {
+            /* have: 宾语 */
+            if (out < max_output - 1) output_words[out++] = " ";
+            int obj = pool_take(word_buf, word_pos, word_count, used,
+                                POS_NOUN, post_verb, post_cnt);
+            if (obj < 0)
+                obj = pool_take(word_buf, word_pos, word_count, used,
+                                POS_ADJ, post_verb, post_cnt);
+            if (obj >= 0 && out < max_output - 1)
+                output_words[out++] = word_buf[obj];
+        } else if (vv && vv->allows_complement) {
+            /* 情态动词: 已经插入主动词在 Step 3 */
+        } else {
+            /* 无配价: 加宾语 */
+            if (out < max_output - 1) output_words[out++] = " ";
+            int obj = pool_take(word_buf, word_pos, word_count, used,
+                                POS_NOUN, post_verb, post_cnt);
+            if (obj >= 0 && out < max_output - 1)
+                output_words[out++] = word_buf[obj];
+        }
+    } else {
+        if (vv->is_copula || vv->is_you) {
+            /* 系词/有字句: 宾语 = NOUN/ADJ */
+            int obj = pool_take(word_buf, word_pos, word_count, used,
+                                POS_NOUN, post_verb, post_cnt);
+            if (obj < 0)
+                obj = pool_take(word_buf, word_pos, word_count, used,
+                                POS_ADJ, post_verb, post_cnt);
+            if (obj >= 0 && out < max_output - 1) {
+                if (is_english && out < max_output - 1) output_words[out++] = " ";
+                output_words[out++] = word_buf[obj];
+            }
+        } else if (vv->needs_object) {
+            /* 及物动词: 宾语 = NOUN，前面加 ADJ 作定语 */
+            int adj_obj = pool_take(word_buf, word_pos, word_count, used,
+                                     POS_ADJ, post_verb, post_cnt);
+            int obj = pool_take(word_buf, word_pos, word_count, used,
+                                POS_NOUN, post_verb, post_cnt);
+            if (obj >= 0 && out < max_output - 1) {
+                if (!is_english && adj_obj >= 0 && out < max_output - 1) {
+                    output_words[out++] = word_buf[adj_obj];
+                    if (out < max_output - 1)
+                        output_words[out++] = "\xe7\x9a\x84";  /* "的" */
+                }
+                if (is_english && adj_obj >= 0 && out < max_output - 1) {
+                    output_words[out++] = word_buf[adj_obj];
+                    if (out < max_output - 1) output_words[out++] = " ";
+                }
+                output_words[out++] = word_buf[obj];
+            } else if (adj_obj >= 0 && out < max_output - 1) {
+                /* 没找到名词宾语，用形容词作宾语 */
+                if (is_english && out < max_output - 1) output_words[out++] = " ";
+                output_words[out++] = word_buf[adj_obj];
+            }
+        } else if (vv->is_descriptive) {
+            /* "很X" 已完成，不需要额外宾语 */
+        } else if (vv->allows_complement && out < max_output - 2) {
+            /* 补语: V+得+ADJ/ADV */
+            int compl = pool_take(word_buf, word_pos, word_count, used,
+                                   POS_ADJ, post_verb, post_cnt);
+            if (compl < 0)
+                compl = pool_take(word_buf, word_pos, word_count, used,
+                                   POS_ADV, post_verb, post_cnt);
+            if (compl >= 0) {
+                output_words[out++] = "\xe5\xbe\x97";  /* "得" */
+                output_words[out++] = word_buf[compl];
+            }
+        } else {
+            /* 无配价表但确实是动词: 尝试加宾语 */
+            int obj = pool_take(word_buf, word_pos, word_count, used,
+                                POS_NOUN, post_verb, post_cnt);
+            if (obj >= 0 && out < max_output - 1)
+                output_words[out++] = word_buf[obj];
+        }
+    }
+
+    /* ── Step 5: 句末助词 + 标点 ── */
+    if (is_english) {
+        if (out < max_output - 1) output_words[out++] = ".";
+    } else {
+        if (vv && vv->needs_object && out < max_output - 2)
+            output_words[out++] = "了";  /* 及物动词加"了"表完成 */
+        if (out < max_output - 1)
+            output_words[out++] = "\xe3\x80\x82";  /* "。" */
+    }
+
+    return out;
+}
+
+/* ── 保留旧骨架函数作为降级路径 ── */
+typedef struct {
+    POSTag seq[4];
+    int    len;
+    float  weight;
+} DiffSentencePattern;
+
+static int diffusion_assemble_scaffold_fallback(
+    const char** word_buf, POSTag* word_pos, int word_count,
+    const char** output_words, int max_output, int is_english) {
+    /* 简化版: 选 ADJ+NOUN 骨架 */
+    int out = 0;
+    int used[DIFF_MAX_SEQUENCE] = {0};
+
+    /* 先取 ADJ */
+    int adj_count = 0;
+    for (int w = 0; w < word_count && adj_count < 3 && out < max_output - 1; w++) {
+        if (used[w] || !word_buf[w]) continue;
+        if (word_pos[w] != POS_ADJ) continue;
+        if (adj_count > 0 && out < max_output - 1)
+            output_words[out++] = is_english ? ", " : "\xe3\x80\x81";  /* "、" */
+        output_words[out++] = word_buf[w];
+        used[w] = 1;
+        adj_count++;
+    }
+    /* 连接词 */
+    if (adj_count > 0 && out < max_output - 1) {
+        if (is_english) output_words[out++] = " ";
+        else output_words[out++] = "\xe7\x9a\x84";  /* "的" */
+    }
+    /* 取 NOUN */
+    int noun_count = 0;
+    for (int w = 0; w < word_count && noun_count < 2 && out < max_output - 1; w++) {
+        if (used[w] || !word_buf[w]) continue;
+        if (word_pos[w] != POS_NOUN) continue;
+        if (noun_count > 0 && out < max_output - 1)
+            output_words[out++] = is_english ? ", " : "\xe3\x80\x81";
+        output_words[out++] = word_buf[w];
+        used[w] = 1;
+        noun_count++;
+    }
+    /* 标点 */
+    if (out < max_output - 1)
+        output_words[out++] = is_english ? "." : "\xe3\x80\x82";
+    return out;
+}
+
+/* ================================================================
  *  初始化
  * ================================================================ */
 
@@ -124,11 +648,12 @@ int diffusion_init(DiffusionCtx* ctx, MasterTopology* master) {
     if (!ctx || !master) return -1;
     memset(ctx, 0, sizeof(*ctx));
     ctx->master = master;
-    ctx->depth  = 1;
-    ctx->top_k  = 5;
+    ctx->depth  = 2;
+    ctx->top_k  = 10;
     ctx->output_len = 20;
     ctx->decay  = 0.7f;
     ctx->temperature = 0.03f;
+    ctx->emergent_pos = NULL;  /* 调用者可选注入 (cingulate_diffusion_evaluate) */
 
     for (int t = 0; t < master->sub_topo_count; t++) {
         SubTopology* sub = master->sub_topologies[t];
@@ -169,6 +694,9 @@ int diffusion_spread(SubTopology* layer,
         if (nid < 0 || nid >= layer->net->node_count) continue;
         ReasoningNode* node = layer->net->nodes[nid];
         if (!node) continue;
+
+        /* 枢纽词跳过: >2000 边的超级连通节点 (如"你"8000边、"是"8000边) 扩散噪声太大 */
+        if (node->edge_count > 2000) continue;
 
         for (int c = 0; c < node->edge_count; c++) {
             int tid = node->edges[c].target ? node->edges[c].target->node_id : -1;
@@ -309,6 +837,21 @@ int diffusion_generate(DiffusionCtx* ctx,
     }
     if (active_count == 0) return 0;
 
+    /* 调试: 打印输入激活的词和其邻居 */
+    {
+        printf("[扩散] 输入=\"%.30s\" 激活 %d 节点:", input, active_count);
+        for (int a = 0; a < active_count && a < 5; a++) {
+            ReasoningNode* an = ctx->vocab->net->nodes[active_ids[a]];
+            printf(" %s(%d边)", an ? an->concept : "?", an ? an->edge_count : 0);
+        }
+        printf("\n");
+    }
+
+    /* ── 输入词注入: 将输入匹配的候选词直接加入候选池，标记高权重 ── */
+    /* 这些词是用户直接使用的词，应该出现在输出中 */
+    float input_boost_score = 1.5f;  /* 高权重确保这些词进入 top-K */
+    (void)input_boost_score;
+
     /* ── 分配/复用评分数组 (静态避免反复calloc) ── */
     int vn = ctx->vocab->net->node_count;
     int sn = ctx->semantic ? ctx->semantic->net->node_count : 0;
@@ -416,6 +959,30 @@ int diffusion_generate(DiffusionCtx* ctx,
 
     qsort(final, final_cnt, sizeof(DiffusionCandidate), _cand_cmp);
 
+    /* ── 输入词注入: 将用户输入匹配的词轻微提升 ── */
+    /* 少边词（更具体）加权更大，枢纽词(>2000边)不加权 */
+    for (int a = 0; a < active_count; a++) {
+        int nid = active_ids[a];
+        if (nid < 0 || nid >= vn) continue;
+        ReasoningNode* an = ctx->vocab->net->nodes[nid];
+        if (!an) continue;
+        float boost = 0.0f;
+        if (an->edge_count <= 0)       boost = 0.6f;  /* 无连接词: 最具体 */
+        else if (an->edge_count < 100) boost = 0.4f;  /* 少边词 */
+        else if (an->edge_count < 2000)boost = 0.2f;  /* 中等连接词 */
+        /* 枢纽词 (>2000边) 不加权 */
+        if (boost > 0.0f) {
+            for (int f = 0; f < final_cnt; f++) {
+                if (final[f].node_id == nid) {
+                    final[f].total_score += boost;
+                    final[f].vocab_score += boost;
+                    break;
+                }
+            }
+        }
+    }
+    qsort(final, final_cnt, sizeof(DiffusionCandidate), _cand_cmp);
+
     /* ── 第3步：模板导向 → 从 template 层取最佳句式 ── */
     const char* tpl_pattern = NULL;
     if (ctx->template && tpl_scores && tn > 0) {
@@ -462,38 +1029,114 @@ int diffusion_generate(DiffusionCtx* ctx,
         conn_count = 6;
     }
 
-    int out = 0;
-    const char* selected[DIFF_MAX_SEQUENCE];
-    int sel = 0;
+    /* ── 第4步：POS 词性重排输出 ── */
+    int out;
 
-    for (int i = 0; i < final_cnt && out < max_output; i++) {
-        if (final[i].used) continue;
+    if (ctx->emergent_pos) {
+        /* ═══ 涌现状词类系统重排：按词性优先级输出 ═══ */
+        POSTag      word_pos[DIFF_MAX_SEQUENCE];    /* 栈数组 128B */
+        const char* word_buf[DIFF_MAX_SEQUENCE];    /* 栈数组 256B */
+        int         word_count = 0;
 
-        /* 过滤垃圾词: 单字、@符号、纯标点、虚词 */
-        if (!final[i].word || strlen(final[i].word) < 2) continue;
-        if (final[i].word[0] == '@' || final[i].word[0] == '?' ||
-            final[i].word[0] == 'H' && final[i].word[1] == 'e') continue;
-        if (is_function_word(final[i].word)) continue;
+        /* 第一遍: 收集有效候选词 + POS 标注 */
+        for (int i = 0; i < final_cnt && word_count < DIFF_MAX_SEQUENCE; i++) {
+            if (final[i].used) continue;
+            if (!final[i].word || strlen(final[i].word) < 2) continue;
+            if (final[i].word[0] == '@' || final[i].word[0] == '?' ||
+                (final[i].word[0] == 'H' && final[i].word[1] == 'e')) continue;
+            if (is_function_word(final[i].word)) continue;
 
-        int inhibited = 0;
-        for (int s = 0; s < sel; s++) {
-            if (final[i].word && selected[s] &&
-                strcmp(final[i].word, selected[s]) == 0) {
-                inhibited = 1; break;
+            /* 去重 */
+            int dup = 0;
+            for (int w = 0; w < word_count; w++) {
+                if (strcmp(final[i].word, word_buf[w]) == 0) { dup = 1; break; }
+            }
+            if (dup) continue;
+
+            word_buf[word_count] = final[i].word;
+            word_pos[word_count] = emergent_pos_tag(
+                ctx->emergent_pos, ctx->master, final[i].word);
+            /* 英文兜底: EmergentPOS (zh) 无法分类英文词 */
+            if (word_pos[word_count] == POS_UNKNOWN)
+                word_pos[word_count] = english_pos_lookup(final[i].word);
+            word_count++;
+            final[i].used = 1;
+        }
+
+        /* 第二遍: 动词配价语法组装 */
+        out = 0;
+
+        /* 检测语言 */
+        int lang_en = 0;
+        for (int w = 0; w < word_count; w++) {
+            if (word_buf[w] && word_buf[w][0]) {
+                lang_en = ((unsigned char)word_buf[w][0] < 0x80);
+                break;
             }
         }
-        if (inhibited) continue;
 
-        /* 模板连接词: 每2个实词插一次 */
-        if (out > 0 && (out % 3 == 0)) {
-            int ci = ((out - 1) % conn_count);
-            if (connectors[ci] && connectors[ci][0]) {
-                output_words[out++] = connectors[ci];
+        /* 动词配价驱动 */
+        out = diffusion_assemble_grammar(word_buf, word_pos, word_count,
+                                          output_words, max_output, lang_en);
+
+        /* 语法组装失败 → 回退名词短语 */
+        if (out < 1) {
+            out = diffusion_assemble_scaffold_fallback(word_buf, word_pos,
+                                                        word_count, output_words,
+                                                        max_output, lang_en);
+        }
+
+        /* 最终回退: POS 优先级平铺 */
+        if (out < 1) {
+            const POSTag priority[] = {
+                POS_NOUN, POS_VERB, POS_ADJ, POS_ADV,
+                POS_NUM, POS_PRON, POS_PREP, POS_CONJ,
+                POS_PARTICLE, POS_INTERJ, POS_UNKNOWN
+            };
+            const int pri_count = sizeof(priority) / sizeof(priority[0]);
+
+            for (int pi = 0; pi < pri_count && out < max_output; pi++) {
+                for (int w = 0; w < word_count && out < max_output; w++) {
+                    if (!word_buf[w]) continue;
+                    if (word_pos[w] != priority[pi]) continue;
+                    output_words[out++] = word_buf[w];
+                    word_buf[w] = NULL;
+                }
             }
         }
-        output_words[out++] = final[i].word;
-        selected[sel++] = final[i].word;
-        final[i].used = 1;
+    } else {
+        /* ═══ 降级路径：模板连接词填充 (无 EmergentPOS 的回退) ═══ */
+        int out_fallback = 0;
+        const char* selected[DIFF_MAX_SEQUENCE];
+        int sel = 0;
+
+        for (int i = 0; i < final_cnt && out_fallback < max_output; i++) {
+            if (final[i].used) continue;
+            if (!final[i].word || strlen(final[i].word) < 2) continue;
+            if (final[i].word[0] == '@' || final[i].word[0] == '?' ||
+                (final[i].word[0] == 'H' && final[i].word[1] == 'e')) continue;
+            if (is_function_word(final[i].word)) continue;
+
+            int inhibited = 0;
+            for (int s = 0; s < sel; s++) {
+                if (final[i].word && selected[s] &&
+                    strcmp(final[i].word, selected[s]) == 0) {
+                    inhibited = 1; break;
+                }
+            }
+            if (inhibited) continue;
+
+            /* 模板连接词: 每2个实词插一次 */
+            if (out_fallback > 0 && (out_fallback % 3 == 0)) {
+                int ci = ((out_fallback - 1) % conn_count);
+                if (connectors[ci] && connectors[ci][0])
+                    output_words[out_fallback++] = connectors[ci];
+            }
+            output_words[out_fallback++] = final[i].word;
+            selected[sel++] = final[i].word;
+            final[i].used = 1;
+        }
+        out = out_fallback;
     }
 
     /* ── 静态数组不释放 (ctx生命周期管理) ── */

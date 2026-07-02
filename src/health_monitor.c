@@ -75,7 +75,8 @@ static void _aggressive_prune(MasterTopology* master) {
                 }
                 kept++;
             }
-            node->edge_count = kept;
+            /* 与 add_connection 保持一致的 RELEASE 序 */
+            __atomic_store_n(&node->edge_count, kept, __ATOMIC_RELEASE);
             /* 边压缩后重建 conn_hash，索引已变化。
              * 先置 NULL 再 free，防止无锁读 node_conn_hash_lookup 踩悬空指针 */
             {

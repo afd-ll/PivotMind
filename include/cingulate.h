@@ -84,6 +84,7 @@ const char* cingulate_summary(GeneratedSequence* seq, char* buf, int size);
 int cingulate_diffusion_evaluate(MasterTopology* topo,
                                   const char* input,
                                   float temperature,
+                                  struct EmergentPOS* emergent_pos,
                                   GeneratedSequence* out_seq);
 
 #ifdef __cplusplus

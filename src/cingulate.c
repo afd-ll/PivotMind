@@ -201,6 +201,7 @@ const char* cingulate_summary(GeneratedSequence* seq, char* buf, int size) {
 int cingulate_diffusion_evaluate(MasterTopology* topo,
                                   const char* input,
                                   float temperature,
+                                  struct EmergentPOS* emergent_pos,
                                   GeneratedSequence* out_seq) {
     if (!topo || !input || !out_seq) return 0;
 
@@ -209,6 +210,7 @@ int cingulate_diffusion_evaluate(MasterTopology* topo,
     DiffusionCtx dctx;
     if (diffusion_init(&dctx, topo) != 0) return 0;
     dctx.temperature = temperature;
+    dctx.emergent_pos = emergent_pos;
 
     const char* words[DIFF_MAX_SEQUENCE];
     int n = diffusion_generate(&dctx, input, words, DIFF_MAX_SEQUENCE);

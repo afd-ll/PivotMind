@@ -358,6 +358,9 @@ const char* template_get_connector(MasterTopology* master,
  */
 const char* pos_connector_map(int pos_a, int pos_b);
 
+/** 英文 POS 对 → 连接词映射（空格/ of / is / and 等） */
+const char* english_connector_map(int pos_a, int pos_b);
+
 // ========== 走边路径生成 ==========
 /**
  * 贪心走边路径生成
