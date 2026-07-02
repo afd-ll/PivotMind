@@ -40,6 +40,7 @@
 #include "hippocampus.h"
 #include "cerebellum.h"
 #include "prefrontal.h"
+#include "emergent_pos.h"
 #include "qa_memory.h"
 #include "amygdala.h"
 #include "multi_topology.h"
@@ -117,6 +118,10 @@ typedef struct {
     int   port;
     char  workdir[512];
     ConfigContext* config;       /* 运行时配置 */
+
+    /* 多轮对话上下文 */
+    char  last_answer[1024];     /* 上一轮回复（注入扩散引擎保持连贯） */
+    int   dialog_context_ready;  /* 是否有可用上下文 */
 } GatewaySystem;
 
 static GatewaySystem* g_gw = NULL;
@@ -680,9 +685,19 @@ static void handle_chat(GatewaySystem* gw, int fd, const char* body) {
         }
     }
 
-    /* 回退到旧路径：简单问题或 PFE 失败 */
+    /* 回退到旧路径：简单问题或 PFE 失败
+     * v0.4.3: 注入上一轮回复作为上下文，使扩散引擎匹配历史 token */
     if (!response) {
-        response = prefrontal_chat(gw->prefrontal, msg);
+        if (gw->dialog_context_ready && gw->last_answer[0]) {
+            /* 拼接: 上轮回复 + 当前输入 → 扩散引擎能匹配新旧 token */
+            char ctx_input[3072];
+            int clen = (int)strlen(gw->last_answer);
+            if (clen > 512) clen = 512; /* 截断过长上下文 */
+            snprintf(ctx_input, sizeof(ctx_input), "%.*s %s", clen, gw->last_answer, msg);
+            response = prefrontal_chat(gw->prefrontal, ctx_input);
+        } else {
+            response = prefrontal_chat(gw->prefrontal, msg);
+        }
     }
 
     /* 最终兜底：QA 记忆检索（扩散和联想推理都无产出） */
@@ -712,6 +727,15 @@ static void handle_chat(GatewaySystem* gw, int fd, const char* body) {
 
         http_json(fd, 200, json);
         gw->total_dialogs++;
+
+        /* v0.4.3: 保存本轮回复到多轮对话上下文 */
+        if (response && response[0]) {
+            int alen = (int)strlen(response);
+            if (alen > 1023) alen = 1023;
+            memcpy(gw->last_answer, response, (size_t)alen);
+            gw->last_answer[alen] = '\0';
+            gw->dialog_context_ready = 1;
+        }
 
         /* 海马体记下这次对话 — 巩固时自动建 QA 连接 */
         if (gw->hippocampus) hippocampus_log_dialog(gw->hippocampus, msg, response);
@@ -755,8 +779,10 @@ static void _cjk_insert_spaces(const char* src, char* dst, int dst_sz) {
     if (wi < dst_sz) dst[wi] = '\0';
 }
 
-/* 分词 + 注册到 vocab + 建相邻边，返回新增节点数 */
-static int _learn_tokens(SubTopology* vocab, const char* text, int* p_prev_id) {
+/* 分词 + 注册到 vocab + 建相邻边，返回新增节点数
+ * v0.4.3: 使用 EmergentPOS 同词类边加权 */
+static int _learn_tokens(SubTopology* vocab, const char* text,
+                         int* p_prev_id, EmergentPOS* ep) {
     if (!vocab || !vocab->net || !text || !text[0]) return 0;
 
     /* 动态分配缓冲区：CJK spaced 最坏情况 = strlen * 4/3 + 1 */
@@ -781,8 +807,27 @@ static int _learn_tokens(SubTopology* vocab, const char* text, int* p_prev_id) {
             }
             if (nid >= 0) {
                 vocab->net->nodes[nid]->activation += 0.1f;
-                if (*p_prev_id >= 0 && *p_prev_id != nid)
-                    huarong_net_add_connection(vocab->net, *p_prev_id, nid, 0.4f);
+                if (*p_prev_id >= 0 && *p_prev_id != nid) {
+                    /* v0.4.3: 涌现词类加权 — 同词类节点边权重更高 */
+                    float edge_w = 0.4f;
+                    if (ep) {
+                        ReasoningNode* prev = vocab->net->nodes[*p_prev_id];
+                        ReasoningNode* curr = vocab->net->nodes[nid];
+                        if (prev && prev->emergent_class_count > 0 &&
+                            curr && curr->emergent_class_count > 0) {
+                            for (int pi = 0; pi < prev->emergent_class_count && pi < 4; pi++) {
+                                for (int ci = 0; ci < curr->emergent_class_count && ci < 4; ci++) {
+                                    if (prev->emergent_class_ids[pi] == curr->emergent_class_ids[ci]) {
+                                        edge_w = 0.65f; /* 同词类: 更强的语法关联 */
+                                        break;
+                                    }
+                                }
+                                if (edge_w > 0.4f) break;
+                            }
+                        }
+                    }
+                    huarong_net_add_connection(vocab->net, *p_prev_id, nid, edge_w);
+                }
                 *p_prev_id = nid;
             }
         }
@@ -823,7 +868,10 @@ static void handle_learn(GatewaySystem* gw, int fd, const char* body) {
     if (!vocab || !vocab->net) { http_json(fd, 200, "{\"result\":\"no vocab\"}"); return; }
 
     int prev_id = -1;
-    int added = _learn_tokens(vocab, msg, &prev_id);
+    /* v0.4.3: 传递涌现词类系统用于同词类边加权 */
+    EmergentPOS* ep = (gw->prefrontal && gw->prefrontal->controller)
+                      ? gw->prefrontal->controller->emergent_pos : NULL;
+    int added = _learn_tokens(vocab, msg, &prev_id, ep);
 
     gw->total_learning_cycles++;
     char resp[128];
