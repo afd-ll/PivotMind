@@ -42,9 +42,9 @@ typedef struct {
     int   verbose;            // 详细输出
 } ArticleReaderConfig;
 
-#define ARTICLE_READER_DEFAULT_CONFIG { \
+#define ARTICLE_READER_DEFAULT_CONFIG ((ArticleReaderConfig){ \
     2, 1.5f, 2, 0.4f, 0.4f, 0.2f, 200, 0 \
-}
+})
 
 // ==================== 公共 API ====================
 
