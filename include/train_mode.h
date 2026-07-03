@@ -10,11 +10,14 @@
  *   1. JSON QA对: [["问","答"], ...]
  *   2. 管道分隔文本: 问|答 (每行一对)
  *   3. 纯文本: 每行一段，分词后建共现边
+ *   4. 文章阅读: 字符级PMI词发现
+ *   5. 媒体文件: 视频目录 → VisualCortex脑区处理 (v0.5)
  *
  * 用法：
  *   ./pivotmind_gateway --train-mode
  *   ./pivotmind_gateway --train-mode --corpus data/hermes_knowledge_base.json --rounds 3
  *   ./pivotmind_gateway --train-mode --corpus data/corpus/wiki_sample.txt --format text --speed 50
+ *   ./pivotmind_gateway --train-mode --corpus /data/cartoons/ --format media --rounds 3
  *
  * 运行时 API：
  *   GET  /train/status    → 训练进度
@@ -34,6 +37,7 @@
 
 /* Forward declaration for optional thalamus signal bus binding */
 typedef struct Thalamus Thalamus;
+typedef struct VisualCortex VisualCortex;
 
 // 语料格式
 typedef enum {
@@ -41,6 +45,7 @@ typedef enum {
     CORPUS_PIPE_QA,      // 问|答
     CORPUS_PLAIN_TEXT,   // 纯文本，分词建边
     CORPUS_ARTICLE,      // 文章阅读：字符级统计合并词发现
+    CORPUS_MEDIA,        // 视频/音频：VisualCortex脑区处理 (v0.5)
 } CorpusFormat;
 
 // 训练配置
@@ -98,6 +103,9 @@ typedef struct {
 
     // 丘脑信号总线（可选，NULL = 不发送反馈 / 不做认知调速）
     Thalamus* thalamus;
+
+    // 视觉皮层脑区（可选，CORPUS_MEDIA 格式必需）(v0.5)
+    VisualCortex* visual_cortex;
 } TrainMode;
 
 // ==================== API ====================
@@ -146,6 +154,12 @@ void train_config_print_defaults(void);
  * 避免在对话活跃时抢占资源
  */
 void train_mode_set_thalamus(TrainMode* tm, Thalamus* th);
+
+/**
+ * 绑定视觉皮层脑区（可选，CORPUS_MEDIA 格式必需）(v0.5)
+ * 绑定后 train_feed_media 将批量入队视频文件到 VisualCortex 任务队列
+ */
+void train_mode_set_visual_cortex(TrainMode* tm, VisualCortex* vc);
 
 /** 从命令行参数解析训练配置 */
 TrainConfig train_config_from_args(int argc, char* argv[]);

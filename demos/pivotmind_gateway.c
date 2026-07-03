@@ -585,6 +585,9 @@ static int gw_system_init(GatewaySystem* gw) {
         __sync_synchronize();  /* ARM 弱内存序: 确保 train_mode 对所有线程可见 */
         if (gw->train_mode) {
             train_mode_set_thalamus(gw->train_mode, gw->thalamus);
+            /* v0.5: 媒体格式训练需要 VisualCortex */
+            if (gw->visual_cortex)
+                train_mode_set_visual_cortex(gw->train_mode, gw->visual_cortex);
             train_mode_start(gw->train_mode);
         } else {
             fprintf(stderr, "[gateway] 训练模式创建失败\n");
@@ -1473,6 +1476,7 @@ int main(int argc, char* argv[]) {
     int port = GW_DEFAULT_PORT;
     int train_mode_flag = 0;
     TrainConfig train_config = {NULL, CORPUS_JSON_QA, 1, 20, 100, 5000, 0};
+    int format_explicit = 0;     /* v0.5: 用户显式指定了 --format */
     const char* workdir = ".";
 
     // 解析命令行参数（兼容旧的位置参数和新的 --train-mode 选项）
@@ -1492,9 +1496,11 @@ int main(int argc, char* argv[]) {
             train_config.batch_learn_interval = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--format") == 0 && i+1 < argc) {
             const char* fmt = argv[++i];
+            format_explicit = 1;  /* 用户显式指定格式 */
             if (strcmp(fmt, "pipe") == 0) train_config.format = CORPUS_PIPE_QA;
             else if (strcmp(fmt, "text") == 0 || strcmp(fmt, "plain") == 0) train_config.format = CORPUS_PLAIN_TEXT;
             else if (strcmp(fmt, "article") == 0) train_config.format = CORPUS_ARTICLE;
+            else if (strcmp(fmt, "media") == 0 || strcmp(fmt, "video") == 0) train_config.format = CORPUS_MEDIA;
             else train_config.format = CORPUS_JSON_QA;
         } else if (strcmp(argv[i], "--save-interval") == 0 && i+1 < argc) {
             train_config.save_interval = atoi(argv[++i]);
@@ -1512,8 +1518,8 @@ int main(int argc, char* argv[]) {
                 workdir = argv[i];
         }
     }
-    // 自动检测语料格式
-    if (train_config.corpus_path)
+    // 自动检测语料格式 (仅在用户未显式指定 --format 时)
+    if (train_config.corpus_path && !format_explicit)
         train_config.format = train_detect_format(train_config.corpus_path);
 
     // 切换工作目录

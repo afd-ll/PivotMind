@@ -9,6 +9,7 @@
 #include "huarong_topology.h"
 #include "feature_io.h"
 #include "article_reader.h"
+#include "visual_cortex.h"    /* v0.5 CORPUS_MEDIA */
 #include "thalamus.h"
 #include "error.h"
 #include "utf8_tokenizer.h"
@@ -29,6 +30,7 @@ static int train_feed_qa_json(TrainMode* tm, const char* path);
 static int train_feed_pipe_qa(TrainMode* tm, const char* path);
 static int train_feed_plain_text(TrainMode* tm, const char* path);
 static int train_feed_article(TrainMode* tm, const char* path);
+static int train_feed_media(TrainMode* tm, const char* path);    /* v0.5 */
 static int train_feed_one_line(TrainMode* tm, const char* text);
 static int train_feed_token_sequence(TrainMode* tm, SubTopology* vocab,
                                       char** tokens, int token_count,
@@ -324,6 +326,7 @@ static void* train_thread_func(void* arg) {
            path, tm->progress.total_lines,
            tm->config.format == CORPUS_JSON_QA ? "JSON QA" :
            tm->config.format == CORPUS_PIPE_QA ? "管道QA" :
+           tm->config.format == CORPUS_MEDIA ? "媒体文件(VisualCortex)" :
            tm->config.format == CORPUS_ARTICLE ? "文章阅读" : "纯文本");
 
     for (int round = 1; round <= tm->config.rounds && !tm->should_stop; round++) {
@@ -339,6 +342,7 @@ static void* train_thread_func(void* arg) {
             case CORPUS_PIPE_QA:   ok = train_feed_pipe_qa(tm, path); break;
             case CORPUS_PLAIN_TEXT: ok = train_feed_plain_text(tm, path); break;
             case CORPUS_ARTICLE:   ok = train_feed_article(tm, path); break;
+            case CORPUS_MEDIA:     ok = train_feed_media(tm, path); break;
         }
 
         if (ok < 0) {
@@ -739,6 +743,135 @@ static int train_feed_article(TrainMode* tm, const char* path) {
     return 0;
 }
 
+// ==================== 媒体文件训练 (v0.5) ====================
+
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <dirent.h>
+#endif
+
+/**
+ * 视频/音频目录批量训练 — 逐文件入队到 VisualCortex 任务队列
+ *
+ * 与 /media/feed API 不同，此处入队后由训练线程等待脑干 tick 异步消费。
+ * 每 tick 视觉皮层只处理一个文件（max_batch_per_tick=1），
+ * 因此轮询等待队列消化完成 + 进度日志。
+ *
+ * @return 0=成功, -1=VisualCortex 未注入或出错
+ */
+static int train_feed_media(TrainMode* tm, const char* path) {
+    if (!tm || !path) return -1;
+
+    VisualCortex* vc = tm->visual_cortex;
+    if (!vc) {
+        train_set_error(tm, "媒体训练需要注入 VisualCortex 脑区指针");
+        return -1;
+    }
+
+    /* 判断是文件还是目录 */
+    struct stat st;
+    if (stat(path, &st) != 0) {
+        train_set_error(tm, "无法访问路径: %s", path);
+        return -1;
+    }
+
+    /* 收集文件列表 */
+    int enqueued = 0;
+
+    if (S_ISDIR(st.st_mode)) {
+        /* 目录: 递归入队所有视频文件 */
+        enqueued = visual_cortex_enqueue_directory(vc, path, NULL, 1);
+        if (enqueued < 0) {
+            train_set_error(tm, "目录遍历失败: %s", path);
+            return -1;
+        }
+    } else {
+        /* 单个文件: 入队 */
+        if (visual_cortex_enqueue(vc, path, "visual") == 0)
+            enqueued = 1;
+    }
+
+    /* 更新进度估算 */
+    tm->progress.total_lines = (long)enqueued;
+    tm->progress.current_line = 0;
+    tm->progress.total_fed = 0;
+
+    printf("[媒体训练] 已入队 %d 个文件, 等待脑干消费...\n", enqueued);
+
+    long processed = 0;
+    long prev_vis_nodes = 0, prev_xmod_edges = 0;
+
+    /* 获取初始统计用于增量对比 */
+    {
+        int q; long f; int vn, xe;
+        visual_cortex_get_stats(vc, &q, &f, &vn, &xe);
+        prev_vis_nodes = (long)vn;
+        prev_xmod_edges = (long)xe;
+    }
+
+    /* 轮询队列，等待全部消化 */
+    while (!tm->should_stop) {
+        /* 暂停检查 */
+        while (tm->should_pause && !tm->should_stop)
+            usleep(200000);
+        if (tm->should_stop) break;
+
+        int qsize = visual_cortex_queue_size(vc);
+        long new_processed = (long)enqueued - qsize;
+
+        if (new_processed != processed) {
+            processed = new_processed;
+            tm->progress.current_line = processed;
+
+            /* 获取增量统计 */
+            int q; long f; int vn, xe;
+            visual_cortex_get_stats(vc, &q, &f, &vn, &xe);
+            tm->progress.total_added_nodes += ((long)vn - prev_vis_nodes);
+            tm->progress.total_added_edges += ((long)xe - prev_xmod_edges);
+            prev_vis_nodes = (long)vn;
+            prev_xmod_edges = (long)xe;
+            tm->progress.total_fed = processed;
+
+            /* 日志 */
+            if (tm->config.verbose || processed % 10 == 0) {
+                printf("[媒体训练] 第%d轮: %ld/%ld 文件, 队列剩余=%d, "
+                       "视觉节点=%ld, 跨模态边=%ld\n",
+                       tm->progress.current_round, processed, (long)enqueued, qsize,
+                       (long)vn, (long)xe);
+            }
+
+            /* 批量学习触发 */
+            if (processed > 0 && processed % tm->config.batch_learn_interval == 0) {
+                train_do_batch_learn(tm);
+            }
+
+            /* 自动存盘 */
+            if (processed > 0 && processed % tm->config.save_interval == 0) {
+                train_do_auto_save(tm, ".");
+            }
+        }
+
+        /* 全部处理完 */
+        if (qsize <= 0 && processed >= (long)enqueued) break;
+
+        /* 限速延迟 — 给脑干 tick 留时间 */
+        usleep(500000); /* 500ms */
+    }
+
+    /* 强制触发一次 batch learn */
+    if (processed > 0 && !tm->should_stop) {
+        train_do_batch_learn(tm);
+        train_do_auto_save(tm, ".");
+    }
+
+    printf("[媒体训练] 完成: %ld/%ld 文件, 视觉节点=%ld, 跨模态边=%ld\n",
+           processed, (long)enqueued,
+           (long)prev_vis_nodes, (long)prev_xmod_edges);
+
+    return 0;
+}
+
 // ==================== 核心：喂一行到引擎 ====================
 
 static int train_feed_one_line(TrainMode* tm, const char* text) {
@@ -889,6 +1022,8 @@ TrainConfig train_config_from_args(int argc, char* argv[]) {
                 cfg.format = CORPUS_PLAIN_TEXT;
             else if (strcmp(fmt, "article") == 0)
                 cfg.format = CORPUS_ARTICLE;
+            else if (strcmp(fmt, "media") == 0 || strcmp(fmt, "video") == 0)
+                cfg.format = CORPUS_MEDIA;
         } else if (strcmp(argv[i], "--rounds") == 0 && i + 1 < argc) {
             cfg.rounds = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--speed") == 0 && i + 1 < argc) {
@@ -913,14 +1048,20 @@ TrainConfig train_config_from_args(int argc, char* argv[]) {
 void train_config_print_defaults(void) {
     printf("训练模式配置:\n");
     printf("  --corpus PATH        语料文件路径\n");
-    printf("  --format json|pipe|text|article  语料格式 (默认自动检测)\n");
+    printf("  --format json|pipe|text|article|media  语料格式 (默认自动检测)\n");
     printf("  --rounds N           训练轮数 (默认1)\n");
     printf("  --speed N            每秒喂料条数 (默认20)\n");
     printf("  --batch N            每N条触发主动学习 (默认100)\n");
     printf("  --save-interval N    每N条自动存盘 (默认5000)\n");
     printf("  --verbose            详细输出\n");
+    printf("\n  v0.5 媒体训练示例:\n");
+    printf("    --corpus /data/cartoons/ --format media --rounds 3\n");
 }
 
 void train_mode_set_thalamus(TrainMode* tm, Thalamus* th) {
     if (tm) tm->thalamus = th;
+}
+
+void train_mode_set_visual_cortex(TrainMode* tm, VisualCortex* vc) {
+    if (tm) tm->visual_cortex = vc;
 }
