@@ -22,6 +22,7 @@
 #include "topology_growth.h"
 #include "broca.h"
 #include "hypothalamus.h"
+#include "visual_cortex.h"    /* v0.5 视觉皮层 — 多模态感知 */
 #include "error.h"
 #include "platform.h"
 #include <stdio.h>
@@ -321,6 +322,18 @@ static int brainstem_tick_perception(Brainstem* bs) {
 
     Amygdala* amy = (Amygdala*)thalamus_get_region(th, THAL_AMYGDALA);
     if (amy) amygdala_tick(amy);
+
+    /* v0.5 视觉皮层 — 每 tick 检查任务队列，按 throttle 限速处理 */
+    if (thalamus_is_region_enabled(th, THAL_VISUAL_CORTEX)) {
+        VisualCortex* vc = (VisualCortex*)thalamus_get_region(th, THAL_VISUAL_CORTEX);
+        if (vc) {
+            float vc_throttle = thalamus_get_throttle(th, THAL_VISUAL_CORTEX);
+            int vc_work = visual_cortex_tick(vc, vc_throttle);
+            if (vc_work > 0 && bs->verbose)
+                printf("[脑干] 视觉皮层本轮处理 %d 个文件\n", vc_work);
+        }
+    }
+
     return work;
 }
 

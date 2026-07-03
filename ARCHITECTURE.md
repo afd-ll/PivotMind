@@ -1,6 +1,6 @@
 # 玄枢 PivotMind 架构文档
 
-> 当前版本: **v0.4.13** — 13 脑区完整架构 + POS 语法映射 + 边特异性权重 + 涌现式词类 + 配置系统 + 神经网络子系统 + 编译零警告
+> 当前版本: **v0.5.0** — 14 脑区 + 12 层拓扑 + 多模态管线 + POS 语法映射 + 边特异性权重 + 涌现式词类 + 配置系统
 
 ## 整体架构
 
@@ -10,7 +10,7 @@
 
 | 层级 | 职责 | 核心文件 |
 |------|------|---------|
-| **多拓扑网络层** | 11 层子拓扑接收输入，逐字分词后激活对应节点，跨拓扑传播 | `huarong_topology.c`, `multi_topology.c` |
+| **多拓扑网络层** | 12 层子拓扑接收输入，逐字分词后激活对应节点，跨拓扑传播 | `huarong_topology.c`, `multi_topology.c` |
 | **认知调度层** | 意图向量计算、满意度评估、retry 循环、在线学习调整 | `cognitive_controller.c` |
 | **对话学习层** | 联想推理、回复生成、赫布在线学习、状态持久化、POS 语法映射 | `dialog_system.c`, `autonomic_learner.c`, `dialog_generate.c` |
 | **推理编排层** (v0.3) | 6 模式推理编排、任务分解、子目标调度、多候选竞争、冲突检测 | `prefrontal_executive.c`, `idea_arena.c` |
@@ -21,7 +21,7 @@
 
 ## 脑区划分
 
-玄枢按哺乳动物大脑皮层的功能分区建模，13 个脑区/子系统各司其职，通过丘脑信号总线通信。**全部脑区均已完整实现，无占位代码。**
+玄枢按哺乳动物大脑皮层的功能分区建模，14 个脑区/子系统各司其职，通过丘脑信号总线通信。**全部脑区均已完整实现，无占位代码。**
 
 | 脑区 | 文件 | 行数 | 子拓扑归属 | 功能 |
 |------|------|------|----------|------|
@@ -39,6 +39,7 @@
 | **扣带回 (ACC)** | `cingulate.c` | 223 | — | 四维序列评估(语义+模板+情绪+长度) |
 | **想法竞技场 (IdeaArena)** | `idea_arena.c` | 722 | — | 多候选五维竞争选择、侧抑制、多巴胺调节 |
 | **网状激活系统 (Reticular)** | `reticular.c` | 133 | — | 觉醒/警觉水平调节 |
+| **视觉皮层 (VisualCortex)** (v0.5) | `visual_cortex.c` | 550 | 视觉拓扑 | 帧提取 + SRT字幕 + 时间窗对齐 + 跨模态边建立 |
 
 ## 三大核心模块
 
@@ -191,19 +192,25 @@ typedef struct CrossTopologyLink {
 | TOPO_CONCEPT (8) | 概念拓扑 | 数值、规则、实体等高抽象概念 |
 | TOPO_MASTER (9) | 主拓扑 | 全局调度与优先级管理 |
 | TOPO_TEMPLATE (10) | 模板拓扑 | 句式模板，路径编码递归抽象 |
+| TOPO_VISUAL (11) | 视觉拓扑 | 视觉概念节点，"苹果_视觉"，CLIP 512-dim 特征 |
 
 ### 拓扑间关系
 
-```
-词汇拓扑 ←跨拓扑→ 语义拓扑
-↕                     ↕
-情绪拓扑 ←跨拓扑→ 领域拓扑
-↕                     ↕
-语法拓扑 ←跨拓扑→ 语用拓扑
-↕                     ↕
-上下文拓扑 ←跨拓扑→ 文化拓扑
-         ↕
-       概念拓扑
+```mermaid
+graph TD
+    VOCAB["词汇拓扑 (0)"] --- SEM["语义拓扑 (1)"]
+    VOCAB --- EMOTION["情绪拓扑 (2)"]
+    VOCAB --- SYNTAX["语法拓扑 (3)"]
+    SEM --- DOMAIN["领域拓扑 (5)"]
+    SEM --- VISUAL["视觉拓扑 (11) v0.5<br/>跨模态锚定"]
+    EMOTION --- CULTURE["文化拓扑 (7)"]
+    SYNTAX --- PRAGMA["语用拓扑 (6)"]
+    SYNTAX --- TEMPLATE["模板拓扑 (10)"]
+    CONTEXT["上下文拓扑 (4)"] --- CULTURE
+    CONTEXT --- CONCEPT["概念拓扑 (8)"]
+    VOCAB --- VISUAL
+
+    style VISUAL fill:#4fc3f7,stroke:#0288d1,color:#000
 ```
 
 跨拓扑连接在训练后通过 `rebuild_cross_connections()` 批量重建，基于节点特征（512 维语义向量）的余弦相似度、精确名称匹配和最左子串匹配三种策略。动态新建跨拓扑连接通过 `CrossTopoHitRecord` 跟踪。
@@ -234,6 +241,56 @@ while (entry) {
 ```
 
 激活传递公式：`new_activation = src_activation × link->weight × link->transfer_rate × motivation × valence`
+
+---
+
+## 多模态管线 (v0.5)
+
+视觉皮层脑区实现两条数据管线，将视频/音频内容转化为拓扑网络的知识：
+
+### 管线 A：字幕管道 (MediaReader)
+
+```
+视频文件 → ffprobe 检测字幕轨道
+        → ffmpeg -map 0:s:0 提取 SRT
+        → SRT 解析: 去序号/时间戳/HTML标签
+        → article_process_line() 逐行喂入
+        → PMI 词发现 → 词汇拓扑 + 相邻词建边
+```
+
+### 管线 B：视觉皮层管道 (VisualCortex)
+
+```
+视频文件 → ffprobe 提取关键帧 (I帧 + 间隔采样)
+        → 场景切换检测 (前64维余弦差异 > 阈值)
+        → ffmpeg 提取 SRT 字幕 → 分词 + 时间戳
+        → 时间窗对齐: 词 t ± 2000ms 内帧共现计数
+        → 共现 ≥ 2 → 创建视觉节点 → 跨拓扑边:
+          vocab"苹果" ←─ visual_anchor ─→ visual"苹果_视觉"
+```
+
+### 脑区调度模型
+
+```
+网关 POST /media/feed
+  → visual_cortex_enqueue()       (生产者: 入队环形缓冲, 容量128)
+  → 脑干 tick (每1s)
+    → thalamus_get_region(THAL_VISUAL_CORTEX)
+      → visual_cortex_tick(throttle)
+        → 门控: throttle < 0.1 → 跳过
+        → 出队 1 文件 → 帧提取 + 对齐 + 建边
+        → THAL_SIG_VISUAL_FRAME / THAL_SIG_CROSS_MODAL_EDGE
+```
+
+### 早教片/动画片优势
+
+| 特征 | 有利于多模态对齐 |
+|------|-----------------|
+| 物体居中、轮廓清晰 | CLIP 特征提取准确率高 |
+| 语音与画面严格同步 | "这是苹果"说出口时，苹果恰在画面中央 |
+| 语言简洁、重复性高 | 同一概念用不同语境多次出现 |
+| 明确指向词 | "这是…""看这个…"标记了对齐时刻 |
+| 天然对话轮次 | "这是什么？""这是太阳" → 天然 QA 对 |
 
 ---
 
@@ -835,7 +892,7 @@ confidence = base_score × 0.4
 
 ```
 PivotMind/
-├── src/                    # 核心源文件（86个 .c, ~48,600 行，编译零警告）
+├── src/                    # 核心源文件（88个 .c, ~49,600 行，编译零警告）
 │   ├── huarong_topology.c             # 底层拓扑网络：节点/边/哈希/拓扑排序
 │   ├── multi_topology.c               # 多拓扑管理：SubTopology/MasterTopology/走边
 │   ├── cognitive_controller.c         # 认知调度中心：意图向量/retry/满意度
@@ -875,7 +932,9 @@ PivotMind/
 │   │   ├── brainstem.c                   # 脑干：昼夜节律 + 心跳循环
 │   │   ├── cingulate.c                   # 扣带回：ACC 评估
 │   │   ├── idea_arena.c                  # 想法竞技场：候选竞争
-│   │   └── reticular.c                   # 网状激活系统：觉醒调节
+│   │   ├── reticular.c                   # 网状激活系统：觉醒调节
+│   │   ├── visual_cortex.c               # 视觉皮层：帧提取+跨模态对齐 (v0.5)
+│   │   └── media_reader.c                # 媒体阅读器：SRT字幕→PMI管道 (v0.5)
 │   │
 │   ├── 涌现式词类:
 │   │   └── emergent_pos.c                # 种子锚点 + 512 维特征聚类
@@ -898,7 +957,7 @@ PivotMind/
 │   │
 │   └── ...                              # 其他辅助模块
 │
-├── include/                # 头文件（89个 .h, ~12,600 行）
+├── include/                # 头文件（91个 .h, ~12,800 行）
 │   ├── multi_topology.h              # MasterTopology / SubTopology / CrossTopologyLink
 │   ├── huarong_topology.h            # ReasoningNode / HuarongTopologyNet
 │   ├── cognitive_controller.h        # CognitiveController / intent_weights / retry
@@ -908,6 +967,8 @@ PivotMind/
 │   ├── emergent_pos.h                # POSAnchor / EmergentPOS
 │   ├── json_config.h                 # ConfigContext 运行时配置
 │   ├── bptt_learner.h                # BPTT 学习器
+│   ├── visual_cortex.h               # VisualCortex 脑区 API (v0.5)
+│   ├── media_reader.h                # MediaReader SRT 管道 (v0.5)
 │   └── ...
 │
 ├── tools/                  # 命令行工具（57 文件）
@@ -923,13 +984,13 @@ PivotMind/
 │   └── digital_life.c                # 命令行交互演示
 │
 ├── tests/                  # 测试
-│   ├── unit/                         # 单元测试（17 项）
+│   ├── unit/                         # 单元测试（19 项）
 │   ├── regression/                   # 回归测试套件（32 项）+ 训练追踪
 │   ├── integration/                  # 集成测试
 │   └── test_pfe_unit.c               # PFE 专项测试（23 项）
 │
 ├── scripts/                # 自动化脚本（12 文件）
-├── changelogs/             # 改动记录（55 编号）
+├── changelogs/             # 改动记录（56 编号）
 ├── reports/                # 审查报告
 ├── docs/                   # 补充文档
 ├── data/                   # 运行时数据（hermes 知识库 25MB）
@@ -979,6 +1040,6 @@ PivotMind/
 | 参数自动调优 | 用强化学习或贝叶斯优化调参 intent_weights | cognitive_controller.c |
 | 训练效果追踪 | 固定测试集的量化回复质量指标 | tests/regression/train_track.py ✅ |
 | 分布式多节点 | 丘脑信号总线延伸到跨机路由 | thalamus.c, multi_topology.c |
-| 语音/图像拓扑 | 扩展到多模态（预留 thread_pool 框架） | multi_topology.c |
+| 语音/图像拓扑 | ~~扩展到多模态~~ → **v0.5 已实现**: 视觉皮层脑区 + 媒体阅读器 | `visual_cortex.c`, `media_reader.c` |
 | FPGA 部署 | 硬件级神经形态计算 | roadmap |
 | ~~跨架构状态格式~~ | ~~JSON/MessagePack~~ → **已实现**: `tools/convert_state.py` | feature_io.c, multi_topology.c |

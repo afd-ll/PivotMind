@@ -50,7 +50,8 @@ typedef enum {
     THAL_AMYGDALA     = 6,  /* 杏仁核 — 情绪/效价调控 */
     THAL_PREF_EXEC    = 7,  /* 前额叶执行器 — 推理编排/子目标调度/想法竞争 (v0.3) */
     THAL_HYPOTHALAMUS = 8,  /* 下丘脑 — 需求/动机调控 (v0.4) */
-    THAL_SUBSYSTEM_COUNT = 9
+    THAL_VISUAL_CORTEX = 9, /* 视觉皮层 — 多模态帧提取+跨模态对齐 (v0.5) */
+    THAL_SUBSYSTEM_COUNT = 10
 } ThalamusSubsystem;
 
 /* ================================================================
@@ -87,7 +88,12 @@ typedef enum {
     THAL_SIG_IDEA_SELECTED,     /* 胜出想法已选定 */
 
     /* 脑区 → 丘脑：反馈上报 */
-    THAL_SIG_FEEDBACK_REPORT    /* 工作报告 */
+    THAL_SIG_FEEDBACK_REPORT,   /* 工作报告 */
+
+    /* 视觉皮层 → 丘脑：多模态信号 (v0.5 media pipeline) */
+    THAL_SIG_VISUAL_FRAME,      /* 视觉帧已处理 */
+    THAL_SIG_CROSS_MODAL_EDGE,  /* 跨模态边已建立 */
+    THAL_SIG_MEDIA_FILE_DONE    /* 媒体文件处理完成 */
 } BrainSignalType;
 
 /* ================================================================

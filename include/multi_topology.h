@@ -36,7 +36,8 @@ typedef enum {
     TOPO_CULTURE = 7,      // 文化拓扑
     TOPO_CONCEPT = 8,      // 概念拓扑（数值、规则、实体）
     TOPO_MASTER = 9,       // 主拓扑
-    TOPO_TEMPLATE = 10     // 模板拓扑（路径编码递归抽象）
+    TOPO_TEMPLATE = 10,    // 模板拓扑（路径编码递归抽象）
+    TOPO_VISUAL = 11       // 视觉拓扑（多模态: CLIP 特征 → 概念锚定）
 } TopologyType;
 
 /**

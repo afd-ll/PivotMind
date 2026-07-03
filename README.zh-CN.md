@@ -7,7 +7,7 @@
 
 [English](README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [Русский](README.ru.md)
 
-[![Version](https://img.shields.io/badge/version-v0.4.13-blue.svg)](changelogs/)
+[![Version](https://img.shields.io/badge/version-v0.5.0-blue.svg)](changelogs/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green.svg)](LICENSE)
 [![Language](https://img.shields.io/badge/C-99%2B-orange.svg)](https://zh.wikipedia.org/wiki/C99)
 [![Platform](https://img.shields.io/badge/ARM-RK3399%20%7C%20x86__64-lightgrey.svg)](#运行平台)
@@ -29,14 +29,14 @@
 没有 Transformer 外部依赖，没有预训练 embedding 向量。
 节点、边、激活、衰减 —— 以及一个永不停歇的后台时钟驱动整个系统。
 
-**当前版本：v0.4.13** —— 13 脑区完整架构、涌现式词类系统、多学习器并行、PFE 推理编排、512 维特征向量、POS 语法映射、边特异性权重、编译零警告。
+**当前版本：v0.5.0** —— 14 脑区完整架构、涌现式词类系统、多学习器并行、PFE 推理编排、512 维特征向量、POS 语法映射、边特异性权重、**多模态视觉管线（VisualCortex + MediaReader）**、编译零警告。
 
-**代码规模：85 个源文件（~48,600 行 C） + 89 个头文件（~12,600 行） + 工具/测试/演示（~13,000 行）= 约 74,000 行。**
+**代码规模：88 个源文件（~49,600 行 C） + 91 个头文件（~12,800 行） + 工具/测试/演示（~13,000 行）= 约 75,500 行。**
 
 ### 溯智网络
 
 每个概念是一个节点，共现即建边。边携带**权重 × 置信度 × 动机倾向**三维属性。
-11 个子拓扑（词汇/语义/情绪/语法/上下文/领域/语用/文化/概念/主拓扑/模板）
+12 个子拓扑（词汇/语义/情绪/语法/上下文/领域/语用/文化/概念/主拓扑/模板/**视觉**）
 各为一张独立的溯智网络，通过跨拓扑连接用邻接表实现 O(1) 索引。
 激活沿多层同时扩散，竞争胜出者构成输出。
 
@@ -46,7 +46,7 @@
 |------------------------|---------------------------------------------------|
 | Token 预测，无状态     | 节点激活，有连续内部状态                          |
 | 梯度离线批量训练       | 赫布在线实时学习 + Skip-gram 预训练                |
-| 单一 Embedding 空间    | 11 个子拓扑独立学习 + 512 维特征向量              |
+| 单一 Embedding 空间    | 12 个子拓扑独立学习 + 512 维特征向量              |
 | 神经网络黑盒           | 节点-边显式路径，完全可追溯                       |
 | 需要 GPU + 大量显存    | 仅 pthread + OpenMP，跑在 ARM 嵌入式板            |
 | 推理与学习分离         | 对话即学习，学习即对话                            |
@@ -57,25 +57,47 @@
 
 ## 脑区架构
 
-玄枢按哺乳动物大脑皮层的功能分区建模，13 个脑区/子系统各司其职，通过丘脑信号总线通信。
-**全部 13 个脑区均已完成实现，无占位代码。**
+玄枢按哺乳动物大脑皮层的功能分区建模，14 个脑区/子系统各司其职，通过丘脑信号总线通信。
+**全部 14 个脑区均已完成实现，无占位代码。**
 
-```
-                          ┌──────────────────────┐
-                          │   前额叶 Prefrontal    │ ← 对话/决策入口
-                          │  + 前额叶执行器 PFE    │ ← 6 模式推理编排引擎
-                          └──────────┬───────────┘
-                                     │ 信号总线
-        ┌────────┬────────┬─────────┼─────────┬────────┬────────┬────────┐
-        ▼        ▼        ▼         ▼         ▼        ▼        ▼        ▼
-   ┌────────┐┌──────┐┌──────┐┌──────────┐┌──────┐┌──────┐┌──────┐┌──────────┐
-   │海马体   ││ DMN  ││杏仁核 ││ 感知皮层  ││布罗卡 ││ 小脑  ││脑干   ││ 下丘脑    │
-   │记忆巩固 ││梦境  ││情绪   ││联网搜索   ││句式   ││微调   ││节律   ││需求/动机  │
-   └────────┘└──────┘└──────┘└──────────┘└──────┘└──────┘└──────┘└──────────┘
-                                     │
-                          ┌──────────┴──────────┐
-                          │    丘脑 Thalamus      │ ← 信号总线 + 资源门控
-                          └─────────────────────┘
+```mermaid
+graph TB
+    PF["🧠 前额叶<br/>对话/决策入口"]
+    PFE["🎯 前额叶执行器<br/>6模式推理"]
+    HC["📚 海马体<br/>记忆巩固"]
+    DMN["💭 默认模式网络<br/>梦境联想"]
+    AMY["😊 杏仁核<br/>情绪调控"]
+    PERC["🔍 感知皮层<br/>联网搜索"]
+    BROCA["📝 布罗卡区<br/>模板生成"]
+    CB["⚖️ 小脑<br/>BPTT/资源保护"]
+    BS["⏰ 脑干<br/>昼夜节律"]
+    HYPO["🔥 下丘脑<br/>需求驱动"]
+    ACC["✅ 扣带回<br/>4D评估"]
+    ARENA["🏟️ 想法竞技场<br/>多候选竞争"]
+    RET["⚡ 网状激活<br/>警觉调节"]
+    VC["👁️ 视觉皮层 v0.5<br/>多模态管线"]
+
+    TH["📡 丘脑<br/>信号总线 + 资源门控"]
+
+    PF --> TH
+    PFE --> TH
+    HC --> TH
+    DMN --> TH
+    AMY --> TH
+    PERC --> TH
+    BROCA --> TH
+    CB --> TH
+    BS --> TH
+    HYPO --> TH
+    ACC --> TH
+    ARENA --> TH
+    RET --> TH
+    VC --> TH
+
+    TH --> PF
+    TH --> HC
+    TH --> PERC
+    TH --> VC
 ```
 
 | 脑区             | 文件                       | 行数 | 职责                                                         |
@@ -87,13 +109,14 @@
 | **杏仁核**       | `amygdala.c`               | 97   | 情绪效价采样、探索/利用平衡                                  |
 | **感知皮层**     | `perception.c`             | 838  | 联网搜索（搜狗+Bing+双备份）、article_reader 语义理解管线    |
 | **布罗卡区**     | `broca.c`                  | 56   | 模板自动构建与衰减调度                                       |
-| **小脑**         | `cerebellum.c`             | 80   | BPTT 微调、CPU/内存资源保护、(BPTT微调)BPTT微调  |
+| **小脑**         | `cerebellum.c`             | 80   | BPTT 微调、CPU/内存资源保护                                  |
 | **下丘脑**       | `hypothalamus.c`           | 149  | 四维需求驱动（好奇/获取/社交/舒适）、昼夜耦合                  |
 | **丘脑**         | `thalamus.c`               | 540  | 信号总线、资源门控、脑区间通信路由、工具槽位分配              |
 | **脑干**         | `brainstem.c`              | 613  | 节律心跳、激活衰减、自发激活、存盘调度、堆监控                |
 | **扣带回 (ACC)** | `cingulate.c`              | 223  | 四维序列评估（语义+模板+情绪+长度）、自适应门控              |
 | **想法竞技场**   | `idea_arena.c`             | 722  | 多候选五维竞争选择、侧抑制、多巴胺调节、赢家反馈              |
 | **网状激活系统** | `reticular.c`              | 133  | 觉醒/警觉水平调节                                                |
+| **视觉皮层** 🆕  | `visual_cortex.c`          | 550  | 帧提取 + SRT 字幕 + 时间窗对齐 + 跨模态边建立               |
 
 ---
 
@@ -104,7 +127,7 @@
 输入经滑动窗口分词后，在多层网络同步扩散：
 
 - **词汇层** —— 直接字面匹配，快速召回
-- **语义层** —— 11 子拓扑跨层联想，触达相关概念
+- **语义层** —— 12 子拓扑跨层联想，触达相关概念
 - **模板层** —— 识别句式模式，指导连接词插入
 - **情绪层** —— valence × arousal 加权，影响候选优先级
 
@@ -144,6 +167,39 @@
 | 🟢 GREEN  | 正常   | 正常运行                            |
 | 🟡 YELLOW | 预警   | 日志告警 + 提高学习门槛             |
 | 🔴 RED    | 紧急   | 存档 + 批量修剪弱边                 |
+
+---
+
+## 多模态管线 **NEW v0.5.0**
+
+视觉皮层脑区通过两条数据管线将视频/音频内容转化为拓扑网络知识：
+
+```mermaid
+flowchart LR
+    subgraph PipelineA["管线A: 字幕管道"]
+        V1["🎬 视频文件"] --> FF1["ffprobe 检测字幕"]
+        FF1 --> FF2["ffmpeg 提取 SRT"]
+        FF2 --> SRT["SRT 解析器"]
+        SRT --> PMI["article_process_line PMI词发现"]
+        PMI --> TOPO1["词汇拓扑 + 建边"]
+    end
+
+    subgraph PipelineB["管线B: 视觉皮层"]
+        V2["🎬 视频文件"] --> FK["ffprobe 关键帧"]
+        FK --> FEAT["512维特征向量"]
+        V2 --> SUB["ffmpeg SRT 时间戳"]
+        SUB --> ALIGN["时间窗对齐"]
+        FEAT --> ALIGN
+        ALIGN --> CROSS["跨拓扑边<br/>vocab↔visual"]
+    end
+
+    TOPO1 --> NET["🧠 拓扑网络"]
+    CROSS --> NET
+```
+
+任务队列模式：网关入队 → 脑干 tick（丘脑门控）→ 每 tick 出队1个文件 → 帧+字幕+对齐+建边。
+
+**为什么用早教片？** 天然的"问→答"模式、语言简洁重复、音画严格同步——多模态语义锚定的理想素材。
 
 ---
 
@@ -247,6 +303,14 @@ curl http://localhost:8080/status
 
 # 健康检查
 curl http://localhost:8080/health
+
+# 投喂视频，多模态学习 (v0.5)
+curl -X POST http://localhost:8080/media/feed \
+  -H "Content-Type: application/json" \
+  -d '{"path":"/data/cartoons/babybus_01.mp4","mode":"visual"}'
+
+# 查询多模态管道状态
+curl http://localhost:8080/media/status
 ```
 
 ### 构建目标
@@ -271,13 +335,13 @@ curl http://localhost:8080/health
 
 ```
 pivotmind/
-├── src/               # 85 个核心源文件（~48,600 行 C）
-├── include/           # 89 个头文件（~12,600 行）
+├── src/               # 88 个核心源文件（~49,600 行 C）
+├── include/           # 91 个头文件（~12,800 行）
 ├── demos/             # 网关与交互入口
 ├── tools/             # 57 个工具（训练/调试/数据处理/语料下载）
-├── tests/             # 单元测试 + 集成测试 + 回归测试套件
+├── tests/             # 单元测试（19 项）+ 集成测试 + 回归测试套件
 ├── scripts/           # 自动化脚本（喂料、下载知识库等）
-├── changelogs/        # 55 个版本变更记录（000-054）
+├── changelogs/        # 56 个版本变更记录（000-055）
 ├── docs/              # 架构文档与图片
 ├── data/              # 运行时数据（hermes 知识库 25MB 等）
 └── libs/              # 第三方库
@@ -299,9 +363,10 @@ pivotmind/
 | **v0.4.8** | 扩散引擎虚词过滤（~130 中英文词）、跨层索引修复、double-free 竞态修复 |
 | **v0.4.11** | 双语语法引擎 (动词配价 + 英文 POS + 扩散激活优化) |
 | **v0.4.12** | 对话质量全线攻坚 (在线词汇学习 + 多轮上下文 + 输出长度控制) |
-| **v0.4.13** | POS 语法映射、边特异性权重、编译警告清零（10 文件 14 处） |
+| **v0.4.13** | POS 语法映射、边特异性权重、编译警告清零 |
+| **v0.5.0** | **多模态管线** — 视觉皮层脑区、MediaReader 字幕管道、跨模态对齐、任务队列 |
 
-> 详细变更：v0.3.0 → [changelogs/032-v0.3.0-reasoning-architecture.md](changelogs/032-v0.3.0-reasoning-architecture.md) ｜ v0.4.0 → [changelogs/034-v0.4.0-code-simplify-brain-boundary.md](changelogs/034-v0.4.0-code-simplify-brain-boundary.md) ｜ v0.4.3 → [changelogs/042-emergent-pos-anchor.md](changelogs/042-emergent-pos-anchor.md) ｜ v0.4.8 → [changelogs/043-diffusion-function-word-filter.md](changelogs/043-diffusion-function-word-filter.md)
+> 详细变更：v0.3.0 → [changelogs/032-v0.3.0-reasoning-architecture.md](changelogs/032-v0.3.0-reasoning-architecture.md) ｜ v0.4.0 → [changelogs/034-v0.4.0-code-simplify-brain-boundary.md](changelogs/034-v0.4.0-code-simplify-brain-boundary.md) ｜ v0.4.3 → [changelogs/042-emergent-pos-anchor.md](changelogs/042-emergent-pos-anchor.md) ｜ v0.5.0 → [changelogs/055-multimodal-v0.5.0.md](changelogs/055-multimodal-v0.5.0.md)
 
 ---
 
@@ -311,6 +376,7 @@ pivotmind/
 - **无 GPU 加速** —— 纯 CPU + pthread + OpenMP
 - **状态文件二进制** —— 不跨架构（x86_64 和 ARM 不互通；文本格式方案规划中）
 - **单机运行** —— 未支持分布式多节点拓扑
+- **多模态 v0.5.0** —— 视觉管线就绪；CLIP 编码器 + Whisper ASR 待集成（Phase 2-3）
 
 ---
 
@@ -318,7 +384,7 @@ pivotmind/
 
 - [ ] FPGA 部署（终极目标：硬件级神经形态计算）
 - [ ] 分布式多节点拓扑（跨设备激活传递）
-- [ ] 视觉/听觉多模态输入接口
+- [x] ~~视觉/听觉多模态输入接口~~ → **v0.5.0 已实现**: 视觉皮层 + MediaReader
 - [ ] JSON/MessagePack 文本格式持久化（跨架构互通）
 
 ---

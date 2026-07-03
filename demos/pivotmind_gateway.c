@@ -9,6 +9,8 @@
  *   POST /chat       {"msg":"..."}     -> {"reply":"...","nodes":492}
  *   POST /learn      {"msg":"..."}     -> {"result":"learned","added":N}
  *   POST /feedback   {"msg":"...","rating":"correct|wrong"} -> {"result":"ok"}
+ *   POST /media/feed {"path":"/videos/","mode":"subtitle|visual"} -> {...}
+ *   GET  /media/status                 -> {"media_reader":{...},"visual_cortex":{...}}
  *   GET  /status                      -> {"nodes":492,"uptime":3600,...}
  *   GET  /health                      -> {"status":"ok"}
  *
@@ -31,6 +33,7 @@
 #include <netinet/in.h>
 #include "pivotmind_version.h"
 #include <arpa/inet.h>
+#include <sys/stat.h>
 
 #include "dialog_system.h"
 #include "active_learner.h"
@@ -61,6 +64,7 @@
 #include "hypothalamus.h"          /* v0.4 下丘脑 — 需求/动机调控 */
 #include "json_config.h"           /* v0.4.7 运行时配置 */
 #include "web_fetch.h"             /* 爬虫框架 */
+#include "visual_cortex.h"         /* v0.5 视觉皮层脑区 — 多模态感知+对齐 */
 
 // 前向声明
 static int _learn_tokens(SubTopology* vocab, const char* text, int* p_prev_id, EmergentPOS* ep);
@@ -97,6 +101,9 @@ typedef struct {
     IdeaArena*          arena;      /* v0.3 想法竞争竞技场 */
     Broca*              broca;      /* v0.4 布罗卡区 — 模板构建调度 */
     Hypothalamus*       hypothalamus; /* v0.4 下丘脑 — 需求/动机调控 */
+
+    /* v0.5 多模态脑区 */
+    VisualCortex*        visual_cortex;  /* 视觉皮层脑区 — 帧提取+跨模态对齐 */
 
     // 运行控制
     volatile int shutdown_requested;
@@ -511,6 +518,7 @@ static int gw_system_init(GatewaySystem* gw) {
         if (!gw->config->brain_regions.cerebellum)   thalamus_enable_region(gw->thalamus, THAL_CEREBELLUM, 0);
         if (!gw->config->brain_regions.amygdala)     thalamus_enable_region(gw->thalamus, THAL_AMYGDALA, 0);
         if (!gw->config->brain_regions.hypothalamus) thalamus_enable_region(gw->thalamus, THAL_HYPOTHALAMUS, 0);
+        if (!gw->config->brain_regions.visual_cortex) thalamus_enable_region(gw->thalamus, THAL_VISUAL_CORTEX, 0);
     }
 
     // 设置子拓扑按脑区归属（每个脑区只负责自己的子拓扑）
@@ -519,10 +527,12 @@ static int gw_system_init(GatewaySystem* gw) {
         int hippocampus_topo[] = {TOPO_CONTEXT, TOPO_DOMAIN};
         int broca_topo[]       = {TOPO_SYNTAX, TOPO_TEMPLATE};
         int amygdala_topo[]    = {TOPO_EMOTION, TOPO_CULTURE};
+        int perception_topo[]  = {TOPO_VISUAL};                      /* v0.5 视觉拓扑归属感知 */
         thalamus_set_partition(gw->thalamus, THAL_PREFRONTAL,  prefrontal_topo,  4);
         thalamus_set_partition(gw->thalamus, THAL_HIPPOCAMPUS, hippocampus_topo, 2);
         thalamus_set_partition(gw->thalamus, THAL_BROCA,       broca_topo,       2);
         thalamus_set_partition(gw->thalamus, THAL_AMYGDALA,    amygdala_topo,    2);
+        thalamus_set_partition(gw->thalamus, THAL_PERCEPTION,  perception_topo,  1); /* v0.5 */
         /* 小脑无专属拓扑（全局监控角色） */
     }
 
@@ -540,6 +550,24 @@ static int gw_system_init(GatewaySystem* gw) {
             printf("[gateway]   自主学习器就绪\n");
             /* 通过丘洞注册，而非 brainstem_set_self_learner */
             thalamus_register_utility(gw->thalamus, THAL_UTIL_SELF_LEARNER, gw->self_learner);
+        }
+    }
+
+    /* ── v0.5 视觉皮层脑区 ── */
+    {
+        VisualCortexConfig vcc = VISUAL_CORTEX_DEFAULT_CONFIG;
+        vcc.verbose = 1;
+        gw->visual_cortex = visual_cortex_create(gw->topology, &vcc);
+        if (gw->visual_cortex) {
+            /* 内部 MediaReader 也自动绑定丘脑 */
+            MediaReader* mr = visual_cortex_get_media_reader(gw->visual_cortex);
+            if (mr) media_reader_set_thalamus(mr, gw->thalamus);
+
+            /* 注册为脑区: 脑干将通过丘脑调度 */
+            thalamus_register_region(gw->thalamus, THAL_VISUAL_CORTEX, gw->visual_cortex);
+            printf("[gateway]   视觉皮层脑区就绪 (v0.5, TOPO_VISUAL=%d)\n", TOPO_VISUAL);
+        } else {
+            fprintf(stderr, "[gateway] 视觉皮层创建失败，继续运行\n");
         }
     }
 
@@ -633,6 +661,8 @@ static void gw_system_shutdown(GatewaySystem* gw) {
     }
 
     // 6. 销毁资源（brainstem 已在上方 stop，这里只 destroy）
+    /* v0.5 视觉皮层脑区 (内部自动销毁 MediaReader) */
+    if (gw->visual_cortex)  { visual_cortex_destroy(gw->visual_cortex); gw->visual_cortex = NULL; }
     if (gw->brain_cache) node_cache_destroy(gw->brain_cache);  gw->brain_cache = NULL;
     if (gw->self_learner) { self_learner_destroy(gw->self_learner); gw->self_learner = NULL; }
     if (gw->amygdala)    amygdala_destroy(gw->amygdala);
@@ -950,6 +980,81 @@ static void handle_feedback(GatewaySystem* gw, int fd, const char* body) {
     memory_store(gw->memory, key, (void*)rating, strlen(rating) + 1, MEMORY_TYPE_STRING, confidence);
 
     http_json(fd, 200, "{\"result\":\"ok\"}");
+}
+
+// ==================== v0.5 多模态媒体投喂 API ====================
+
+// POST /media/feed - 入队视频文件到视觉皮层任务队列
+static void handle_media_feed(GatewaySystem* gw, int fd, const char* body) {
+    char path[1024] = {0};
+    char mode[64] = "visual";  /* 默认: 视觉皮层对齐模式 */
+
+    if (!json_extract_string(body, "path", path, sizeof(path)) || strlen(path) == 0) {
+        http_json(fd, 400, "{\"error\":\"missing 'path' field\"}");
+        return;
+    }
+    json_extract_string(body, "mode", mode, sizeof(mode));
+
+    if (!gw->visual_cortex) {
+        http_json(fd, 500, "{\"error\":\"visual cortex not initialized\"}");
+        return;
+    }
+
+    int enqueued = 0;
+
+    /* 检查是否为目录 */
+    struct stat st;
+    if (stat(path, &st) == 0 && S_ISDIR(st.st_mode)) {
+        char recursive[8] = "0";
+        int rec = 0;
+        if (json_extract_string(body, "recursive", recursive, sizeof(recursive))) {
+            rec = (strcmp(recursive, "1") == 0 || strcmp(recursive, "true") == 0) ? 1 : 0;
+        }
+        enqueued = visual_cortex_enqueue_directory(gw->visual_cortex, path, NULL, rec);
+    } else {
+        int ret = visual_cortex_enqueue(gw->visual_cortex, path, mode);
+        if (ret == 0) enqueued = 1;
+    }
+
+    int queue_size = visual_cortex_queue_size(gw->visual_cortex);
+
+    char resp[512];
+    snprintf(resp, sizeof(resp),
+             "{\"result\":\"enqueued\",\"mode\":\"%s\",\"enqueued\":%d,\"queue_size\":%d}",
+             mode, enqueued, queue_size);
+    http_json(fd, (enqueued > 0) ? 200 : 500, resp);
+}
+
+// GET /media/status - 查询多模态管道状态
+static void handle_media_status(GatewaySystem* gw, int fd) {
+    char resp[1024];
+
+    int qsize = 0;
+    long vc_frames = 0;
+    int vc_vis = 0, vc_xmod = 0;
+    if (gw->visual_cortex)
+        visual_cortex_get_stats(gw->visual_cortex, &qsize, &vc_frames, &vc_vis, &vc_xmod);
+
+    /* 内部 MediaReader 统计 */
+    long mr_files = 0, mr_lines = 0, mr_words = 0;
+    if (gw->visual_cortex) {
+        MediaReader* mr = visual_cortex_get_media_reader(gw->visual_cortex);
+        if (mr) media_reader_get_stats(mr, &mr_files, &mr_lines, &mr_words);
+    }
+
+    /* 视觉拓扑统计 */
+    int vis_topo_nodes = 0;
+    SubTopology* vt = master_get_sub_topology_by_type(gw->topology, TOPO_VISUAL);
+    if (vt && vt->net) vis_topo_nodes = vt->net->node_count;
+
+    snprintf(resp, sizeof(resp),
+             "{\"queue_size\":%d,"
+             "\"media_reader\":{\"files\":%ld,\"lines\":%ld,\"words\":%ld},"
+             "\"visual_cortex\":{\"frames\":%ld,\"visual_nodes\":%d,\"cross_modal_edges\":%d,\"topo_visual_nodes\":%d}}",
+             qsize,
+             mr_files, mr_lines, mr_words,
+             vc_frames, vc_vis, vc_xmod, vis_topo_nodes);
+    http_json(fd, 200, resp);
 }
 
 // GET /status - 状态查询
@@ -1296,6 +1401,8 @@ static void handle_connection(GatewaySystem* gw, int client_fd) {
             } else {
                 http_json(client_fd, 404, "{\"error\":\"brain not initialized\"}");
             }
+        } else if (strcmp(req.path, "/media/status") == 0) {
+            handle_media_status(gw, client_fd);
         } else {
             http_json(client_fd, 404, "{\"error\":\"not found\"}");
         }
@@ -1308,6 +1415,8 @@ static void handle_connection(GatewaySystem* gw, int client_fd) {
             handle_learn(gw, client_fd, req.body);
         } else if (strcmp(req.path, "/feedback") == 0) {
             handle_feedback(gw, client_fd, req.body);
+        } else if (strcmp(req.path, "/media/feed") == 0) {
+            handle_media_feed(gw, client_fd, req.body);
         } else if (strncmp(req.path, "/train/", 7) == 0) {
             if (!gw->train_mode) {
                 http_json(client_fd, 404, "{\"error\":\"train mode not enabled\"}");

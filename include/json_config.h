@@ -30,6 +30,7 @@ typedef struct {
     bool cerebellum;
     bool amygdala;
     bool hypothalamus;
+    bool visual_cortex;     /* v0.5 视觉皮层脑区 */
 } BrainRegionConfig;
 
 /* ── 拓扑参数 ── */

@@ -49,6 +49,7 @@ static void config_init_defaults(ConfigContext* ctx) {
     ctx->brain_regions.cerebellum   = true;
     ctx->brain_regions.amygdala     = true;
     ctx->brain_regions.hypothalamus = true;
+    ctx->brain_regions.visual_cortex = true;
 }
 
 /* ── 最小化 JSON 解析器 ── */
@@ -176,6 +177,7 @@ static void set_bool_field(ConfigContext* ctx, const char* group, const char* ke
         else if (strcmp(key, "cerebellum") == 0)   ctx->brain_regions.cerebellum = b;
         else if (strcmp(key, "amygdala") == 0)     ctx->brain_regions.amygdala = b;
         else if (strcmp(key, "hypothalamus") == 0) ctx->brain_regions.hypothalamus = b;
+        else if (strcmp(key, "visual_cortex") == 0) ctx->brain_regions.visual_cortex = b;
     }
 }
 
@@ -356,9 +358,10 @@ int config_write_default(const char* path) {
     fprintf(fp, "        \"perception\": true,\n");
     fprintf(fp, "        \"broca\": true,\n");
     fprintf(fp, "        \"cerebellum\": true,\n");
-    fprintf(fp, "        \"amygdala\": true,\n");
-    fprintf(fp, "        \"hypothalamus\": true\n");
-    fprintf(fp, "    }\n");
+        fprintf(fp, "        \"amygdala\": true,\n");
+        fprintf(fp, "        \"hypothalamus\": true,\n");
+        fprintf(fp, "        \"visual_cortex\": true\n");
+        fprintf(fp, "    }\n");
     fprintf(fp, "}\n");
 
     fclose(fp);

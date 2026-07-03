@@ -7,7 +7,7 @@
 
 [English](README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [Русский](README.ru.md)
 
-[![Version](https://img.shields.io/badge/version-v0.4.13-blue.svg)](changelogs/)
+[![Version](https://img.shields.io/badge/version-v0.5.0-blue.svg)](changelogs/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green.svg)](LICENSE)
 [![Language](https://img.shields.io/badge/C-99%2B-orange.svg)](https://en.wikipedia.org/wiki/C99)
 [![Platform](https://img.shields.io/badge/ARM-RK3399%20%7C%20x86__64-lightgrey.svg)](#running-on)
@@ -29,15 +29,15 @@ PivotMind is a **brain-inspired cognitive engine** built on
 No external Transformer dependencies. No pretrained embedding vectors.
 Just nodes, edges, activation, and decay — powered by a relentless background clock.
 
-**Current Version: v0.4.13** — 13 fully-implemented brain regions, emergent POS system, parallel multi-learner, PFE reasoning orchestration, 512-dim feature vectors, POS grammar mapping, edge specificity weighting, zero compile warnings.
+**Current Version: v0.5.0** — 14 fully-implemented brain regions, emergent POS system, parallel multi-learner, PFE reasoning orchestration, 512-dim feature vectors, POS grammar mapping, edge specificity weighting, **multi-modal visual pipeline (VisualCortex + MediaReader)**, zero compile warnings.
 
-**Codebase: 85 source files (~48,600 lines C) + 89 headers (~12,600 lines) + tools/tests/demos (~13,000 lines) = ~74,000 total lines.**
+**Codebase: 88 source files (~49,600 lines C) + 91 headers (~12,800 lines) + tools/tests/demos (~13,000 lines) = ~75,500 total lines.**
 
 ### TraceWisdomNetwork
 
 Each concept is a node. Co-occurrence creates an edge. Edges carry a triple attribute:
 **weight × confidence × motivational bias**.
-Eleven sub-topologies (vocabulary / semantic / emotion / syntax / context / domain / pragmatics / culture / concept / master / template)
+Twelve sub-topologies (vocabulary / semantic / emotion / syntax / context / domain / pragmatics / culture / concept / master / template / **visual**)
 each form an independent reasoning network, interconnected through cross-topology links with O(1) adjacency indexing.
 Activation diffuses simultaneously across layers, with competition selecting the winner as output.
 
@@ -47,7 +47,7 @@ Activation diffuses simultaneously across layers, with competition selecting the
 |-----------------------|--------------------------------------------------------|
 | Token prediction, stateless | Node activation, continuous internal state       |
 | Gradient-based offline batch training | Hebbian online + Skip-gram pretraining     |
-| Single embedding space | 11 independent sub-topologies + 512-dim features       |
+| Single embedding space | 12 independent sub-topologies + 512-dim features       |
 | Neural network black box | Explicit node-edge paths, fully traceable            |
 | Requires GPU + massive VRAM | pthread + OpenMP only, runs on ARM embedded     |
 | Inference separate from learning | Conversation IS learning                    |
@@ -58,27 +58,47 @@ Activation diffuses simultaneously across layers, with competition selecting the
 
 ## Brain Region Architecture
 
-PivotMind models mammalian cortical functional divisions — 13 brain regions/subsystems, each with dedicated responsibilities, communicating through the Thalamus signal bus.
-**All 13 regions are fully implemented with zero stub code.**
+PivotMind models mammalian cortical functional divisions — 14 brain regions/subsystems, each with dedicated responsibilities, communicating through the Thalamus signal bus.
+**All 14 regions are fully implemented with zero stub code.**
 
-```
-                          ┌──────────────────────┐
-                          │   Prefrontal Cortex    │ ← Dialog / Decision Entry
-                          │  + Prefrontal Exec PFE │ ← 6-Mode Reasoning Orchestrator
-                          └──────────┬───────────┘
-                                     │ Signal Bus
-        ┌────────┬────────┬─────────┼─────────┬────────┬────────┬────────┐
-        ▼        ▼        ▼         ▼         ▼        ▼        ▼        ▼
-   ┌────────┐┌──────┐┌──────┐┌──────────┐┌──────┐┌──────┐┌──────┐┌──────────┐
-   │Hippo-  ││ DMN  ││Amyg- ││ Perception││Broca ││Cere- ││Brain-││Hypothal- │
-   │campus  ││      ││dala  ││  Cortex   ││      ││bellum││stem  ││  amus    │
-   │Memory  ││Dream ││Emo-  ││  Web     ││Template││BPTT  ││Circ- ││ Drives   │
-   │Consol. ││      ││tion  ││  Search  ││Builder││Tuner ││adian ││          │
-   └────────┘└──────┘└──────┘└──────────┘└──────┘└──────┘└──────┘└──────────┘
-                                     │
-                          ┌──────────┴──────────┐
-                          │    Thalamus           │ ← Signal Bus + Resource Gate
-                          └─────────────────────┘
+```mermaid
+graph TB
+    PF["🧠 Prefrontal Cortex<br/>Dialog / Decision Entry"]
+    PFE["🎯 Prefrontal Exec<br/>6-Mode Reasoning"]
+    HC["📚 Hippocampus<br/>Memory Consolidation"]
+    DMN["💭 DMN<br/>Dream / Idle"]
+    AMY["😊 Amygdala<br/>Emotion"]
+    PERC["🔍 Perception<br/>Web Search"]
+    BROCA["📝 Broca<br/>Template Builder"]
+    CB["⚖️ Cerebellum<br/>BPTT / Protect"]
+    BS["⏰ Brainstem<br/>Circadian Clock"]
+    HYPO["🔥 Hypothalamus<br/>Drives"]
+    ACC["✅ ACC<br/>4D Evaluation"]
+    ARENA["🏟️ IdeaArena<br/>Candidate Competition"]
+    RET["⚡ Reticular<br/>Arousal"]
+    VC["👁️ VisualCortex v0.5<br/>Multi-Modal Pipeline"]
+
+    TH["📡 Thalamus<br/>Signal Bus + Resource Gate"]
+
+    PF --> TH
+    PFE --> TH
+    HC --> TH
+    DMN --> TH
+    AMY --> TH
+    PERC --> TH
+    BROCA --> TH
+    CB --> TH
+    BS --> TH
+    HYPO --> TH
+    ACC --> TH
+    ARENA --> TH
+    RET --> TH
+    VC --> TH
+
+    TH --> PF
+    TH --> HC
+    TH --> PERC
+    TH --> VC
 ```
 
 | Brain Region       | File                       | Lines | Function                                                       |
@@ -97,6 +117,7 @@ PivotMind models mammalian cortical functional divisions — 13 brain regions/su
 | **Cingulate (ACC)**| `cingulate.c`              | 223   | 4D sequence evaluation (semantic + template + emotion + length)|
 | **IdeaArena**      | `idea_arena.c`             | 722   | Multi-candidate 5D competition, lateral inhibition, dopamine   |
 | **Reticular**      | `reticular.c`              | 133   | Arousal/alertness level regulation                             |
+| **VisualCortex** 🆕| `visual_cortex.c`          | 550   | Frame extraction + SRT subtitle + cross-modal alignment        |
 
 ---
 
@@ -107,7 +128,7 @@ PivotMind models mammalian cortical functional divisions — 13 brain regions/su
 Input is tokenized via sliding window, then diffuses simultaneously across layers:
 
 - **Vocabulary** — direct literal matching, fast recall
-- **Semantic** — cross-topology association across 11 sub-topologies
+- **Semantic** — cross-topology association across 12 sub-topologies
 - **Template** — syntactic pattern recognition, guiding connector insertion
 - **Emotion** — valence × arousal weighting, modulating candidate priority
 
@@ -147,6 +168,39 @@ Continuously monitors RSS memory, connection growth rate, and reasoning latency 
 | 🟢 GREEN      | Normal      | Normal operation                                  |
 | 🟡 YELLOW     | Warning     | Log alert + raise learning threshold              |
 | 🔴 RED        | Critical    | Emergency save + bulk prune weak edges            |
+
+---
+
+## Multi-Modal Pipeline **NEW v0.5.0**
+
+The VisualCortex brain region ingests video/audio content through two data pipelines:
+
+```mermaid
+flowchart LR
+    subgraph PipelineA["Pipeline A: Subtitle"]
+        V1["🎬 Video File"] --> FF1["ffprobe detect subs"]
+        FF1 --> FF2["ffmpeg extract SRT"]
+        FF2 --> SRT["SRT Parser"]
+        SRT --> PMI["article_process_line PMI"]
+        PMI --> TOPO1["Vocab Topology +edges"]
+    end
+
+    subgraph PipelineB["Pipeline B: Visual Cortex"]
+        V2["🎬 Video File"] --> FK["ffprobe keyframes"]
+        FK --> FEAT["512-dim Features"]
+        V2 --> SUB["ffmpeg SRT timestamps"]
+        SUB --> ALIGN["Time-window Alignment"]
+        FEAT --> ALIGN
+        ALIGN --> CROSS["Cross-Topology Edge<br/>vocab↔visual"]
+    end
+
+    TOPO1 --> NET["🧠 Topology Network"]
+    CROSS --> NET
+```
+
+Task queue: Gateway enqueue → Brainstem tick (throttle-gated) → dequeue 1 file/tick → frames+SRT+align+edges.
+
+**Why early education videos?** Natural QA patterns, simple repeated language, perfect audio-visual sync — ideal for multi-modal semantic anchoring.
 
 ---
 
@@ -250,6 +304,14 @@ curl http://localhost:8080/status
 
 # Health check
 curl http://localhost:8080/health
+
+# Feed video for multi-modal learning (v0.5)
+curl -X POST http://localhost:8080/media/feed \
+  -H "Content-Type: application/json" \
+  -d '{"path":"/data/cartoons/babybus_01.mp4","mode":"visual"}'
+
+# Check multi-modal pipeline status
+curl http://localhost:8080/media/status
 ```
 
 ### Build Targets
@@ -274,13 +336,13 @@ curl http://localhost:8080/health
 
 ```
 pivotmind/
-├── src/               # 85 core source files (~48,600 lines C)
-├── include/           # 89 header files (~12,600 lines)
+├── src/               # 88 core source files (~49,600 lines C)
+├── include/           # 91 header files (~12,800 lines)
 ├── demos/             # Gateway and interactive entry
 ├── tools/             # 57 tools (training/debugging/data processing/corpus download)
-├── tests/             # Unit tests + integration tests + regression suite
+├── tests/             # Unit tests (19) + integration tests + regression suite
 ├── scripts/           # Automation scripts (feeding, knowledge download, etc.)
-├── changelogs/        # 55 version changelogs (000-054)
+├── changelogs/        # 56 version changelogs (000-055)
 ├── docs/              # Architecture documentation and diagrams
 ├── data/              # Runtime data (hermes knowledge base 25MB, etc.)
 └── libs/              # Third-party libraries
@@ -302,9 +364,10 @@ pivotmind/
 | **v0.4.8** | Diffusion function word filter (~130 words), cross-layer index fix, double-free race fix |
 | **v0.4.11** | Bilingual grammar engine (verb valency + English POS + diffusion activation optimization) |
 | **v0.4.12** | Chat quality overhaul (online learning + multi-turn context + output length control) |
-| **v0.4.13** | POS grammar mapping, edge specificity weighting, zero compile warnings (10 files, 14 warnings fixed) |
+| **v0.4.13** | POS grammar mapping, edge specificity weighting, zero compile warnings |
+| **v0.5.0** | **Multi-modal pipeline** — VisualCortex brain region, MediaReader SRT pipeline, cross-modal alignment, task queue model |
 
-> Detailed changelogs: v0.3.0 → [changelogs/032-v0.3.0-reasoning-architecture.md](changelogs/032-v0.3.0-reasoning-architecture.md) ｜ v0.4.0 → [changelogs/034-v0.4.0-code-simplify-brain-boundary.md](changelogs/034-v0.4.0-code-simplify-brain-boundary.md) ｜ v0.4.3 → [changelogs/042-emergent-pos-anchor.md](changelogs/042-emergent-pos-anchor.md) ｜ v0.4.8 → [changelogs/043-diffusion-function-word-filter.md](changelogs/043-diffusion-function-word-filter.md)
+> Detailed changelogs: v0.3.0 → [changelogs/032-v0.3.0-reasoning-architecture.md](changelogs/032-v0.3.0-reasoning-architecture.md) ｜ v0.4.0 → [changelogs/034-v0.4.0-code-simplify-brain-boundary.md](changelogs/034-v0.4.0-code-simplify-brain-boundary.md) ｜ v0.4.3 → [changelogs/042-emergent-pos-anchor.md](changelogs/042-emergent-pos-anchor.md) ｜ v0.5.0 → [changelogs/055-multimodal-v0.5.0.md](changelogs/055-multimodal-v0.5.0.md)
 
 ---
 
@@ -314,6 +377,7 @@ pivotmind/
 - **No GPU acceleration** — Pure CPU + pthread + OpenMP
 - **Binary state files** — Not cross-architecture compatible (x86_64 and ARM; text format planned)
 - **Single-node only** — No distributed multi-node topology support yet
+- **Multi-modal v0.5.0** — Visual pipeline works; CLIP encoder + Whisper ASR integration pending (Phase 2-3)
 
 ---
 
@@ -321,7 +385,7 @@ pivotmind/
 
 - [ ] FPGA deployment (ultimate goal: hardware-level neuromorphic computing)
 - [ ] Distributed multi-node topology (cross-device activation propagation)
-- [ ] Visual / auditory multimodal input interfaces
+- [x] ~~Visual / auditory multimodal input interfaces~~ → **v0.5.0 implemented**: VisualCortex + MediaReader
 - [ ] JSON/MessagePack text format persistence (cross-architecture compatibility)
 
 ---

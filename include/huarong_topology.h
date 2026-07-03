@@ -13,7 +13,8 @@ typedef struct NodeHashTable NodeHashTable;
 typedef enum {
     NODE_TYPE_FUNCTION_WORD = 0,  // 功能词（的、了、是）— 衰减慢
     NODE_TYPE_COMMON_WORD  = 1,  // 普通词 — 正常衰减
-    NODE_TYPE_PROPER_NOUN  = 2   // 专有名词 — 衰减快，鼓励替换
+    NODE_TYPE_PROPER_NOUN  = 2,  // 专有名词 — 衰减快，鼓励替换
+    NODE_TYPE_VISUAL       = 3   // 视觉概念节点 — 多模态特征（CLIP编码）
 } NodeType;
 
 // ==================== 华容道拓扑神经网络核心结构 ==================== 
