@@ -153,18 +153,32 @@ static int frame_diff_score(const float* prev, const float* cur, int dim) {
     return (int)(sqrtf(sum_sq) * 100.0f);
 }
 
+/* v0.5.1: 修正 — 使用 ffprobe 而非 ffmpeg 进行帧元数据提取 */
+static const char* vc_get_ffprobe_path(VisualCortex* vc) {
+    if (vc->cfg.ffprobe_path[0] != '\0')
+        return vc->cfg.ffprobe_path;
+    static char derived[256];
+    strncpy(derived, vc->cfg.ffmpeg_path, sizeof(derived) - 1);
+    derived[sizeof(derived) - 1] = '\0';
+    char* needle = strstr(derived, "ffmpeg");
+    if (needle) memcpy(needle, "ffprobe", 7);
+    else strncpy(derived, "ffprobe", sizeof(derived) - 1);
+    return derived;
+}
+
 static int vc_extract_frames(VisualCortex* vc, const char* filepath) {
+    const char* probe = vc_get_ffprobe_path(vc);
     char cmd[1536];
     int interval_secs = vc->cfg.frame_interval_ms / 1000;
     if (interval_secs < 1) interval_secs = 1;
 
     snprintf(cmd, sizeof(cmd),
-             "\"%s\" -v quiet -select_streams v:0 "
+             "\"%s\" -v error -select_streams v:0 "
              "-skip_frame nokey "
              "-show_entries frame=pkt_pts_time,pict_type,width,height "
              "-of csv=p=0 "
              "\"%s\"",
-             vc->cfg.ffmpeg_path, filepath);
+             probe, filepath);
 
 #ifdef _WIN32
     FILE* fp = _popen(cmd, "r");
@@ -490,7 +504,9 @@ static int vc_process_one_video(VisualCortex* vc, const char* filepath, const ch
 
     vc->frame_count = vc_extract_frames(vc, filepath);
     if (vc->frame_count <= 0) {
-        fprintf(stderr, "[visual] 帧提取失败: %s\n", filepath);
+        fprintf(stderr, "[visual] 帧提取失败 (ffprobe=%s): %s\n",
+                vc_get_ffprobe_path(vc), filepath);
+        fprintf(stderr, "[visual] 提示: 请确认 ffprobe 可用 + 视频文件完整\n");
         return -1;
     }
     vc->total_frames_processed += vc->frame_count;
@@ -721,9 +737,12 @@ VisualCortex* visual_cortex_create(MasterTopology* topology,
     vc->task_count = 0;
     pthread_mutex_init(&vc->task_lock, NULL);
 
-    /* 内部 MediaReader */
+    /* 内部 MediaReader — 传入 ffprobe 路径用于字幕探测 */
     MediaReaderConfig mrc = MEDIA_READER_DEFAULT_CONFIG;
     mrc.verbose = vc->cfg.verbose;
+    strncpy(mrc.ffmpeg_path, vc->cfg.ffmpeg_path, sizeof(mrc.ffmpeg_path) - 1);
+    if (vc->cfg.ffprobe_path[0])
+        strncpy(mrc.ffprobe_path, vc->cfg.ffprobe_path, sizeof(mrc.ffprobe_path) - 1);
     vc->media_reader = media_reader_create(topology, &mrc);
     if (!vc->media_reader) {
         fprintf(stderr, "[visual] MediaReader 创建失败\n");

@@ -39,6 +39,7 @@ typedef struct Thalamus Thalamus;
 typedef struct {
     /* ── 帧提取 ── */
     char  ffmpeg_path[256];
+    char  ffprobe_path[256];         /* ffprobe 路径 (空=自动从 ffmpeg_path 推导) */
     int   frame_interval_ms;         /* 帧采样间隔 (默认 500ms) */
     int   keyframe_only;             /* 1=仅关键帧, 0=均匀间隔采样 */
     int   scene_threshold;           /* 场景切换检测阈值 (0=关闭, 建议 30) */
@@ -67,7 +68,7 @@ typedef struct {
 } VisualCortexConfig;
 
 #define VISUAL_CORTEX_DEFAULT_CONFIG { \
-    "ffmpeg", 500, 1, 30, "", 200, \
+    "ffmpeg", "", 500, 1, 30, "", 200, \
     512, 0, "", \
     2000.0f, 2, 0.6f, \
     5000, 1, 60, 0 \

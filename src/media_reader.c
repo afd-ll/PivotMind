@@ -35,8 +35,9 @@ struct MediaReader {
     ArticleReader*     article_reader;
     ArticleReaderConfig ar_cfg;
 
-    /* ffmpeg 配置 */
+    /* ffmpeg / ffprobe 配置 */
     char  ffmpeg_path[256];
+    char  ffprobe_path[256];      /* v0.5.1: 独立 ffprobe 路径 (空=自动推导) */
     int   subtitle_track;
 
     /* 丘脑信号总线 (可选) */
@@ -83,43 +84,101 @@ static int srt_is_index_line(const char* line) {
     return 1;
 }
 
+/* ==================== ffprobe / ffmpeg 工具路径 ==================== */
+
+/**
+ * 获取 ffprobe 路径: 如果配置了就用配置的，否则从 ffmpeg_path 推导
+ * (把路径中最后的 "ffmpeg" 替换为 "ffprobe")
+ */
+static const char* media_get_ffprobe_path(MediaReader* mr) {
+    if (mr->ffprobe_path[0] != '\0')
+        return mr->ffprobe_path;
+
+    /* 自动推导: "ffmpeg" → "ffprobe", "D:\tools\ffmpeg.exe" → "D:\tools\ffprobe.exe" */
+    static char derived[256];
+    strncpy(derived, mr->ffmpeg_path, sizeof(derived) - 1);
+    derived[sizeof(derived) - 1] = '\0';
+
+    char* needle = strstr(derived, "ffmpeg");
+    if (needle) {
+        /* 替换 "ffmpeg" → "ffprobe" (长度相同: 6 chars) */
+        memcpy(needle, "ffprobe", 7);
+    } else {
+        /* 路径中不含 ffmpeg，直接用 ffprobe */
+        strncpy(derived, "ffprobe", sizeof(derived) - 1);
+    }
+    return derived;
+}
+
 /* ==================== ffmpeg 字幕提取 ==================== */
 
 /**
  * 检测文件中是否存在字幕轨道
- * 通过调用 ffprobe 检测
+ * 使用 ffprobe (非 ffmpeg) 进行流检测
  * @return 1=有字幕, 0=无, -1=ffprobe 不可用
  */
 static int media_probe_subtitle(MediaReader* mr, const char* filepath) {
+    const char* probe = media_get_ffprobe_path(mr);
     char cmd[1024];
+
     snprintf(cmd, sizeof(cmd),
-             "\"%s\" -v quiet -print_format json -show_streams \"%s\"",
-             mr->ffmpeg_path, filepath);
+             "\"%s\" -v error -select_streams s -show_entries "
+             "stream=index:stream=codec_name:stream_tags=language "
+             "-of csv=p=0 \"%s\"",
+             probe, filepath);
+
+    if (mr->verbose)
+        printf("[media] 探测字幕: %s\n", cmd);
 
     FILE* fp = popen(cmd, "r");
     if (!fp) {
-        if (mr->verbose) fprintf(stderr, "[media] ffprobe 执行失败: %s\n", strerror(errno));
+        fprintf(stderr, "[media] ffprobe 启动失败 (路径=%s): %s\n",
+                probe, strerror(errno));
         return -1;
     }
 
-    char buf[8192];
+    char buf[4096];
     size_t total = fread(buf, 1, sizeof(buf) - 1, fp);
     buf[total] = '\0';
     int ret = pclose(fp);
 
-    if (ret != 0) return -1;
-
-    /* 简单检测: JSON 中包含 "subtitle" 字样 */
-    if (strstr(buf, "\"codec_type\"") && strstr(buf, "subtitle"))
-        return 1;
-
-    /* 也检查 "codec_type\": \"subtitle\" 精确模式 */
-    const char* p = buf;
-    while ((p = strstr(p, "\"codec_type\"")) != NULL) {
-        if (strstr(p, "subtitle")) return 1;
-        p++;
+    if (ret != 0) {
+        fprintf(stderr, "[media] ffprobe 返回错误码 %d (路径=%s)\n"
+                "[media] 提示: 请确认视频文件存在且 ffprobe 已安装 (%s)\n",
+                ret, probe, filepath);
+        return -1;
     }
 
+    /* 有输出行 = 有字幕轨道 */
+    for (size_t i = 0; i < total; i++) {
+        if (buf[i] != '\n' && buf[i] != '\r' && buf[i] != ' ' && buf[i] != '\t') {
+            if (mr->verbose) {
+                printf("[media] 检测到字幕轨道:\n");
+                /* 逐行打印轨道信息 */
+                char* line = strtok(buf, "\n");
+                while (line) {
+                    printf("  %s\n", line);
+                    line = strtok(NULL, "\n");
+                }
+            }
+            return 1;
+        }
+    }
+
+    /* 无输出 → 无字幕轨道。回退检查: 是否 ffprobe 本身不可用 */
+    {
+        char test_cmd[512];
+        snprintf(test_cmd, sizeof(test_cmd), "\"%s\" -version > NUL 2>&1", probe);
+        int has_probe = (system(test_cmd) == 0);
+        if (!has_probe) {
+            fprintf(stderr, "[media] %s 不可用！请安装 ffmpeg/ffprobe 并将其加入 PATH\n", probe);
+            fprintf(stderr, "[media] 下载: https://ffmpeg.org/download.html\n");
+            return -1;
+        }
+    }
+
+    if (mr->verbose)
+        printf("[media] 视频无软字幕轨道 (可能为硬字幕/烧录字幕，需 ASR 后备)\n");
     return 0;
 }
 
@@ -143,20 +202,23 @@ static int media_extract_subtitle(MediaReader* mr, const char* filepath,
     snprintf(tmpfile, sizeof(tmpfile), "/tmp/pm_media_subs_%d.srt", (int)getpid());
 #endif
 
-    /* ffmpeg: 提取字幕轨道到临时 SRT 文件 */
+    /* ffmpeg: 提取字幕轨道到临时 SRT (使用 codec copy, 保持原始编码) */
     if (mr->subtitle_track >= 0) {
         snprintf(cmd, sizeof(cmd),
-                 "\"%s\" -y -v quiet -i \"%s\" -map 0:s:%d -c:s srt \"%s\"",
+                 "\"%s\" -y -v error -i \"%s\" -map 0:s:%d -c:s srt \"%s\"",
                  mr->ffmpeg_path, filepath, mr->subtitle_track, tmpfile);
     } else {
         snprintf(cmd, sizeof(cmd),
-                 "\"%s\" -y -v quiet -i \"%s\" -map 0:s:0 -c:s srt \"%s\"",
+                 "\"%s\" -y -v error -i \"%s\" -map 0:s:0? -c:s srt \"%s\"",
                  mr->ffmpeg_path, filepath, tmpfile);
     }
 
+    if (mr->verbose)
+        printf("[media] 提取字幕: %s\n", cmd);
+
     int ret = system(cmd);
     if (ret != 0) {
-        /* 清理临时文件 */
+        fprintf(stderr, "[media] ffmpeg 字幕提取失败 (exit=%d)\n", ret);
         remove(tmpfile);
         return -1;
     }
@@ -164,6 +226,7 @@ static int media_extract_subtitle(MediaReader* mr, const char* filepath,
     /* 读取临时文件到内存 */
     FILE* fp = fopen(tmpfile, "rb");
     if (!fp) {
+        fprintf(stderr, "[media] 无法读取临时字幕文件: %s\n", tmpfile);
         remove(tmpfile);
         return -1;
     }
@@ -171,6 +234,7 @@ static int media_extract_subtitle(MediaReader* mr, const char* filepath,
     fseek(fp, 0, SEEK_END);
     long fsize = ftell(fp);
     if (fsize <= 0) {
+        fprintf(stderr, "[media] 字幕文件为空 (可能该轨道无有效字幕数据)\n");
         fclose(fp);
         remove(tmpfile);
         return -1;
@@ -188,6 +252,9 @@ static int media_extract_subtitle(MediaReader* mr, const char* filepath,
     text[read_bytes] = '\0';
     fclose(fp);
     remove(tmpfile);
+
+    if (mr->verbose)
+        printf("[media] 提取字幕: %zu 字节\n", read_bytes);
 
     *out_text = text;
     *out_len  = read_bytes;
@@ -330,6 +397,64 @@ static int srt_feed_lines(MediaReader* mr, const char* srt_text, size_t srt_len)
 
 /* ==================== 文件/目录处理 ==================== */
 
+/* ==================== 轨道诊断 (v0.5.1) ==================== */
+
+int media_diagnose_tracks(MediaReader* mr, const char* filepath) {
+    if (!mr || !filepath) return -1;
+
+    const char* probe = media_get_ffprobe_path(mr);
+    char cmd[1024];
+
+    /* 先用 ffprobe 列出所有轨道 */
+    snprintf(cmd, sizeof(cmd),
+             "\"%s\" -v error -show_entries "
+             "stream=index,codec_type,codec_name:stream_tags=language "
+             "-of default=noprint_wrappers=1 \"%s\"",
+             probe, filepath);
+
+    printf("=== 诊断: %s ===\n", filepath);
+    printf("ffprobe 路径: %s\n", probe);
+
+    FILE* fp = popen(cmd, "r");
+    if (!fp) {
+        fprintf(stderr, "[诊断] 无法执行 ffprobe (%s): %s\n", probe, strerror(errno));
+        return -1;
+    }
+
+    int track_count = 0;
+    char line[512];
+    printf("轨道列表:\n");
+    while (fgets(line, sizeof(line), fp)) {
+        /* 去掉换行 */
+        size_t len = strlen(line);
+        while (len > 0 && (line[len-1] == '\n' || line[len-1] == '\r'))
+            line[--len] = '\0';
+        if (len > 0) {
+            printf("  %s\n", line);
+            track_count++;
+        }
+    }
+    pclose(fp);
+
+    if (track_count == 0) {
+        printf("  (无轨道信息 — 视频文件可能损坏或 ffprobe 不可用)\n");
+    }
+
+    printf("总轨道数: %d\n", track_count);
+    if (track_count > 0) {
+        int has_sub = media_probe_subtitle(mr, filepath);
+        printf("字幕轨道: %s\n",
+               has_sub == 1 ? "有 ✓" :
+               has_sub == 0 ? "无 (视频可能使用硬字幕/烧录字幕)" :
+               "检测失败");
+    }
+
+    printf("================================\n");
+    return track_count;
+}
+
+/* ==================== 文件/目录处理 ==================== */
+
 int media_process_file(MediaReader* mr, const char* filepath) {
     if (!mr || !filepath) return -1;
 
@@ -354,10 +479,16 @@ int media_process_file(MediaReader* mr, const char* filepath) {
 
     /* 检测字幕轨道 */
     int has_sub = media_probe_subtitle(mr, filepath);
-    if (has_sub <= 0) {
-        if (mr->verbose)
-            fprintf(stderr, "[media] 无字幕轨道 (has_sub=%d): %s\n", has_sub, filepath);
-        return (has_sub < 0) ? -1 : 0;
+    if (has_sub < 0) {
+        fprintf(stderr, "[media] ffprobe 错误 — 请确保 ffmpeg/ffprobe 已安装并在 PATH 中\n");
+        fprintf(stderr, "[media] 下载: https://ffmpeg.org/download.html\n");
+        fprintf(stderr, "[media] 提示: 运行 media_diagnose_tracks() 诊断具体问题\n");
+        return -1;
+    }
+    if (has_sub == 0) {
+        fprintf(stderr, "[media] 视频无软字幕轨道: %s\n", filepath);
+        fprintf(stderr, "[media] 提示: 硬字幕/烧录字幕需要 Phase 2 OCR 或 Phase 3 Whisper ASR\n");
+        return 0;
     }
 
     /* 提取字幕 */
@@ -369,6 +500,7 @@ int media_process_file(MediaReader* mr, const char* filepath) {
     }
 
     if (!srt_text || srt_len == 0) {
+        fprintf(stderr, "[media] 字幕内容为空: %s\n", filepath);
         free(srt_text);
         return 0;
     }
@@ -478,11 +610,16 @@ MediaReader* media_reader_create(MasterTopology* topology,
 
     mr->topology = topology;
 
-    /* 配置 ffmpeg */
+    /* 配置 ffmpeg / ffprobe */
     if (cfg && cfg->ffmpeg_path[0]) {
         strncpy(mr->ffmpeg_path, cfg->ffmpeg_path, sizeof(mr->ffmpeg_path) - 1);
     } else {
         strncpy(mr->ffmpeg_path, "ffmpeg", sizeof(mr->ffmpeg_path) - 1);
+    }
+    if (cfg && cfg->ffprobe_path[0]) {
+        strncpy(mr->ffprobe_path, cfg->ffprobe_path, sizeof(mr->ffprobe_path) - 1);
+    } else {
+        mr->ffprobe_path[0] = '\0';  /* 空 = 自动从 ffmpeg_path 推导 */
     }
 
     mr->subtitle_track = (cfg) ? cfg->subtitle_track : -1;

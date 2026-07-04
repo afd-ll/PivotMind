@@ -32,8 +32,11 @@ typedef struct Thalamus Thalamus;
 // ==================== 配置 ====================
 
 typedef struct {
-    /* ffmpeg 可执行文件路径 ("", "ffmpeg", 或绝对路径) */
+    /* ffmpeg 可执行文件路径 (用于转码/提取) */
     char  ffmpeg_path[256];
+
+    /* ffprobe 可执行文件路径 (用于流检测; 空字符串 = 自动从 ffmpeg_path 推导) */
+    char  ffprobe_path[256];
 
     /* 字幕轨道号 (-1 = 自动选择第一个字幕轨) */
     int   subtitle_track;
@@ -49,7 +52,7 @@ typedef struct {
 } MediaReaderConfig;
 
 #define MEDIA_READER_DEFAULT_CONFIG { \
-    "ffmpeg", -1, 0, 0, 0 \
+    "ffmpeg", "", -1, 0, 0, 0 \
 }
 
 // ==================== 公共 API ====================
@@ -109,5 +112,15 @@ void media_reader_get_stats(MediaReader* mr,
  * 绑定后每次处理完文件自动通过丘脑发送 THAL_SIG_MEDIA_FILE_DONE 信号
  */
 void media_reader_set_thalamus(MediaReader* mr, Thalamus* th);
+
+/**
+ * 诊断: 列出视频文件中所有可用的轨道信息 (v0.5.1)
+ * 打印视频/音频/字幕轨道到 stdout，帮助用户确认媒体文件是否包含字幕。
+ *
+ * @param mr        媒体阅读器
+ * @param filepath  视频文件路径
+ * @return          找到的轨道总数, -1 为出错
+ */
+int media_diagnose_tracks(MediaReader* mr, const char* filepath);
 
 #endif /* MEDIA_READER_H */
