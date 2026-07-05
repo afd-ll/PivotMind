@@ -998,6 +998,28 @@ static void handle_media_feed(GatewaySystem* gw, int fd, const char* body) {
     }
     json_extract_string(body, "mode", mode, sizeof(mode));
 
+    /* v0.5.1: 诊断模式 — 列出视频的所有轨道信息 */
+    if (strcmp(mode, "diagnose") == 0) {
+        if (!gw->visual_cortex) {
+            http_json(fd, 500, "{\"error\":\"visual cortex not initialized\"}");
+            return;
+        }
+        MediaReader* mr = visual_cortex_get_media_reader(gw->visual_cortex);
+        if (!mr) {
+            http_json(fd, 500, "{\"error\":\"media reader not available\"}");
+            return;
+        }
+        int tracks = media_diagnose_tracks(mr, path);
+        char resp[512];
+        snprintf(resp, sizeof(resp),
+                 "{\"result\":\"%s\",\"tracks\":%d,\"has_subtitle\":%s}",
+                 (tracks > 0) ? "ok" : "no_tracks",
+                 tracks,
+                 (tracks > 0) ? "check_server_stdout" : "none");
+        http_json(fd, 200, resp);
+        return;
+    }
+
     if (!gw->visual_cortex) {
         http_json(fd, 500, "{\"error\":\"visual cortex not initialized\"}");
         return;
