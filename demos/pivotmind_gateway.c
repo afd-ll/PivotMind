@@ -273,7 +273,7 @@ static char* json_extract_string(const char* json, const char* key, char* buf, i
 
 // ==================== HTTP 工具 ====================
 
-// 发送 HTTP 响应
+// 发送 HTTP 响应 (v0.5.1: 加固 — 检查 write 返回值, 防 EPIPE/ECONNRESET 丢日志)
 static void http_send(int fd, int status, const char* content_type, const char* body) {
     const char* status_text = (status == 200) ? "OK" :
                               (status == 400) ? "Bad Request" :
@@ -294,8 +294,11 @@ static void http_send(int fd, int status, const char* content_type, const char* 
         "\r\n",
         status, status_text, content_type, body_len);
 
-    send(fd, header, hdr_len, MSG_NOSIGNAL);
-    send(fd, body, body_len, MSG_NOSIGNAL);
+    /* MSG_NOSIGNAL: write 到已关闭 socket 时返回 -1 而非杀进程 */
+    ssize_t sent = send(fd, header, hdr_len, MSG_NOSIGNAL);
+    if (sent >= 0)
+        send(fd, body, body_len, MSG_NOSIGNAL);
+    /* sent < 0: 客户端已断开, 静默忽略 */
 }
 
 // 发送 JSON 响应
@@ -1303,7 +1306,7 @@ typedef struct {
 static int parse_request(int fd, HttpRequest* req) {
     memset(req, 0, sizeof(HttpRequest));
 
-    // 读取请求 (先读 header，再读 body)
+    // 读取请求 (chunked read, 每轮 4KB)
     char buf[GW_MAX_REQUEST];
     int total = 0;
     int header_end = -1;
@@ -1313,7 +1316,9 @@ static int parse_request(int fd, HttpRequest* req) {
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
     while (total < (int)sizeof(buf) - 1) {
-        int n = recv(fd, buf + total, 1, 0);
+        int chunk = (int)sizeof(buf) - 1 - total;
+        if (chunk > 4096) chunk = 4096;  /* 一次读 4KB, 非逐字节 */
+        int n = recv(fd, buf + total, chunk, 0);
         if (n <= 0) break;
         total += n;
         buf[total] = '\0';
@@ -1337,7 +1342,7 @@ static int parse_request(int fd, HttpRequest* req) {
             char* cl = strcasestr(buf, "Content-Length:");
             if (cl) {
                 int content_length = atoi(cl + 15);
-                if (content_length > GW_MAX_REQUEST) return -1; // 太大
+                if (content_length > GW_MAX_REQUEST - 4096) return -1; /* 保护: 留出 header 空间 */
                 if (body_received >= content_length) break; // body 完整
             } else {
                 break; // 无 body
@@ -1359,12 +1364,14 @@ static int parse_request(int fd, HttpRequest* req) {
     while (*p && *p != ' ' && *p != '?' && i < (int)sizeof(req->path) - 1) req->path[i++] = *p++;
     req->path[i] = '\0';
 
-    // 提取 body
+    // 提取 body (带边界保护)
     int header_size = header_end + 4;
     req->body_len = total - header_size;
-    if (req->body_len > 0) {
+    if (req->body_len > 0 && req->body_len < (int)sizeof(req->body)) {
         memcpy(req->body, buf + header_size, req->body_len);
         req->body[req->body_len] = '\0';
+    } else if (req->body_len >= (int)sizeof(req->body)) {
+        return -1;  /* body 溢出 */
     }
 
     return 0;
@@ -1373,6 +1380,13 @@ static int parse_request(int fd, HttpRequest* req) {
 // ==================== 连接处理 ====================
 
 static void handle_connection(GatewaySystem* gw, int client_fd) {
+    /* 加固: TCP keepalive 检测死连接 */
+    int ka = 1;
+    setsockopt(client_fd, SOL_SOCKET, SO_KEEPALIVE, &ka, sizeof(ka));
+    /* 加固: 发送超时 10s */
+    struct timeval stv = { .tv_sec = 10, .tv_usec = 0 };
+    setsockopt(client_fd, SOL_SOCKET, SO_SNDTIMEO, &stv, sizeof(stv));
+
     HttpRequest req;
     if (parse_request(client_fd, &req) < 0) {
         http_json(client_fd, 400, "{\"error\":\"bad request\"}");
