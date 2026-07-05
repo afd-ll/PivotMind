@@ -38,21 +38,20 @@
 
 /* ==================== 内部常量 ==================== */
 
-#define VC_MAX_FRAMES_PER_VIDEO    400
-#define VC_MAX_TOKENS_PER_VIDEO    2000
-#define VC_MAX_CROSS_PAIRS         512
-#define VC_TASK_QUEUE_SIZE         128     /* 任务队列最大容量 */
+#define VC_MAX_FRAMES_PER_VIDEO    400      /* 单视频最大采样帧数 */
+#define VC_MAX_TOKENS_PER_VIDEO    2000     /* 单视频最大词元数 */
+#define VC_TASK_QUEUE_SIZE         128      /* 任务队列最大容量 */
 
 /* ==================== 内部数据结构 ==================== */
 
 typedef struct {
     float start_ms;
     float end_ms;
-    char  text[512];
+    char  text[PM_PATH_BUF];               /* constants.h: snprintf/路径缓冲 */
 } SubtitleEntry;
 
 typedef struct {
-    char  word[128];
+    char  word[PM_SMALL_BUF];              /* constants.h: 关联信息等小缓冲 */
     float timestamp_ms;
     int   vocab_node_id;
 } TimedToken;
@@ -143,10 +142,14 @@ static int vc_queue_pop(VisualCortex* vc, VCTask* out) {
 
 /* ==================== 帧提取 ==================== */
 
+/* 场景切换检测: 只比较前 N 维以求速度 (全512维太慢) */
+#define VC_SCENE_DIFF_DIMS 64
+
 static int frame_diff_score(const float* prev, const float* cur, int dim) {
     if (!prev || !cur) return 0;
     float sum_sq = 0.0f;
-    for (int i = 0; i < dim && i < 64; i++) {
+    int limit = (dim < VC_SCENE_DIFF_DIMS) ? dim : VC_SCENE_DIFF_DIMS;
+    for (int i = 0; i < limit; i++) {
         float d = prev[i] - cur[i];
         sum_sq += d * d;
     }
@@ -381,7 +384,7 @@ static int vc_find_or_create_visual_node(VisualCortex* vc, const char* word) {
     SubTopology* vt = vc_ensure_visual_topo(vc);
     if (!vt || !vt->net) return -1;
 
-    char vis_name[256];
+    char vis_name[PM_CONCEPT_NAME];  /* constants.h: 概念名称最大长度 */
     snprintf(vis_name, sizeof(vis_name), "%s_视觉", word);
 
     int node_id = huarong_net_find_concept(vt->net, vis_name);

@@ -14,9 +14,9 @@
 
 static void config_init_defaults(ConfigContext* ctx) {
     /* topology */
-    ctx->topology.feature_dim         = 512;
-    ctx->topology.max_nodes_per_topo  = 10000;
-    ctx->topology.cross_hit_table_size = 2048;
+    ctx->topology.feature_dim         = PM_NODE_FEATURE_DIM;
+    ctx->topology.max_nodes_per_topo  = PM_MAX_NODES_PER_TOPO;
+    ctx->topology.cross_hit_table_size = PM_CROSS_HIT_TABLE;
 
     /* learning */
     ctx->learning.decay_rate           = 0.7f;
@@ -325,8 +325,8 @@ int config_write_default(const char* path) {
 
     fprintf(fp, "{\n");
     fprintf(fp, "    \"topology\": {\n");
-    fprintf(fp, "        \"feature_dim\": 512,\n");
-    fprintf(fp, "        \"max_nodes_per_topo\": 10000,\n");
+    fprintf(fp, "        \"feature_dim\": %d,\n", PM_NODE_FEATURE_DIM);
+    fprintf(fp, "        \"max_nodes_per_topo\": %d,\n", PM_MAX_NODES_PER_TOPO);
     fprintf(fp, "        \"cross_hit_table_size\": 2048\n");
     fprintf(fp, "    },\n");
     fprintf(fp, "    \"learning\": {\n");

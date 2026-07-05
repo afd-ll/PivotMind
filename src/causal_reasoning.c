@@ -2350,7 +2350,7 @@ CausalGraph* infer_causal_graph_from_master_topology(MasterTopology* master,
             if (cause_cg_id < 0) continue;
 
             // 跨拓扑连接（通过交叉连接索引）
-            int adj_idx = sub->topo_id * 10000 + i;
+            int adj_idx = sub->topo_id * PM_MAX_NODES_PER_TOPO + i;
             if (adj_idx < master->cross_adj_count) {
                 CrossTopoAdjEntry* entry = master->cross_adj[adj_idx];
                 while (entry) {

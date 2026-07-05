@@ -9,7 +9,7 @@
  *   4. 跨拓扑：语义相关但无连接的节点对创建跨拓扑连接
  *   5. 清理：全局衰减梦境激活
  *
- * 线程安全：联想引擎为梦境独立实例，边修改使用 node_locks[256]；
+ * 线程安全：联想引擎为梦境独立实例，边修改使用 node_locks[PM_NODE_LOCK_COUNT]；
  * 读路径通过 huarong_net_enter_reader/leave_reader 注册活跃读者，
  * 防止并发的 add_connection 扩容释放旧边数组导致 use-after-free
  */
