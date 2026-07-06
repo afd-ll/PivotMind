@@ -336,8 +336,6 @@ ReasoningNode* huarong_net_find_or_create_node(HuarongTopologyNet* net,
         net->nodes = new_nodes;
         net->max_nodes = new_max;
     }
-        return NULL;
-    }
 
     int node_id = net->node_count;
     ReasoningNode* node = create_reasoning_node(node_id, concept, features, feature_dim);
