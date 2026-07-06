@@ -33,7 +33,7 @@
 /* ========== 拓扑结构 ========== */
 #define PM_DEFAULT_CONN_CAP  10    // 节点默认连接容量
 #define PM_CROSS_HIT_TABLE   2048  // 跨拓扑 hit 记录哈希表大小
-#define PM_MAX_NODES_PER_TOPO 10000 // 单拓扑最大节点数（邻接表索引编码用）
+#define PM_MAX_NODES_PER_TOPO 1000000 /* 单拓扑索引槽位 (v0.5.1: 1M, flat array auto-grows; 非硬上限) */
 #define PM_NODE_FEATURE_DIM  512   // 拓扑节点语义向量维度
 #define PM_NODE_LOCK_COUNT   256   // 节点级锁分片数（须为2的幂）
 

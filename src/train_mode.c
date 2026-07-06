@@ -422,11 +422,9 @@ static int train_feed_qa_json(TrainMode* tm, const char* path) {
             }
             if (vocab && vocab->net) {
                 int qid = huarong_net_find_concept(vocab->net, stream->q_buf);
-                if (qid < 0 && vocab->net->node_count < vocab->net->max_nodes)
-                    qid = huarong_net_dynamic_add_node(vocab->net, stream->q_buf, NULL, 0);
+                if (qid < 0) qid = huarong_net_dynamic_add_node(vocab->net, stream->q_buf, NULL, 0);
                 int aid = huarong_net_find_concept(vocab->net, stream->a_buf);
-                if (aid < 0 && vocab->net->node_count < vocab->net->max_nodes)
-                    aid = huarong_net_dynamic_add_node(vocab->net, stream->a_buf, NULL, 0);
+                if (aid < 0) aid = huarong_net_dynamic_add_node(vocab->net, stream->a_buf, NULL, 0);
 
                 if (qid >= 0 && aid >= 0 && qid != aid) {
                     vocab->net->nodes[qid]->activation += 0.2f;
@@ -491,7 +489,7 @@ static int train_feed_token_sequence(TrainMode* tm, SubTopology* vocab,
 
     for (int i = 0; i < token_count; i++) {
         int nid = huarong_net_find_concept(vocab->net, tokens[i]);
-        if (nid < 0 && vocab->net->node_count < vocab->net->max_nodes) {
+        if (nid < 0) {
             nid = huarong_net_dynamic_add_node(vocab->net, tokens[i], NULL, 0);
             if (nid >= 0) {
                 added++;

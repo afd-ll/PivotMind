@@ -386,17 +386,12 @@ int auto_extend_topology(MasterTopology* master, int topo_id) {
 
     HuarongTopologyNet* net = sub->net;
 
-    // 计算需要扩展的容量
+    // 计算需要扩展的容量 (v0.5.1: 取消硬天花板, huarong_net_add_node 已自动扩容)
     int current_capacity = net->max_nodes;
     int new_capacity = current_capacity + config->growth_increment;
 
-    // 检查限制
-    if (new_capacity > config->max_nodes_per_topology) {
-        new_capacity = config->max_nodes_per_topology;
-    }
-
     if (new_capacity <= current_capacity) {
-        return -1;  // 无法再扩展
+        return 0;  // 无需扩展
     }
 
     // 扩容

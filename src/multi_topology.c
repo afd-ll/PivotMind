@@ -33,7 +33,7 @@
 #define INITIAL_CROSS_LINK_CAPACITY 1000
 #define MAX_SAFE_LIMIT 1000000
 #define EPSILON 1e-10f
-#define CROSS_ADJ_INITIAL_SIZE PM_MAX_NODES_PER_TOPO  /* 跨拓扑邻接表初始大小 = 每拓扑最大节点数 */
+#define CROSS_ADJ_INITIAL_SIZE 4096  /* 跨拓扑邻接表初始大小 (v0.5.1: 按需增长, 非硬上限) */
 
 // 拓扑类型名称（只在multi_topology.c中定义一次）
 const char* TOPOLOGY_TYPE_NAMES[] = {

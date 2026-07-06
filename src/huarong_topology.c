@@ -253,10 +253,19 @@ ReasoningNode* huarong_net_add_node(HuarongTopologyNet* net,
     
     pthread_mutex_lock(&net->mutex);
     
-    // 检查是否已达到最大容量
+    // 容量满 → 自动扩容 (v0.5.1: 取消硬上限, realloc 而非拒绝)
     if (net->node_count >= net->max_nodes || net->nodes == NULL) {
-        pthread_mutex_unlock(&net->mutex);
-        return NULL;
+        int new_max = net->max_nodes + (net->max_nodes / 2);
+        if (new_max < net->max_nodes + 100) new_max = net->max_nodes + 100;
+        
+        ReasoningNode** new_nodes = (ReasoningNode**)realloc(
+            net->nodes, (size_t)new_max * sizeof(ReasoningNode*));
+        if (!new_nodes) {
+            pthread_mutex_unlock(&net->mutex);
+            return NULL;  /* OOM — 真·无药可救 */
+        }
+        net->nodes = new_nodes;
+        net->max_nodes = new_max;
     }
     
     int node_id = net->node_count;
@@ -314,9 +323,19 @@ ReasoningNode* huarong_net_find_or_create_node(HuarongTopologyNet* net,
         }
     }
 
-    // 没有找到 → 创建新节点
+    // 没有找到 → 创建新节点。容量满则自动扩容
     if (net->node_count >= net->max_nodes || net->nodes == NULL) {
-        pthread_mutex_unlock(&net->mutex);
+        int new_max = net->max_nodes + (net->max_nodes / 2);
+        if (new_max < net->max_nodes + 100) new_max = net->max_nodes + 100;
+        ReasoningNode** new_nodes = (ReasoningNode**)realloc(
+            net->nodes, (size_t)new_max * sizeof(ReasoningNode*));
+        if (!new_nodes) {
+            pthread_mutex_unlock(&net->mutex);
+            return NULL;
+        }
+        net->nodes = new_nodes;
+        net->max_nodes = new_max;
+    }
         return NULL;
     }
 
@@ -777,8 +796,7 @@ int huarong_net_dynamic_add_node(HuarongTopologyNet* net,
                                 const char* concept,
                                 float* features,
                                 int feature_dim) {
-    if (!net || net->node_count >= net->max_nodes) return -1;
-    
+    /* v0.5.1: 移除冗余容量检查 — huarong_net_add_node 已自动扩容 */
     ReasoningNode* new_node = huarong_net_add_node(net, concept, features, feature_dim);
     return new_node ? new_node->node_id : -1;
 }
