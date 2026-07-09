@@ -1,5 +1,5 @@
-#include "../include/memory_system.h"
-#include "../include/causal_reasoning.h"
+#include "memory_system.h"
+#include "causal_reasoning.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

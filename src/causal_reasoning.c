@@ -1,9 +1,9 @@
-#include "../include/causal_reasoning.h"
-#include "../include/huarong_topology.h"
-#include "../include/utf8_tokenizer.h"
-#include "../include/node_hash.h"
-#include "../include/multi_topology.h"
-#include "../include/concept_abstraction.h"
+#include "causal_reasoning.h"
+#include "huarong_topology.h"
+#include "utf8_tokenizer.h"
+#include "node_hash.h"
+#include "multi_topology.h"
+#include "concept_abstraction.h"
 
 #ifdef _OPENMP
 #include <omp.h>

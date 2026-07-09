@@ -1,6 +1,6 @@
-#include "../include/concept_processor.h"
-#include "../include/multi_topology.h"
-#include "../include/huarong_topology.h"
+#include "concept_processor.h"
+#include "multi_topology.h"
+#include "huarong_topology.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
