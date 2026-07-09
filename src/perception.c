@@ -18,6 +18,8 @@
 #include <string.h>
 #include <ctype.h>
 #include <time.h>
+#include <unistd.h>
+#include <signal.h>
 
 /* 全局感觉皮层指针 — 供 self_learner / dialog_system 等模块通过 extern 引用 */
 Perception* g_perception = NULL;
@@ -1369,8 +1371,15 @@ int perception_search_and_learn_qa(Perception* p, const char* query, int engine_
         char url[1024];
         snprintf(url, sizeof(url), eng->url_fmt, encoded);
 
-        WebResult* wr = web_search(url, eng->timeout_ms, 131072);
-        if (!wr || !wr->body) { eng->failures++; web_result_free(wr); continue; }
+    /* 硬超时保护 — 用 alarm 防止 libcurl 卡死 */
+    #ifndef _WIN32
+    alarm(eng->timeout_ms / 1000 + 2);
+    #endif
+    WebResult* wr = web_search(url, eng->timeout_ms > 0 ? eng->timeout_ms : 5000, 131072);
+    #ifndef _WIN32
+    alarm(0);
+    #endif
+    if (!wr || !wr->body) { eng->failures++; web_result_free(wr); eng->cooldown_until_tick = tick + 600; continue; }
 
         eng->failures = 0;
 
