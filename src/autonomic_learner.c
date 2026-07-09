@@ -34,6 +34,7 @@
 #include "topology_growth.h"
 #include "feature_io.h"
 #include "cognitive_controller.h"  /* POSTag / pos_tag_chinese for syntax topology */
+#include "cognitive_params.h"       /* CognitiveState for emotional modulation */
 #include "dict_loader.h"           /* 词典分词 + 词性标注 */
 #include <stdio.h>
 #include <stdlib.h>
@@ -519,6 +520,15 @@ void autonomic_learn_from_dialog(MasterTopology* master,
 
     reset_activation_record();
 
+    /* 情绪调制因子：正效价→加速学习，负效价→抑制（0.5x ~ 1.5x） */
+    float emotive_weight_mult = 1.0f;
+    if (master->cognitive_state_ptr) {
+        float v = ((CognitiveState*)master->cognitive_state_ptr)->valence;
+        emotive_weight_mult = 1.0f + v * 0.5f;
+        if (emotive_weight_mult < 0.3f) emotive_weight_mult = 0.3f;
+        if (emotive_weight_mult > 2.0f) emotive_weight_mult = 2.0f;
+    }
+
     // 一次性扫描缓存四种拓扑指针（O(n) → 1 次遍历）
     SubTopology* vocab = NULL;
     SubTopology* semantic = NULL;
@@ -625,7 +635,7 @@ void autonomic_learn_from_dialog(MasterTopology* master,
                 syntax->net, syntax_name, NULL, 0, syntax->node_hash);
             if (pos_node) {
                 /* 词汇节点 → 语法 POS 节点（跨拓扑连接） */
-                boost_connection_weighted(vocab, input_nodes[i], pos_node, state, 0.3f);
+                boost_connection_weighted(vocab, input_nodes[i], pos_node, state, 0.3f * emotive_weight_mult);
             }
         }
         for (int i = 0; i < response_count; i++) {
@@ -635,7 +645,7 @@ void autonomic_learn_from_dialog(MasterTopology* master,
             ReasoningNode* pos_node = huarong_net_find_or_create_node(
                 syntax->net, syntax_name, NULL, 0, syntax->node_hash);
             if (pos_node) {
-                boost_connection_weighted(vocab, response_nodes[i], pos_node, state, 0.3f);
+                boost_connection_weighted(vocab, response_nodes[i], pos_node, state, 0.3f * emotive_weight_mult);
             }
         }
     }
@@ -659,7 +669,7 @@ void autonomic_learn_from_dialog(MasterTopology* master,
             int dist = j - i;
             float wmult = (dist == 1) ? 1.5f : (1.5f / dist);
             if (wmult < 0.3f) wmult = 0.3f;
-            boost_connection_weighted(vocab, input_nodes[i], input_nodes[j], state, wmult);
+            boost_connection_weighted(vocab, input_nodes[i], input_nodes[j], state, wmult * emotive_weight_mult);
         }
     }
 
@@ -682,7 +692,7 @@ void autonomic_learn_from_dialog(MasterTopology* master,
             int dist = j - i;
             float wmult = (dist == 1) ? 1.5f : (1.5f / dist);
             if (wmult < 0.3f) wmult = 0.3f;
-            boost_connection_weighted(vocab, response_nodes[i], response_nodes[j], state, wmult);
+            boost_connection_weighted(vocab, response_nodes[i], response_nodes[j], state, wmult * emotive_weight_mult);
         }
     }
 
@@ -733,7 +743,7 @@ void autonomic_learn_from_dialog(MasterTopology* master,
                 }
 
                 boost_connection_weighted(vocab, input_nodes[i], response_nodes[j],
-                                          state, wm);
+                                          state, wm * emotive_weight_mult);
             }
         }
 
@@ -787,7 +797,7 @@ void autonomic_learn_from_dialog(MasterTopology* master,
                     int dist = j - i;
                     float wmult = (dist == 1) ? 1.5f : (1.5f / dist);
                     if (wmult < 0.3f) wmult = 0.3f;
-                    boost_connection_weighted(tgt, tgt_input[i], tgt_input[j], state, wmult * lr_scale);
+                    boost_connection_weighted(tgt, tgt_input[i], tgt_input[j], state, wmult * lr_scale * emotive_weight_mult);
                 }
             }
             for (int i = 0; i < response_count; i++) {
@@ -797,14 +807,14 @@ void autonomic_learn_from_dialog(MasterTopology* master,
                     int dist = j - i;
                     float wmult = (dist == 1) ? 1.5f : (1.5f / dist);
                     if (wmult < 0.3f) wmult = 0.3f;
-                    boost_connection_weighted(tgt, tgt_response[i], tgt_response[j], state, wmult * lr_scale);
+                    boost_connection_weighted(tgt, tgt_response[i], tgt_response[j], state, wmult * lr_scale * emotive_weight_mult);
                 }
             }
             for (int i = 0; i < input_count; i++) {
                 if (!tgt_input[i]) continue;
                 for (int j = 0; j < response_count; j++) {
                     if (!tgt_response[j]) continue;
-                    boost_connection_weighted(tgt, tgt_input[i], tgt_response[j], state, lr_scale);
+                    boost_connection_weighted(tgt, tgt_input[i], tgt_response[j], state, lr_scale * emotive_weight_mult);
                 }
             }
         }

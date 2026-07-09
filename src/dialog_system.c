@@ -1454,6 +1454,17 @@ char* dialog_process(DialogSystem* sys, const char* user_input, DialogReasoning*
             }
             causal_search_results_free(causal_results, causal_count);
         }
+
+        /* 使用因果推理引擎生成结构化解释（A* 搜索 + 自然语言） */
+        if (sys->causal_graph && sys->memory) {
+            char* causal_explanation = process_causal_query(sem, sys->causal_graph, sys->memory);
+            if (causal_explanation) {
+                ui_print_thinking_line("因果解释", causal_explanation);
+                semantic_understanding_destroy(sem);
+                ui_print_thinking_end();
+                return causal_explanation;  /* 直接返回因果解释，跳过拓扑生成 */
+            }
+        }
     }
 
     // 概念处理：检测数学表达式

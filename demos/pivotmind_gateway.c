@@ -424,6 +424,9 @@ static int gw_system_init(GatewaySystem* gw) {
     if (!gw->amygdala) { fprintf(stderr, "[gateway] 杏仁核创建失败\n"); return -1; }
     fprintf(stderr, "[gateway]   杏仁核就绪\n");
 
+    /* 将认知状态指针注入拓扑，供所有模块通过 master->cognitive_state_ptr 访问 */
+    gw->topology->cognitive_state_ptr = gw->dialog->cognitive_state;
+
     /* ── v0.3 新脑区 ── */
     // 前额叶执行器（推理编排引擎 — 任务分解/子目标调度）
     fprintf(stderr, "[gateway]   创建前额叶执行器 (v0.3)...\n");

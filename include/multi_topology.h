@@ -195,11 +195,26 @@ typedef struct MasterTopology {
     // ========== 认知调度中心 ==========
     struct CognitiveController* cognitive_controller; // 运行时注入，不持久化
 
+    // ========== 全局认知状态（情绪/动机/探索率） ==========
+    void* cognitive_state_ptr;                     // CognitiveState* — 运行时注入，不持久化
+
     // ========== 上下文拓扑追踪 ==========
     // 已迁移至 InferenceContext.last_context_node（每会话独立，多线程安全）
     // 保留字段用于二进制兼容，不再直接使用
     int _legacy_context_node;
 } MasterTopology;
+
+/* 便捷访问：获取全局认知状态（需外部包含 cognitive_params.h 后方可用） */
+#ifdef HAS_COGNITIVE_PARAMS
+static inline float master_get_valence(const MasterTopology* m) {
+    if (!m || !m->cognitive_state_ptr) return 0.0f;
+    return ((const CognitiveState*)m->cognitive_state_ptr)->valence;
+}
+static inline float master_get_explore_rate(const MasterTopology* m) {
+    if (!m || !m->cognitive_state_ptr) return 0.5f;
+    return ((const CognitiveState*)m->cognitive_state_ptr)->explore_rate;
+}
+#endif
 
 // ==================== API函数声明 ====================
 
