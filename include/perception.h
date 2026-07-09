@@ -200,6 +200,28 @@ char* perception_search_for_user(Perception* p, const char* query, int max_len);
 int perception_expand_query(Perception* p, const char* concept,
                             char expanded[][128], int max);
 
+/**
+ * 从纯文本中提取 QA 对（问句 + 答句）
+ * @param text      原始文本（可含 HTML）
+ * @param questions 输出：问题数组
+ * @param answers   输出：回答数组
+ * @param max_pairs 最大提取对数（建议 64）
+ * @return 实际提取对数
+ */
+int perception_extract_qa_pairs(const char* text,
+                                 char questions[][512],
+                                 char answers[][2048],
+                                 int max_pairs);
+
+/**
+ * 搜索 + 提取 QA 对 + 喂入自主学习器
+ * 一次调用完成：多引擎搜索 → HTML 提取 QA 对 → Hebbian 学习
+ * @param query        搜索关键词
+ * @param engine_limit 最多用几个引擎（0=全部，建议 3）
+ * @return 成功学习的 QA 对数
+ */
+int perception_search_and_learn_qa(Perception* p, const char* query, int engine_limit);
+
 #ifdef __cplusplus
 }
 #endif

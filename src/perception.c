@@ -7,6 +7,7 @@
 #include "web_search.h"
 #include "web_fetch.h"
 #include "active_learner.h"
+#include "autonomic_learner.h"
 #include "article_reader.h"
 #include "huarong_topology.h"
 #include "node_hash.h"
@@ -1266,4 +1267,136 @@ int perception_expand_query(Perception* p, const char* concept,
         count++;
     }
     return count;
+}
+
+/* ================================================================
+ *  QA 对提取：从纯文本中检测"提问→回答"结构
+ * ================================================================ */
+
+#define PM_QA_MAX_QUESTIONS 64
+#define PM_QA_MAX_Q_LEN     512
+#define PM_QA_MAX_A_LEN    2048
+
+/**
+ * 从原始文本中提取 QA 对
+ * 策略：检测问号结尾的行作为问题，紧跟的非空行作为回答
+ */
+int perception_extract_qa_pairs(const char* text,
+                                 char questions[][PM_QA_MAX_Q_LEN],
+                                 char answers[][PM_QA_MAX_A_LEN],
+                                 int max_pairs) {
+    if (!text || !questions || !answers || max_pairs <= 0) return 0;
+
+    char clean[65536];
+    int clen = 0;
+    int in_tag = 0;
+    for (const char* p = text; *p && clen < (int)sizeof(clean) - 1; p++) {
+        if (*p == '<') in_tag = 1;
+        else if (*p == '>') { in_tag = 0; clean[clen++] = ' '; }
+        else if (!in_tag) {
+            if (*p == '\r') continue;
+            clean[clen++] = *p;
+        }
+    }
+    clean[clen] = '\0';
+
+    /* 按行分割 */
+    char* lines[2048];
+    int line_count = 0;
+    char* saveptr;
+    char* tok = strtok_r(clean, "\n", &saveptr);
+    while (tok && line_count < 2048) {
+        while (*tok == ' ' || *tok == '\t') tok++;
+        size_t len = strlen(tok);
+        while (len > 0 && (tok[len-1] == ' ' || tok[len-1] == '\r')) tok[--len] = '\0';
+        if (len > 0) lines[line_count++] = tok;
+        tok = strtok_r(NULL, "\n", &saveptr);
+    }
+
+    /* 检测 QA 对 */
+    int count = 0;
+    for (int i = 0; i < line_count - 1 && count < max_pairs; i++) {
+        size_t llen = strlen(lines[i]);
+        if (llen < 4 || llen > 500) continue;
+
+        /* 检测问句：以？结尾，或包含疑问词 */
+        int is_question = 0;
+        if (lines[i][llen-1] == '？' || lines[i][llen-1] == '?') {
+            is_question = 1;
+        } else if (strstr(lines[i], "怎么") || strstr(lines[i], "如何") ||
+                   strstr(lines[i], "为什么") || strstr(lines[i], "什么是") ||
+                   strstr(lines[i], "哪个") || strstr(lines[i], "能否")) {
+            is_question = 1;
+        }
+
+        if (!is_question) continue;
+
+        /* 找回答 */
+        size_t alen = strlen(lines[i+1]);
+        if (alen < 6 || alen > 2000) continue;
+        /* 排除连续问句 */
+        if (lines[i+1][alen-1] == '？' || lines[i+1][alen-1] == '?') continue;
+
+        snprintf(questions[count], PM_QA_MAX_Q_LEN, "%s", lines[i]);
+        snprintf(answers[count], PM_QA_MAX_A_LEN, "%s", lines[i+1]);
+        count++;
+        i++;  /* 跳过回答行 */
+    }
+
+    return count;
+}
+
+/**
+ * 搜索 + 提取 QA 对 + 喂入自主学习器
+ * @return 成功学习的 QA 对数
+ */
+int perception_search_and_learn_qa(Perception* p, const char* query, int engine_limit) {
+    if (!p || !query || !query[0]) return 0;
+    if (!p->learner) return 0;
+    if (engine_limit <= 0) engine_limit = 3;
+
+    int total_learned = 0;
+    int tick = p->tick_counter;
+
+    /* 搜索 */
+    char encoded[512];
+    _url_encode(query, encoded, sizeof(encoded));
+
+    for (int ei = 0; ei < p->engine_count && ei < engine_limit; ei++) {
+        SearchEngine* eng = &p->engines[ei];
+        if (!_engine_available(eng, tick)) continue;
+
+        char url[1024];
+        snprintf(url, sizeof(url), eng->url_fmt, encoded);
+
+        WebResult* wr = web_search(url, eng->timeout_ms, 131072);
+        if (!wr || !wr->body) { eng->failures++; web_result_free(wr); continue; }
+
+        eng->failures = 0;
+
+        /* 提取 QA 对 */
+        char questions[PM_QA_MAX_QUESTIONS][PM_QA_MAX_Q_LEN];
+        char answers[PM_QA_MAX_QUESTIONS][PM_QA_MAX_A_LEN];
+        int pair_count = perception_extract_qa_pairs(wr->body, questions, answers, PM_QA_MAX_QUESTIONS);
+
+        /* 喂入自主学习器 */
+        AutonomicState astate;
+        memset(&astate, 0, sizeof(astate));
+        autonomic_state_init(&astate);
+
+        for (int i = 0; i < pair_count; i++) {
+            autonomic_learn_from_dialog(p->topology,
+                                        questions[i], answers[i],
+                                        &astate, NULL, p->memory);
+            total_learned++;
+        }
+
+        autonomic_state_destroy(&astate);
+        web_result_free(wr);
+
+        if (p->cfg.verbose)
+            fprintf(stderr, "[QA训练] '%s' %s: %d对\n", query, eng->name, pair_count);
+    }
+
+    return total_learned;
 }

@@ -99,6 +99,9 @@ $(BUILD_DIR)/compare_templates: $(OBJ_DIR)/compare_templates.o $(LIB_NAME)
 $(BUILD_DIR)/eval_templates: $(OBJ_DIR)/eval_templates.o $(LIB_NAME)
 	$(CC) $(CFLAGS) -o $@ $(OBJ_DIR)/eval_templates.o -L. -lpivotmind $(LDFLAGS)
 
+$(BUILD_DIR)/qa_crawler: $(OBJ_DIR)/qa_crawler.o $(LIB_NAME)
+	$(CC) $(CFLAGS) -o $@ $(OBJ_DIR)/qa_crawler.o -L. -lpivotmind $(LDFLAGS)
+
 # ========== 构建目标 ==========
 
 # 默认 (跳过 clean)
@@ -131,6 +134,7 @@ template-build: $(BUILD_DIR)/template_build
 path-analyze: $(BUILD_DIR)/path_analyze
 compare-templates: $(BUILD_DIR)/compare_templates
 eval-templates: $(BUILD_DIR)/eval_templates
+qa-crawler: $(BUILD_DIR)/qa_crawler
 
 # 运行
 run: $(BUILD_DIR)/digital_life
@@ -248,4 +252,4 @@ test: test-tensor test-model test-metrics test-trainer test-chinese test-io test
 	@echo "║  所有单元测试已完成                  ║"
 	@echo "╚══════════════════════════════════════╝"
 
-.PHONY: all linux debug asan digital-life gateway seed-builder debug-seed test-dialog corpus-train batch-learn batch-learn-lowmem template-build path-analyze compare-templates eval-templates run clean install test test-tensor test-model test-metrics test-trainer test-chinese test-io test-web-fetch test-dialog-unit test-diffusion-unit test-topology-unit test-memory-unit test-learner-unit test-causal-unit test-forgetting-unit test-media-reader test-visual-cortex test-pure test-search test-integration test-cc test-cc-full test-runner
+.PHONY: all linux debug asan digital-life gateway seed-builder debug-seed test-dialog corpus-train batch-learn batch-learn-lowmem template-build path-analyze compare-templates eval-templates qa-crawler run clean install test test-tensor test-model test-metrics test-trainer test-chinese test-io test-web-fetch test-dialog-unit test-diffusion-unit test-topology-unit test-memory-unit test-learner-unit test-causal-unit test-forgetting-unit test-media-reader test-visual-cortex test-pure test-search test-integration test-cc test-cc-full test-runner
