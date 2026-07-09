@@ -1858,6 +1858,26 @@ skip_postprocess:
     // 使用 strdup 复制，避免悬挂指针问题
     char* result = response ? strdup(response) : strdup("(null)");
 
+    /* 低置信度回答时尝试联网搜索，为用户补充信息 */
+    if (sys->last_knowledge_quality < 0.3f && user_input && result && !strstr(result, "（暂时无法搜索")) {
+        extern Perception* g_perception;
+        if (g_perception) {
+            char* web_info = perception_search_for_user(g_perception, user_input, 4096);
+            if (web_info) {
+                size_t rlen = strlen(result);
+                size_t wlen = strlen(web_info);
+                char* merged = (char*)malloc(rlen + wlen + 128);
+                if (merged) {
+                    snprintf(merged, rlen + wlen + 128,
+                             "%s\n\n[联网搜索补充]\n%s", result, web_info);
+                    free(result);
+                    result = merged;
+                }
+                free(web_info);
+            }
+        }
+    }
+
     /* 记录多轮对话历史 */
     if (sys && result && user_input) {
         int slot = sys->history_head;

@@ -70,6 +70,32 @@ typedef struct SearchCacheEntry {
     struct SearchCacheEntry* next;  /* 链表（简单 LRU） */
 } SearchCacheEntry;
 
+/** 搜索引擎定义 */
+#define PM_SEARCH_ENGINE_MAX 8
+typedef struct {
+    const char* name;              /* 引擎标识，如 "sogou_wx" */
+    const char* url_fmt;           /* URL 模板，%s 处替换为查询词（需调用方做 URL 编码） */
+    int   timeout_ms;              /* 单次请求超时(ms) */
+    float quality_weight;          /* 结果质量权重 (0.0~1.0)，排序时用 */
+    int   min_request_interval_ms; /* 同引擎两次请求最小间隔(ms) */
+    int   max_requests_per_hour;   /* 每小时请求上限 */
+
+    /* 运行时状态（由感知皮层自动维护） */
+    int   failures;                /* 连续失败计数 */
+    int   cooldown_until_tick;     /* 冷却到哪个 tick */
+    int   requests_today;          /* 今日已请求次数 */
+    time_t last_request_time;      /* 上次请求时间戳 */
+} SearchEngine;
+
+/** 搜索结果片段（给用户看的摘要） */
+typedef struct {
+    char  title[256];
+    char  snippet[1024];
+    char  url[512];
+    char  source[32];              /* 来源引擎名 */
+    float score;                   /* quality_weight * 本地相关性 */
+} SearchSnippet;
+
 /** 感觉皮层句柄 */
 typedef struct Perception {
     MasterTopology*  topology;
@@ -89,8 +115,11 @@ typedef struct Perception {
     int               article_accum_count;  /* 累计未 flush 的搜索结果数 */
 
     /* 搜索策略 */
-    int               provider_cooldown[3]; /* 各 provider 冷却到何时(tick) */
-    int               provider_failures[3]; /* 连续失败计数 */
+    SearchEngine     engines[PM_SEARCH_ENGINE_MAX]; /* 多引擎并行配置 */
+    int              engine_count;
+    int              provider_cooldown[3]; /* 旧 provider 冷却（兼容，逐步迁移） */
+    int              provider_failures[3]; /* 旧 provider 失败计数 */
+    time_t           day_reset_time;       /* 上次每日重置时间戳 */
 
     /* 统计 */
     long  total_searches;
@@ -151,6 +180,25 @@ int perception_suggest_queries(Perception* p, const char** queries);
  * @return 新学到的词数，0=无新词或跳过
  */
 int perception_search_news(Perception* p);
+
+/**
+ * 用户驱动的联网搜索 — 直接返回搜索结果文本给用户
+ * 并行查询多个引擎，合并去重后格式化为可读文本
+ * @param query  用户原始查询词（中文/英文）
+ * @param max_len 返回文本最大长度（建议 4096）
+ * @return malloc 的搜索结果文本，调用者需 free；失败返回 NULL
+ */
+char* perception_search_for_user(Perception* p, const char* query, int max_len);
+
+/**
+ * 查询扩展：从拓扑中获取与 concept 共现频率最高的 N 个关联词
+ * @param concept  原始查询词
+ * @param expanded 输出数组 (需预先分配 PM_QUERY_EXPAND_MAX 个槽位)
+ * @param max      最多扩展几个词（建议 3-5）
+ * @return 实际扩展的词数（可能为 0）
+ */
+int perception_expand_query(Perception* p, const char* concept,
+                            char expanded[][128], int max);
 
 #ifdef __cplusplus
 }
