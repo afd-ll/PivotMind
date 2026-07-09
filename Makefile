@@ -5,9 +5,9 @@
 # 自动依赖追踪: -MD -MP 生成 .d 文件，头文件变化时自动重编译
 
 # 编译器
-CC = gcc
-CFLAGS = -pipe -Wall -Wextra -O2 -Iinclude -Iinclude/nn -Isrc/nn -I. -Ilibs -std=gnu99 -fopenmp -pthread -MD -MP -D_USE_MATH_DEFINES -D_FORTIFY_SOURCE=2 -flto -DHAS_OPENSSL
-LDFLAGS = -lm -lssl -lcrypto -lcurl -lz -flto
+CC = ccache gcc
+CFLAGS = -pipe -Wall -Wextra -O2 -Iinclude -Iinclude/nn -Isrc/nn -I. -Ilibs -std=gnu99 -fopenmp -pthread -MD -MP -D_USE_MATH_DEFINES -D_FORTIFY_SOURCE=2 -flto=auto -DHAS_OPENSSL
+LDFLAGS = -lm -lssl -lcrypto -lcurl -lz -flto=auto
 DEBUG_CFLAGS = -Wall -Wextra -g -O0 -Iinclude -Iinclude/nn -Isrc/nn -I. -Ilibs -std=gnu99 -fopenmp -pthread -MD -MP -DDEBUG -D_FORTIFY_SOURCE=2
 ASAN_CFLAGS = -fsanitize=address,undefined -fno-omit-frame-pointer -g -O1 -Iinclude -Iinclude/nn -Isrc/nn -I. -Ilibs -std=gnu99 -fopenmp -pthread -MD -MP -DDEBUG
 ASAN_LDFLAGS = -fsanitize=address,undefined -lm -lcurl
