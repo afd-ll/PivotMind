@@ -948,12 +948,13 @@ static int _html_extract_text(const char* html, char* out, int max) {
     int in_tag = 0, in_script = 0, in_style = 0;
     const char* p = html;
     while (*p && pos < max - 1) {
-        if (!in_script && !in_style && *p == '<') {
+        if (*p == '<') {
             in_tag = 1;
-            if (strncasecmp(p, "<script", 7) == 0) in_script = 1;
-            if (strncasecmp(p, "<style", 6) == 0) in_style = 1;
+            if (!in_script && strncasecmp(p, "<script", 7) == 0) in_script = 1;
+            if (!in_style && strncasecmp(p, "<style", 6) == 0) in_style = 1;
         }
-        if (!in_tag) {
+        if (!in_tag && !in_script && !in_style) {
+            /* 输出非标签、非脚本、非样式文本 */
             if (*p == '&') {
                 /* 简单 HTML 实体解码 */
                 if (strncmp(p, "&nbsp;", 6) == 0) { out[pos++] = ' '; p += 5; }
@@ -970,8 +971,8 @@ static int _html_extract_text(const char* html, char* out, int max) {
         }
         if (in_tag && *p == '>') {
             in_tag = 0;
-            if (in_script && strncasecmp(p-6, "/script", 7) == 0) in_script = 0;
-            if (in_style && strncasecmp(p-5, "/style", 6) == 0) in_style = 0;
+            if (in_script && strncasecmp(p-7, "/script", 7) == 0) in_script = 0;
+            if (in_style && strncasecmp(p-6, "/style", 6) == 0) in_style = 0;
             if (!in_script && !in_style) out[pos++] = ' ';
         }
         p++;
