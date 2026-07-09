@@ -2858,8 +2858,8 @@ CausalGraph* causal_graph_load_from_file(const char* filepath) {
     long observed_at, last_confirmed;
     
     // 跳过前两行
-    fgets(line, sizeof(line), fp);
-    fgets(line, sizeof(line), fp);
+    if (!fgets(line, sizeof(line), fp)) { fclose(fp); return 0; }
+    if (!fgets(line, sizeof(line), fp)) { fclose(fp); return 0; }
     
     while (fgets(line, sizeof(line), fp)) {
         if (strstr(line, "\"edges\":")) continue;

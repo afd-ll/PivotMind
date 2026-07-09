@@ -93,9 +93,9 @@ static inline int pm_get_load(float* out_load) {
 #if defined(__linux__)
     FILE* f = fopen("/proc/loadavg", "r");
     if (!f) return -1;
-    fscanf(f, "%f", out_load);
+    int matched = fscanf(f, "%f", out_load);
     fclose(f);
-    return 0;
+    return (matched == 1) ? 0 : -1;
 #else
     (void)out_load;
     return -1;

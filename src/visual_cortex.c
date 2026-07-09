@@ -308,7 +308,9 @@ static int vc_extract_subtitles(VisualCortex* vc, const char* filepath,
                 if (!in_tag) clean[ci++] = line[i];
             }
             clean[ci] = '\0';
-            if (ci == 0 || clean[0] == '♪' || clean[0] == '♫') continue;
+            if (ci == 0) continue;
+            if (ci >= 3 && (memcmp(clean, "\xE2\x99\xAA", 3) == 0 ||
+                            memcmp(clean, "\xE2\x99\xAB", 3) == 0)) continue;
             if (clean[0] == '[' && strchr(clean, ']')) continue;
             strncpy(entries[count].text, clean, sizeof(entries[count].text) - 1);
             count++; expect_text = 0;

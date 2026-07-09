@@ -352,7 +352,8 @@ static int srt_feed_lines(MediaReader* mr, const char* srt_text, size_t srt_len)
             if (!has_text) continue;
 
             /* 跳过常见的非对话字幕标记 (如 ♪ 歌词符号, [音乐] 等) */
-            if (clean[0] == '♪' || clean[0] == '♫' ||
+            if ((memcmp(clean, "\xE2\x99\xAA", 3) == 0 ||
+                 memcmp(clean, "\xE2\x99\xAB", 3) == 0) ||
                 (clean[0] == '[' && strchr(clean, ']'))) {
                 continue;
             }

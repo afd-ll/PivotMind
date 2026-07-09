@@ -213,22 +213,32 @@ Vocab* vocab_load(const char* filepath) {
     Vocab* vocab = (Vocab*)malloc(sizeof(Vocab));
     if (!vocab) { fclose(fp); return NULL; }
 
-    fread(&vocab->size, sizeof(int), 1, fp);
-    fread(&vocab->max_freq, sizeof(int), 1, fp);
+    if (fread(&vocab->size, sizeof(int), 1, fp) != 1 ||
+        fread(&vocab->max_freq, sizeof(int), 1, fp) != 1) {
+        free(vocab); fclose(fp); return NULL;
+    }
     vocab->capacity = vocab->size + 256;
     vocab->entries = (VocabEntry*)malloc(vocab->capacity * sizeof(VocabEntry));
 
-    for (int i = 0; i < vocab->size; i++) {
+    int i;
+    for (i = 0; i < vocab->size; i++) {
         int word_len;
-        fread(&word_len, sizeof(int), 1, fp);
+        if (fread(&word_len, sizeof(int), 1, fp) != 1) goto load_fail;
         vocab->entries[i].word = (char*)malloc(word_len);
-        fread(vocab->entries[i].word, 1, word_len, fp);
-        fread(&vocab->entries[i].id, sizeof(int), 1, fp);
-        fread(&vocab->entries[i].freq, sizeof(int), 1, fp);
+        if (fread(vocab->entries[i].word, 1, word_len, fp) != (size_t)word_len) goto load_fail;
+        if (fread(&vocab->entries[i].id, sizeof(int), 1, fp) != 1) goto load_fail;
+        if (fread(&vocab->entries[i].freq, sizeof(int), 1, fp) != 1) goto load_fail;
     }
 
     fclose(fp);
     return vocab;
+
+load_fail:
+    for (int j = 0; j < i; j++) free(vocab->entries[j].word);
+    free(vocab->entries);
+    free(vocab);
+    fclose(fp);
+    return NULL;
 }
 
 int vocab_size(Vocab* vocab) {

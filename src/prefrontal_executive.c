@@ -1317,7 +1317,7 @@ int pfe_load_strategy_weights(PrefrontalExecutive* pfe) {
     }
 
     /* 尝试读取统计 */
-    fread(pfe->per_mode_stats, sizeof(PFEModeStats), PFE_MODE_COUNT, f);
+    (void)!fread(pfe->per_mode_stats, sizeof(PFEModeStats), PFE_MODE_COUNT, f);
 
     fclose(f);
     return 0;
