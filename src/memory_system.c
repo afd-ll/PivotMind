@@ -539,6 +539,13 @@ void memory_consolidate(MemorySystem* memory) {
             destroy_memory_entry(entry);
             memory->context_memory->entries[i] = NULL;
         } else {
+            /* 艾宾浩斯遗忘：未升级的上下文记忆自然衰减 */
+            entry->importance *= entry->decay_factor;
+            if (entry->importance < 0.1f) {
+                destroy_memory_entry(entry);
+                memory->context_memory->entries[i] = NULL;
+                continue;
+            }
             if (write_idx != i) {
                 memory->context_memory->entries[write_idx] = entry;
             }
@@ -566,6 +573,13 @@ void memory_consolidate(MemorySystem* memory) {
             destroy_memory_entry(entry);
             memory->short_term->entries[i] = NULL;
         } else {
+            /* 艾宾浩斯遗忘：未升级的短期记忆自然衰减 */
+            entry->importance *= entry->decay_factor;
+            if (entry->importance < 0.2f) {
+                destroy_memory_entry(entry);
+                memory->short_term->entries[i] = NULL;
+                continue;
+            }
             if (write_idx != i) {
                 memory->short_term->entries[write_idx] = entry;
             }
@@ -580,6 +594,31 @@ void memory_consolidate(MemorySystem* memory) {
     rebuild_stm_hash(memory->short_term);
 
     memory->last_consolidation = current_time;
+
+    /* LTM 周期性衰减：永久记忆也会随时间缓慢遗忘 */
+    {
+        int ltm_write = 0;
+        for (int i = 0; i < memory->permanent_memory->size; i++) {
+            MemoryEntry* entry = memory->permanent_memory->entries[i];
+            if (!entry) continue;
+            entry->importance *= 0.995f;  /* 每次巩固只衰减 0.5% */
+            if (entry->importance < 0.2f) {
+                printf("长期记忆遗忘: '%s' (重要性降至 %.2f)\n", entry->key, entry->importance);
+                destroy_memory_entry(entry);
+                memory->permanent_memory->entries[i] = NULL;
+                continue;
+            }
+            if (ltm_write != i) {
+                memory->permanent_memory->entries[ltm_write] = entry;
+            }
+            ltm_write++;
+        }
+        for (int i = ltm_write; i < memory->permanent_memory->size; i++) {
+            memory->permanent_memory->entries[i] = NULL;
+        }
+        memory->permanent_memory->size = ltm_write;
+    }
+
     printf("记忆巩固完成\n");
 }
 

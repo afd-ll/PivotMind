@@ -1857,6 +1857,20 @@ skip_postprocess:
     
     // 使用 strdup 复制，避免悬挂指针问题
     char* result = response ? strdup(response) : strdup("(null)");
+
+    /* 记录多轮对话历史 */
+    if (sys && result && user_input) {
+        int slot = sys->history_head;
+        snprintf(sys->history[slot].input, sizeof(sys->history[slot].input), "%s", user_input);
+        snprintf(sys->history[slot].response, sizeof(sys->history[slot].response), "%s", result);
+        sys->history_head = (slot + 1) % PM_DIALOG_HISTORY_MAX;
+        if (sys->history_count < PM_DIALOG_HISTORY_MAX) sys->history_count++;
+        /* 兼容旧 has_last_turn / last_input / last_response 字段 */
+        sys->has_last_turn = 1;
+        snprintf(sys->last_input, sizeof(sys->last_input), "%s", user_input);
+        snprintf(sys->last_response, sizeof(sys->last_response), "%s", result);
+    }
+
     LOG_DEBUG("[proc] returning result: %s", result);
     free(response);
     return result;
