@@ -6,10 +6,10 @@
 
 # 编译器
 CC = gcc
-CFLAGS = -pipe -Wall -Wextra -O2 -Iinclude -I. -Ilibs -std=gnu99 -fopenmp -pthread -MD -MP -D_USE_MATH_DEFINES -D_FORTIFY_SOURCE=2 -flto -DHAS_OPENSSL
+CFLAGS = -pipe -Wall -Wextra -O2 -Iinclude -Isrc/nn -I. -Ilibs -std=gnu99 -fopenmp -pthread -MD -MP -D_USE_MATH_DEFINES -D_FORTIFY_SOURCE=2 -flto -DHAS_OPENSSL
 LDFLAGS = -lm -lssl -lcrypto -lcurl -lz -flto
-DEBUG_CFLAGS = -Wall -Wextra -g -O0 -Iinclude -I. -Ilibs -std=gnu99 -fopenmp -pthread -MD -MP -DDEBUG -D_FORTIFY_SOURCE=2
-ASAN_CFLAGS = -fsanitize=address,undefined -fno-omit-frame-pointer -g -O1 -Iinclude -I. -Ilibs -std=gnu99 -fopenmp -pthread -MD -MP -DDEBUG
+DEBUG_CFLAGS = -Wall -Wextra -g -O0 -Iinclude -Isrc/nn -I. -Ilibs -std=gnu99 -fopenmp -pthread -MD -MP -DDEBUG -D_FORTIFY_SOURCE=2
+ASAN_CFLAGS = -fsanitize=address,undefined -fno-omit-frame-pointer -g -O1 -Iinclude -Isrc/nn -I. -Ilibs -std=gnu99 -fopenmp -pthread -MD -MP -DDEBUG
 ASAN_LDFLAGS = -fsanitize=address,undefined -lm -lcurl
 
 # 输出目录
@@ -21,7 +21,7 @@ $(shell mkdir -p $(BUILD_DIR) $(OBJ_DIR) $(DEP_DIR))
 export TMPDIR = /tmp
 
 # 源文件（通配自动发现�?
-CORE_SRC = $(wildcard src/*.c)
+CORE_SRC = $(wildcard src/*.c) $(wildcard src/nn/*.c)
 TOOL_SRC = $(wildcard tools/*.c demos/*.c)
 
 # 所�?.o 文件（映射到 obj/ 目录�?
@@ -44,6 +44,7 @@ LIB_NAME = libpivotmind.a
 
 # 核心�?.c �?.o（依赖文件写�?dep/ 目录�?
 $(OBJ_DIR)/%.o: src/%.c
+	@mkdir -p $(dir $(OBJ_DIR)/$*) $(dir $(DEP_DIR)/$*)
 	$(CC) $(CFLAGS) -MF $(DEP_DIR)/$*.d -c $< -o $@
 
 # 工具 .c �?.o
