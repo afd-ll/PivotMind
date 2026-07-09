@@ -111,6 +111,18 @@ int main(int argc, char* argv[]) {
     MasterTopology* topo = master_topology_create(16);
     if (!topo) { fprintf(stderr, "拓扑创建失败\n"); return 1; }
 
+    /* 初始化所有子拓扑（autonomic_learn_from_dialog 依赖词汇拓扑） */
+    master_add_sub_topology(topo, TOPO_VOCABULARY, "词汇拓扑", 30000, 10);
+    master_add_sub_topology(topo, TOPO_SEMANTIC,   "语义拓扑",  4000,  9);
+    master_add_sub_topology(topo, TOPO_EMOTION,    "情绪拓扑",  1000,  8);
+    master_add_sub_topology(topo, TOPO_SYNTAX,     "语法拓扑",  1000,  7);
+    master_add_sub_topology(topo, TOPO_CONTEXT,    "上下文拓扑", 1000,  6);
+    master_add_sub_topology(topo, TOPO_DOMAIN,     "领域拓扑",  1000,  5);
+    master_add_sub_topology(topo, TOPO_PRAGMA,     "语用拓扑",  1000,  4);
+    master_add_sub_topology(topo, TOPO_CULTURE,    "文化拓扑",  1000,  3);
+    master_add_sub_topology(topo, TOPO_CONCEPT,    "概念拓扑",  6000,  9);
+    master_add_sub_topology(topo, TOPO_MASTER,     "主拓扑",     100,  0);
+
     printf("[2/4] 创建记忆系统...\n");
     MemorySystem* mem = memory_system_create(64, 256, 1024);
     if (!mem) { master_topology_destroy(topo); return 1; }
