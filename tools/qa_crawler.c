@@ -16,6 +16,7 @@
 #include "perception.h"
 #include "memory_system.h"
 #include "autonomic_learner.h"
+#include "dream_engine.h"
 
 static const char* g_queries[] = {
     "聊天","对话","问答","访谈","采访",
@@ -129,8 +130,10 @@ int main(int argc, char* argv[]) {
 
             if (pc == 0) { printf("no QA\n"); sleep(delay_s); continue; }
 
-            for (int i = 0; i < pc; i++)
+            for (int i = 0; i < pc; i++) {
                 autonomic_learn_from_dialog(topo, questions[i], answers[i], &astate, NULL, mem);
+                dream_enqueue_qa(questions[i], answers[i]);  /* 入队梦境重放 */
+            }
             tpairs += pc;
             printf("+%d QA\n", pc);
 

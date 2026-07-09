@@ -18,6 +18,8 @@
 #include "associative_reasoning.h"
 #include "huarong_topology.h"
 #include "node_hash.h"
+#include "autonomic_learner.h"
+#include "memory_system.h"
 #include "common.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -25,6 +27,58 @@
 #include <math.h>
 #include <pthread.h>
 #include <time.h>
+
+/* ================================================================
+ *  QA 重放缓冲区 — 白天学习，夜间巩固
+ * ================================================================ */
+#define PM_DREAM_REPLAY_MAX 256
+static struct {
+    char question[512];
+    char answer[2048];
+    int  count;          /* 重放次数 */
+} g_replay_buf[PM_DREAM_REPLAY_MAX];
+static int g_replay_head = 0;
+static int g_replay_count = 0;
+static pthread_mutex_t g_replay_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+void dream_enqueue_qa(const char* question, const char* answer) {
+    if (!question || !answer) return;
+    pthread_mutex_lock(&g_replay_mutex);
+    /* 检查是否已存在 (避免重复) */
+    for (int i = 0; i < g_replay_count; i++) {
+        int idx = (g_replay_head - g_replay_count + i + PM_DREAM_REPLAY_MAX) % PM_DREAM_REPLAY_MAX;
+        if (strcmp(g_replay_buf[idx].question, question) == 0) {
+            g_replay_buf[idx].count = 0;
+            pthread_mutex_unlock(&g_replay_mutex);
+            return;
+        }
+    }
+    int slot = g_replay_head;
+    snprintf(g_replay_buf[slot].question, sizeof(g_replay_buf[slot].question), "%s", question);
+    snprintf(g_replay_buf[slot].answer, sizeof(g_replay_buf[slot].answer), "%s", answer);
+    g_replay_buf[slot].count = 0;
+    g_replay_head = (slot + 1) % PM_DREAM_REPLAY_MAX;
+    if (g_replay_count < PM_DREAM_REPLAY_MAX) g_replay_count++;
+    pthread_mutex_unlock(&g_replay_mutex);
+}
+
+/* 从缓冲区取一轮待重放的 QA 对 */
+static int dream_dequeue_replay(int max_pairs,
+                                 char questions[][512], char answers[][2048]) {
+    int dequeued = 0;
+    pthread_mutex_lock(&g_replay_mutex);
+    int start = (g_replay_head - g_replay_count + PM_DREAM_REPLAY_MAX) % PM_DREAM_REPLAY_MAX;
+    for (int i = 0; i < g_replay_count && dequeued < max_pairs; i++) {
+        int idx = (start + i) % PM_DREAM_REPLAY_MAX;
+        if (g_replay_buf[idx].count >= 3) continue;  /* 已重放 3 次，跳过 */
+        snprintf(questions[dequeued], 512, "%s", g_replay_buf[idx].question);
+        snprintf(answers[dequeued], 2048, "%s", g_replay_buf[idx].answer);
+        g_replay_buf[idx].count++;
+        dequeued++;
+    }
+    pthread_mutex_unlock(&g_replay_mutex);
+    return dequeued;
+}
 
 /* 线程本地 RNG */
 static unsigned int _dream_rng_seed(void) {
@@ -56,6 +110,23 @@ int dream_cycle(MasterTopology* master, MemorySystem* memory,
 
     /* 推进跨拓扑命中轮次 — 用于耦合衰减窗口和固化阈值判定 */
     master->cross_hit_round++;
+
+    /*  QA 重放巩固：白天学的对话对在梦境中反复回放 */
+    if (cfg.enable_replay && memory) {
+        char qs[16][512], as[16][2048];
+        int pairs = dream_dequeue_replay(cfg.replay_pairs_per_cycle, qs, as);
+        if (pairs > 0) {
+            AutonomicState astate;
+            memset(&astate, 0, sizeof(astate));
+            autonomic_state_init(&astate);
+            for (int i = 0; i < pairs; i++) {
+            autonomic_learn_from_dialog(master, qs[i], as[i], &astate, NULL, memory);
+        }
+        autonomic_state_destroy(&astate);
+        if (cfg.verbose)
+            fprintf(stderr, "[梦境重放] 巩固 %d 对 QA\n", pairs);
+    }
+    }
 
     SubTopology* vocab    = master_get_sub_topology_by_type(master, TOPO_VOCABULARY);
     SubTopology* semantic = master_get_sub_topology_by_type(master, TOPO_SEMANTIC);
