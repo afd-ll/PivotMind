@@ -82,6 +82,10 @@ $(BUILD_DIR)/corpus_train: $(OBJ_DIR)/corpus_train.o $(LIB_NAME)
 $(BUILD_DIR)/batch_learn: $(OBJ_DIR)/batch_learn.o $(LIB_NAME)
 	$(CC) $(CFLAGS) -o $@ $(OBJ_DIR)/batch_learn.o -L. -lpivotmind $(LDFLAGS)
 
+# 字符共现建边工具（从文本文件在现有拓扑上建边）
+$(BUILD_DIR)/edge_builder: $(OBJ_DIR)/edge_builder.o $(LIB_NAME)
+	$(CC) $(CFLAGS) -o $@ $(OBJ_DIR)/edge_builder.o -L. -lpivotmind $(LDFLAGS)
+
 # 低内存版（禁掉周期性跨拓扑重建，适合 Zero 2W �?512MB 以下设备�?
 $(BUILD_DIR)/batch_learn_lowmem: $(OBJ_DIR)/batch_learn.o $(LIB_NAME)
 	$(CC) $(CFLAGS) -DLOW_MEM -o $@ $(OBJ_DIR)/batch_learn.o -L. -lpivotmind $(LDFLAGS)
@@ -135,6 +139,8 @@ path-analyze: $(BUILD_DIR)/path_analyze
 compare-templates: $(BUILD_DIR)/compare_templates
 eval-templates: $(BUILD_DIR)/eval_templates
 qa-crawler: $(BUILD_DIR)/qa_crawler
+
+edge-builder: $(BUILD_DIR)/edge_builder
 
 # 运行
 run: $(BUILD_DIR)/digital_life
