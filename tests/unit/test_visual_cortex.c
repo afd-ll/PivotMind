@@ -15,11 +15,11 @@
  *   10. NULL 安全
  */
 
-#include "../include/common.h"
-#include "../include/visual_cortex.h"
-#include "../include/media_reader.h"
-#include "../include/multi_topology.h"
-#include "../include/thalamus.h"
+#include "common.h"
+#include "visual_cortex.h"
+#include "media_reader.h"
+#include "multi_topology.h"
+#include "thalamus.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

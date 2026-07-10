@@ -3,8 +3,8 @@
  * @brief Unit tests for multi_topology.c — topology_walk_greedy, node ops
  */
 
-#include "../include/common.h"
-#include "../include/multi_topology.h"
+#include "common.h"
+#include "multi_topology.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

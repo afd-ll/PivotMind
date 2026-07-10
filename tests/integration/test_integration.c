@@ -3,12 +3,12 @@
  * @brief Integration tests for the complete AI system
  */
 
-#include "../include/common.h"
-#include "../include/model.h"
-#include "../include/tensor.h"
-#include "../include/layer.h"
-#include "../include/trainer.h"
-#include "../include/model_io.h"
+#include "common.h"
+#include "model.h"
+#include "tensor.h"
+#include "layer.h"
+#include "trainer.h"
+#include "model_io.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

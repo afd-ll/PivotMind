@@ -3,9 +3,9 @@
  * @brief Unit tests for metrics.c
  */
 
-#include "../include/common.h"
-#include "../include/metrics.h"
-#include "../include/tensor.h"
+#include "common.h"
+#include "metrics.h"
+#include "tensor.h"
 #include <stdio.h>
 #include <assert.h>
 #include <math.h>

@@ -11,10 +11,10 @@
  *   6. 视频文件无字幕时的优雅降级
  */
 
-#include "../include/common.h"
-#include "../include/media_reader.h"
-#include "../include/multi_topology.h"
-#include "../include/article_reader.h"
+#include "common.h"
+#include "media_reader.h"
+#include "multi_topology.h"
+#include "article_reader.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
