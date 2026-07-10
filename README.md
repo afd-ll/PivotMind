@@ -7,7 +7,7 @@
 
 [English](README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [Русский](README.ru.md)
 
-[![Version](https://img.shields.io/badge/version-v0.5.0-blue.svg)](changelogs/)
+[![Version](https://img.shields.io/badge/version-v0.5.2-blue.svg)](changelogs/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green.svg)](LICENSE)
 [![Language](https://img.shields.io/badge/C-99%2B-orange.svg)](https://en.wikipedia.org/wiki/C99)
 [![Platform](https://img.shields.io/badge/ARM-RK3399%20%7C%20x86__64-lightgrey.svg)](#running-on)
@@ -29,7 +29,7 @@ PivotMind is a **brain-inspired cognitive engine** built on
 No external Transformer dependencies. No pretrained embedding vectors.
 Just nodes, edges, activation, and decay — powered by a relentless background clock.
 
-**Current Version: v0.5.0** — 14 fully-implemented brain regions, emergent POS system, parallel multi-learner, PFE reasoning orchestration, 512-dim feature vectors, POS grammar mapping, edge specificity weighting, **multi-modal visual pipeline (VisualCortex + MediaReader)**, zero compile warnings.
+**Current Version: v0.5.2** — 14 fully-implemented brain regions, emergent POS system, parallel multi-learner, PFE reasoning orchestration, 512-dim feature vectors, POS grammar mapping, edge specificity weighting, multi-modal visual pipeline (VisualCortex + MediaReader), **Bing RSS web crawler + PMI knowledge graph builder**, zero compile warnings.
 
 **Codebase: 88 source files (~49,600 lines C) + 91 headers (~12,800 lines) + tools/tests/demos (~13,000 lines) = ~75,500 total lines.**
 
@@ -366,8 +366,10 @@ pivotmind/
 | **v0.4.12** | Chat quality overhaul (online learning + multi-turn context + output length control) |
 | **v0.4.13** | POS grammar mapping, edge specificity weighting, zero compile warnings |
 | **v0.5.0** | **Multi-modal pipeline** — VisualCortex brain region, MediaReader SRT pipeline, cross-modal alignment, task queue model |
+| **v0.5.1** | Code reorganization — NN subsystem split (21 src, 15 headers), ccache+LTO build optimization, pure function unit tests |
+| **v0.5.2** | Bing RSS web crawler + PMI knowledge graph (52 articles, 4733 nodes, 7820 edges), diffusion UTF-8 character-window fix, edge builder tool |
 
-> Detailed changelogs: v0.3.0 → [changelogs/032-v0.3.0-reasoning-architecture.md](changelogs/032-v0.3.0-reasoning-architecture.md) ｜ v0.4.0 → [changelogs/034-v0.4.0-code-simplify-brain-boundary.md](changelogs/034-v0.4.0-code-simplify-brain-boundary.md) ｜ v0.4.3 → [changelogs/042-emergent-pos-anchor.md](changelogs/042-emergent-pos-anchor.md) ｜ v0.5.0 → [changelogs/055-multimodal-v0.5.0.md](changelogs/055-multimodal-v0.5.0.md)
+> Detailed changelogs: v0.3.0 → [changelogs/032-v0.3.0-reasoning-architecture.md](changelogs/032-v0.3.0-reasoning-architecture.md) ｜ v0.4.0 → [changelogs/034-v0.4.0-code-simplify-brain-boundary.md](changelogs/034-v0.4.0-code-simplify-brain-boundary.md) ｜ v0.4.3 → [changelogs/042-emergent-pos-anchor.md](changelogs/042-emergent-pos-anchor.md) ｜ v0.5.0 → [changelogs/055-multimodal-v0.5.0.md](changelogs/055-multimodal-v0.5.0.md) ｜ v0.5.2 → [changelogs/055-diffusion-char-window.md](changelogs/055-diffusion-char-window.md)
 
 ---
 
