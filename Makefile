@@ -4,8 +4,13 @@
 # 改一个源文件 �?只重新编译该文件 �?重新链接相关二进�?
 # 自动依赖追踪: -MD -MP 生成 .d 文件，头文件变化时自动重编译
 
-# 编译器
-CC = ccache gcc
+# 编译器 — ccache 加速（未安装时自动回退到 gcc）
+CCACHE := $(shell which ccache 2>/dev/null)
+ifeq ($(CCACHE),)
+  CC = gcc
+else
+  CC = ccache gcc
+endif
 CFLAGS = -pipe -Wall -Wextra -O2 -Iinclude -Iinclude/nn -Isrc/nn -I. -Ilibs -std=gnu99 -fopenmp -pthread -MD -MP -D_USE_MATH_DEFINES -D_FORTIFY_SOURCE=2 -flto=auto -DHAS_OPENSSL
 LDFLAGS = -lm -lssl -lcrypto -lcurl -lz -flto=auto
 DEBUG_CFLAGS = -Wall -Wextra -g -O0 -Iinclude -Iinclude/nn -Isrc/nn -I. -Ilibs -std=gnu99 -fopenmp -pthread -MD -MP -DDEBUG -D_FORTIFY_SOURCE=2

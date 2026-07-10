@@ -85,7 +85,7 @@ jobs:
         run: |
           make linux \
             CC=aarch64-linux-gnu-gcc \
-            CFLAGS="-Wall -Wextra -O2 -Iinclude -I. -Ilibs -I/tmp/openssl-arm/include -I/tmp/curl-arm/include -I/tmp/zlib-arm/include -std=gnu99 -MD -MP -DHAS_OPENSSL" \
+            CFLAGS="-Wall -Wextra -O2 -Iinclude -Iinclude/nn -Isrc/nn -I. -Ilibs -I/tmp/openssl-arm/include -I/tmp/curl-arm/include -I/tmp/zlib-arm/include -std=gnu99 -fopenmp -pthread -MD -MP -DHAS_OPENSSL" \
             LDFLAGS="-L/tmp/openssl-arm/lib -L/tmp/curl-arm/lib -L/tmp/zlib-arm/lib -lm -lcurl -lssl -lcrypto -lz -pthread -static-libstdc++"
 
       - name: Verify ARM64 ELF
