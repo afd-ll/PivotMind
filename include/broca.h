@@ -52,6 +52,22 @@ void broca_decay_templates(MasterTopology* topology, int threshold, float decay)
 /** 获取模板统计 */
 int broca_template_count(MasterTopology* topology);
 
+/**
+ * 用模板将词序列包裹成自然语言句子
+ *
+ * 对扩散引擎产出的词级碎片序列，通过 Broca 区构建的 POS 模板
+ * 插入连接词（"的"、"地"、"得"等），形成自然语言输出。
+ * 优先匹配 TOPO_TEMPLATE 模板节点；无匹配时回退到硬编码启发式规则。
+ *
+ * @param master     多拓扑网络（含 TOPO_TEMPLATE）
+ * @param ep         涌现词类系统（提供 POS 标注，可为 NULL 则仅用硬编码规则）
+ * @param words      词序列
+ * @param word_count 词数
+ * @return 格式化后的句子（调用者需 free），失败返回 NULL
+ */
+char* broca_wrap_response(MasterTopology* master, struct EmergentPOS* ep,
+                          const char** words, int word_count);
+
 #ifdef __cplusplus
 }
 #endif

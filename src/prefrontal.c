@@ -6,6 +6,7 @@
 #include "prefrontal.h"
 #include "cingulate.h"
 #include "associative_reasoning.h"
+#include "broca.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -86,15 +87,12 @@ char* prefrontal_chat(Prefrontal* pf, const char* input) {
                                                    pf->controller ? pf->controller->emergent_pos : NULL,
                                                    &seq);
             if (n >= 2) {
-                char buf[512];
-                int pos = 0;
-                for (int w = 0; w < seq.count && pos < 500; w++) {
-                    int need = snprintf(buf + pos, sizeof(buf) - pos, "%s", seq.words[w]);
-                    if (pos + need > 500) break;
-                    pos += need;
-                }
-                buf[pos] = '\0';
-                if (buf[0]) return strdup(buf);
+                char* wrapped = broca_wrap_response(
+                    pf->topology,
+                    pf->controller ? pf->controller->emergent_pos : NULL,
+                    seq.words, seq.count);
+                if (wrapped && wrapped[0]) return wrapped;
+                free(wrapped);
             }
             /* 网络尚无相关概念时的退化态：极简单字，无模板 */
             return strdup("。");
@@ -139,18 +137,16 @@ char* prefrontal_chat(Prefrontal* pf, const char* input) {
         /* 硬阻断 */
         if (seq.total_score < pf->block_threshold) continue;
 
-        /* 拼合（扩散引擎已含模板连接词，直接拼接）
-         * v0.4.3: 截断到 500 字符以匹配测试回归预期 */
-        char buf[2048];
-        int pos = 0;
-        for (int w = 0; w < seq.count && pos < 500; w++) {
-            int need = snprintf(buf+pos, sizeof(buf)-pos, "%s", seq.words[w]);
-            if (pos + need > 500) break;  /* 不截断单词 */
-            pos += need;
-            if (pos >= 500) break;
+        /* 用布罗卡区模板包裹输出（插入连接词） */
+        char* wrapped = broca_wrap_response(
+            pf->topology,
+            pf->controller ? pf->controller->emergent_pos : NULL,
+            seq.words, seq.count);
+        if (!wrapped || !wrapped[0]) {
+            free(wrapped);
+            continue;
         }
-        buf[pos] = '\0';
-        response = strdup(buf);
+        response = wrapped;
 
         /* 更新自适应阈值 */
         pf->recent_scores[pf->recent_pos] = seq.total_score;
