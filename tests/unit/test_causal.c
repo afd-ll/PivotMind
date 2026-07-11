@@ -3,8 +3,8 @@
  * @brief Unit tests for causal_reasoning.c — graph lifecycle, edges
  */
 
-#include "../include/common.h"
-#include "../include/causal_reasoning.h"
+#include "common.h"
+#include "causal_reasoning.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

@@ -345,18 +345,18 @@ PretrainState* pretrain_state_load(Vocab* vocab, const char* weights_path) {
     if (!fp) return NULL;
 
     int magic, vocab_size, embed_dim;
-    fread(&magic, sizeof(int), 1, fp);
+    if (fread(&magic, sizeof(int), 1, fp) != 1) goto load_fail;
 
     // 检测格式
     int is_full_format = (magic == 0x50524554);
 
     if (is_full_format) {
-        fread(&vocab_size, sizeof(int), 1, fp);
-        fread(&embed_dim, sizeof(int), 1, fp);
+        if (fread(&vocab_size, sizeof(int), 1, fp) != 1) goto load_fail;
+        if (fread(&embed_dim, sizeof(int), 1, fp) != 1) goto load_fail;
     } else {
         // 兼容旧格式：magic实际是vocab_size
         vocab_size = magic;
-        fread(&embed_dim, sizeof(int), 1, fp);
+        if (fread(&embed_dim, sizeof(int), 1, fp) != 1) goto load_fail;
     }
 
     PretrainState* state = (PretrainState*)malloc(sizeof(PretrainState));
@@ -373,20 +373,21 @@ PretrainState* pretrain_state_load(Vocab* vocab, const char* weights_path) {
 
     if (is_full_format) {
         // 已在前面读取了 magic, vocab_size, embed_dim
-        fread(state->embedding_layer->weights->data, sizeof(float),
-              vocab_size * embed_dim, fp);
+        if (fread(state->embedding_layer->weights->data, sizeof(float),
+              vocab_size * embed_dim, fp) != (size_t)(vocab_size * embed_dim)) goto load_fail_state;
         // 读取上下文权重
         state->context_weights = (float*)malloc(vocab_size * embed_dim * sizeof(float));
         if (state->context_weights) {
-            fread(state->context_weights, sizeof(float), vocab_size * embed_dim, fp);
+            if (fread(state->context_weights, sizeof(float), vocab_size * embed_dim, fp)
+                != (size_t)(vocab_size * embed_dim)) goto load_fail_state;
         }
         // 读取统计
-        fread(&state->total_pairs, sizeof(int), 1, fp);
-        fread(&state->loss, sizeof(float), 1, fp);
+        if (fread(&state->total_pairs, sizeof(int), 1, fp) != 1) goto load_fail_state;
+        if (fread(&state->loss, sizeof(float), 1, fp) != 1) goto load_fail_state;
     } else {
         // 旧格式：vocab_size和embed_dim已在前面读取
-        fread(state->embedding_layer->weights->data, sizeof(float),
-              vocab_size * embed_dim, fp);
+        if (fread(state->embedding_layer->weights->data, sizeof(float),
+              vocab_size * embed_dim, fp) != (size_t)(vocab_size * embed_dim)) goto load_fail_state;
         state->context_weights = (float*)calloc(vocab_size * embed_dim, sizeof(float));
     }
 
@@ -395,6 +396,15 @@ PretrainState* pretrain_state_load(Vocab* vocab, const char* weights_path) {
     printf("[预训练] 权重已加载: %s (vocab=%d, dim=%d)\n",
            weights_path, vocab_size, embed_dim);
     return state;
+
+load_fail_state:
+    free(state->context_weights);
+    layer_destroy(state->embedding_layer);
+    free(state);
+load_fail:
+    fclose(fp);
+    fprintf(stderr, "[预训练] 权重加载失败: %s\n", weights_path);
+    return NULL;
 }
 
 // ========== 核心训练函数 ==========
@@ -1253,7 +1263,7 @@ PretrainState* pretrain_state_resume(Vocab* vocab, const char* ckpt_path) {
 
     // 读取文件头
     int magic;
-    fread(&magic, sizeof(int), 1, fp);
+    if (fread(&magic, sizeof(int), 1, fp) != 1) { fclose(fp); return NULL; }
     if (magic != 0x50524554) {
         LOG_ERROR("[预训练] 无效的检查点格式");
         fclose(fp);
@@ -1261,41 +1271,44 @@ PretrainState* pretrain_state_resume(Vocab* vocab, const char* ckpt_path) {
     }
 
     int vocab_size, embed_dim;
-    fread(&vocab_size, sizeof(int), 1, fp);
-    fread(&embed_dim, sizeof(int), 1, fp);
+    if (fread(&vocab_size, sizeof(int), 1, fp) != 1) goto resume_fail;
+    if (fread(&embed_dim, sizeof(int), 1, fp) != 1) goto resume_fail;
 
     PretrainState* state = pretrain_state_create(vocab, embed_dim);
     if (!state) { fclose(fp); return NULL; }
 
     // 读取嵌入权重
-    fread(state->embedding_layer->weights->data, sizeof(float),
-          vocab_size * embed_dim, fp);
+    if (fread(state->embedding_layer->weights->data, sizeof(float),
+          vocab_size * embed_dim, fp) != (size_t)(vocab_size * embed_dim)) goto resume_fail_state;
 
     // 读取上下文权重
     if (state->context_weights) {
-        fread(state->context_weights, sizeof(float), vocab_size * embed_dim, fp);
+        if (fread(state->context_weights, sizeof(float), vocab_size * embed_dim, fp)
+            != (size_t)(vocab_size * embed_dim)) goto resume_fail_state;
     }
 
     // 读取统计信息
-    fread(&state->total_pairs, sizeof(int), 1, fp);
-    fread(&state->loss, sizeof(float), 1, fp);
+    if (fread(&state->total_pairs, sizeof(int), 1, fp) != 1) goto resume_fail_state;
+    if (fread(&state->loss, sizeof(float), 1, fp) != 1) goto resume_fail_state;
 
     // 读取扩展检查点数据
     int has_extended = 0;
     if (fread(&has_extended, sizeof(int), 1, fp) == 1 && has_extended == 0x45585431) {
         // 扩展格式: 包含动量和恢复信息
-        fread(&state->resume_epoch, sizeof(int), 1, fp);
-        fread(&state->resume_line, sizeof(int), 1, fp);
-        fread(&state->global_step, sizeof(int), 1, fp);
-        fread(&state->current_lr, sizeof(float), 1, fp);
-        fread(&state->epoch, sizeof(int), 1, fp);
+        if (fread(&state->resume_epoch, sizeof(int), 1, fp) != 1) goto resume_fail_state;
+        if (fread(&state->resume_line, sizeof(int), 1, fp) != 1) goto resume_fail_state;
+        if (fread(&state->global_step, sizeof(int), 1, fp) != 1) goto resume_fail_state;
+        if (fread(&state->current_lr, sizeof(float), 1, fp) != 1) goto resume_fail_state;
+        if (fread(&state->epoch, sizeof(int), 1, fp) != 1) goto resume_fail_state;
 
         // 读取动量缓冲区
         if (state->grad_momentum_embed) {
-            fread(state->grad_momentum_embed, sizeof(float), vocab_size * embed_dim, fp);
+            if (fread(state->grad_momentum_embed, sizeof(float), vocab_size * embed_dim, fp)
+                != (size_t)(vocab_size * embed_dim)) goto resume_fail_state;
         }
         if (state->grad_momentum_context) {
-            fread(state->grad_momentum_context, sizeof(float), vocab_size * embed_dim, fp);
+            if (fread(state->grad_momentum_context, sizeof(float), vocab_size * embed_dim, fp)
+                != (size_t)(vocab_size * embed_dim)) goto resume_fail_state;
         }
 
         printf("[预训练] 从检查点恢复: epoch=%d, line=%d, step=%d\n",
@@ -1312,6 +1325,13 @@ PretrainState* pretrain_state_resume(Vocab* vocab, const char* ckpt_path) {
     printf("[预训练] 检查点已加载: %s (vocab=%d, dim=%d, pairs=%d)\n",
            ckpt_path, vocab_size, embed_dim, state->total_pairs);
     return state;
+
+resume_fail_state:
+    pretrain_state_destroy(state);
+resume_fail:
+    fclose(fp);
+    LOG_ERROR("[预训练] 检查点加载失败: %s", ckpt_path);
+    return NULL;
 }
 
 // ========== 保存扩展检查点 ==========

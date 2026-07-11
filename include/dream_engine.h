@@ -37,12 +37,17 @@ typedef struct {
     int   cross_solidify_rounds;   /* 需要多少轮梦境反复触发才固化 (默认 3) */
     float cross_coupling_weight;   /* 临时耦合的初始权重 (默认 0.12) */
     float cross_coupling_decay;    /* 临时耦合未再触发的衰减率 (默认 0.7) */
+
+    /* QA 重放巩固 */
+    int   enable_replay;           /* 是否启用对话重放 (默认 1) */
+    int   replay_pairs_per_cycle;  /* 每轮梦境重放几对 QA (默认 5) */
 } DreamConfig;
 
 /** 默认梦境配置 */
 #define DREAM_DEFAULT_CONFIG { \
     5, 3, 2, 4, 0.08f, 0.4f, 0.3f, 32, 1, \
-    3, 0.12f, 0.7f \
+    3, 0.12f, 0.7f, \
+    1, 5 \
 }
 
 /**
@@ -55,6 +60,14 @@ typedef struct {
  */
 int dream_cycle(MasterTopology* master, MemorySystem* memory,
                 const DreamConfig* config);
+
+/**
+ * 入队 QA 对话对到梦境重放缓冲区
+ * 白天学到的对话对在夜间通过 dream_cycle 反复重放巩固
+ * @param question  用户提问
+ * @param answer    系统回答
+ */
+void dream_enqueue_qa(const char* question, const char* answer);
 
 #ifdef __cplusplus
 }

@@ -142,7 +142,7 @@ static void gw_signal_handler(int signum) {
     (void)signum;
     if (g_gw) {
         const char msg[] = "\n[gateway] 收到退出信号，正在关闭...\n";
-        write(STDOUT_FILENO, msg, sizeof(msg) - 1);
+        (void)!write(STDOUT_FILENO, msg, sizeof(msg) - 1);
         g_gw->shutdown_requested = 1;
     }
 }
@@ -424,6 +424,9 @@ static int gw_system_init(GatewaySystem* gw) {
     if (!gw->amygdala) { fprintf(stderr, "[gateway] 杏仁核创建失败\n"); return -1; }
     fprintf(stderr, "[gateway]   杏仁核就绪\n");
 
+    /* 将认知状态指针注入拓扑，供所有模块通过 master->cognitive_state_ptr 访问 */
+    gw->topology->cognitive_state_ptr = gw->dialog->cognitive_state;
+
     /* ── v0.3 新脑区 ── */
     // 前额叶执行器（推理编排引擎 — 任务分解/子目标调度）
     fprintf(stderr, "[gateway]   创建前额叶执行器 (v0.3)...\n");
@@ -669,7 +672,7 @@ static void gw_system_shutdown(GatewaySystem* gw) {
     // 6. 销毁资源（brainstem 已在上方 stop，这里只 destroy）
     /* v0.5 视觉皮层脑区 (内部自动销毁 MediaReader) */
     if (gw->visual_cortex)  { visual_cortex_destroy(gw->visual_cortex); gw->visual_cortex = NULL; }
-    if (gw->brain_cache) node_cache_destroy(gw->brain_cache);  gw->brain_cache = NULL;
+    if (gw->brain_cache) { node_cache_destroy(gw->brain_cache); gw->brain_cache = NULL; }
     if (gw->self_learner) { self_learner_destroy(gw->self_learner); gw->self_learner = NULL; }
     if (gw->amygdala)    amygdala_destroy(gw->amygdala);
     if (gw->hippocampus) hippocampus_destroy(gw->hippocampus);

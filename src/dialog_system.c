@@ -1454,6 +1454,17 @@ char* dialog_process(DialogSystem* sys, const char* user_input, DialogReasoning*
             }
             causal_search_results_free(causal_results, causal_count);
         }
+
+        /* 使用因果推理引擎生成结构化解释（A* 搜索 + 自然语言） */
+        if (sys->causal_graph && sys->memory) {
+            char* causal_explanation = process_causal_query(sem, sys->causal_graph, sys->memory);
+            if (causal_explanation) {
+                ui_print_thinking_line("因果解释", causal_explanation);
+                semantic_understanding_destroy(sem);
+                ui_print_thinking_end();
+                return causal_explanation;  /* 直接返回因果解释，跳过拓扑生成 */
+            }
+        }
     }
 
     // 概念处理：检测数学表达式
@@ -1846,6 +1857,40 @@ skip_postprocess:
     
     // 使用 strdup 复制，避免悬挂指针问题
     char* result = response ? strdup(response) : strdup("(null)");
+
+    /* 低置信度回答时尝试联网搜索，为用户补充信息 */
+    if (sys->last_knowledge_quality < 0.3f && user_input && result && !strstr(result, "（暂时无法搜索")) {
+        extern Perception* g_perception;
+        if (g_perception) {
+            char* web_info = perception_search_for_user(g_perception, user_input, 4096);
+            if (web_info) {
+                size_t rlen = strlen(result);
+                size_t wlen = strlen(web_info);
+                char* merged = (char*)malloc(rlen + wlen + 128);
+                if (merged) {
+                    snprintf(merged, rlen + wlen + 128,
+                             "%s\n\n[联网搜索补充]\n%s", result, web_info);
+                    free(result);
+                    result = merged;
+                }
+                free(web_info);
+            }
+        }
+    }
+
+    /* 记录多轮对话历史 */
+    if (sys && result && user_input) {
+        int slot = sys->history_head;
+        snprintf(sys->history[slot].input, sizeof(sys->history[slot].input), "%s", user_input);
+        snprintf(sys->history[slot].response, sizeof(sys->history[slot].response), "%s", result);
+        sys->history_head = (slot + 1) % PM_DIALOG_HISTORY_MAX;
+        if (sys->history_count < PM_DIALOG_HISTORY_MAX) sys->history_count++;
+        /* 兼容旧 has_last_turn / last_input / last_response 字段 */
+        sys->has_last_turn = 1;
+        snprintf(sys->last_input, sizeof(sys->last_input), "%s", user_input);
+        snprintf(sys->last_response, sizeof(sys->last_response), "%s", result);
+    }
+
     LOG_DEBUG("[proc] returning result: %s", result);
     free(response);
     return result;

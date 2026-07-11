@@ -2039,14 +2039,19 @@ int topology_walk_greedy(SubTopology* sub, int start_node_id,
         // 更新被选节点的热度（热度衰减在线更新）
         ReasoningNode* stepped_node = net->nodes[current_id];
         if (stepped_node) {
-            stepped_node->selection_count++;
-            float decay;
-            switch (stepped_node->node_type) {
-                case NODE_TYPE_FUNCTION_WORD: decay = 0.999f; break;
-                case NODE_TYPE_PROPER_NOUN:  decay = 0.990f; break;
-                default:                     decay = 0.995f; break;
-            }
-            // 增量更新：heat *= decay（比 pow() 快10倍）
+        stepped_node->selection_count++;
+        float decay;
+        switch (stepped_node->node_type) {
+            case NODE_TYPE_FUNCTION_WORD: decay = 0.999f; break;
+            case NODE_TYPE_PROPER_NOUN:  decay = 0.990f; break;
+            default:                     decay = 0.995f; break;
+        }
+        /* 情绪调制探索率：高探索→衰减慢，更多未被选过的节点保持热度 */
+        if (master->cognitive_state_ptr) {
+            float er = ((CognitiveState*)master->cognitive_state_ptr)->explore_rate;
+            decay = decay + (1.0f - decay) * er * 0.5f;
+        }
+        // 增量更新：heat *= decay（比 pow() 快10倍）
             stepped_node->heat *= decay;
             // 软下限保护
             if (stepped_node->heat < 0.05f) stepped_node->heat = 0.05f;

@@ -3,8 +3,8 @@
  * @brief Unit tests for memory_system.c — STM/LTM/permanent storage
  */
 
-#include "../include/common.h"
-#include "../include/memory_system.h"
+#include "common.h"
+#include "memory_system.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

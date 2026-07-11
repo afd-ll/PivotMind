@@ -3,11 +3,11 @@
  * @brief Unit tests for trainer.c
  */
 
-#include "../include/common.h"
-#include "../include/trainer.h"
-#include "../include/model.h"
-#include "../include/tensor.h"
-#include "../include/layer.h"
+#include "common.h"
+#include "trainer.h"
+#include "model.h"
+#include "tensor.h"
+#include "layer.h"
 #include <stdio.h>
 #include <assert.h>
 

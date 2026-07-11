@@ -25,51 +25,49 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install ARM cross-compiler
+      - name: Install ARM64 cross-compiler
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            gcc-arm-linux-gnueabihf \
-            libc6-dev-armhf-cross
+            gcc-aarch64-linux-gnu \
+            libc6-dev-arm64-cross
 
-      - name: Build zlib for ARM
+      - name: Build zlib for ARM64
         run: |
           curl -sL https://github.com/madler/zlib/archive/refs/tags/v1.3.1.tar.gz -o /tmp/zlib.tar.gz
           tar xzf /tmp/zlib.tar.gz -C /tmp
           cd /tmp/zlib-1.3.1
-          CC=arm-linux-gnueabihf-gcc \
+          CC=aarch64-linux-gnu-gcc \
           ./configure --prefix=/tmp/zlib-arm
           make -j$(nproc)
           make install
 
-      - name: Build OpenSSL for ARM
+      - name: Build OpenSSL for ARM64
         run: |
           curl -sL https://github.com/openssl/openssl/releases/download/openssl-3.0.15/openssl-3.0.15.tar.gz -o /tmp/openssl.tar.gz
           tar xzf /tmp/openssl.tar.gz -C /tmp
           cd /tmp/openssl-3.0.15
-          # OpenSSL 3.0 交叉编译标准流程
-          CROSS=arm-linux-gnueabihf
-          ./Configure linux-armv4 \
+          CROSS=aarch64-linux-gnu
+          ./Configure linux-aarch64 \
             --prefix=/tmp/openssl-arm \
             --cross-compile-prefix=${CROSS}- \
             no-asm no-shared no-dso no-engine no-ui-console no-tests
           make -j$(nproc)
           make install_sw
 
-      - name: Build libcurl for ARM
+      - name: Build libcurl for ARM64
         run: |
           curl -sL https://curl.se/download/curl-8.12.1.tar.gz -o /tmp/curl.tar.gz
           tar xzf /tmp/curl.tar.gz -C /tmp
           cd /tmp/curl-8.12.1
-          # 禁用 pkg-config（主机 pkg-config 无法识别 ARM 交叉编译链）
           export PKG_CONFIG_LIBDIR=/tmp/curl-arm/lib/pkgconfig
           mkdir -p $PKG_CONFIG_LIBDIR
-          CC=arm-linux-gnueabihf-gcc \
+          CC=aarch64-linux-gnu-gcc \
           CPPFLAGS="-I/tmp/openssl-arm/include -I/tmp/zlib-arm/include" \
           LDFLAGS="-L/tmp/openssl-arm/lib -L/tmp/zlib-arm/lib" \
           ./configure \
             --build=x86_64-linux-gnu \
-            --host=arm-linux-gnueabihf \
+            --host=aarch64-linux-gnu \
             --prefix=/tmp/curl-arm \
             --with-openssl=/tmp/openssl-arm \
             --with-zlib=/tmp/zlib-arm \
@@ -83,16 +81,15 @@ jobs:
           make -j$(nproc)
           make install
 
-      - name: Build ARM (no OpenMP — no libgomp for ARM target)
+      - name: Build ARM64
         run: |
           make linux \
-            CC=arm-linux-gnueabihf-gcc \
-            CFLAGS="-Wall -Wextra -O2 -Iinclude -I. -Ilibs -I/tmp/openssl-arm/include -I/tmp/curl-arm/include -I/tmp/zlib-arm/include -std=gnu99 -MD -MP -DHAS_OPENSSL" \
+            CC=aarch64-linux-gnu-gcc \
+            CFLAGS="-Wall -Wextra -O2 -Iinclude -Iinclude/nn -Isrc/nn -I. -Ilibs -I/tmp/openssl-arm/include -I/tmp/curl-arm/include -I/tmp/zlib-arm/include -std=gnu99 -fopenmp -pthread -MD -MP -DHAS_OPENSSL" \
             LDFLAGS="-L/tmp/openssl-arm/lib -L/tmp/curl-arm/lib -L/tmp/zlib-arm/lib -lm -lcurl -lssl -lcrypto -lz -pthread -static-libstdc++"
 
-      - name: Verify ARM ELF
+      - name: Verify ARM64 ELF
         run: |
           file build/bin/*
-          readelf -h build/bin/pivotmind_gateway | grep 'Machine:'
-          # 验证链接的库
-          arm-linux-gnueabihf-readelf -d build/bin/pivotmind_gateway | grep NEEDED
+          aarch64-linux-gnu-readelf -h build/bin/pivotmind_gateway | grep 'Machine:'
+          aarch64-linux-gnu-readelf -d build/bin/pivotmind_gateway | grep NEEDED

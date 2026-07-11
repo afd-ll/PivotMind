@@ -901,20 +901,38 @@ int diffusion_generate(DiffusionCtx* ctx,
                         int max_output) {
     if (!ctx || !ctx->master || !ctx->vocab || !input || !output_words) return 0;
 
-    /* ── 第0步：滑动窗口分词 → 词汇层初始激活 ── */
+    /* ── 第0步：按字符滑动窗口匹配词汇拓扑节点 ──
+     * 中文 UTF-8 每字 1-4 字节，必须按字符边界截取子串，
+     * 否则 "人工智能"(12字节) 在字节窗口里永远拼不出来。 */
+
+    /* 建立字符位置数组: char_pos[i] = 第 i 个字符的起始字节偏移 */
+    int char_pos[256];
+    int char_count = 0;
+    const char* cp = input;
+    while (*cp && char_count < 255) {
+        char_pos[char_count++] = (int)(cp - input);
+        unsigned char c = (unsigned char)*cp;
+        if      (c < 0x80)       cp += 1;
+        else if ((c & 0xE0) == 0xC0) cp += 2;
+        else if ((c & 0xF0) == 0xE0) cp += 3;
+        else                     cp += 4;
+    }
+    char_pos[char_count] = (int)(cp - input);  /* 末尾哨兵 */
+
     int active_ids[DIFF_MAX_CANDIDATES];
     int active_count = 0;
-    int input_len = (int)strlen(input);
 
-    /* 逐字扫描 + bigram + trigram 全部尝试匹配 */
-    for (int win = 3; win >= 1 && active_count == 0; win--) {
-        for (int pos = 0; pos + win <= input_len; pos++) {
+    /* 从 5字窗口 到 1字窗口，长匹配优先 */
+    for (int win_chars = 5; win_chars >= 1 && active_count == 0; win_chars--) {
+        for (int ci = 0; ci + win_chars <= char_count; ci++) {
             if (active_count >= 64) break;
-            char sub[16];
-            int sl = win < 15 ? win : 15;
-            memcpy(sub, input + pos, sl);
-            sub[sl] = 0;
-            if (sl < 1) continue;
+            int byte_start = char_pos[ci];
+            int byte_end   = char_pos[ci + win_chars];
+            int byte_len   = byte_end - byte_start;
+            if (byte_len <= 0 || byte_len > 31) continue;
+            char sub[32];
+            memcpy(sub, input + byte_start, byte_len);
+            sub[byte_len] = 0;
 
             int nid = huarong_net_find_concept(ctx->vocab->net, sub);
             if (nid >= 0) {

@@ -18,6 +18,8 @@
 #include "associative_reasoning.h"
 #include "huarong_topology.h"
 #include "node_hash.h"
+#include "autonomic_learner.h"
+#include "memory_system.h"
 #include "common.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -25,6 +27,58 @@
 #include <math.h>
 #include <pthread.h>
 #include <time.h>
+
+/* ================================================================
+ *  QA 重放缓冲区 — 白天学习，夜间巩固
+ * ================================================================ */
+#define PM_DREAM_REPLAY_MAX 256
+static struct {
+    char question[512];
+    char answer[2048];
+    int  count;          /* 重放次数 */
+} g_replay_buf[PM_DREAM_REPLAY_MAX];
+static int g_replay_head = 0;
+static int g_replay_count = 0;
+static pthread_mutex_t g_replay_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+void dream_enqueue_qa(const char* question, const char* answer) {
+    if (!question || !answer) return;
+    pthread_mutex_lock(&g_replay_mutex);
+    /* 检查是否已存在 (避免重复) */
+    for (int i = 0; i < g_replay_count; i++) {
+        int idx = (g_replay_head - g_replay_count + i + PM_DREAM_REPLAY_MAX) % PM_DREAM_REPLAY_MAX;
+        if (strcmp(g_replay_buf[idx].question, question) == 0) {
+            g_replay_buf[idx].count = 0;
+            pthread_mutex_unlock(&g_replay_mutex);
+            return;
+        }
+    }
+    int slot = g_replay_head;
+    snprintf(g_replay_buf[slot].question, sizeof(g_replay_buf[slot].question), "%s", question);
+    snprintf(g_replay_buf[slot].answer, sizeof(g_replay_buf[slot].answer), "%s", answer);
+    g_replay_buf[slot].count = 0;
+    g_replay_head = (slot + 1) % PM_DREAM_REPLAY_MAX;
+    if (g_replay_count < PM_DREAM_REPLAY_MAX) g_replay_count++;
+    pthread_mutex_unlock(&g_replay_mutex);
+}
+
+/* 从缓冲区取一轮待重放的 QA 对 */
+static int dream_dequeue_replay(int max_pairs,
+                                 char questions[][512], char answers[][2048]) {
+    int dequeued = 0;
+    pthread_mutex_lock(&g_replay_mutex);
+    int start = (g_replay_head - g_replay_count + PM_DREAM_REPLAY_MAX) % PM_DREAM_REPLAY_MAX;
+    for (int i = 0; i < g_replay_count && dequeued < max_pairs; i++) {
+        int idx = (start + i) % PM_DREAM_REPLAY_MAX;
+        if (g_replay_buf[idx].count >= 3) continue;  /* 已重放 3 次，跳过 */
+        snprintf(questions[dequeued], 512, "%s", g_replay_buf[idx].question);
+        snprintf(answers[dequeued], 2048, "%s", g_replay_buf[idx].answer);
+        g_replay_buf[idx].count++;
+        dequeued++;
+    }
+    pthread_mutex_unlock(&g_replay_mutex);
+    return dequeued;
+}
 
 /* 线程本地 RNG */
 static unsigned int _dream_rng_seed(void) {
@@ -56,6 +110,69 @@ int dream_cycle(MasterTopology* master, MemorySystem* memory,
 
     /* 推进跨拓扑命中轮次 — 用于耦合衰减窗口和固化阈值判定 */
     master->cross_hit_round++;
+
+    /*  QA 梦境重放巩固 + 交叉训练 + 泛化 */
+    if (cfg.enable_replay && memory) {
+        char qs[16][512], as[16][2048];
+        int pairs = dream_dequeue_replay(cfg.replay_pairs_per_cycle, qs, as);
+        if (pairs > 0) {
+            AutonomicState astate;
+            memset(&astate, 0, sizeof(astate));
+            autonomic_state_init(&astate);
+            SubTopology* vocab = master_get_sub_topology_by_type(master, TOPO_VOCABULARY);
+
+            for (int i = 0; i < pairs; i++) {
+                /* 1. 原对强化 */
+                autonomic_learn_from_dialog(master, qs[i], as[i], &astate, NULL, memory);
+
+                /* 2. 交叉训练：找语义相近的问题，拓展回答的覆盖范围 */
+                if (vocab && vocab->net) {
+                    ReasoningNode* qnode = node_hash_find(vocab->node_hash, qs[i]);
+                    if (qnode) {
+                        /* 从问题节点出发，找边权最高的 2 个邻近词作为替代问题 */
+                        float best_w[2] = {0, 0};
+                        const char* alt_q[2] = {NULL, NULL};
+                        for (int e = 0; e < qnode->edge_count; e++) {
+                            ReasoningNode* tgt = qnode->edges[e].target;
+                            if (!tgt || !tgt->concept) continue;
+                            float w = qnode->edges[e].weight;
+                            if (w > best_w[0]) { best_w[1] = best_w[0]; alt_q[1] = alt_q[0]; best_w[0] = w; alt_q[0] = tgt->concept; }
+                            else if (w > best_w[1]) { best_w[1] = w; alt_q[1] = tgt->concept; }
+                        }
+                        /* 用邻近词做交叉训练：您好→我可以帮你什么 */
+                        for (int j = 0; j < 2; j++) {
+                            if (alt_q[j] && best_w[j] > 0.3f) {
+                                autonomic_learn_from_dialog(master, alt_q[j], as[i],
+                                                            &astate, NULL, memory);
+                            }
+                        }
+                    }
+                }
+
+                /* 3. 路径扩散：在回答中加入微小扰动，让回答路径不单一 */
+                char varied[2048];
+                snprintf(varied, sizeof(varied), "%s", as[i]);
+                /* 25% 概率在回答末尾加一个相关词做扰动 */
+                if ((rand() % 100) < 25 && vocab) {
+                    strncat(varied, " ", sizeof(varied) - strlen(varied) - 1);
+                    /* 从回答最关键词的共现词中随机挑一个 */
+                    int ri = rand() % 256;
+                    for (int e = 0; e < (vocab->net->node_count > 200 ? 200 : vocab->net->node_count); e++) {
+                        ReasoningNode* n = vocab->net->nodes[(ri + e) % vocab->net->node_count];
+                        if (n && n->concept && n->edge_count > 0) {
+                            strncat(varied, n->concept, sizeof(varied) - strlen(varied) - 1);
+                            break;
+                        }
+                    }
+                }
+                autonomic_learn_from_dialog(master, qs[i], varied, &astate, NULL, memory);
+            }
+
+            autonomic_state_destroy(&astate);
+            if (cfg.verbose)
+                fprintf(stderr, "[梦境重放] 巩固+交叉训练+扩散 %d 对 QA (含邻近词泛化)\n", pairs);
+        }
+    }
 
     SubTopology* vocab    = master_get_sub_topology_by_type(master, TOPO_VOCABULARY);
     SubTopology* semantic = master_get_sub_topology_by_type(master, TOPO_SEMANTIC);

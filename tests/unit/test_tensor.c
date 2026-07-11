@@ -3,10 +3,10 @@
  * @brief Unit tests for tensor.c
  */
 
-#include "../include/common.h"
-#include "../include/tensor.h"
-#include "../include/matrix_ops.h"
-#include "../include/tensor_pool.h"
+#include "common.h"
+#include "tensor.h"
+#include "matrix_ops.h"
+#include "tensor_pool.h"
 #include <stdio.h>
 #include <assert.h>
 #include <stdlib.h>

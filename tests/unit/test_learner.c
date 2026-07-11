@@ -3,10 +3,10 @@
  * @brief Unit tests for autonomic_learner.c — Hebbian online learning
  */
 
-#include "../include/common.h"
-#include "../include/autonomic_learner.h"
-#include "../include/multi_topology.h"
-#include "../include/memory_system.h"
+#include "common.h"
+#include "autonomic_learner.h"
+#include "multi_topology.h"
+#include "memory_system.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

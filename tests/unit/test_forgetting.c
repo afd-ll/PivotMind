@@ -3,8 +3,8 @@
  * @brief Unit tests for catastrophic_forgetting.c — EWC config and structures
  */
 
-#include "../include/common.h"
-#include "../include/catastrophic_forgetting.h"
+#include "common.h"
+#include "catastrophic_forgetting.h"
 #include <stdio.h>
 #include <stdlib.h>
 

@@ -3,9 +3,9 @@
  * @brief Unit tests for model.c
  */
 
-#include "../include/model.h"
-#include "../include/tensor.h"
-#include "../include/layer.h"
+#include "model.h"
+#include "tensor.h"
+#include "layer.h"
 #include <stdio.h>
 #include <assert.h>
 

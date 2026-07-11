@@ -17,7 +17,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
-#include "../include/prefrontal_executive.h"
+#include "prefrontal_executive.h"
 
 /* ================================================================
  *  测试框架

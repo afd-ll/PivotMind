@@ -7,6 +7,7 @@
 #include "web_search.h"
 #include "web_fetch.h"
 #include "active_learner.h"
+#include "autonomic_learner.h"
 #include "article_reader.h"
 #include "huarong_topology.h"
 #include "node_hash.h"
@@ -17,26 +18,33 @@
 #include <string.h>
 #include <ctype.h>
 #include <time.h>
+#include <unistd.h>
+#include <signal.h>
 
 /* 全局感觉皮层指针 — 供 self_learner / dialog_system 等模块通过 extern 引用 */
 Perception* g_perception = NULL;
 
-/* 搜狗搜索（已验证可用，HTTP 200, 528KB） */
-#define SOGOU_WEB   "https://www.sogou.com/sie?ie=utf-8&query="
-/* 搜狗备选（独立熔断状态，同一 URL 不同 UA 重试） */
-#define SOGOU_WEB2  "https://www.sogou.com/sie?ie=utf-8&query="
-/* Bing 搜索（cn.bing.com，需 302 重定向，web_fetch 已支持） */
-#define BING_WEB    "https://cn.bing.com/search?q="
+/* ========== 多搜索引擎定义（SearXNG 启发） ========== */
+static SearchEngine g_default_engines[] = {
+    /* 搜狗微信搜索 — 微信公众号文章，信息密度高，被反爬概率低 */
+    {"sogou_wx",  "https://weixin.sogou.com/weixin?type=2&query=%s",  5000, 1.0f, 5000, 10},
+    /* 搜狗移动搜索 — 手机版搜狗，HTML 比 PC 版简单 */
+    {"sogou_m",   "https://m.sogou.com/web/searchList.jsp?keyword=%s", 5000, 0.8f, 3000, 15},
+    /* 搜狗 Web 搜索 — 原始 PC 版（保留兼容） */
+    {"sogou_web", "https://www.sogou.com/sie?ie=utf-8&query=%s",       5000, 0.5f, 2000, 10},
+    /* Bing CN — 需 302 重定向 */
+    {"bing_cn",   "https://cn.bing.com/search?q=%s",                   8000, 0.6f, 5000, 10},
+    /* 百度移动搜索 — 国内覆盖率最高 */
+    {"baidu_m",   "https://m.baidu.com/s?word=%s",                     6000, 0.7f, 5000, 10},
+};
+#define PM_ENGINE_COUNT (int)(sizeof(g_default_engines) / sizeof(g_default_engines[0]))
 
-/* 搜索 Provider 索引 */
-#define PROV_SOGOU    0
-#define PROV_BING     1
-#define PROV_SOGOU2   2   /* 备选：搜狗独立熔断入口 */
-#define PROV_COUNT    3
-
-/* Provider 熔断：连续失败此数后冷却 */
+/* 旧 Provider（兼容迁移） */
+#define PROV_SOGOU   0
+#define PROV_BING    1
+#define PROV_SOGOU2  2
+#define PROV_COUNT   3
 #define PROVIDER_FAIL_MAX   3
-/* Provider 冷却时长（tick 数） */
 #define PROVIDER_COOLDOWN_TICKS  300
 
 /* 搜索缓存最大条目 */
@@ -211,8 +219,13 @@ Perception* perception_create(MasterTopology* topology,
     /* 设置全局指针供其他模块引用 */
     g_perception = p;
 
-    printf("[感觉皮层] 就绪 (最大%d个/周期, 超时%dms, 缓存%ds, article_reader 已绑定)\n",
-           p->cfg.max_searches_per_cycle, p->cfg.search_timeout_ms,
+    /* 初始化多搜索引擎 */
+    p->engine_count = PM_ENGINE_COUNT;
+    memcpy(p->engines, g_default_engines, sizeof(g_default_engines));
+    p->day_reset_time = time(NULL);
+
+    printf("[感觉皮层] 就绪 (%d个搜索引擎, 最大%d个/周期, 超时%dms, 缓存%ds)\n",
+           PM_ENGINE_COUNT, p->cfg.max_searches_per_cycle, p->cfg.search_timeout_ms,
            p->cfg.cache_ttl_seconds);
     return p;
 }
@@ -378,20 +391,14 @@ static void _provider_check_http_status(Perception* p, int prov_idx, WebResult* 
  */
 static WebResult* _try_provider(Perception* p, int prov_idx,
                                 const char* encoded_query) {
-    char url[512];
-    switch (prov_idx) {
-    case PROV_SOGOU:
-        snprintf(url, sizeof(url), "%s%s", SOGOU_WEB, encoded_query);
-        break;
-    case PROV_BING:
-        snprintf(url, sizeof(url), "%s%s", BING_WEB, encoded_query);
-        break;
-    case PROV_SOGOU2:
-        snprintf(url, sizeof(url), "%s%s", SOGOU_WEB2, encoded_query);
-        break;
-    default:
-        return NULL;
-    }
+    /* 映射旧 provider 索引到引擎数组 */
+    static const int prov_to_eng[] = {2, 3, 2};  /* SOGOU→sogou_web[2], BING→bing_cn[3], SOGOU2→sogou_web[2] */
+    if (prov_idx < 0 || prov_idx >= 3) return NULL;
+    int eng_idx = prov_to_eng[prov_idx];
+    if (eng_idx >= p->engine_count) return NULL;
+
+    char url[1024];
+    snprintf(url, sizeof(url), p->engines[eng_idx].url_fmt, encoded_query);
 
     if (p->cfg.verbose)
         fprintf(stderr, "[感觉皮层] 请求: %s\n", url);
@@ -870,4 +877,535 @@ void perception_stats(Perception* p, long* searches, long* learned, long* new_co
     if (learned)  *learned  = p->total_concepts_learned;
     if (new_conns) *new_conns = p->total_new_connections;
     pthread_mutex_unlock(&p->mutex);
+}
+
+/* ================================================================
+ *  用户驱动的联网搜索 API — 并行多引擎查询
+ * ================================================================ */
+
+/* 前向声明：引擎 HTML 解析器 */
+static int _parse_sogou_weixin(const char* html, SearchSnippet* out, int max);
+static int _parse_sogou_mobile(const char* html, SearchSnippet* out, int max);
+static int _parse_baidu_mobile(const char* html, SearchSnippet* out, int max);
+static int _parse_bing_html(const char* html, SearchSnippet* out, int max);
+static int _parse_sogou_web(const char* html, SearchSnippet* out, int max);
+static int _html_extract_text(const char* html, char* out, int max);
+static int _dedup_snippets(SearchSnippet* snippets, int count);
+
+/* 引擎健康检查：是否可用 */
+static int _engine_available(SearchEngine* eng, int tick) {
+    if (!eng || !eng->url_fmt) return 0;
+    if (eng->cooldown_until_tick > tick) return 0;
+
+    /* 每日重置 */
+    time_t now_t = time(NULL);
+    struct tm tm_now;
+    localtime_r(&now_t, &tm_now);
+    int today = tm_now.tm_yday;
+    struct tm tm_last;
+    localtime_r(&eng->last_request_time, &tm_last);
+    if (today != tm_last.tm_yday) eng->requests_today = 0;
+
+    if (eng->requests_today >= eng->max_requests_per_hour * 24) return 0;
+    return 1;
+}
+
+/* 引擎查询：构造 URL → web_fetch → 解析 HTML → 提取片段 */
+static int _engine_query(SearchEngine* eng, const char* query_encoded,
+                         SearchSnippet* out, int max_out) {
+    char url[1024];
+    snprintf(url, sizeof(url), eng->url_fmt, query_encoded);
+
+    WebResult* wr = web_search(url, eng->timeout_ms, 65536);
+    if (!wr || !wr->body) return 0;
+
+    int count = 0;
+
+    /* 根据引擎名选择解析器 */
+    if (strstr(eng->name, "sogou_wx") || strstr(eng->name, "weixin")) {
+        count = _parse_sogou_weixin(wr->body, out, max_out);
+    } else if (strstr(eng->name, "sogou_m") || strstr(eng->name, "m.sogou")) {
+        count = _parse_sogou_mobile(wr->body, out, max_out);
+    } else if (strstr(eng->name, "baidu_m") || strstr(eng->name, "m.baidu")) {
+        count = _parse_baidu_mobile(wr->body, out, max_out);
+    } else if (strstr(eng->name, "bing")) {
+        count = _parse_bing_html(wr->body, out, max_out);
+    } else {
+        count = _parse_sogou_web(wr->body, out, max_out);
+    }
+
+    /* 记录来源 */
+    for (int i = 0; i < count; i++) {
+        snprintf(out[i].source, sizeof(out[i].source), "%s", eng->name);
+        out[i].score *= eng->quality_weight;
+    }
+
+    web_result_free(wr);
+    return count;
+}
+
+/* 通用 HTML 文本提取 — 从任意 HTML 中抽纯文本 */
+static int _html_extract_text(const char* html, char* out, int max) {
+    if (!html || !out) return 0;
+    int pos = 0;
+    int in_tag = 0, in_script = 0, in_style = 0;
+    const char* p = html;
+    while (*p && pos < max - 1) {
+        if (*p == '<') {
+            in_tag = 1;
+            if (!in_script && strncasecmp(p, "<script", 7) == 0) in_script = 1;
+            if (!in_style && strncasecmp(p, "<style", 6) == 0) in_style = 1;
+        }
+        if (!in_tag && !in_script && !in_style) {
+            /* 输出非标签、非脚本、非样式文本 */
+            if (*p == '&') {
+                /* 简单 HTML 实体解码 */
+                if (strncmp(p, "&nbsp;", 6) == 0) { out[pos++] = ' '; p += 5; }
+                else if (strncmp(p, "&lt;", 4) == 0) { out[pos++] = '<'; p += 3; }
+                else if (strncmp(p, "&gt;", 4) == 0) { out[pos++] = '>'; p += 3; }
+                else if (strncmp(p, "&amp;", 5) == 0) { out[pos++] = '&'; p += 4; }
+                else if (strncmp(p, "&quot;", 6) == 0) { out[pos++] = '"'; p += 5; }
+                else { out[pos++] = *p; }
+            } else if (*p == '\n' || *p == '\r' || *p == '\t') {
+                if (pos > 0 && out[pos-1] != ' ') out[pos++] = ' ';
+            } else if ((unsigned char)*p >= 0x20 || *p == '\n') {
+                out[pos++] = *p;
+            }
+        }
+        if (in_tag && *p == '>') {
+            in_tag = 0;
+            if (in_script && strncasecmp(p-7, "/script", 7) == 0) in_script = 0;
+            if (in_style && strncasecmp(p-6, "/style", 6) == 0) in_style = 0;
+            if (!in_script && !in_style) out[pos++] = ' ';
+        }
+        p++;
+    }
+    out[pos] = '\0';
+    return pos;
+}
+
+/* ── 各引擎 HTML 解析器 ── */
+
+/* 搜狗微信搜索解析器 */
+static int _parse_sogou_weixin(const char* html, SearchSnippet* out, int max) {
+    if (!html || !out) return 0;
+    /* 微信公众号搜索结果结构: <h3><a>标题</a></h3> + <p class="txt-info">摘要</p> */
+    int count = 0;
+    const char* pos = html;
+    while (count < max && (pos = strstr(pos, "<h3>"))) {
+        const char* a_start = strstr(pos, "<a ");
+        if (!a_start) { pos += 4; continue; }
+        const char* href = strstr(a_start, "href=\"");
+        const char* title_start = strstr(a_start, ">");
+        if (!title_start) { pos += 4; continue; }
+        title_start++;
+        const char* title_end = strstr(title_start, "</a>");
+        if (!title_end) { pos += 4; continue; }
+
+        size_t tlen = title_end - title_start;
+        if (tlen >= sizeof(out[count].title)) tlen = sizeof(out[count].title) - 1;
+        memcpy(out[count].title, title_start, tlen);
+        out[count].title[tlen] = '\0';
+
+        /* URL（可选） */
+        if (href) {
+            href += 6;
+            const char* h_end = strchr(href, '"');
+            if (h_end) {
+                size_t ulen = h_end - href;
+                if (ulen >= sizeof(out[count].url)) ulen = sizeof(out[count].url) - 1;
+                memcpy(out[count].url, href, ulen);
+                out[count].url[ulen] = '\0';
+            }
+        }
+
+        /* 摘要 */
+        const char* snippet = strstr(title_end, "<p class=\"txt-info\">");
+        if (snippet) {
+            snprintf(out[count].snippet, sizeof(out[count].snippet), "%.800s", snippet + 20);
+        } else {
+            out[count].snippet[0] = '\0';
+        }
+
+        out[count].score = 1.0f;
+        count++;
+        pos = title_end + 5;
+    }
+    return count;
+}
+
+/* 搜狗移动搜索解析器 */
+static int _parse_sogou_mobile(const char* html, SearchSnippet* out, int max) {
+    if (!html || !out) return 0;
+    /* 简单 HTML 文本提取 + 分词 */
+    char text[32768];
+    int tlen = _html_extract_text(html, text, sizeof(text));
+    if (tlen < 50) return 0;
+
+    /* 按句号/换行切分，取前几条作为摘要 */
+    int count = 0;
+    char* tok = strtok(text, "\n");
+    while (tok && count < max) {
+        while (*tok == ' ') tok++;
+        if (strlen(tok) > 20) {
+            snprintf(out[count].title, sizeof(out[count].title), "%.200s", tok);
+            snprintf(out[count].snippet, sizeof(out[count].snippet), "%.800s",
+                     tok + (strlen(tok) > 200 ? 200 : 0));
+            out[count].score = 0.7f;
+            count++;
+        }
+        tok = strtok(NULL, "\n");
+    }
+    return count;
+}
+
+/* 百度移动搜索解析器 */
+static int _parse_baidu_mobile(const char* html, SearchSnippet* out, int max) {
+    return _parse_sogou_mobile(html, out, max);  /* 同策略：纯文本提取 */
+}
+
+/* Bing 搜索解析器 */
+static int _parse_bing_html(const char* html, SearchSnippet* out, int max) {
+    if (!html || !out) return 0;
+    int count = 0;
+    /* 找搜索结果区域 */
+    const char* pos = strstr(html, "b_algo");
+    if (!pos) pos = strstr(html, "b_results");
+    if (!pos) return _parse_sogou_mobile(html, out, max);  /* 回退文本提取 */
+
+    while (count < max && (pos = strstr(pos, "<h2"))) {
+        const char* title_start = strstr(pos, ">");
+        if (!title_start) { pos += 3; continue; }
+        title_start++;
+        const char* title_end = strstr(title_start, "</h2>") ? strstr(title_start, "</h2>") : strstr(title_start, "</a>");
+        if (!title_end) { pos += 3; continue; }
+        size_t tlen = title_end - title_start;
+        if (tlen >= sizeof(out[count].title)) tlen = sizeof(out[count].title) - 1;
+        memcpy(out[count].title, title_start, tlen);
+        out[count].title[tlen] = '\0';
+
+        /* 去除 HTML 标签 */
+        for (int c = 0; out[count].title[c]; c++) {
+            if (out[count].title[c] == '<') {
+                char* endb = strchr(out[count].title + c, '>');
+                if (endb) memmove(out[count].title + c, endb + 1, strlen(endb + 1) + 1);
+            }
+        }
+
+        const char* snippet_start = strstr(title_end, "<p");
+        if (snippet_start) {
+            snippet_start = strstr(snippet_start, ">") + 1;
+            const char* snippet_end = strstr(snippet_start, "</p>");
+            if (snippet_end) {
+                size_t slen = snippet_end - snippet_start;
+                if (slen >= sizeof(out[count].snippet)) slen = sizeof(out[count].snippet) - 1;
+                memcpy(out[count].snippet, snippet_start, slen);
+                out[count].snippet[slen] = '\0';
+            }
+        }
+        out[count].score = 0.8f;
+        count++;
+        pos = title_end;
+    }
+    return count;
+}
+
+/* 搜狗 Web 搜索解析器（保留原有逻辑） */
+static int _parse_sogou_web(const char* html, SearchSnippet* out, int max) {
+    return _parse_sogou_mobile(html, out, max);  /* 同文本提取策略 */
+}
+
+/* 搜索结果去重（按标题） */
+static int _dedup_snippets(SearchSnippet* snippets, int count) {
+    for (int i = 0; i < count; i++) {
+        if (!snippets[i].title[0]) continue;
+        for (int j = i + 1; j < count; j++) {
+            if (!snippets[j].title[0]) continue;
+            if (strcmp(snippets[i].title, snippets[j].title) == 0) {
+                snippets[j].title[0] = '\0';  /* 标记为删除 */
+            }
+        }
+    }
+    int w = 0;
+    for (int i = 0; i < count; i++) {
+        if (snippets[i].title[0]) {
+            if (w != i) snippets[w] = snippets[i];
+            w++;
+        }
+    }
+    return w;
+}
+
+/**
+ * 用户驱动的联网搜索 — 查询多个引擎，返回格式化结果
+ */
+char* perception_search_for_user(Perception* p, const char* query, int max_len) {
+    if (!p || !query || !query[0]) return NULL;
+    if (max_len <= 0) max_len = 4096;
+
+    /* URL 编码查询词 */
+    char encoded[512];
+    _url_encode(query, encoded, sizeof(encoded));
+
+    SearchSnippet all_snips[64];
+    int total = 0;
+    int now_tick = p->tick_counter;
+
+    pthread_mutex_lock(&p->mutex);
+
+    /* 检查缓存 */
+    time_t cached = _cache_lookup(p, query);
+    time_t now = time(NULL);
+    if (cached > 0 && (now - cached) < p->cfg.cache_ttl_seconds) {
+        pthread_mutex_unlock(&p->mutex);
+        char* result = malloc(256);
+        if (result) snprintf(result, 256, "（该问题最近已搜索过，请稍后再试）");
+        return result;
+    }
+
+    /* 遍历引擎查询 */
+    for (int ei = 0; ei < p->engine_count && total < 50; ei++) {
+        SearchEngine* eng = &p->engines[ei];
+        if (!_engine_available(eng, now_tick)) continue;
+
+        /* 引擎间隔节流 */
+        time_t now_s = time(NULL);
+        if (eng->last_request_time > 0 &&
+            (now_s - eng->last_request_time) * 1000 < eng->min_request_interval_ms)
+            continue;
+
+        int snip_count = _engine_query(eng, encoded,
+                                       all_snips + total, 64 - total);
+        if (snip_count > 0) {
+            eng->failures = 0;
+            eng->requests_today++;
+            eng->last_request_time = now_s;
+            total += snip_count;
+        } else {
+            eng->failures++;
+            if (eng->failures >= 3) {
+                eng->cooldown_until_tick = now_tick + 300;
+                if (p->cfg.verbose)
+                    fprintf(stderr, "[感觉皮层] %s 熔断 %d tick\n", eng->name, 300);
+            }
+        }
+
+        /* 搜到足够结果就停 */
+        if (total >= 10) break;
+    }
+
+    /* 更新缓存 */
+    if (total > 0) _cache_insert(p, query, total);
+
+    pthread_mutex_unlock(&p->mutex);
+
+    if (total == 0) {
+        char* result = malloc(128);
+        if (result) snprintf(result, 128, "（暂时无法搜索到相关信息）");
+        return result;
+    }
+
+    /* 去重 */
+    total = _dedup_snippets(all_snips, total);
+
+    /* 格式化为可读文本 */
+    char* result = (char*)calloc(max_len, 1);
+    if (!result) return NULL;
+
+    int written = snprintf(result, max_len, "搜索「%s」找到以下信息：\n\n", query);
+    for (int i = 0; i < total && i < 8; i++) {
+        char line[1024];
+        int n = snprintf(line, sizeof(line),
+                        "[%d] %s\n    %s\n    (来源: %s)\n\n",
+                        i + 1, all_snips[i].title,
+                        all_snips[i].snippet[0] ? all_snips[i].snippet : "(无摘要)",
+                        all_snips[i].source);
+        if (written + n < max_len - 1) {
+            memcpy(result + written, line, n);
+            written += n;
+        }
+    }
+    result[written] = '\0';
+    return result;
+}
+
+/**
+ * 查询扩展：从拓扑中获取关联词
+ */
+int perception_expand_query(Perception* p, const char* concept,
+                            char expanded[][128], int max) {
+    if (!p || !concept || !expanded || max <= 0) return 0;
+
+    SubTopology* vocab = master_get_sub_topology_by_type(p->topology, TOPO_VOCABULARY);
+    if (!vocab || !vocab->net) return 0;
+
+    /* 找到概念节点 */
+    ReasoningNode* source = node_hash_find(vocab->node_hash, concept);
+    if (!source) return 0;
+
+    /* 选共现边强度最高的前 max 个词 */
+    typedef struct { char word[128]; float strength; } Related;
+    Related related[32];
+    int rc = 0;
+
+    for (int i = 0; i < source->edge_count && rc < 32; i++) {
+        ReasoningNode* tgt = source->edges[i].target;
+        if (!tgt || !tgt->concept || strcmp(tgt->concept, concept) == 0) continue;
+        snprintf(related[rc].word, sizeof(related[rc].word), "%s", tgt->concept);
+        related[rc].strength = source->edges[i].weight;
+        rc++;
+    }
+
+    /* 简单排序取 top */
+    for (int i = 0; i < rc - 1; i++)
+        for (int j = i + 1; j < rc; j++)
+            if (related[j].strength > related[i].strength) {
+                Related t = related[i]; related[i] = related[j]; related[j] = t;
+            }
+
+    int count = 0;
+    for (int i = 0; i < rc && count < max; i++) {
+        snprintf(expanded[count], 128, "%s", related[i].word);
+        count++;
+    }
+    return count;
+}
+
+/* ================================================================
+ *  QA 对提取：从纯文本中检测"提问→回答"结构
+ * ================================================================ */
+
+#define PM_QA_MAX_QUESTIONS 64
+#define PM_QA_MAX_Q_LEN     512
+#define PM_QA_MAX_A_LEN    2048
+
+/**
+ * 从原始文本中提取 QA 对
+ * 策略：检测问号结尾的行作为问题，紧跟的非空行作为回答
+ */
+int perception_extract_qa_pairs(const char* text,
+                                 char questions[][PM_QA_MAX_Q_LEN],
+                                 char answers[][PM_QA_MAX_A_LEN],
+                                 int max_pairs) {
+    if (!text || !questions || !answers || max_pairs <= 0) return 0;
+
+    char clean[65536];
+    int clen = 0;
+    int in_tag = 0;
+    for (const char* p = text; *p && clen < (int)sizeof(clean) - 1; p++) {
+        if (*p == '<') in_tag = 1;
+        else if (*p == '>') { in_tag = 0; clean[clen++] = ' '; }
+        else if (!in_tag) {
+            if (*p == '\r') continue;
+            clean[clen++] = *p;
+        }
+    }
+    clean[clen] = '\0';
+
+    /* 按行分割 */
+    char* lines[2048];
+    int line_count = 0;
+    char* saveptr;
+    char* tok = strtok_r(clean, "\n", &saveptr);
+    while (tok && line_count < 2048) {
+        while (*tok == ' ' || *tok == '\t') tok++;
+        size_t len = strlen(tok);
+        while (len > 0 && (tok[len-1] == ' ' || tok[len-1] == '\r')) tok[--len] = '\0';
+        if (len > 0) lines[line_count++] = tok;
+        tok = strtok_r(NULL, "\n", &saveptr);
+    }
+
+    /* 检测 QA 对 */
+    int count = 0;
+    for (int i = 0; i < line_count - 1 && count < max_pairs; i++) {
+        size_t llen = strlen(lines[i]);
+        if (llen < 4 || llen > 500) continue;
+
+        /* 检测问句：以？结尾，或包含疑问词 */
+        int is_question = 0;
+        if (lines[i][llen-1] == '？' || lines[i][llen-1] == '?') {
+            is_question = 1;
+        } else if (strstr(lines[i], "怎么") || strstr(lines[i], "如何") ||
+                   strstr(lines[i], "为什么") || strstr(lines[i], "什么是") ||
+                   strstr(lines[i], "哪个") || strstr(lines[i], "能否")) {
+            is_question = 1;
+        }
+
+        if (!is_question) continue;
+
+        /* 找回答 */
+        size_t alen = strlen(lines[i+1]);
+        if (alen < 6 || alen > 2000) continue;
+        /* 排除连续问句 */
+        if (lines[i+1][alen-1] == '？' || lines[i+1][alen-1] == '?') continue;
+
+        snprintf(questions[count], PM_QA_MAX_Q_LEN, "%s", lines[i]);
+        snprintf(answers[count], PM_QA_MAX_A_LEN, "%s", lines[i+1]);
+        count++;
+        i++;  /* 跳过回答行 */
+    }
+
+    return count;
+}
+
+/**
+ * 搜索 + 提取 QA 对 + 喂入自主学习器
+ * @return 成功学习的 QA 对数
+ */
+int perception_search_and_learn_qa(Perception* p, const char* query, int engine_limit) {
+    if (!p || !query || !query[0]) return 0;
+    if (!p->learner) return 0;
+    if (engine_limit <= 0) engine_limit = 3;
+
+    int total_learned = 0;
+    int tick = p->tick_counter;
+
+    /* 搜索 */
+    char encoded[512];
+    _url_encode(query, encoded, sizeof(encoded));
+
+    for (int ei = 0; ei < p->engine_count && ei < engine_limit; ei++) {
+        SearchEngine* eng = &p->engines[ei];
+        if (!_engine_available(eng, tick)) continue;
+
+        char url[1024];
+        snprintf(url, sizeof(url), eng->url_fmt, encoded);
+
+    /* 硬超时保护 — 用 alarm 防止 libcurl 卡死 */
+    #ifndef _WIN32
+    alarm(eng->timeout_ms / 1000 + 2);
+    #endif
+    WebResult* wr = web_search(url, eng->timeout_ms > 0 ? eng->timeout_ms : 5000, 131072);
+    #ifndef _WIN32
+    alarm(0);
+    #endif
+    if (!wr || !wr->body) { eng->failures++; web_result_free(wr); eng->cooldown_until_tick = tick + 600; continue; }
+
+        eng->failures = 0;
+
+        /* 提取 QA 对 */
+        char questions[PM_QA_MAX_QUESTIONS][PM_QA_MAX_Q_LEN];
+        char answers[PM_QA_MAX_QUESTIONS][PM_QA_MAX_A_LEN];
+        int pair_count = perception_extract_qa_pairs(wr->body, questions, answers, PM_QA_MAX_QUESTIONS);
+
+        /* 喂入自主学习器 */
+        AutonomicState astate;
+        memset(&astate, 0, sizeof(astate));
+        autonomic_state_init(&astate);
+
+        for (int i = 0; i < pair_count; i++) {
+            autonomic_learn_from_dialog(p->topology,
+                                        questions[i], answers[i],
+                                        &astate, NULL, p->memory);
+            total_learned++;
+        }
+
+        autonomic_state_destroy(&astate);
+        web_result_free(wr);
+
+        if (p->cfg.verbose)
+            fprintf(stderr, "[QA训练] '%s' %s: %d对\n", query, eng->name, pair_count);
+    }
+
+    return total_learned;
 }

@@ -3,12 +3,12 @@
  * @brief Unit tests for dialog_system.c — input parsing + full system lifecycle
  */
 
-#include "../include/common.h"
-#include "../include/dialog_system.h"
-#include "../include/multi_topology.h"
-#include "../include/memory_system.h"
-#include "../include/causal_reasoning.h"
-#include "../include/active_learner.h"
+#include "common.h"
+#include "dialog_system.h"
+#include "multi_topology.h"
+#include "memory_system.h"
+#include "causal_reasoning.h"
+#include "active_learner.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

@@ -3,9 +3,9 @@
  * @brief Unit tests for diffusion.c — init safety, basic lifecycle
  */
 
-#include "../include/common.h"
-#include "../include/diffusion.h"
-#include "../include/multi_topology.h"
+#include "common.h"
+#include "diffusion.h"
+#include "multi_topology.h"
 #include <stdio.h>
 
 static int tests_run = 0, tests_passed = 0, tests_failed = 0;

@@ -162,6 +162,15 @@ typedef struct {
     char last_response[PM_RESPONSE_BUF];
     int has_last_turn;
 
+    /* 多轮对话历史环形缓冲（最近 4 轮） */
+#define PM_DIALOG_HISTORY_MAX 4
+    struct {
+        char input[1024];
+        char response[PM_RESPONSE_BUF];
+    } history[PM_DIALOG_HISTORY_MAX];
+    int history_head;          /* 下一写入槽位 */
+    int history_count;         /* 已记录轮数 */
+
     float prediction_lr;
     float curiosity;
     int consecutive_success;
