@@ -103,6 +103,18 @@ char* broca_wrap_response(MasterTopology* master, EmergentPOS* ep,
     /* 单字直接返回 */
     if (word_count == 1) return strdup(words[0]);
 
+    /* 模板拓扑为空时不做 POS 包裹，直接拼接原词返回 */
+    int tpl_count = broca_template_count(master);
+    if (tpl_count == 0) {
+        size_t len = 0;
+        for (int i = 0; i < word_count; i++) len += strlen(words[i]);
+        char* raw = (char*)malloc(len + 1);
+        if (!raw) return NULL;
+        raw[0] = '\0';
+        for (int i = 0; i < word_count; i++) strcat(raw, words[i]);
+        return raw;
+    }
+
     /* Step 1: POS 标注 */
     POSTag pos_tags[BWR_MAX_POS];
     int can_template = 0;
