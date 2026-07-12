@@ -1409,3 +1409,38 @@ int perception_search_and_learn_qa(Perception* p, const char* query, int engine_
 
     return total_learned;
 }
+
+int perception_feed_learn_text(Perception* p, const char* text) {
+    if (!p || !text || !text[0]) return 0;
+    if (!p->ar || !p->topology) return 0;
+
+    /* 中文分句：将句号、问号、感叹号、分号替换为换行 */
+    char* buf = strdup(text);
+    if (!buf) return 0;
+    for (char* c = buf; *c; c++)
+        if (*c == '。' || *c == '！' || *c == '？' || *c == '；') *c = '\n';
+
+    int fed = 0;
+    char* line = strtok(buf, "\n");
+    while (line) {
+        while (*line == ' ' || *line == '\t') line++;
+        if (*line) {
+            article_process_line(p->ar, line);
+            fed++;
+        }
+        line = strtok(NULL, "\n");
+    }
+    free(buf);
+
+    /* 每 5 句 flush 一次，强制写入拓扑 */
+    static int call_count = 0;
+    if (++call_count % 5 == 0) {
+        SubTopology* vocab = NULL;
+        for (int t = 0; t < p->topology->sub_topo_count; t++)
+            if (p->topology->sub_topologies[t] && p->topology->sub_topologies[t]->type == TOPO_VOCABULARY)
+                { vocab = p->topology->sub_topologies[t]; break; }
+        article_flush(p->ar, vocab);
+    }
+
+    return fed;
+}

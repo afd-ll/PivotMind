@@ -114,6 +114,7 @@ typedef struct {
     long         total_learning_cycles;
     time_t       last_learn_time;     // 限流用
     int          learn_burst;         // 限流burst计数
+    char         last_learn_text[2048]; // 上一条/learn文本，用于建边
     // 训练模式
     TrainMode*      train_mode;      /* 训练模式实例 */
     int             train_mode_flag; /* --train-mode 标志 */
@@ -948,10 +949,14 @@ static void handle_learn(GatewaySystem* gw, int fd, const char* body) {
     if (!vocab || !vocab->net) { http_json(fd, 200, "{\"result\":\"no vocab\"}"); return; }
 
     int prev_id = -1;
-    /* v0.4.3: 传递涌现词类系统用于同词类边加权 */
     EmergentPOS* ep = (gw->prefrontal && gw->prefrontal->controller)
                       ? gw->prefrontal->controller->emergent_pos : NULL;
     int added = _learn_tokens(vocab, msg, &prev_id, ep);
+
+    /* 同时走 PMI 管线：建立词间共现频率表 → 自动学习者会建边 */
+    if (gw->perception) {
+        perception_feed_learn_text(gw->perception, msg);
+    }
 
     gw->total_learning_cycles++;
     char resp[128];

@@ -222,6 +222,12 @@ int perception_extract_qa_pairs(const char* text,
  */
 int perception_search_and_learn_qa(Perception* p, const char* query, int engine_limit);
 
+/**
+ * 喂入学习文本 — 走 article_reader PMI 管线建立词共现频率表
+ * 用于 /learn 端点，让学习不只是加节点，而是建立词间关联边
+ */
+int perception_feed_learn_text(Perception* p, const char* text);
+
 #ifdef __cplusplus
 }
 #endif
