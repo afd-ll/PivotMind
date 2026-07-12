@@ -86,7 +86,8 @@ struct ArticleReader {
     int         total_chars;     // 累计字符总次数
 
     // 字符对共现表（开放定址哈希）
-    PairEntry   pair_table[AR_PAIR_HASH_SIZE];
+    PairEntry*  pair_table;
+    int         pair_hash_size;
     int         pair_count;
 
     // 发现的词（动态数组）
@@ -157,13 +158,44 @@ static CharEntry* _ar_find_char(ArticleReader* ar, const char* ch) {
     return NULL;  // 表满
 }
 
+#define AR_PAIR_LOAD_MAX  0.75f  /* 负载因子>75%时触发扩容 */
+
+/** 字符对哈希表扩容 — 双倍容量 + rehash */
+static int _ar_expand_pair_hash(ArticleReader* ar) {
+    int new_size = ar->pair_hash_size * 2;
+    if (new_size > 2097152) return -1; /* 上限 2M 槽 */
+    PairEntry* new_tab = (PairEntry*)calloc(new_size, sizeof(PairEntry));
+    if (!new_tab) return -1;
+    int new_mask = new_size - 1;
+
+    for (int i = 0; i < ar->pair_hash_size; i++) {
+        if (!ar->pair_table[i].used) continue;
+        char key[16];
+        snprintf(key, sizeof(key), "%s|%s", ar->pair_table[i].a, ar->pair_table[i].b);
+        unsigned int h = _ar_hash(key) & new_mask;
+        for (int p = 0; p < new_size; p++) {
+            int idx = (h + p) & new_mask;
+            if (!new_tab[idx].used) { new_tab[idx] = ar->pair_table[i]; break; }
+        }
+    }
+    free(ar->pair_table);
+    ar->pair_table = new_tab;
+    ar->pair_hash_size = new_size;
+    return 0;
+}
+
 /** 在 pair_table 中查找或插入字符对 */
 static PairEntry* _ar_find_pair(ArticleReader* ar, const char* a, const char* b) {
+    /* 负载因子检查：超过75%触发扩容 */
+    if ((float)ar->pair_count / ar->pair_hash_size > AR_PAIR_LOAD_MAX)
+        _ar_expand_pair_hash(ar);
+
     char key[16];
     snprintf(key, sizeof(key), "%s|%s", a, b);
-    unsigned int h = _ar_hash(key) & AR_PAIR_HASH_MASK;
-    for (int i = 0; i < AR_PAIR_HASH_SIZE; i++) {
-        int idx = (h + i) & AR_PAIR_HASH_MASK;
+    int mask = ar->pair_hash_size - 1;
+    unsigned int h = _ar_hash(key) & mask;
+    for (int i = 0; i < ar->pair_hash_size; i++) {
+        int idx = (h + i) & mask;
         if (!ar->pair_table[idx].used) {
             strncpy(ar->pair_table[idx].a, a, sizeof(ar->pair_table[idx].a) - 1);
             ar->pair_table[idx].a[sizeof(ar->pair_table[idx].a) - 1] = 0;
@@ -373,6 +405,11 @@ ArticleReader* article_reader_create(MasterTopology* master,
     ArticleReader* ar = (ArticleReader*)calloc(1, sizeof(ArticleReader));
     if (!ar) return NULL;
 
+    /* 字符对哈希表动态分配 */
+    ar->pair_table = (PairEntry*)calloc(AR_PAIR_HASH_SIZE, sizeof(PairEntry));
+    if (!ar->pair_table) { free(ar); return NULL; }
+    ar->pair_hash_size = AR_PAIR_HASH_SIZE;
+
     pthread_mutex_init(&ar->mutex, NULL);
 
     ar->master = master;
@@ -441,7 +478,8 @@ void article_reader_destroy(ArticleReader* ar) {
     pthread_mutex_destroy(&ar->mutex);
     free(ar->words);
     free(ar->word_hash);
-    free(ar->seq);       // 堆分配的字符序列缓冲区
+    free(ar->pair_table);
+    free(ar->seq);
     free(ar->line_chars); // 堆分配的行缓冲区
     free(ar);
 }
