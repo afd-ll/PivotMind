@@ -1,0 +1,93 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 620" font-family="'JetBrains Mono','PingFang SC','Microsoft YaHei',monospace">
+  <defs>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1e293b" stroke-width="0.5"/>
+    </pattern>
+    <marker id="arr" markerWidth="7" markerHeight="5" refX="6" refY="2.5" orient="auto"><polygon points="0 0, 7 2.5, 0 5" fill="#64748b"/></marker>
+    <marker id="arrV" markerWidth="7" markerHeight="5" refX="6" refY="2.5" orient="auto"><polygon points="0 0, 7 2.5, 0 5" fill="#a78bfa"/></marker>
+  </defs>
+  <rect width="100%" height="100%" fill="#0c1220"/>
+  <rect width="100%" height="100%" fill="url(#grid)"/>
+  <text x="20" y="28" fill="#48dbfb" font-size="16" font-weight="700">数据结构关系</text>
+
+  <!-- MasterTopology -->
+  <rect x="20" y="50" width="280" height="140" rx="8" fill="rgba(76,29,149,0.15)" stroke="#a78bfa" stroke-width="2"/>
+  <text x="40" y="75" fill="#a78bfa" font-size="13" font-weight="700">MasterTopology</text>
+  <rect x="40" y="88" width="240" height="25" rx="4" fill="rgba(76,29,149,0.2)"/>
+  <text x="50" y="105" fill="#e2e8f0" font-size="10">SubTopology[12] sub_topologies</text>
+  <rect x="40" y="118" width="240" height="25" rx="4" fill="rgba(76,29,149,0.2)"/>
+  <text x="50" y="135" fill="#e2e8f0" font-size="10">FreqTable* freq_table</text>
+  <rect x="40" y="148" width="240" height="25" rx="4" fill="rgba(76,29,149,0.2)"/>
+  <text x="50" y="165" fill="#e2e8f0" font-size="10">CrossLink* cross_links</text>
+
+  <!-- Arrow Master → SubTopo -->
+  <line x1="300" y1="120" x2="340" y2="120" stroke="#a78bfa" stroke-width="1" marker-end="url(#arrV)"/>
+
+  <!-- SubTopology -->
+  <rect x="350" y="50" width="280" height="200" rx="8" fill="rgba(6,78,59,0.12)" stroke="#34d399" stroke-width="2"/>
+  <text x="370" y="75" fill="#34d399" font-size="13" font-weight="700">SubTopology</text>
+  <rect x="370" y="88" width="240" height="22" rx="4" fill="rgba(6,78,59,0.2)"/>
+  <text x="380" y="103" fill="#e2e8f0" font-size="9">int type (VOCAB·SEMANTIC·TEMPLATE·…)</text>
+  <rect x="370" y="115" width="240" height="22" rx="4" fill="rgba(6,78,59,0.2)"/>
+  <text x="380" y="130" fill="#e2e8f0" font-size="9">HuarongTopologyNet* net</text>
+  <rect x="370" y="142" width="240" height="22" rx="4" fill="rgba(6,78,59,0.2)"/>
+  <text x="380" y="157" fill="#e2e8f0" font-size="9">int node_count</text>
+
+  <!-- Net inset -->
+  <rect x="385" y="175" width="225" height="55" rx="6" fill="rgba(34,211,238,0.08)" stroke="#22d3ee" stroke-width="0.8" stroke-dasharray="3,3"/>
+  <text x="400" y="195" fill="#22d3ee" font-size="9" font-weight="600">HuarongTopologyNet</text>
+  <text x="400" y="212" fill="#94a3b8" font-size="8">ReasoningNode** nodes</text>
+  <text x="400" y="224" fill="#94a3b8" font-size="8">NodeHashTable* hash</text>
+
+  <!-- Arrow Net → Node -->
+  <line x1="630" y1="200" x2="680" y2="200" stroke="#22d3ee" stroke-width="1" marker-end="url(#arr)"/>
+
+  <!-- ReasoningNode -->
+  <rect x="690" y="50" width="250" height="320" rx="8" fill="rgba(8,51,68,0.15)" stroke="#22d3ee" stroke-width="2"/>
+  <text x="710" y="75" fill="#22d3ee" font-size="13" font-weight="700">ReasoningNode</text>
+  
+  <rect x="710" y="88" width="210" height="20" rx="4" fill="rgba(8,51,68,0.25)"/>
+  <text x="720" y="102" fill="#e2e8f0" font-size="9">int node_id · char* concept</text>
+  <rect x="710" y="112" width="210" height="20" rx="4" fill="rgba(8,51,68,0.25)"/>
+  <text x="720" y="126" fill="#e2e8f0" font-size="9">float* features [512]</text>
+  <rect x="710" y="136" width="210" height="20" rx="4" fill="rgba(8,51,68,0.25)"/>
+  <text x="720" y="150" fill="#e2e8f0" font-size="9">float activation · confidence</text>
+  
+  <!-- Edges -->
+  <rect x="710" y="160" width="210" height="45" rx="4" fill="rgba(251,191,36,0.10)" stroke="#fbbf24" stroke-width="0.8"/>
+  <text x="720" y="177" fill="#fbbf24" font-size="9" font-weight="600">Edge[] edges</text>
+  <text x="720" y="194" fill="#94a3b8" font-size="8">int edge_count · edge_capacity</text>
+
+  <!-- Edge detail -->
+  <text x="720" y="220" fill="#64748b" font-size="8">Edge 结构:</text>
+  <rect x="710" y="228" width="210" height="130" rx="4" fill="rgba(251,191,36,0.06)" stroke="#fbbf24" stroke-width="0.5"/>
+  <text x="720" y="248" fill="#e2e8f0" font-size="9">→ target (int)</text>
+  <text x="720" y="266" fill="#94a3b8" font-size="8">→ weight (float)</text>
+  <text x="720" y="280" fill="#94a3b8" font-size="8">→ bias (float)</text>
+  <text x="720" y="294" fill="#94a3b8" font-size="8">→ confidence (float)</text>
+  <text x="720" y="308" fill="#94a3b8" font-size="8">→ specificity (float)</text>
+  <text x="720" y="322" fill="#94a3b8" font-size="8">→ from_topo_id · to_topo_id</text>
+  <text x="720" y="340" fill="#94a3b8" font-size="8">→ conn_hash[] (O(1) 查找)</text>
+
+  <!-- Other structures -->
+  <text x="20" y="400" fill="#48dbfb" font-size="13" font-weight="700">辅助结构</text>
+
+  <rect x="20" y="415" width="280" height="80" rx="6" fill="rgba(251,146,60,0.10)" stroke="#fb923c" stroke-width="1"/>
+  <text x="40" y="438" fill="#fb923c" font-size="11" font-weight="600">FreqTable / PathFreqTable</text>
+  <text x="40" y="458" fill="#94a3b8" font-size="9">路径三元组频率统计 · 不可分解性分析</text>
+  <text x="40" y="478" fill="#94a3b8" font-size="9">用于模板构建的自动语法发现</text>
+
+  <rect x="320" y="415" width="280" height="80" rx="6" fill="rgba(34,211,238,0.08)" stroke="#22d3ee" stroke-width="1"/>
+  <text x="340" y="438" fill="#22d3ee" font-size="11" font-weight="600">EmergentPOS</text>
+  <text x="340" y="458" fill="#94a3b8" font-size="9">种子锚点 · 特征向量聚类</text>
+  <text x="340" y="478" fill="#94a3b8" font-size="9">POSTag: NOUN·VERB·ADJ·ADV·NUM·...</text>
+
+  <rect x="620" y="415" width="320" height="80" rx="6" fill="rgba(136,19,55,0.10)" stroke="#fb7185" stroke-width="1"/>
+  <text x="640" y="438" fill="#fb7185" font-size="11" font-weight="600">CingulateGate / GeneratedSequence</text>
+  <text x="640" y="458" fill="#94a3b8" font-size="9">四维序列评估 (语义+模板+情绪+长度)</text>
+  <text x="640" y="478" fill="#94a3b8" font-size="9">ACC门控: 接受阈值· 温度扰动· 多候选</text>
+
+  <text x="20" y="530" fill="#64748b" font-size="9">节点: ~30K · 边: ~535K · 12层拓扑 · 14脑区 · 6推理模式</text>
+  <text x="20" y="548" fill="#475569" font-size="8">纯 C 结构体 + 动态数组 · 自定义内存池 · 连接哈希表 O(1) 查找 · 线程安全</text>
+</svg>

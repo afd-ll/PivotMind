@@ -1,0 +1,121 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 520" font-family="'JetBrains Mono','PingFang SC','Microsoft YaHei',monospace">
+  <defs>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1e293b" stroke-width="0.5"/>
+    </pattern>
+    <marker id="arr" markerWidth="7" markerHeight="5" refX="6" refY="2.5" orient="auto">
+      <polygon points="0 0, 7 2.5, 0 5" fill="#64748b"/>
+    </marker>
+  </defs>
+  <rect width="100%" height="100%" fill="#0c1220"/>
+  <rect width="100%" height="100%" fill="url(#grid)"/>
+
+  <!-- Title -->
+  <text x="20" y="28" fill="#48dbfb" font-size="16" font-weight="700">三大核心模块</text>
+
+  <!-- Module 1: Topology -->
+  <rect x="20" y="45" width="340" height="445" rx="8" fill="rgba(6,78,59,0.12)" stroke="#34d399" stroke-width="1.5"/>
+  <text x="40" y="72" fill="#34d399" font-size="13" font-weight="700">1. 拓扑网络层</text>
+  <text x="40" y="90" fill="#64748b" font-size="9">huarong_topology.c · multi_topology.c</text>
+
+  <rect x="40" y="105" width="300" height="55" rx="6" fill="rgba(6,78,59,0.25)" stroke="#34d399" stroke-width="0.8"/>
+  <text x="55" y="125" fill="#e2e8f0" font-size="10" font-weight="600">huarong_net_find_or_create_node</text>
+  <text x="55" y="142" fill="#94a3b8" font-size="8">查找或创建节点</text>
+
+  <line x1="190" y1="160" x2="190" y2="175" stroke="#34d399" stroke-width="0.8" marker-end="url(#arr)"/>
+
+  <rect x="40" y="175" width="300" height="55" rx="6" fill="rgba(6,78,59,0.25)" stroke="#34d399" stroke-width="0.8"/>
+  <text x="55" y="195" fill="#e2e8f0" font-size="10" font-weight="600">topology_walk_greedy / topology_walk_beam</text>
+  <text x="55" y="212" fill="#94a3b8" font-size="8">五维评分走边 · Beam Search (K=3)</text>
+
+  <line x1="190" y1="230" x2="190" y2="245" stroke="#34d399" stroke-width="0.8" marker-end="url(#arr)"/>
+
+  <rect x="40" y="245" width="300" height="55" rx="6" fill="rgba(6,78,59,0.25)" stroke="#34d399" stroke-width="0.8"/>
+  <text x="55" y="265" fill="#e2e8f0" font-size="10" font-weight="600">master_add_cross_link</text>
+  <text x="55" y="282" fill="#94a3b8" font-size="8">跨拓扑连接建立</text>
+
+  <line x1="190" y1="300" x2="190" y2="315" stroke="#34d399" stroke-width="0.8" marker-end="url(#arr)"/>
+
+  <rect x="40" y="315" width="300" height="55" rx="6" fill="rgba(6,78,59,0.25)" stroke="#34d399" stroke-width="0.8"/>
+  <text x="55" y="335" fill="#e2e8f0" font-size="10" font-weight="600">master_reevaluate_cross_links</text>
+  <text x="55" y="352" fill="#94a3b8" font-size="8">跨拓扑连接质量重评估</text>
+
+  <!-- Data structures box -->
+  <rect x="40" y="385" width="300" height="90" rx="6" fill="rgba(76,29,149,0.12)" stroke="#a78bfa" stroke-width="0.8" stroke-dasharray="3,3"/>
+  <text x="55" y="405" fill="#a78bfa" font-size="9" font-weight="600">核心数据结构</text>
+  <text x="55" y="422" fill="#94a3b8" font-size="8">MasterTopology → 12 SubTopology</text>
+  <text x="55" y="438" fill="#94a3b8" font-size="8">ReasoningNode: concept·features·edges·activation</text>
+  <text x="55" y="454" fill="#94a3b8" font-size="8">Edge: target·weight·bias·confidence·specificity</text>
+
+  <!-- Arrows between modules -->
+  <line x1="360" y1="260" x2="385" y2="260" stroke="#fb923c" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- Module 2: Cognitive -->
+  <rect x="385" y="45" width="340" height="445" rx="8" fill="rgba(251,146,60,0.10)" stroke="#fb923c" stroke-width="1.5"/>
+  <text x="405" y="72" fill="#fb923c" font-size="13" font-weight="700">2. 认知调度层</text>
+  <text x="405" y="90" fill="#64748b" font-size="9">cognitive_controller.c</text>
+
+  <rect x="405" y="105" width="300" height="55" rx="6" fill="rgba(251,146,60,0.2)" stroke="#fb923c" stroke-width="0.8"/>
+  <text x="420" y="125" fill="#e2e8f0" font-size="10" font-weight="600">compute_intent</text>
+  <text x="420" y="142" fill="#94a3b8" font-size="8">意图向量计算 · NN 置信度因子</text>
+
+  <line x1="555" y1="160" x2="555" y2="175" stroke="#fb923c" stroke-width="0.8" marker-end="url(#arr)"/>
+
+  <rect x="405" y="175" width="300" height="55" rx="6" fill="rgba(251,146,60,0.2)" stroke="#fb923c" stroke-width="0.8"/>
+  <text x="420" y="195" fill="#e2e8f0" font-size="10" font-weight="600">evaluate_draft</text>
+  <text x="420" y="212" fill="#94a3b8" font-size="8">草案质量评估 · ACC 门控</text>
+
+  <line x1="555" y1="230" x2="555" y2="245" stroke="#fb923c" stroke-width="0.8" marker-end="url(#arr)"/>
+
+  <rect x="405" y="245" width="300" height="55" rx="6" fill="rgba(251,146,60,0.2)" stroke="#fb923c" stroke-width="0.8"/>
+  <text x="420" y="265" fill="#e2e8f0" font-size="10" font-weight="600">emergent_pos_classify</text>
+  <text x="420" y="282" fill="#94a3b8" font-size="8">涌现式词类分类 · 种子锚点聚类</text>
+
+  <line x1="555" y1="300" x2="555" y2="315" stroke="#fb923c" stroke-width="0.8" marker-end="url(#arr)"/>
+
+  <rect x="405" y="315" width="300" height="55" rx="6" fill="rgba(251,146,60,0.2)" stroke="#fb923c" stroke-width="0.8"/>
+  <text x="420" y="335" fill="#e2e8f0" font-size="10" font-weight="600">cingulate_gate</text>
+  <text x="420" y="352" fill="#94a3b8" font-size="8">扣带回门控决策 · 多候选竞争</text>
+
+  <rect x="405" y="385" width="300" height="90" rx="6" fill="rgba(136,19,55,0.12)" stroke="#fb7185" stroke-width="0.8" stroke-dasharray="3,3"/>
+  <text x="420" y="405" fill="#fb7185" font-size="9" font-weight="600">推理编排 (PFE + IdeaArena)</text>
+  <text x="420" y="422" fill="#94a3b8" font-size="8">6模式推理 · 任务分解 · 子目标调度</text>
+  <text x="420" y="438" fill="#94a3b8" font-size="8">五维竞争 · 侧抑制 · 多巴胺调节</text>
+  <text x="420" y="454" fill="#94a3b8" font-size="8">pfe_reason · pfe_assess_complexity</text>
+
+  <line x1="725" y1="260" x2="750" y2="260" stroke="#22d3ee" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- Module 3: Dialog -->
+  <rect x="750" y="45" width="330" height="445" rx="8" fill="rgba(8,51,68,0.12)" stroke="#22d3ee" stroke-width="1.5"/>
+  <text x="770" y="72" fill="#22d3ee" font-size="13" font-weight="700">3. 对话学习层</text>
+  <text x="770" y="90" fill="#64748b" font-size="9">dialog_system.c · autonomic_learner.c · diffusion.c</text>
+
+  <rect x="770" y="105" width="290" height="55" rx="6" fill="rgba(8,51,68,0.25)" stroke="#22d3ee" stroke-width="0.8"/>
+  <text x="785" y="125" fill="#e2e8f0" font-size="10" font-weight="600">dialog_input_create</text>
+  <text x="785" y="142" fill="#94a3b8" font-size="8">创建对话输入 · 分词解析</text>
+
+  <line x1="915" y1="160" x2="915" y2="175" stroke="#22d3ee" stroke-width="0.8" marker-end="url(#arr)"/>
+
+  <rect x="770" y="175" width="290" height="55" rx="6" fill="rgba(8,51,68,0.25)" stroke="#22d3ee" stroke-width="0.8"/>
+  <text x="785" y="195" fill="#e2e8f0" font-size="10" font-weight="600">cingulate_diffusion_evaluate</text>
+  <text x="785" y="212" fill="#94a3b8" font-size="8">多层扩散生成 · 逐次升温重试</text>
+
+  <line x1="915" y1="230" x2="915" y2="245" stroke="#22d3ee" stroke-width="0.8" marker-end="url(#arr)"/>
+
+  <rect x="770" y="245" width="290" height="55" rx="6" fill="rgba(8,51,68,0.25)" stroke="#22d3ee" stroke-width="0.8"/>
+  <text x="785" y="265" fill="#e2e8f0" font-size="10" font-weight="600">broca_wrap_response</text>
+  <text x="785" y="282" fill="#94a3b8" font-size="8">语法POS匹配 · 连接词插入</text>
+
+  <line x1="915" y1="300" x2="915" y2="315" stroke="#22d3ee" stroke-width="0.8" marker-end="url(#arr)"/>
+
+  <rect x="770" y="315" width="290" height="55" rx="6" fill="rgba(8,51,68,0.25)" stroke="#22d3ee" stroke-width="0.8"/>
+  <text x="785" y="335" fill="#e2e8f0" font-size="10" font-weight="600">autonomic_learn_from_dialog</text>
+  <text x="785" y="352" fill="#94a3b8" font-size="8">赫布在线学习 · 跨拓扑边建立</text>
+
+  <rect x="770" y="385" width="290" height="90" rx="6" fill="rgba(34,211,238,0.10)" stroke="#22d3ee" stroke-width="0.8" stroke-dasharray="3,3"/>
+  <text x="785" y="405" fill="#22d3ee" font-size="9" font-weight="600">输出 + 学习回路</text>
+  <text x="785" y="422" fill="#94a3b8" font-size="8">QA记忆检索 · 联想推理fallback</text>
+  <text x="785" y="438" fill="#94a3b8" font-size="8">PMI词共现建边 · 自主修正周期</text>
+  <text x="785" y="454" fill="#94a3b8" font-size="8">状态持久化 · 昼夜节律调度</text>
+</svg>
