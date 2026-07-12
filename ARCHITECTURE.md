@@ -4,7 +4,7 @@
 
 ## 整体架构
 
-![架构总览图](docs/images/架构总览图.png)
+![架构总览图](docs/images/架构总览图.svg)
 
 ### 架构分层
 
@@ -43,7 +43,7 @@
 
 ## 三大核心模块
 
-![核心模块流程图](docs/images/核心模块流程图.png)
+![核心模块流程图](docs/images/核心模块流程图.svg)
 
 ### 1. 拓扑网络层
 
@@ -84,7 +84,7 @@
 
 ## 核心数据结构
 
-![数据结构关系图](docs/images/数据结构关系图.png)
+![数据结构关系图](docs/images/数据结构关系图.svg)
 
 ### MasterTopology（认知主控）
 
@@ -732,7 +732,7 @@ typedef enum {
 
 ### batch_learn 主循环
 
-![训练工作流](docs/images/训练工作流.png)
+![训练工作流](docs/images/训练工作流.svg)
 
 位于 `src/tools/batch_learn.c`，OpenMP 并行训练：
 
