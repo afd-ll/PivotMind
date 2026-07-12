@@ -7,7 +7,7 @@
 
 [English](README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [Русский](README.ru.md)
 
-[![Version](https://img.shields.io/badge/version-v0.5.0-blue.svg)](changelogs/)
+[![Version](https://img.shields.io/badge/version-v0.5.4-blue.svg)](changelogs/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green.svg)](LICENSE)
 [![Language](https://img.shields.io/badge/C-99%2B-orange.svg)](https://zh.wikipedia.org/wiki/C99)
 [![Platform](https://img.shields.io/badge/ARM-RK3399%20%7C%20x86__64-lightgrey.svg)](#运行平台)
@@ -29,7 +29,7 @@
 没有 Transformer 外部依赖，没有预训练 embedding 向量。
 节点、边、激活、衰减 —— 以及一个永不停歇的后台时钟驱动整个系统。
 
-**当前版本：v0.5.0** —— 14 脑区完整架构、涌现式词类系统、多学习器并行、PFE 推理编排、512 维特征向量、POS 语法映射、边特异性权重、**多模态视觉管线（VisualCortex + MediaReader）**、编译零警告。
+**当前版本：v0.5.4** —— 14 脑区完整架构、涌现式词类系统、多学习器并行、PFE 推理编排、512 维特征向量、POS 语法映射、边特异性权重、**多模态视觉管线 + /learn PMI 词共现管线（VisualCortex + MediaReader）**、编译零警告。
 
 **代码规模：88 个源文件（~49,600 行 C） + 91 个头文件（~12,800 行） + 工具/测试/演示（~13,000 行）= 约 75,500 行。**
 
@@ -170,7 +170,7 @@ graph TB
 
 ---
 
-## 多模态管线 **NEW v0.5.0**
+## 多模态管线 **NEW v0.5.4**
 
 视觉皮层脑区通过两条数据管线将视频/音频内容转化为拓扑网络知识：
 
@@ -341,7 +341,7 @@ pivotmind/
 ├── tools/             # 57 个工具（训练/调试/数据处理/语料下载）
 ├── tests/             # 单元测试（19 项）+ 集成测试 + 回归测试套件
 ├── scripts/           # 自动化脚本（喂料、下载知识库等）
-├── changelogs/        # 56 个版本变更记录（000-055）
+├── changelogs/        # 58 个版本变更记录（000-057）
 ├── docs/              # 架构文档与图片
 ├── data/              # 运行时数据（hermes 知识库 25MB 等）
 └── libs/              # 第三方库
@@ -364,9 +364,9 @@ pivotmind/
 | **v0.4.11** | 双语语法引擎 (动词配价 + 英文 POS + 扩散激活优化) |
 | **v0.4.12** | 对话质量全线攻坚 (在线词汇学习 + 多轮上下文 + 输出长度控制) |
 | **v0.4.13** | POS 语法映射、边特异性权重、编译警告清零 |
-| **v0.5.0** | **多模态管线** — 视觉皮层脑区、MediaReader 字幕管道、跨模态对齐、任务队列 |
+| **v0.5.4** | **多模态管线** — 视觉皮层脑区、MediaReader 字幕管道、跨模态对齐、任务队列 |
 
-> 详细变更：v0.3.0 → [changelogs/032-v0.3.0-reasoning-architecture.md](changelogs/032-v0.3.0-reasoning-architecture.md) ｜ v0.4.0 → [changelogs/034-v0.4.0-code-simplify-brain-boundary.md](changelogs/034-v0.4.0-code-simplify-brain-boundary.md) ｜ v0.4.3 → [changelogs/042-emergent-pos-anchor.md](changelogs/042-emergent-pos-anchor.md) ｜ v0.5.0 → [changelogs/055-multimodal-v0.5.0.md](changelogs/055-multimodal-v0.5.0.md)
+> 详细变更：v0.3.0 → [changelogs/032-v0.3.0-reasoning-architecture.md](changelogs/032-v0.3.0-reasoning-architecture.md) ｜ v0.4.0 → [changelogs/034-v0.4.0-code-simplify-brain-boundary.md](changelogs/034-v0.4.0-code-simplify-brain-boundary.md) ｜ v0.4.3 → [changelogs/042-emergent-pos-anchor.md](changelogs/042-emergent-pos-anchor.md) ｜ v0.5.4 → [changelogs/055-multimodal-v0.5.4.md](changelogs/055-multimodal-v0.5.4.md)
 
 ---
 
@@ -376,7 +376,7 @@ pivotmind/
 - **无 GPU 加速** —— 纯 CPU + pthread + OpenMP
 - **状态文件二进制** —— 不跨架构（x86_64 和 ARM 不互通；文本格式方案规划中）
 - **单机运行** —— 未支持分布式多节点拓扑
-- **多模态 v0.5.0** —— 视觉管线就绪；CLIP 编码器 + Whisper ASR 待集成（Phase 2-3）
+- **多模态 v0.5.4** —— 视觉管线就绪；CLIP 编码器 + Whisper ASR 待集成（Phase 2-3）
 
 ---
 
@@ -384,7 +384,7 @@ pivotmind/
 
 - [ ] FPGA 部署（终极目标：硬件级神经形态计算）
 - [ ] 分布式多节点拓扑（跨设备激活传递）
-- [x] ~~视觉/听觉多模态输入接口~~ → **v0.5.0 已实现**: 视觉皮层 + MediaReader
+- [x] ~~视觉/听觉多模态输入接口~~ → **v0.5.4 已实现**: 视觉皮层 + MediaReader
 - [ ] JSON/MessagePack 文本格式持久化（跨架构互通）
 
 ---
