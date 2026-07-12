@@ -668,11 +668,19 @@ DialogReasoning* dialog_reason(DialogInput* input, MasterTopology* master,
 
                     /* 联网搜索学习：为不懂的概念提交给 perception 管线异步学习 */
                     {
-                        /* 提交给 perception，不阻塞对话（内部有缓存） */
-                        extern Perception* g_perception;
-                        if (g_perception)
-                            perception_suggest_queries(g_perception,
-                                (const char*[]){new_node->concept, NULL});
+                        /* 过滤垃圾概念：纯大写乱码不搜索 */
+                        int has_cjk = 0, has_vowel = 0;
+                        for (const char* pc = new_node->concept; *pc; pc++) {
+                            if ((unsigned char)*pc >= 0xC0) { has_cjk = 1; break; }
+                            if (*pc=='a'||*pc=='e'||*pc=='i'||*pc=='o'||*pc=='u'||
+                                *pc=='A'||*pc=='E'||*pc=='I'||*pc=='O'||*pc=='U') has_vowel = 1;
+                        }
+                        if (has_cjk || has_vowel) {
+                            extern Perception* g_perception;
+                            if (g_perception)
+                                perception_suggest_queries(g_perception,
+                                    (const char*[]){new_node->concept, NULL});
+                        }
                     }
                     /* 新概念学习已完全委托给 perception 的 article_reader 语义理解管线，
                      * 不再在此处阻塞式调 web_search 建关键词节点。 */

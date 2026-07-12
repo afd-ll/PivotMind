@@ -98,6 +98,28 @@ static void mark_explored(SelfLearner* sl, int topo_id, int node_id) {
  * 好奇心评分：未被探索的节点得分高
  * 公式：1.0 / (1 + explore_count) + time_bonus
  */
+/* 过滤垃圾概念：纯ASCII乱码/全大写无元音/全标点等不应作为搜索词 */
+static int _is_meaningful_concept(const char* s) {
+    if (!s || !s[0]) return 0;
+    int cjk = 0, alpha = 0, vowel = 0, punct = 0, upper = 0;
+    for (const char* p = s; *p; p++) {
+        unsigned char c = (unsigned char)*p;
+        if (c >= 0xE0)      { cjk = 1; p += 2; }
+        else if (c >= 0xC0) { cjk = 1; p += 1; }
+        else if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
+            alpha++;
+            if (c == 'a'||c == 'e'||c == 'i'||c == 'o'||c == 'u'||
+                c == 'A'||c == 'E'||c == 'I'||c == 'O'||c == 'U') vowel++;
+            if (c >= 'A' && c <= 'Z') upper++;
+        }
+        else if (c == '/' || c == '\\' || c < 0x20) punct++;
+    }
+    if (cjk) return 1;                    /* 有中文 → 有效 */
+    if (alpha >= 2 && vowel > 0) return 1; /* 有元音的英文词 */
+    return 0;                              /* 全辅音/纯数字/标点 → 垃圾 */
+}
+
+
 static float curiosity_score(SelfLearner* sl, int topo_id, int node_id) {
     ExploreRecord* rec = find_record(sl, topo_id, node_id);
     if (!rec) return 1.0f;  /* 从未探索 → 最高好奇心 */
@@ -389,6 +411,7 @@ int self_learner_cycle(SelfLearner* sl) {
                     /* 走 perception 统一管线（熔断/缓存/多源 fallback） */
                     extern Perception* g_perception;  /* 由主程序注入的全局感觉皮层 */
                     if (g_perception) {
+                    if (!_is_meaningful_concept(node->concept)) continue;
                         int result = perception_learn_concept(g_perception, node->concept);
                         if (result > 0) total_mods++;
                     }
