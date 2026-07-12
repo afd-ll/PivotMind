@@ -14,6 +14,9 @@
 
 #include "multi_topology.h"
 
+/* 前向声明 — 避免循环依赖 */
+typedef struct EmergentPOS EmergentPOS;
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -65,7 +68,7 @@ int broca_template_count(MasterTopology* topology);
  * @param word_count 词数
  * @return 格式化后的句子（调用者需 free），失败返回 NULL
  */
-char* broca_wrap_response(MasterTopology* master, struct EmergentPOS* ep,
+char* broca_wrap_response(MasterTopology* master, EmergentPOS* ep,
                           const char** words, int word_count);
 
 #ifdef __cplusplus
