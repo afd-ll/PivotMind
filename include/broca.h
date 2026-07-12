@@ -48,6 +48,7 @@ int broca_tick(Broca* b);
 
 /** 模板构建（每N轮对话增量） */
 int broca_build_templates(MasterTopology* topology, int count, int max_depth);
+int broca_seed_grammar(MasterTopology* master);
 
 /** 模板衰减 */
 void broca_decay_templates(MasterTopology* topology, int threshold, float decay);

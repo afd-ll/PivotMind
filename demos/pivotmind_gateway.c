@@ -42,6 +42,7 @@
 #include "perception.h"
 #include "hippocampus.h"
 #include "cerebellum.h"
+#include "broca.h"
 #include "prefrontal.h"
 #include "emergent_pos.h"
 #include "qa_memory.h"
@@ -956,6 +957,19 @@ static void handle_learn(GatewaySystem* gw, int fd, const char* body) {
     char resp[128];
     snprintf(resp, sizeof(resp), "{\"result\":\"learned\",\"added\":%d}", added);
     http_json(fd, 200, resp);
+
+    /* 语法种子注入：模板拓扑为空/不足时，每10次learn注入一次 */
+    static int seed_cooldown = 0;
+    if (++seed_cooldown >= 10) {
+        seed_cooldown = 0;
+        SubTopology* tpl = NULL;
+        for (int t = 0; t < gw->topology->sub_topo_count; t++)
+            if (gw->topology->sub_topologies[t] && gw->topology->sub_topologies[t]->type == TOPO_TEMPLATE)
+                { tpl = gw->topology->sub_topologies[t]; break; }
+        if (tpl && tpl->net && tpl->net->node_count < 8) {
+            broca_seed_grammar(gw->topology);
+        }
+    }
 }
 
 // POST /feedback - 反馈
@@ -1445,6 +1459,36 @@ static void handle_connection(GatewaySystem* gw, int client_fd) {
             }
         } else if (strcmp(req.path, "/media/status") == 0) {
             handle_media_status(gw, client_fd);
+        } else if (strcmp(req.path, "/debug") == 0) {
+            /* 调试端点 */
+            SubTopology* vocab = NULL;
+            for (int t = 0; t < gw->topology->sub_topo_count; t++) {
+                if (gw->topology->sub_topologies[t] && gw->topology->sub_topologies[t]->type == TOPO_VOCABULARY) {
+                    vocab = gw->topology->sub_topologies[t]; break;
+                }
+            }
+            int vnodes = (vocab && vocab->net) ? vocab->net->node_count : 0;
+            int fentries = (gw->topology->freq_table) ? gw->topology->freq_table->entry_count : -1;
+            int tnodes = 0, total = 0;
+            for (int t = 0; t < gw->topology->sub_topo_count; t++) {
+                if (gw->topology->sub_topologies[t] && gw->topology->sub_topologies[t]->net) {
+                    int n = gw->topology->sub_topologies[t]->net->node_count;
+                    total += n;
+                    if (gw->topology->sub_topologies[t]->type == TOPO_TEMPLATE) tnodes = n;
+                }
+            }
+            char dbg[512];
+            snprintf(dbg, sizeof(dbg),
+                "{\"vocab_nodes\":%d,\"freq_entries\":%d,"
+                "\"total_nodes\":%d,\"template_nodes\":%d,\"sub_topos\":%d}",
+                vnodes, fentries, total, tnodes, gw->topology->sub_topo_count);
+            http_json(client_fd, 200, dbg);
+        } else if (strcmp(req.path, "/force_templates") == 0) {
+            int built = broca_build_templates(gw->topology, 10, 4);
+            char rsp[128];
+            snprintf(rsp, sizeof(rsp), "{\"built\":%d}", built);
+            http_json(client_fd, 200, rsp);
+            fprintf(stderr, "[gateway] 强制模板构建: %d\n", built);
         } else {
             http_json(client_fd, 404, "{\"error\":\"not found\"}");
         }

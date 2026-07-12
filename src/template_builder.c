@@ -349,7 +349,12 @@ TemplateCluster* template_cluster_groups(
     for (int g = 0; g < group_count; g++) {
         TripletPrefixGroup* grp = &groups[g];
         int sz = grp->size;
-        if (sz < cfg->min_cluster_size) continue;
+        fprintf(stderr, "[模板]   组%d: size=%d a=%d b=%d\n", g, sz,
+                grp->node_a, grp->node_b);
+        if (sz < cfg->min_cluster_size) {
+            fprintf(stderr, "[模板]   组%d: 跳过(size=%d < min=%d)\n", g, sz, cfg->min_cluster_size);
+            continue;
+        }
 
         /* 构建特征向量数组 */
         float** feats = (float**)malloc((size_t)sz * sizeof(float*));
@@ -366,6 +371,18 @@ TemplateCluster* template_cluster_groups(
         }
 
         if (!has_features) {
+            /* 无特征时的降级：每个 size>=min_cluster_size 的组作为一个独立簇 */
+            fprintf(stderr, "[模板]   组%d: 无特征，降级为直接簇\n", g);
+            if (cc >= max_clusters) break;
+            clusters[cc].member_ids = (int*)malloc((size_t)sz * sizeof(int));
+            if (!clusters[cc].member_ids) { free(feats); continue; }
+            for (int i = 0; i < sz; i++) {
+                clusters[cc].member_ids[i] = grp->node_c_list[i];
+            }
+            clusters[cc].member_count = sz;
+            clusters[cc].representative_c = grp->node_c_list[0];
+            clusters[cc].total_count = grp->counts[0] + (sz > 1 ? grp->counts[1] : 0);
+            cc++;
             free(feats);
             continue;
         }
@@ -428,8 +445,12 @@ TemplateCluster* template_cluster_groups(
         }
 
         /* 输出到 clusters */
+        int added = 0;
         for (int k = 0; k < sz; k++) {
+            if (roots[k].member_count == 0) continue;
             if (roots[k].member_count < cfg->min_cluster_size) {
+                fprintf(stderr, "[模板]   组%d root%d: 成员不足(%d<%d) 跳过\n",
+                        g, k, roots[k].member_count, cfg->min_cluster_size);
                 free(roots[k].members);
                 continue;
             }
@@ -452,11 +473,33 @@ TemplateCluster* template_cluster_groups(
             cl->total_count      = roots[k].total_count;
             cl->template_node_id = -1;
             cc++;
+            added++;
             free(roots[k].members);
         }
 
         uf_destroy(uf);
         free(roots);
+
+        /* 无特征或无聚类时的降级：整个组作为一个簇 */
+        if (added == 0 && sz >= cfg->min_cluster_size) {
+            fprintf(stderr, "[模板]   组%d: 余弦聚类无产出，降级为直接簇\n", g);
+            if (cc < max_clusters) {
+                TemplateCluster* cl = &clusters[cc];
+                cl->node_a = grp->node_a;
+                cl->node_b = grp->node_b;
+                cl->member_ids = (int*)malloc((size_t)sz * sizeof(int));
+                if (cl->member_ids) {
+                    for (int i = 0; i < sz; i++)
+                        cl->member_ids[i] = grp->node_c_list[i];
+                    cl->member_count = sz;
+                    cl->representative_c = grp->node_c_list[0];
+                    cl->total_count = grp->counts[0] + (sz > 1 ? grp->counts[1] : 0);
+                    cl->template_node_id = -1;
+                    cc++;
+                }
+            }
+        }
+
         free(feats);
     }
 
@@ -809,24 +852,33 @@ int template_auto_build(MasterTopology* master, int min_entries, int max_templat
 
     /* 增量构建: 模板拓扑用 confidence 自然生灭，不再一次性幂等 */
     SubTopology* tpl = master_get_sub_topology_by_type(master, TOPO_TEMPLATE);
-    if (!tpl || !tpl->net) return 0;
-    /* 移除幂等守卫: 允许模板节点随频率表增长而增量更新 */
-    /* 旧 guard: if (tpl->net->node_count > 0) return 0; */
+    if (!tpl || !tpl->net) { fprintf(stderr, "[模板] 模板拓扑不存在\n"); return 0; }
 
     /* 数据充足性检查 */
-    if (!master->freq_table || master->freq_table->entry_count < min_entries) return 0;
+    if (!master->freq_table || master->freq_table->entry_count < min_entries) {
+        fprintf(stderr, "[模板] freq不足: entries=%d need=%d\n",
+                master->freq_table ? master->freq_table->entry_count : 0, min_entries);
+        return 0;
+    }
 
     SubTopology* vocab = master_get_sub_topology_by_type(master, TOPO_VOCABULARY);
-    if (!vocab || !vocab->net) return 0;
+    if (!vocab || !vocab->net) { fprintf(stderr, "[模板] 词汇拓扑不存在\n"); return 0; }
 
     int nc = vocab->net->node_count;
-    if (nc < 500) return 0;
+    if (nc < 500) { fprintf(stderr, "[模板] 词汇不足: %d < 500\n", nc); return 0; }
+
+    fprintf(stderr, "[模板] 开始构建: vocab=%d freq=%d max_tpl=%d\n", nc,
+            master->freq_table->entry_count, max_templates);
 
     /* Step 1: 不可分解性分析 */
     int rc = 0;
     IrreducibilityResult* res = path_analyze_irreducibility(
         master->freq_table, (void* const*)vocab->net->nodes, nc, &rc);
-    if (!res || rc == 0) return 0;
+    if (!res || rc == 0) {
+        fprintf(stderr, "[模板] 不可分解性分析失败: res=%p rc=%d\n", (void*)res, rc);
+        return 0;
+    }
+    fprintf(stderr, "[模板] 不可分解性分析: %d 结果\n", rc);
 
     /* Step 2: 前缀分组 */
     TemplateBuildConfig cfg = template_config_default();
@@ -835,6 +887,7 @@ int template_auto_build(MasterTopology* master, int min_entries, int max_templat
     int gc = 0;
     TripletPrefixGroup* grps = template_group_triplets(
         res, rc, (ReasoningNode* const*)vocab->net->nodes, nc, &cfg, &gc);
+    fprintf(stderr, "[模板] 三元组分组: %d 组\n", gc);
 
     /* Step 3: 软聚类 */
     int cc = 0;
@@ -842,12 +895,18 @@ int template_auto_build(MasterTopology* master, int min_entries, int max_templat
     if (grps && gc > 0) {
         clus = template_cluster_groups(
             grps, gc, (ReasoningNode* const*)vocab->net->nodes, nc, &cfg, &cc);
+        fprintf(stderr, "[模板] 软聚类: %d 簇\n", cc);
+    } else {
+        fprintf(stderr, "[模板] 跳过聚类: grps=%p gc=%d\n", (void*)grps, gc);
     }
 
     /* Step 4: 创建模板节点 */
     int built = 0;
     if (clus && cc > 0) {
         built = template_build_nodes(master, clus, cc, vocab, max_templates);
+        fprintf(stderr, "[模板] 模板创建: %d 个\n", built);
+    } else {
+        fprintf(stderr, "[模板] 跳过创建: clus=%p cc=%d\n", (void*)clus, cc);
     }
 
     /* Step 5: POS 结构合并 — 消除 Pipeline A/B 间的冗余模板 */

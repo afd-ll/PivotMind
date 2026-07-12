@@ -10,7 +10,7 @@ Broca* broca_create(MasterTopology* master) {
     Broca* b = (Broca*)calloc(1, sizeof(Broca));
     if (!b) return NULL;
     b->master              = master;
-    b->build_interval_ticks = 300;  /* 默认每300 tick构建一次模板 */
+    b->build_interval_ticks = 10;   /* 每10 tick构建一次语法 */
     b->max_build_depth     = 3;
     b->decay_threshold     = 5;     /* 活跃度低于此值衰减 */
     b->decay_rate          = 0.85f;
@@ -32,6 +32,14 @@ int broca_tick(Broca* b) {
     /* 按间隔触发模板自动构建 */
     if (b->tick_count % b->build_interval_ticks == 0) {
         new_templates = template_auto_build(b->master, 50, b->max_build_depth);
+
+        /* 自动构建无产出时的降级：注入基础中文语法种子 */
+        if (new_templates == 0 && b->tick_count % 30 == 0) {
+            SubTopology* tpl = master_get_sub_topology_by_type(b->master, TOPO_TEMPLATE);
+            if (tpl && tpl->net && tpl->net->node_count < 20) {
+                broca_seed_grammar(b->master);
+            }
+        }
         b->total_builds++;
         b->total_new_templates += (new_templates > 0 ? new_templates : 0);
     }
@@ -211,4 +219,43 @@ char* broca_wrap_response(MasterTopology* master, EmergentPOS* ep,
 done:
     buf[out_pos] = '\0';
     return buf;
+}
+
+/* ================================================================
+ *  broca_seed_grammar — 注入基础中文语法种子节点到模板拓扑
+ *
+ *  当自动语法发现（template_auto_build）无产出时，作为兜底方案
+ *  直接创建 POS 序列语法节点，让 broca_wrap_response 能正常工作
+ * ================================================================ */
+#include "emergent_pos.h"
+
+int broca_seed_grammar(MasterTopology* master) {
+    if (!master) return 0;
+    SubTopology* tpl = master_get_sub_topology_by_type(master, TOPO_TEMPLATE);
+    if (!tpl || !tpl->net) return 0;
+    if (tpl->net->node_count >= 20) return 0;
+
+    /* 注入基础语法节点 — 只需存在即可让 broca_wrap_response 走 POS 匹配路径 */
+    static const char* seeds[] = {
+        "ADJ+NOUN:的", "NOUN+ADJ", "NOUN+VERB",
+        "VERB+ADJ:得", "ADV+VERB:地", "NOUN+NOUN:和",
+        "VERB+NOUN", "ADJ+ADJ"
+    };
+    int n = sizeof(seeds) / sizeof(seeds[0]);
+    int created = 0;
+
+    for (int i = 0; i < n; i++) {
+        int exists = 0;
+        for (int j = 0; j < tpl->net->node_count; j++)
+            if (tpl->net->nodes[j] && strcmp(tpl->net->nodes[j]->concept, seeds[i]) == 0)
+                { exists = 1; break; }
+        if (exists) continue;
+
+        ReasoningNode* node = huarong_net_find_or_create_node(tpl->net, seeds[i], NULL, 0, NULL);
+        if (node) created++;
+    }
+
+    if (created > 0)
+        fprintf(stderr, "[布罗卡区] 注入语法种子: %d 条\n", created);
+    return created;
 }
