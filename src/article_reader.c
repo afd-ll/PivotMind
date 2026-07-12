@@ -30,7 +30,7 @@
 
 // 字符/词哈希表大小（2 的幂）
 #define AR_CHAR_HASH_SIZE  16384
-#define AR_PAIR_HASH_SIZE  65536
+#define AR_PAIR_HASH_SIZE  262144  /* 65536→262144, 支持更多词共现对 */
 #define AR_WORD_HASH_SIZE  16384
 
 #define AR_CHAR_HASH_MASK  (AR_CHAR_HASH_SIZE - 1)
