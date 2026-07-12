@@ -951,7 +951,7 @@ int diffusion_generate(DiffusionCtx* ctx,
 
     /* 调试: 打印输入激活的词和其邻居 */
     {
-        printf("[扩散] 输入=\"%.30s\" 激活 %d 节点:", input, active_count);
+        printf("[扩散] 输入=\"%.60s\" 激活 %d 节点:", input, active_count);
         for (int a = 0; a < active_count && a < 5; a++) {
             ReasoningNode* an = ctx->vocab->net->nodes[active_ids[a]];
             printf(" %s(%d边)", an ? an->concept : "?", an ? an->edge_count : 0);
