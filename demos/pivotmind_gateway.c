@@ -924,10 +924,10 @@ static void handle_learn(GatewaySystem* gw, int fd, const char* body) {
         return;
     }
 
-    /* 限流：每秒最多50次，burst=5 */
+    /* 限流：每秒最多500次，burst=500 */
     time_t now = time(NULL);
     if (now == gw->last_learn_time) {
-        if (++gw->learn_burst > 5) {
+        if (++gw->learn_burst > 500) {
             http_json(fd, 429, "{\"error\":\"rate limit\"}");
             return;
         }
