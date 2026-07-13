@@ -49,12 +49,13 @@ void prefrontal_destroy(Prefrontal* pf) {
 char* prefrontal_chat(Prefrontal* pf, const char* input) {
     if (!pf || !pf->dialog || !input) return NULL;
 
-    /* ── 社交礼仪快速路由：概念名驱动扩散，从网络取回复 ── */
+    /* ── 社交礼仪快速路由：先尝试从网络扩散生成，失败则用自然回退 ── */
     {
         const char* trimmed = input;
         while (*trimmed == ' ' || *trimmed == '\t') trimmed++;
 
         const char* social_seed = NULL;
+        const char* social_fallback = NULL;
 
         /* 问候 */
         if ((strncmp(trimmed, "你好", 4) == 0 && (!trimmed[4] || trimmed[4] == ' ' || trimmed[4] == '!'))
@@ -65,6 +66,7 @@ char* prefrontal_chat(Prefrontal* pf, const char* input) {
             || strncmp(trimmed, "hello", 5) == 0
             || strncmp(trimmed, "hi", 2) == 0) {
             social_seed = "问候与打招呼";
+            social_fallback = "你好！有什么我可以帮你的吗？";
         }
 
         /* 告别 */
@@ -73,15 +75,16 @@ char* prefrontal_chat(Prefrontal* pf, const char* input) {
             || strstr(trimmed, "bye")
             || strstr(trimmed, "晚安"))) {
             social_seed = "告别与道别";
+            social_fallback = "再见，下次聊！";
         }
 
         /* 感谢 */
         if (!social_seed && (strstr(trimmed, "谢谢") || strstr(trimmed, "感谢"))) {
             social_seed = "感谢与礼貌回应";
+            social_fallback = "不客气！";
         }
 
         if (social_seed) {
-            /* 轻度扩散：单次低温，不经过 ACC 回溯循环 */
             GeneratedSequence seq = {0};
             int n = cingulate_diffusion_evaluate(pf->topology, social_seed, 0.08f,
                                                    pf->controller ? pf->controller->emergent_pos : NULL,
@@ -91,11 +94,95 @@ char* prefrontal_chat(Prefrontal* pf, const char* input) {
                     pf->topology,
                     pf->controller ? pf->controller->emergent_pos : NULL,
                     seq.words, seq.count);
-                if (wrapped && wrapped[0]) return wrapped;
-                free(wrapped);
+                if (wrapped && wrapped[0]) {
+                    if (strlen(wrapped) >= 3) return wrapped;
+                    free(wrapped);
+                } else {
+                    free(wrapped);
+                }
             }
-            /* 网络尚无相关概念时的退化态：极简单字，无模板 */
+            if (social_fallback) return strdup(social_fallback);
             return strdup("。");
+        }
+    }
+
+    /* ── 直接图查询：属性问句 (X是什么颜色/味道/感觉) ── */
+    {
+        const char* attr_type = NULL;
+        if (strstr(input, "什么颜色") || strstr(input, "什么色的"))
+            attr_type = "颜色";
+        else if (strstr(input, "什么味道"))
+            attr_type = "味道";
+        else if (strstr(input, "什么感觉"))
+            attr_type = "感觉";
+
+        if (attr_type) {
+            SubTopology* vocab = master_get_sub_topology_by_type(pf->topology, TOPO_VOCABULARY);
+            if (vocab && vocab->net) {
+                /* 线性扫描找概念（兼容concept_hash/node_hash双哈希不一致） */
+                int attr_nid = -1, subj_nid = -1;
+                for (int vi = 0; vi < vocab->net->node_count; vi++) {
+                    ReasoningNode* vn = vocab->net->nodes[vi];
+                    if (vn && vn->concept) {
+                        if (attr_nid < 0 && strcmp(vn->concept, attr_type) == 0)
+                            attr_nid = vi;
+                    }
+                }
+                const char* attr_pos = strstr(input, "什么");
+                if (attr_pos && attr_pos > input && attr_nid >= 0) {
+                    int max_len = (int)(attr_pos - input);
+                    for (int w = 4; w >= 1 && subj_nid < 0; w--) {
+                        for (int ci = 0; ci + w * 3 <= max_len; ci += 3) {
+                            char sub[16] = {0};
+                            memcpy(sub, input + ci, w * 3 < 15 ? w * 3 : 15);
+                            for (int vi = 0; vi < vocab->net->node_count; vi++) {
+                                ReasoningNode* vn = vocab->net->nodes[vi];
+                                if (vn && vn->concept && strcmp(vn->concept, sub) == 0)
+                                { subj_nid = vi; break; }
+                            }
+                            if (subj_nid >= 0) break;
+                        }
+                    }
+                }
+                if (subj_nid >= 0 && attr_nid >= 0) {
+                    ReasoningNode* subj_node = vocab->net->nodes[subj_nid];
+                    ReasoningNode* attr_node = vocab->net->nodes[attr_nid];
+                    if (subj_node && attr_node) {
+                        float best_score = 0.0f;
+                        int best_nid = -1;
+                        for (int se = 0; se < subj_node->edge_count; se++) {
+                            int cand_nid = subj_node->edges[se].target ?
+                                subj_node->edges[se].target->node_id : -1;
+                            if (cand_nid < 0) continue;
+                            float attr_weight = 0.0f;
+                            for (int ae = 0; ae < attr_node->edge_count; ae++) {
+                                if (attr_node->edges[ae].target &&
+                                    attr_node->edges[ae].target->node_id == cand_nid) {
+                                    attr_weight = attr_node->edges[ae].weight;
+                                    break;
+                                }
+                            }
+                            if (attr_weight > 0.0f) {
+                                float score = subj_node->edges[se].weight + attr_weight;
+                                if (score > best_score) {
+                                    best_score = score;
+                                    best_nid = cand_nid;
+                                }
+                            }
+                        }
+                        if (best_nid >= 0 && best_nid < vocab->net->node_count) {
+                            ReasoningNode* answer = vocab->net->nodes[best_nid];
+                            if (answer && answer->concept && concept_is_printable(answer->concept)) {
+                                char buf[256];
+                                snprintf(buf, sizeof(buf), "%s是%s色的。",
+                                         subj_node->concept ? subj_node->concept : "",
+                                         answer->concept);
+                                return strdup(buf);
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -108,9 +195,7 @@ char* prefrontal_chat(Prefrontal* pf, const char* input) {
     /* ── 多层扩散生成 + ACC 自适应门控 ── */
     char* response = NULL;
 
-    /* 多候选生成 + ACC 门控回溯（最多尝试 3 次） */
     for (int attempt = 0; attempt < 3; attempt++) {
-        /* 逐次提高温度扰动，探索不同候选 */
         float temperature = 0.15f + attempt * 0.12f;
 
         GeneratedSequence seq = {0};
@@ -123,7 +208,6 @@ char* prefrontal_chat(Prefrontal* pf, const char* input) {
         const char* summary = cingulate_summary(&seq, gate_buf, sizeof(gate_buf));
         printf("[前额叶] 脊前扣带评分: %s\n", summary ? summary : "?");
 
-        /* ACC 门控决策 */
         CingulateGate gate = cingulate_gate(&seq, pf->accept_threshold);
 
         if (gate == CINGULATE_BACKTRACK || gate == CINGULATE_REWRITE) {
@@ -131,13 +215,11 @@ char* prefrontal_chat(Prefrontal* pf, const char* input) {
             printf("[前额叶] ACC %s (总分=%.3f), 尝试 %d/3\n",
                    gate == CINGULATE_BACKTRACK ? "BACKTRACK" : "REWRITE",
                    seq.total_score, attempt + 1);
-            continue;  /* 回溯 → 尝试下一次 */
+            continue;
         }
 
-        /* 硬阻断 */
         if (seq.total_score < pf->block_threshold) continue;
 
-        /* 用布罗卡区模板包裹输出（插入连接词） */
         char* wrapped = broca_wrap_response(
             pf->topology,
             pf->controller ? pf->controller->emergent_pos : NULL,
@@ -148,7 +230,6 @@ char* prefrontal_chat(Prefrontal* pf, const char* input) {
         }
         response = wrapped;
 
-        /* 更新自适应阈值 */
         pf->recent_scores[pf->recent_pos] = seq.total_score;
         pf->recent_pos = (pf->recent_pos + 1) % 100;
         if (pf->recent_pos % 10 == 0) {
@@ -163,17 +244,16 @@ char* prefrontal_chat(Prefrontal* pf, const char* input) {
             if (pf->accept_threshold < 0.10f) pf->accept_threshold = 0.10f;
         }
 
-        /* 传递 ACC 真实评分，替代硬编码 0.5 */
         cognitive_controller_snapshot(pf->controller, seq.total_score);
         return response;
     }
 
-    /* ── 二段联想扩散 fallback（扩散无产出时）── */
+    /* ── 二段联想扩散 fallback ── */
     {
         printf("[前额叶] 扩散无产出, 尝试联想推理...\n");
         AssociativeEngine* assoc = assoc_engine_create(pf->topology);
         if (assoc) {
-            int ac = associate_from_text(assoc, input, 0);  /* 0 = 动态深度 */
+            int ac = associate_from_text(assoc, input, 0);
             if (ac > 1) {
                 response = generate_from_associations(assoc, 2048, input, ctx_activations);
                 if (response) {
@@ -196,10 +276,6 @@ void prefrontal_feedback(Prefrontal* pf, const char* input,
 
     float confidence = (strcmp(rating, "correct") == 0 || strcmp(rating, "对") == 0) ? 0.95f : 0.2f;
 
-    /* 在线学习：调高本对话中使用的拓扑权重 */
-    // intent_base_learn called internally if needed
-
-    /* 存入记忆 */
     char key[512];
     snprintf(key, sizeof(key), "feedback:%s", input ? input : "");
     memory_store(pf->memory, key, (void*)rating, (int)strlen(rating) + 1,

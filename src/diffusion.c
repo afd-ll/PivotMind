@@ -949,6 +949,83 @@ int diffusion_generate(DiffusionCtx* ctx,
     }
     if (active_count == 0) return 0;
 
+    /* ── 两跳激活扩散：直接匹配 → 一跳邻居 → 两跳邻居，几何衰减 ── */
+    /* "苹果"激活 → "红色""水果"一跳 → "颜色""好吃"两跳 */
+    #define SPREAD_1HOP 1.0f
+    #define SPREAD_2HOP 0.4f
+    #define SPREAD_MAX_EXTRA 256
+    int spread1_ids[SPREAD_MAX_EXTRA];
+    int spread1_count = 0;
+
+    /* 一跳：直接匹配节点的邻居 */
+    for (int a = 0; a < active_count; a++) {
+        ReasoningNode* src = ctx->vocab->net->nodes[active_ids[a]];
+        if (!src) continue;
+        for (int e = 0; e < src->edge_count && spread1_count < SPREAD_MAX_EXTRA; e++) {
+            ReasoningNode* nb = src->edges[e].target;
+            if (!nb || nb->node_id == src->node_id) continue;
+            int dup = 0;
+            for (int d = 0; d < active_count; d++)
+                if (active_ids[d] == nb->node_id) { dup = 1; break; }
+            for (int d = 0; d < spread1_count; d++)
+                if (spread1_ids[d] == nb->node_id) { dup = 1; break; }
+            if (!dup) {
+                nb->activation += SPREAD_1HOP * src->edges[e].weight;
+                spread1_ids[spread1_count++] = nb->node_id;
+            }
+        }
+    }
+
+    /* 两跳：一跳邻居的邻居 — 衰减系数 SPREAD_2HOP */
+    int spread2_count = 0;
+    for (int s = 0; s < spread1_count && spread1_count + spread2_count < SPREAD_MAX_EXTRA; s++) {
+        ReasoningNode* src = ctx->vocab->net->nodes[spread1_ids[s]];
+        if (!src) continue;
+        for (int e = 0; e < src->edge_count; e++) {
+            ReasoningNode* nb = src->edges[e].target;
+            if (!nb || nb->node_id == src->node_id) continue;
+            int dup = 0;
+            for (int d = 0; d < active_count; d++)
+                if (active_ids[d] == nb->node_id) { dup = 1; break; }
+            for (int d = 0; d < spread1_count; d++)
+                if (spread1_ids[d] == nb->node_id) { dup = 1; break; }
+            for (int d = 0; d < spread2_count; d++)
+                if (spread1_ids[spread1_count + d] == nb->node_id) { dup = 1; break; }
+            if (!dup) {
+                nb->activation += SPREAD_2HOP * src->edges[e].weight;
+                spread1_ids[spread1_count + spread2_count] = nb->node_id;
+                spread2_count++;
+            }
+        }
+    }
+    /* (spread1/2 共享 spread1_ids 数组，不释放；仅用于去重) */
+
+    /* ── Jaccard 邻接相似度激活重加权 ── */
+    /* 对被激活的节点，计算其与输入锚点集的邻居重叠率，提升语义精准度 */
+    int total_spread = spread1_count + spread2_count;
+    for (int si = 0; si < total_spread; si++) {
+        int nid = spread1_ids[si];
+        if (nid < 0 || nid >= ctx->vocab->net->node_count) continue;
+        ReasoningNode* node = ctx->vocab->net->nodes[nid];
+        if (!node || node->edge_count == 0) continue;
+
+        /* 统计该节点与输入激活集的共享邻居数 */
+        int shared = 0;
+        for (int e = 0; e < node->edge_count; e++) {
+            int tgt = node->edges[e].target ? node->edges[e].target->node_id : -1;
+            if (tgt < 0) continue;
+            for (int a = 0; a < active_count; a++)
+                if (active_ids[a] == tgt) { shared++; break; }
+            if (shared > 0) continue; /* 只统计一次 */
+            for (int s = 0; s < total_spread && s < SPREAD_MAX_EXTRA; s++)
+                if (spread1_ids[s] == tgt) { shared++; break; }
+        }
+        /* Jaccard ≈ shared / node->edge_count，映射到 [0.5, 1.5] 乘数 */
+        float jac = (node->edge_count > 0) ? (float)shared / (float)node->edge_count : 0.0f;
+        float boost = 0.5f + jac;  /* jac=0→0.5x, jac=1.0→1.5x */
+        node->activation *= boost;
+    }
+
     /* 调试: 打印输入激活的词和其邻居 */
     {
         printf("[扩散] 输入=\"%.60s\" 激活 %d 节点:", input, active_count);
@@ -1028,15 +1105,22 @@ int diffusion_generate(DiffusionCtx* ctx,
                             ctx->template, tpl_scores, cur_decay * 0.5f);
         }
 
-        /* 更新当前活跃集 = 本轮得分最高的 K 个词（跳过虚词） */
+        /* 更新当前活跃集 = 本轮得分最高的 K 个词（跳过虚词、压制枢纽词） */
         DiffusionCandidate tmp[DIFF_MAX_CANDIDATES];
         int tmp_cnt = 0;
         for (int i = 0; i < vn && tmp_cnt < DIFF_MAX_CANDIDATES; i++) {
             if (vocab_scores[i] > 0.001f && ctx->vocab->net->nodes[i]) {
-                const char* concept = ctx->vocab->net->nodes[i]->concept;
+                ReasoningNode* nd = ctx->vocab->net->nodes[i];
+                const char* concept = nd->concept;
                 if (concept && is_function_word(concept)) continue;
                 tmp[tmp_cnt].node_id     = i;
-                tmp[tmp_cnt].total_score = vocab_scores[i];
+                /* 目标度惩罚前移到活跃集选择，防止枢纽词劫持后续扩散方向 */
+                float dp = 1.0f;
+                if (nd->edge_count > 10) {
+                    dp = 1.0f / log2f((float)(nd->edge_count));
+                    if (dp < 0.05f) dp = 0.05f;
+                }
+                tmp[tmp_cnt].total_score = vocab_scores[i] * dp;
                 tmp[tmp_cnt].word        = concept;
                 tmp_cnt++;
             }
@@ -1063,7 +1147,15 @@ int diffusion_generate(DiffusionCtx* ctx,
         final[final_cnt].semantic_score = 0;
         final[final_cnt].template_score = 0;
         final[final_cnt].emotion_score  = 0;
-        final[final_cnt].total_score    = vocab_scores[i];  /* 已含跨层回流 */
+        /* P1: 目标度惩罚 — 枢纽词(>10边)得分衰减，特定词优势放大
+         *  10边 → 0.28x, 100边 → 0.15x, 1000边 → 0.10x
+         *  解决扩散被高频共现枢纽词(很/大/的)劫持的问题 */
+        float degree_penalty = 1.0f;
+        if (n->edge_count > 10) {
+            degree_penalty = 1.0f / log2f((float)(n->edge_count));
+            if (degree_penalty < 0.05f) degree_penalty = 0.05f;  /* 软底，不完全抹零 */
+        }
+        final[final_cnt].total_score    = vocab_scores[i] * degree_penalty;
         final[final_cnt].word = n->concept;
         final[final_cnt].used = 0;
         final_cnt++;
@@ -1090,6 +1182,50 @@ int diffusion_generate(DiffusionCtx* ctx,
                     final[f].vocab_score += boost;
                     break;
                 }
+            }
+        }
+    }
+    qsort(final, final_cnt, sizeof(DiffusionCandidate), _cand_cmp);
+
+    /* ── 第2.5步：图交集重排序 ──
+     * 核心思想：正确答案应该同时连接到多个输入词。
+     * 例如"苹果是什么颜色"→"苹果"和"颜色"都连接到"红色"→高交集分。
+     * 通用枢纽词("很"/"大")每个输入词都连但边权低→低交集分。 */
+    {
+        /* 对于每个final候选词，计算与多少个输入激活节点有高权边 */
+        for (int f = 0; f < final_cnt; f++) {
+            int gen_nid = final[f].node_id;
+            if (gen_nid < 0 || gen_nid >= vn) continue;
+            int input_connections = 0;
+            float total_edge_weight = 0.0f;
+            for (int a = 0; a < active_count; a++) {
+                int src_nid = active_ids[a];
+                if (src_nid < 0 || src_nid >= vn) continue;
+                ReasoningNode* src = ctx->vocab->net->nodes[src_nid];
+                if (!src) continue;
+                for (int e = 0; e < src->edge_count; e++) {
+                    if (src->edges[e].target &&
+                        src->edges[e].target->node_id == gen_nid) {
+                        float ew = src->edges[e].weight;
+                        if (ew >= 0.3f) {
+                            input_connections++;
+                            total_edge_weight += ew;
+                        }
+                        break;
+                    }
+                }
+            }
+            /* 交集分：连接的输入词越多、边权越高 → 越像正确答案 */
+            float intersect_score = 0.0f;
+            if (active_count > 0 && input_connections > 0) {
+                float coverage = (float)input_connections / (float)active_count;
+                float avg_weight = total_edge_weight / (float)input_connections;
+                intersect_score = coverage * (0.3f + 0.7f * avg_weight);
+            }
+            /* 覆盖率达到50%以上(两个输入词都连) → 大幅加分
+             * 覆盖率低 → 不加分(不惩罚，让扩散原始分数仍然有效) */
+            if (intersect_score > 0.3f) {
+                final[f].total_score += intersect_score * 2.0f;
             }
         }
     }

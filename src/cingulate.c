@@ -9,61 +9,70 @@
 #include "cingulate.h"
 #include "huarong_topology.h"
 #include "diffusion.h"
+#include "utf8_tokenizer.h"
 #include <stdio.h>
 #include <string.h>
 #include <math.h>
 
 /* ================================================================
- *  语义一致性：生成词序列与输入的语义层重叠度
+ *  语义一致性：生成词序列与输入在词汇拓扑中的边权验证
+ *  P2: 不再依赖(通常为空的)TOPO_SEMANTIC，改用词汇拓扑边权
+ *  对每个生成词，检查输入词到它的最大边权 → 强关联/弱关联/噪音
  * ================================================================ */
 static float semantic_consistency(GeneratedSequence* seq,
                                    MasterTopology* topo,
                                    const char* input) {
     if (!topo || seq->count < 2) return 0.3f;
+    if (!input || !input[0]) return 0.4f;
 
-    /* 在语义拓扑中找 input 的激活节点 */
-    SubTopology* sem = master_get_sub_topology_by_type(topo, TOPO_SEMANTIC);
-    if (!sem || !sem->net) return 0.5f;  /* 无语义层跳过 */
+    /* 获取词汇拓扑 */
+    SubTopology* vocab = master_get_sub_topology_by_type(topo, TOPO_VOCABULARY);
+    if (!vocab || !vocab->net) return 0.5f;
 
-    /* 统计生成词中哪些在语义拓扑有对应 */
-    int matched = 0;
+    /* 对输入分词，找到对应的词汇拓扑节点ID */
+    char* tokens[64];
+    int tok_count = utf8_tokenize(input, tokens, 64);
+    int input_nids[64];
+    int input_nid_count = 0;
+    for (int t = 0; t < tok_count && input_nid_count < 64; t++) {
+        if (!tokens[t]) continue;
+        int nid = huarong_net_find_concept(vocab->net, tokens[t]);
+        if (nid >= 0) input_nids[input_nid_count++] = nid;
+    }
+    for (int t = 0; t < tok_count; t++) free(tokens[t]);
+    if (input_nid_count == 0) return 0.4f;  /* 输入词都不在词汇表中 */
+
+    /* 对每个生成词，检查与输入词的最大边权 */
+    float total_relevance = 0.0f;
     for (int i = 0; i < seq->count && i < MAX_GENERATED_WORDS; i++) {
         const char* w = seq->words[i];
         if (!w) continue;
-        for (int j = 0; j < sem->net->node_count; j++) {
-            ReasoningNode* n = sem->net->nodes[j];
-            if (n && n->concept && strcmp(n->concept, w) == 0) {
-                matched++;
-                break;
-            }
-        }
-        if (i < seq->count - 1) {
-            /* O(1) 连接哈希查找相邻词之间的边 */
-            ReasoningNode* na = NULL, *nb = NULL;
-            for (int j = 0; j < sem->net->node_count; j++) {
-                if (na && nb) break;
-                ReasoningNode* n = sem->net->nodes[j];
-                if (!n || !n->concept) continue;
-                if (!na && strcmp(n->concept, seq->words[i]) == 0)   na = n;
-                if (!nb && strcmp(n->concept, seq->words[i+1]) == 0) nb = n;
-            }
-            if (na && nb) {
-                /* 线性扫描连接（已知连接数量有限，O(conn_count)可接受） */
-                for (int k = 0; k < na->edge_count; k++) {
-                    if (na->edges[k].target == nb) {
-                        float edge_w = na->edges[k].weight;
-                        if (edge_w > 0.1f) matched += 2;
-                        else matched += 1;
-                        break;
-                    }
+        int gen_nid = huarong_net_find_concept(vocab->net, w);
+        if (gen_nid < 0) continue;
+        ReasoningNode* gen_node = vocab->net->nodes[gen_nid];
+        if (!gen_node) continue;
+
+        /* 找任何输入节点到该生成词的最大边权 */
+        float max_edge_weight = 0.0f;
+        for (int in = 0; in < input_nid_count; in++) {
+            ReasoningNode* in_node = vocab->net->nodes[input_nids[in]];
+            if (!in_node) continue;
+            for (int e = 0; e < in_node->edge_count; e++) {
+                if (in_node->edges[e].target &&
+                    in_node->edges[e].target->node_id == gen_nid) {
+                    if (in_node->edges[e].weight > max_edge_weight)
+                        max_edge_weight = in_node->edges[e].weight;
+                    break;
                 }
             }
         }
+        /* 边权 >=0.5 → 强语义关联, 0.3~0.5 → 弱关联, <0.3 → 噪音 */
+        total_relevance += (max_edge_weight >= 0.5f) ? 1.0f :
+                           (max_edge_weight >= 0.3f) ? 0.5f : 0.1f;
     }
-    (void)input;  /* 未来：比对 input 语义向量 */
 
-    float max_score = (float)(seq->count * 3);
-    return max_score > 0 ? (float)matched / max_score : 0.5f;
+    float avg_relevance = seq->count > 0 ? total_relevance / (float)seq->count : 0.0f;
+    return avg_relevance;
 }
 
 /* ================================================================

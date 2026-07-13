@@ -7,7 +7,7 @@
 
 [English](README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [Русский](README.ru.md)
 
-[![Version](https://img.shields.io/badge/version-v0.5.4-blue.svg)](changelogs/)
+[![Version](https://img.shields.io/badge/version-v0.5.5-blue.svg)](changelogs/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green.svg)](LICENSE)
 [![Language](https://img.shields.io/badge/C-99%2B-orange.svg)](https://en.wikipedia.org/wiki/C99)
 [![Platform](https://img.shields.io/badge/ARM-RK3399%20%7C%20x86__64-lightgrey.svg)](#running-on)
@@ -29,7 +29,7 @@ PivotMind는 [TraceWisdomNetwork](#tracewisdomnetwork) +
 Transformer 없음. 임베딩 벡터 없음. 역전파 없음.
 노드, 엣지, 활성화, 감쇠 — 끊임없이 돌아가는 백그라운드 클록에 의해 구동됩니다.
 
-**현재 버전: v0.5.4** — 14개 뇌 영역/서브시스템(전부 구현 완료), 창발적 품사 시스템, 병렬 다중 학습기, PFE 추론, 512차원 특징 벡터.
+**현재 버전: v0.5.5** — 14개 뇌 영역/서브시스템(전부 구현 완료), 창발적 품사 시스템, 병렬 다중 학습기, PFE 추론, 512차원 특징 벡터.
 
 **코드 규모: 85개 소스 파일(~48,600행 C) + 89개 헤더(~12,600행) + 도구/테스트/데모(~13,000행) = 약 74,000행.**
 
@@ -110,7 +110,7 @@ Input is tokenized via sliding window, then diffuses simultaneously across layer
 - **Template** — syntactic pattern recognition, guiding connector insertion
 - **Emotion** — valence × arousal weighting, modulating candidate priority
 
-**v0.5.4 개선**: 기능어 필터링 — `is_function_word()`가 ~130개 중영 기능어를 확인하고, 파이프라인 3단계(활성 세트 업데이트, 가중 점수, 출력)에서 필터링하여 고연결성 기능어가 출력을 장악하는 것을 방지합니다. 측방 억제로 내용어 다양성을 보장합니다.
+**v0.5.5 개선**: 기능어 필터링 — `is_function_word()`가 ~130개 중영 기능어를 확인하고, 파이프라인 3단계(활성 세트 업데이트, 가중 점수, 출력)에서 필터링하여 고연결성 기능어가 출력을 장악하는 것을 방지합니다. 측방 억제로 내용어 다양성을 보장합니다.
 
 ### Reasoning Orchestration (PFE)
 
@@ -277,7 +277,7 @@ pivotmind/
 | **v0.4.1** | Web fetch refactor (libcurl engine), Bing/Bing News providers, news timer           |
 | **v0.4.2** | Comprehensive realloc dangling pointer fix (15+ sites), 4-round memory safety audit |
 | **v0.4.3** | **Emergent POS** — seed anchors + 512-dim feature clustering, grammar emerges from data |
-| **v0.5.4** | Diffusion function word filter (~130 words), cross-layer index fix, double-free race fix |
+| **v0.5.5** | Diffusion function word filter (~130 words), cross-layer index fix, double-free race fix |
 
 > Detailed changelogs: see [`changelogs/`](changelogs/) directory
 

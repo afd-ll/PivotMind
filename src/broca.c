@@ -181,6 +181,12 @@ char* broca_wrap_response(MasterTopology* master, EmergentPOS* ep,
             /* 模板命中：输出词 + 槽位间连接词 */
             ReasoningNode* tn = tpl_topo->net->nodes[best_tpl];
             for (int k = 0; k < best_len; k++) {
+                /* 英文词间自动插空格 */
+                if (out_pos > 0 && (unsigned char)words[i+k][0] < 0x80) {
+                    unsigned char last = (unsigned char)buf[out_pos - 1];
+                    if (last >= 0x20 && last < 0x80)
+                        buf[out_pos++] = ' ';
+                }
                 int need = snprintf(buf + out_pos, buf_cap - out_pos,
                                     "%s", words[i + k]);
                 if (need < 0 || out_pos + need >= (int)buf_cap) goto done;
@@ -196,6 +202,12 @@ char* broca_wrap_response(MasterTopology* master, EmergentPOS* ep,
             i += best_len;
         } else {
             /* 无模板：直接输出当前词 */
+            /* 英文词间自动插空格 */
+            if (out_pos > 0 && (unsigned char)words[i][0] < 0x80) {
+                unsigned char last = (unsigned char)buf[out_pos - 1];
+                if (last >= 0x20 && last < 0x80)
+                    buf[out_pos++] = ' ';
+            }
             int need = snprintf(buf + out_pos, buf_cap - out_pos,
                                 "%s", words[i]);
             if (need < 0 || out_pos + need >= (int)buf_cap) goto done;

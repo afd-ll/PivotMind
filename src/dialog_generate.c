@@ -53,6 +53,26 @@ char* dialog_generate(DialogReasoning* reasoning, const char* input,
         int anc_tok_count = utf8_tokenize(input, anchor_tokens, 64);
         int matched = 0;
         SubTopology* vocab = master_get_sub_topology_by_type(dsys->master, TOPO_VOCABULARY);
+        /* 拓扑驱动自举分词：扫描相邻 token 对，若存在组合节点则合并为整体，
+         * 使走边时 \"苹果\" 作为整体匹配而非 \"苹\"+\"果\"。 */
+        if (vocab && vocab->net && anc_tok_count > 1) {
+            for (int t = 0; t < anc_tok_count - 1; t++) {
+                if (!anchor_tokens[t] || !anchor_tokens[t+1]) continue;
+                /* 只对两个连续 CJK 单字尝试组合合并 */
+                if (strlen(anchor_tokens[t]) != 3 || strlen(anchor_tokens[t+1]) != 3) continue;
+                char cname[13];
+                snprintf(cname, sizeof(cname), "%s%s", anchor_tokens[t], anchor_tokens[t+1]);
+                int cnid = huarong_net_find_concept(vocab->net, cname);
+                if (cnid >= 0) {
+                    /* 组合节点存在：替换 t 为组合名，标记 t+1 为已消费 */
+                    free(anchor_tokens[t]);
+                    anchor_tokens[t] = strdup(cname);
+                    free(anchor_tokens[t+1]);
+                    anchor_tokens[t+1] = NULL;
+                    t++;  /* 跳过已合并的 token */
+                }
+            }
+        }
         if (vocab && vocab->net && anc_tok_count > 0) {
             for (int t = 0; t < anc_tok_count; t++) {
                 if (!anchor_tokens[t]) continue;
@@ -405,9 +425,35 @@ char* dialog_generate(DialogReasoning* reasoning, const char* input,
 // 检查字符串是否包含中文或英文标点
 static int contains_punctuation(const char* s) {
     if (!s) return 0;
-    const char* punct = "，。、；：？！…—～·．（）【】《》""''　,.;:!?\"'()[]{}<>/\\@#$%^&*_+-=~`";
+    /* 仅检查单字节ASCII标点，避免将CJK字符的UTF-8字节误判为标点字节 */
+    const char* punct = ",.;:!?\"'()[]{}<>/\\@#$%^&*_+-=~`";
     for (const char* p = punct; *p; p++) {
         if (strchr(s, *p)) return 1;
+    }
+    /* 检查多字节中文标点（逐字符匹配） */
+    static const char* cjk_punct[] = {
+        "\xe3\x80\x82",  /* 。 */
+        "\xe3\x80\x81",  /* 、 */
+        "\xef\xbc\x8c",  /* ， */
+        "\xef\xbc\x9b",  /* ； */
+        "\xef\xbc\x9a",  /* ： */
+        "\xef\xbc\x81",  /* ！ */
+        "\xef\xbc\x9f",  /* ？ */
+        "\xe2\x80\xa6",  /* … */
+        "\xe2\x80\x94",  /* — */
+        "\xef\xbd\x9e",  /* ～ */
+        "\xc2\xb7",      /* · */
+        "\xef\xbc\x8e",  /* ． */
+        "\xef\xbc\x88",  /* （ */
+        "\xef\xbc\x89",  /* ） */
+        "\xe3\x80\x90",  /* 【 */
+        "\xe3\x80\x91",  /* 】 */
+        "\xe3\x80\x8a",  /* 《 */
+        "\xe3\x80\x8b",  /* 》 */
+        NULL
+    };
+    for (const char** pp = cjk_punct; *pp; pp++) {
+        if (strstr(s, *pp)) return 1;
     }
     return 0;
 }
@@ -435,9 +481,130 @@ int concept_is_printable(const char* concept) {
     return 1;
 }
 
+/* ==================== 组合节点条件概率追踪器 ====================
+ * 统计单字出现次数和相邻字符对共现次数，
+ * 当条件概率 P(B|A) ≥ THETA 或 P(A|B) ≥ THETA 且共现数 ≥ N_MIN 时，
+ * 自动创建组合节点（如 "苹"+"果" → "苹果"）。
+ * 哈希表为静态全局变量，进程重启后从零重新累积。
+ * 已创建的组合节点作为普通 ReasoningNode 持久化到状态文件。
+ */
+#define CP_HASH_SIZE   65536
+#define CP_HASH_MASK   (CP_HASH_SIZE - 1)
+#define COMPOUND_N_MIN 10       /* 最少共现次数，防小样本噪声 */
+#define COMPOUND_THETA 0.5f     /* 条件概率阈值 */
+
+typedef struct {
+    int node_a;   /* smaller node_id */
+    int node_b;   /* larger node_id */
+    int cooc;     /* co-occurrence count */
+} CoocEntry;
+
+typedef struct { CoocEntry table[CP_HASH_SIZE]; } PairCoocTable;
+static PairCoocTable* g_pair_cooc = NULL;
+static int* g_single_count = NULL;
+static int  g_single_capacity = 0;
+
+static inline int cp_pair_hash(int a, int b) {
+    if (a > b) { int t = a; a = b; b = t; }
+    uint64_t key = ((uint64_t)a << 32) | (uint64_t)b;
+    return (int)((key * 0x9E3779B97F4A7C15ULL) & CP_HASH_MASK);
+}
+
+static void cp_tracker_ensure(int max_nodes) {
+    if (!g_pair_cooc) g_pair_cooc = (PairCoocTable*)calloc(1, sizeof(PairCoocTable));
+    if (g_single_capacity < max_nodes) {
+        int new_cap = max_nodes + 2048;
+        int* p = (int*)realloc(g_single_count, (size_t)new_cap * sizeof(int));
+        if (p) {
+            memset(p + g_single_capacity, 0,
+                   (size_t)(new_cap - g_single_capacity) * sizeof(int));
+            g_single_count = p;
+            g_single_capacity = new_cap;
+        }
+    }
+}
+
+static void cp_tracker_record(int id_a, int id_b) {
+    if (!g_pair_cooc || id_a < 0 || id_b < 0 || id_a == id_b) return;
+    int max_id = id_a > id_b ? id_a : id_b;
+    if (max_id >= g_single_capacity) cp_tracker_ensure(max_id + 2048);
+    if (g_single_count) {
+        if (id_a < g_single_capacity) g_single_count[id_a]++;
+        if (id_b < g_single_capacity) g_single_count[id_b]++;
+    }
+    int h = cp_pair_hash(id_a, id_b);
+    int min_id = id_a < id_b ? id_a : id_b;
+    int max_id_ = id_a > id_b ? id_a : id_b;
+    for (int p = 0; p < CP_HASH_SIZE; p++) {
+        int idx = (h + p) & CP_HASH_MASK;
+        CoocEntry* e = &g_pair_cooc->table[idx];
+        if (e->cooc == 0) {
+            e->node_a = min_id; e->node_b = max_id_; e->cooc = 1; return;
+        }
+        if (e->node_a == min_id && e->node_b == max_id_) { e->cooc++; return; }
+    }
+}
+
+static int cp_tracker_get_cooc(int id_a, int id_b) {
+    if (!g_pair_cooc) return 0;
+    int h = cp_pair_hash(id_a, id_b);
+    int min_id = id_a < id_b ? id_a : id_b;
+    int max_id = id_a > id_b ? id_a : id_b;
+    for (int p = 0; p < CP_HASH_SIZE; p++) {
+        int idx = (h + p) & CP_HASH_MASK;
+        CoocEntry* e = &g_pair_cooc->table[idx];
+        if (e->cooc == 0) return 0;
+        if (e->node_a == min_id && e->node_b == max_id) return e->cooc;
+    }
+    return 0;
+}
+
+static int cp_tracker_get_single(int id) {
+    if (!g_single_count || id < 0 || id >= g_single_capacity) return 0;
+    return g_single_count[id];
+}
+
+static int cp_tracker_should_create(int id_a, int id_b) {
+    int cooc = cp_tracker_get_cooc(id_a, id_b);
+    if (cooc < COMPOUND_N_MIN) return 0;
+    int ta = cp_tracker_get_single(id_a);
+    int tb = cp_tracker_get_single(id_b);
+    if (ta <= 0 || tb <= 0) return 0;
+    float p_ba = (float)cooc / (float)ta;  /* P(B|A) */
+    float p_ab = (float)cooc / (float)tb;  /* P(A|B) */
+    return (p_ba >= COMPOUND_THETA || p_ab >= COMPOUND_THETA) ? 1 : 0;
+}
+
+/* 继承源节点 A 和 B 的出边到组合节点 cn，权重取平均或按 0.7 折 */
+static void cp_inherit_edges(HuarongTopologyNet* net, ReasoningNode* cn,
+                              ReasoningNode* na, ReasoningNode* nb) {
+    if (!net || !cn || !na || !nb) return;
+    for (int e = 0; e < na->edge_count; e++) {
+        if (!na->edges[e].target) continue;
+        float w = na->edges[e].weight;
+        float wb = 0.0f; int found = 0;
+        for (int eb = 0; eb < nb->edge_count; eb++) {
+            if (nb->edges[eb].target == na->edges[e].target) {
+                wb = nb->edges[eb].weight; found = 1; break;
+            }
+        }
+        huarong_net_add_connection(net, cn->node_id,
+            na->edges[e].target->node_id, found ? (w + wb) * 0.5f : w * 0.7f);
+    }
+    for (int e = 0; e < nb->edge_count; e++) {
+        if (!nb->edges[e].target) continue;
+        int dup = 0;
+        for (int ea = 0; ea < na->edge_count; ea++) {
+            if (na->edges[ea].target == nb->edges[e].target) { dup = 1; break; }
+        }
+        if (!dup)
+            huarong_net_add_connection(net, cn->node_id,
+                nb->edges[e].target->node_id, nb->edges[e].weight * 0.7f);
+    }
+}
+
 static int get_or_create_concept(SubTopology* topo, const char* concept) {
     if (!topo || !topo->net || !concept) return -1;
-    /* O(1) 哈希查找替代 O(n) 线性扫描 */
     int existing = huarong_net_find_concept(topo->net, concept);
     if (existing >= 0) return existing;
     float feat[NODE_FEATURE_DIM];
@@ -447,117 +614,125 @@ static int get_or_create_concept(SubTopology* topo, const char* concept) {
     return node ? node->node_id : -1;
 }
 
+/* ==================== 自动学习概念（条件概率驱动版）==================== */
 void auto_learn_concepts(MasterTopology* master, const char* text, void* str_pool) {
-    (void)str_pool;  // 保留供后续字符串池优化使用
+    (void)str_pool;
     if (!master || !text || strlen(text) == 0) return;
 
-    // 获取词汇拓扑和语义拓扑
     SubTopology* vocab = master_get_sub_topology_by_type(master, TOPO_VOCABULARY);
-    SubTopology* semantic = master_get_sub_topology_by_type(master, TOPO_SEMANTIC);
-    if (!vocab || !vocab->net || !semantic || !semantic->net) return;
+    if (!vocab || !vocab->net) return;
+    cp_tracker_ensure(vocab->net->max_nodes);
 
-    // 分词
-    char* tokens[64];
-    int token_count = utf8_tokenize(text, tokens, 64);
+    /* UTF-8 分词（中文按单字切） */
+    char* tokens[128];
+    int token_count = utf8_tokenize(text, tokens, 128);
     if (token_count <= 0) return;
 
-    // 第一步：从单个字符组合成有意义的双字/三字概念
-    // 对于中文，连续中文字符合并为2~3字窗口
-    char* concepts[64];
-    int concept_count = 0;
+    /* 提取中文单字（跳过标点/停用词），获取或创建节点ID */
+    int cjk_pos[128], cjk_ids[128], cjk_count = 0;
+    for (int i = 0; i < token_count && cjk_count < 128; i++) {
+        if (!tokens[i] || strlen(tokens[i]) != 3) continue;
+        unsigned char c0 = (unsigned char)tokens[i][0];
+        if ((c0 & 0x80) == 0) continue;
+        if (contains_punctuation(tokens[i]) || is_stop_word(tokens[i])) continue;
+        int nid = get_or_create_concept(vocab, tokens[i]);
+        if (nid >= 0) {
+            cjk_pos[cjk_count] = i;
+            cjk_ids[cjk_count] = nid;
+            cjk_count++;
+        }
+    }
+    if (cjk_count <= 0) { for (int i = 0; i < token_count; i++) free(tokens[i]); return; }
 
-    for (int i = 0; i < token_count && concept_count < 64; i++) {
-        // 跳过停用词和含标点的词
-        if (is_stop_word(tokens[i]) || contains_punctuation(tokens[i])) continue;
+    /* 收集所有参与节点（单字 + 将创建的组合词）用于后续建边 */
+    int node_ids[128], node_count = 0;
+    for (int i = 0; i < cjk_count; i++) node_ids[node_count++] = cjk_ids[i];
 
-        // 英文/ASCII词直接作为概念
-        if (!tokens[i] || strlen(tokens[i]) == 0) continue;
-        unsigned char c = (unsigned char)tokens[i][0];
-        if ((c & 0x80) == 0) {
-            // ASCII token（英文词、数字等）
-            if (strlen(tokens[i]) >= 2) {  // 至少2个字符才有意义
-                concepts[concept_count++] = strdup(tokens[i]);
-            }
+    /* ---- 条件概率驱动的组合节点创建 ---- */
+    for (int i = 0; i < cjk_count - 1; i++) {
+        int id_a = cjk_ids[i], id_b = cjk_ids[i + 1];
+        cp_tracker_record(id_a, id_b);
+        if (!cp_tracker_should_create(id_a, id_b)) continue;
+
+        char cname[13];  /* 4 CJK chars max (12 bytes) + null */
+        snprintf(cname, sizeof(cname), "%s%s",
+                 tokens[cjk_pos[i]], tokens[cjk_pos[i+1]]);
+        int existing = huarong_net_find_concept(vocab->net, cname);
+        if (existing >= 0) {
+            if (existing < vocab->net->node_count && vocab->net->nodes[existing])
+                vocab->net->nodes[existing]->activation += 0.05f;
+            continue;
+        }
+
+        /* 特征向量 = 两源节点均值 */
+        float feat[NODE_FEATURE_DIM];
+        ReasoningNode *na = vocab->net->nodes[id_a], *nb = vocab->net->nodes[id_b];
+        if (na && na->features && nb && nb->features) {
+            for (int d = 0; d < NODE_FEATURE_DIM; d++)
+                feat[d] = (na->features[d] + nb->features[d]) * 0.5f;
+        } else {
+            for (int d = 0; d < NODE_FEATURE_DIM; d++)
+                feat[d] = ((float)rand() / RAND_MAX - 0.5f) * 0.1f;
+        }
+
+        ReasoningNode* cn = huarong_net_add_node(vocab->net, cname, feat, NODE_FEATURE_DIM);
+        if (cn) {
+            cp_inherit_edges(vocab->net, cn, na, nb);
+            /* 将新创建的组合节点也加入滑动窗口候选 */
+            if (node_count < 128) node_ids[node_count++] = cn->node_id;
         }
     }
 
-    // 对于中文单字，尝试组合成双字词
-    // 收集所有中文单字位置
-    int chinese_pos[64], chinese_count = 0;
-    for (int i = 0; i < token_count && chinese_count < 64; i++) {
-        if (!tokens[i]) continue;
-        unsigned char c = (unsigned char)tokens[i][0];
-        if ((c & 0x80) != 0 && strlen(tokens[i]) == 3) {  // 中文字符
-            chinese_pos[chinese_count++] = i;
+    /* ---- 扫描已有组合节点，加入滑动窗口候选 ---- */
+    for (int i = 0; i < cjk_count - 1 && node_count < 128; i++) {
+        char cname[13];
+        snprintf(cname, sizeof(cname), "%s%s",
+                 tokens[cjk_pos[i]], tokens[cjk_pos[i+1]]);
+        int cnid = huarong_net_find_concept(vocab->net, cname);
+        if (cnid >= 0) {
+            /* 去重：检查是否已在 node_ids 中 */
+            int dup = 0;
+            for (int k = 0; k < node_count; k++)
+                if (node_ids[k] == cnid) { dup = 1; break; }
+            if (!dup) node_ids[node_count++] = cnid;
         }
     }
 
-    // 组合双字词（前后相邻的中文字符）
-    for (int i = 0; i < chinese_count - 1 && concept_count < 64; i++) {
-        char bigram[7];  // 2个中文字符(3+3) + 终止符
-        snprintf(bigram, sizeof(bigram), "%s%s",
-                 tokens[chinese_pos[i]], tokens[chinese_pos[i + 1]]);
-        if (!is_stop_word(bigram) && !contains_punctuation(bigram)) {
-            concepts[concept_count++] = strdup(bigram);
-        }
-    }
-
-    // 第二步：将概念加入词汇拓扑
-    int concept_ids[64];
-    int valid_count = 0;
-    for (int i = 0; i < concept_count; i++) {
-        int id = get_or_create_concept(vocab, concepts[i]);
-        if (id >= 0) {
-            concept_ids[valid_count++] = id;
-        }
-    }
-
-    // 第三步：在词汇拓扑中建立共现连接（滑动窗口，窗口=5）
-    // 原全连接 O(n^2) → 滑动窗口 O(n×5)，大幅减少噪音边
+    /* ---- 滑动窗口建边（对已有节点） ---- */
     #define COOCCUR_WINDOW 5
-    for (int i = 0; i < valid_count; i++) {
-        int j_max = (i + COOCCUR_WINDOW < valid_count) ? i + COOCCUR_WINDOW : valid_count;
+    for (int i = 0; i < node_count; i++) {
+        int j_max = (i + COOCCUR_WINDOW < node_count) ? i + COOCCUR_WINDOW : node_count;
         for (int j = i + 1; j < j_max; j++) {
-            int conn_exists = 0;
-            ReasoningNode* node_a = vocab->net->nodes[concept_ids[i]];
-            if (node_a) {
-                for (int k = 0; k < node_a->edge_count; k++) {
-                    ReasoningNode* target = node_a->edges[k].target;
-                    if (target && target->node_id == concept_ids[j]) {
-                        node_a->edges[k].weight += 0.1f;
-                        if (node_a->edges[k].weight > 1.0f)
-                            node_a->edges[k].weight = 1.0f;
-                        conn_exists = 1;
-                        break;
+            int found = 0;
+            ReasoningNode* na = vocab->net->nodes[node_ids[i]];
+            if (na) {
+                for (int k = 0; k < na->edge_count; k++) {
+                    if (na->edges[k].target &&
+                        na->edges[k].target->node_id == node_ids[j]) {
+                        na->edges[k].weight += 0.1f;
+                        if (na->edges[k].weight > 1.0f) na->edges[k].weight = 1.0f;
+                        found = 1; break;
                     }
                 }
             }
-            if (!conn_exists) {
-                huarong_net_add_connection(vocab->net,
-                    concept_ids[i], concept_ids[j], 0.5f);
-            }
+            if (!found)
+                huarong_net_add_connection(vocab->net, node_ids[i], node_ids[j], 0.5f);
         }
     }
-    
-    // 第四步：在线更新节点 embedding（Hebbian: 共现节点互相拉近）
+
+    /* ---- Hebbian 在线更新 ---- */
     float lr = 0.02f;
-    for (int i = 0; i < valid_count; i++) {
-        ReasoningNode* ni = vocab->net->nodes[concept_ids[i]];
+    for (int i = 0; i < node_count; i++) {
+        ReasoningNode* ni = vocab->net->nodes[node_ids[i]];
         if (!ni || !ni->features || ni->feature_dim != NODE_FEATURE_DIM) continue;
-        for (int j = i + 1; j < valid_count; j++) {
-            ReasoningNode* nj = vocab->net->nodes[concept_ids[j]];
+        for (int j = i + 1; j < node_count; j++) {
+            ReasoningNode* nj = vocab->net->nodes[node_ids[j]];
             if (!nj || !nj->features || nj->feature_dim != NODE_FEATURE_DIM) continue;
             hebbian_update(ni->features, nj->features, NODE_FEATURE_DIM, lr);
         }
     }
 
-    // 清理
-    for (int i = 0; i < token_count; i++) {
-        free(tokens[i]);
-    }
-    for (int i = 0; i < concept_count; i++) {
-        free(concepts[i]);
-    }
+    for (int i = 0; i < token_count; i++) free(tokens[i]);
 }
 
 

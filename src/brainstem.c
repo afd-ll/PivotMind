@@ -23,6 +23,7 @@
 #include "broca.h"
 #include "hypothalamus.h"
 #include "visual_cortex.h"    /* v0.5 视觉皮层 — 多模态感知 */
+#include "semantic_growth.h"  /* 语义拓扑自动生长 */
 #include "error.h"
 #include "platform.h"
 #include <stdio.h>
@@ -533,6 +534,13 @@ static void* brainstem_loop(void* arg) {
             int saved = master_save_state(bs->master, "pivotmind_state.dat");
             if (saved > 0 && bs->verbose)
                 LOG_INFO("[存盘] tick=%d 已保存 %d 节点", bs->tick_count, saved);
+        }
+
+        /* 语义拓扑自动生长：每 60 tick (≈1min)，首次在第5tick即触发 */
+        if (bs->tick_count == 3 || bs->tick_count % 5 == 0) {
+            int grown = semantic_grow_from_vocab(bs->master);
+            if (grown > 0 && bs->verbose)
+                LOG_INFO("[语义生长] tick=%d 新增 %d 语义节点", bs->tick_count, grown);
         }
     }
 

@@ -953,6 +953,10 @@ static void handle_learn(GatewaySystem* gw, int fd, const char* body) {
                       ? gw->prefrontal->controller->emergent_pos : NULL;
     int added = _learn_tokens(vocab, msg, &prev_id, ep);
 
+    /* v0.5.5: 同时走 auto_learn_concepts 建双字概念+共现边
+     * 弥补 _learn_tokens 只建单字节点的问题，使"颜色"/"红色"等作为整体存在 */
+    auto_learn_concepts(m, msg, NULL);
+
     /* 同时走 PMI 管线：建立词间共现频率表 → 自动学习者会建边 */
     if (gw->perception) {
         perception_feed_learn_text(gw->perception, msg);

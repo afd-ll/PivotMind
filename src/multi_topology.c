@@ -1422,7 +1422,7 @@ char* master_generate_response(MasterTopology* master,
 #define EDGE_WALK_W_WEIGHT      0.22f   // 边逻辑强度（原0.27→0.22：削弱rich-get-richer）
 #define EDGE_WALK_W_CONF        0.15f   // 边置信度（原0.20→0.15）
 #define EDGE_WALK_W_BIAS        0.05f   // 边动机倾向（原0.10→0.05）
-#define EDGE_WALK_W_ACTIVATION  0.18f   // 目标节点激活值（原0.23→0.18）
+#define EDGE_WALK_W_ACTIVATION  0.35f   // 目标节点激活值（提升：语义约束主导）
 #define EDGE_WALK_W_NODE_CONF   0.10f   // 目标节点置信度
 // 效维已改为乘法因子，见 VALENCE_COEFF
 #define EDGE_WALK_W_SEMANTIC    0.20f   // 语义得分（原0.10→0.20：更强的主题约束）
@@ -2010,8 +2010,14 @@ int topology_walk_greedy(SubTopology* sub, int start_node_id,
             }
         }
 
-        // 无合适的下一步或得分过低（使用动态剪枝阈值）
+        // 无合适的下一步或得分过低
         if (best_next_id < 0 || best_score < prune_threshold) break;
+        /* 语义场休止：候选节点激活值 < 0.05 说明已走出输入语义范围 */
+        {
+            ReasoningNode* bn = (best_next_id >= 0 && best_next_id < node_count)
+                ? net->nodes[best_next_id] : NULL;
+            if (bn && bn->activation < 0.05f) break;
+        }
 
         // 走一步
         current_id = best_next_id;
