@@ -135,6 +135,7 @@ typedef struct {
     char  last_answer[1024];     /* 上一轮回复（注入扩散引擎保持连贯） */
     int   dialog_context_ready;  /* 是否有可用上下文 */
 } GatewaySystem;
+static void handle_qa(GatewaySystem* gw, int fd, const char* body);
 
 static GatewaySystem* g_gw = NULL;
 
@@ -712,6 +713,7 @@ static void handle_chat(GatewaySystem* gw, int fd, const char* body) {
     /* ── v0.3 Phase 2: 复杂问题走 PFE 推理编排 ── */
     int use_pfe = 0;
     char* response = NULL;
+    if (gw->qa_memory) { const char* qa = qa_memory_query(gw->qa_memory, msg); if (qa) { response = strdup(qa); } }
 
     /* v0.4.3: 对话中自动学习 — 将输入 token 注册到词汇拓扑
      * 这是端到端对话质量最大的瓶颈：不学习新词则扩散引擎 active_count=0 */
@@ -1433,6 +1435,9 @@ static void handle_connection(GatewaySystem* gw, int client_fd) {
             handle_root(gw, client_fd);
         } else if (strcmp(req.path, "/health") == 0) {
             handle_health(gw, client_fd);
+        } else if (strcmp(req.path, "/qa") == 0) {
+            char rs[64]; snprintf(rs, 64, "{\"count\":%d}", gw->qa_memory ? qa_memory_count(gw->qa_memory) : 0);
+            http_json(client_fd, 200, rs);
         } else if (strcmp(req.path, "/status") == 0) {
             if (!gw->engine_ready) {
                 http_json(client_fd, 503, "{\"status\":\"loading\"}");
@@ -1506,6 +1511,8 @@ static void handle_connection(GatewaySystem* gw, int client_fd) {
             http_json(client_fd, 503, "{\"status\":\"loading\",\"message\":\"engine initializing\"}");
         } else if (strcmp(req.path, "/chat") == 0) {
             handle_chat(gw, client_fd, req.body);
+        } else if (strcmp(req.path, "/qa") == 0) {
+            handle_qa(gw, client_fd, req.body);
         } else if (strcmp(req.path, "/learn") == 0) {
             handle_learn(gw, client_fd, req.body);
         } else if (strcmp(req.path, "/feedback") == 0) {
@@ -1560,6 +1567,26 @@ static void handle_connection(GatewaySystem* gw, int client_fd) {
 }
 
 // ==================== 主函数 ====================
+
+static void handle_qa(GatewaySystem* gw, int fd, const char* body) {
+    if (!gw->qa_memory) { gw->qa_memory = qa_memory_create(NULL, 500000); }
+    if (!gw->qa_memory) { http_json(fd, 500, "{\"error\":\"qa failed\"}"); return; }
+    int added = 0; const char* p = body;
+    while (p && *p) {
+        const char* qk = strstr(p, "\"q\""); if (!qk) break;
+        const char* qv = strchr(qk+3,':'); if(!qv)break; qv=strchr(qv,'"'); if(!qv)break; qv++;
+        const char* qe = strchr(qv,'"'); if(!qe)break;
+        const char* ak = strstr(qe,"\"a\""); if(!ak)break;
+        const char* av = strchr(ak+3,':'); if(!av)break; av=strchr(av,'"'); if(!av)break; av++;
+        const char* ae = strchr(av,'"'); if(!ae)break;
+        char q[1024]={0},a[1024]={0}; int ql=qe-qv,al=ae-av;
+        if(ql>0&&ql<1024&&al>0&&al<1024){memcpy(q,qv,ql);memcpy(a,av,al); if(qa_memory_add(gw->qa_memory,q,a)==0)added++;}
+        p=ae+1;
+    }
+    char rs[128]; snprintf(rs,128,"{\"result\":\"ok\",\"added\":%d,\"total\":%d}",added,qa_memory_count(gw->qa_memory));
+    http_json(fd,200,rs);
+}
+
 
 int main(int argc, char* argv[]) {
     setvbuf(stdout, NULL, _IOLBF, 0);  /* 行缓冲，确保所有线程日志即时可见 */
@@ -1636,6 +1663,8 @@ int main(int argc, char* argv[]) {
     signal(SIGTERM, gw_signal_handler);
     signal(SIGPIPE, SIG_IGN); // 忽略断开连接的写
 
+    { int pf = socket(AF_INET, SOCK_STREAM, 0); if (pf >= 0) { struct sockaddr_in pa = {.sin_family=AF_INET, .sin_addr.s_addr=inet_addr("127.0.0.1"), .sin_port=htons(port)}; if (connect(pf, (struct sockaddr*)&pa, sizeof(pa)) == 0) { fprintf(stderr, "[gateway] 端口 %d 已被占用，拒绝启动。\n", port); close(pf); return 1; } close(pf); } }
+    { int pf = socket(AF_INET, SOCK_STREAM, 0); if (pf >= 0) { struct sockaddr_in pa = {.sin_family=AF_INET, .sin_addr.s_addr=inet_addr("127.0.0.1"), .sin_port=htons(port)}; if (connect(pf, (struct sockaddr*)&pa, sizeof(pa)) == 0) { fprintf(stderr, "[gateway] 端口 %d 已被占用，拒绝启动。\n", port); close(pf); return 1; } close(pf); } }
     // 创建监听 socket (先绑定端口，再初始化引擎，避免加载期间 SSH 连不上)
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (server_fd < 0) {
@@ -1664,6 +1693,8 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
+    { FILE* pf = fopen("/tmp/pivotmind.port", "w"); if (pf) { fprintf(pf, "%d", port); fclose(pf); } }
+    { FILE* pf = fopen("/tmp/pivotmind.port", "w"); if (pf) { fprintf(pf, "%d", port); fclose(pf); } }
     printf("[gateway] 端口 %d 已绑定 (引擎初始化中...)\n", port);
 
     // 后台线程初始化引擎 (避免阻塞主循环，加载期间仍可响应 /health)

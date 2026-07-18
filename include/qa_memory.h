@@ -24,6 +24,9 @@ void qa_memory_destroy(QAMemory* m);
 /* 获取条目数 */
 int qa_memory_count(QAMemory* m);
 
+/* 运行时添加单条 QA 对（分词后存入） */
+int qa_memory_add(QAMemory* m, const char* question, const char* answer);
+
 #ifdef __cplusplus
 }
 #endif
