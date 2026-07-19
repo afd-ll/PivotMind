@@ -920,6 +920,37 @@ static int _learn_tokens(SubTopology* vocab, const char* text,
     return added;
 }
 
+/* _learn_worker — 异步学习线程 */
+static void* _learn_worker(void* arg) {
+    char* msg = (char*)arg;
+    if (!msg) return NULL;
+    GatewaySystem* gw = g_gw;
+    if (!gw || !gw->topology) { free(msg); return NULL; }
+    SubTopology* vocab = NULL;
+    for (int t = 0; t < gw->topology->sub_topo_count; t++) {
+        if (gw->topology->sub_topologies[t] && gw->topology->sub_topologies[t]->type == TOPO_VOCABULARY)
+            { vocab = gw->topology->sub_topologies[t]; break; }
+    }
+    if (vocab && vocab->net) {
+        int prev_id = -1;
+        EmergentPOS* ep = (gw->prefrontal && gw->prefrontal->controller)
+                          ? gw->prefrontal->controller->emergent_pos : NULL;
+        _learn_tokens(vocab, msg, &prev_id, ep);
+        auto_learn_concepts(gw->topology, msg, NULL);
+        if (gw->perception) perception_feed_learn_text(gw->perception, msg);
+        __sync_fetch_and_add(&gw->total_learning_cycles, 1);
+        /* 语法种子注入 */
+        SubTopology* tpl = NULL;
+        for (int t = 0; t < gw->topology->sub_topo_count; t++)
+            if (gw->topology->sub_topologies[t] && gw->topology->sub_topologies[t]->type == TOPO_TEMPLATE)
+                { tpl = gw->topology->sub_topologies[t]; break; }
+        if (tpl && tpl->net && tpl->net->node_count < 8) broca_seed_grammar(gw->topology);
+    }
+    free(msg);
+    return NULL;
+}
+
+
 // POST /learn - 主动学习
 static void handle_learn(GatewaySystem* gw, int fd, const char* body) {
     char msg[2048] = {0};
@@ -940,47 +971,22 @@ static void handle_learn(GatewaySystem* gw, int fd, const char* body) {
         gw->learn_burst = 0;
     }
 
-    MasterTopology* m = gw->topology;
-    if (!m) { http_json(fd, 200, "{\"result\":\"no topology\"}"); return; }
+    /* 异步学习：spawn detach thread, 立即返回 */
+    char* msg_copy = strdup(msg);
+    if (!msg_copy) { http_json(fd, 500, "{\"error\":\"oom\"}"); return; }
 
-    SubTopology* vocab = NULL;
-    for (int t = 0; t < m->sub_topo_count; t++) {
-        if (m->sub_topologies[t] && m->sub_topologies[t]->type == TOPO_VOCABULARY)
-            { vocab = m->sub_topologies[t]; break; }
+    pthread_t tid;
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    if (pthread_create(&tid, &attr, _learn_worker, msg_copy) != 0) {
+        free(msg_copy);
+        http_json(fd, 500, "{\"error\":\"thread failed\"}");
+        return;
     }
-    if (!vocab || !vocab->net) { http_json(fd, 200, "{\"result\":\"no vocab\"}"); return; }
+    pthread_attr_destroy(&attr);
 
-    int prev_id = -1;
-    EmergentPOS* ep = (gw->prefrontal && gw->prefrontal->controller)
-                      ? gw->prefrontal->controller->emergent_pos : NULL;
-    int added = _learn_tokens(vocab, msg, &prev_id, ep);
-
-    /* v0.5.5: 同时走 auto_learn_concepts 建双字概念+共现边
-     * 弥补 _learn_tokens 只建单字节点的问题，使"颜色"/"红色"等作为整体存在 */
-    auto_learn_concepts(m, msg, NULL);
-
-    /* 同时走 PMI 管线：建立词间共现频率表 → 自动学习者会建边 */
-    if (gw->perception) {
-        perception_feed_learn_text(gw->perception, msg);
-    }
-
-    gw->total_learning_cycles++;
-    char resp[128];
-    snprintf(resp, sizeof(resp), "{\"result\":\"learned\",\"added\":%d}", added);
-    http_json(fd, 200, resp);
-
-    /* 语法种子注入：模板拓扑为空/不足时，每10次learn注入一次 */
-    static int seed_cooldown = 0;
-    if (++seed_cooldown >= 10) {
-        seed_cooldown = 0;
-        SubTopology* tpl = NULL;
-        for (int t = 0; t < gw->topology->sub_topo_count; t++)
-            if (gw->topology->sub_topologies[t] && gw->topology->sub_topologies[t]->type == TOPO_TEMPLATE)
-                { tpl = gw->topology->sub_topologies[t]; break; }
-        if (tpl && tpl->net && tpl->net->node_count < 8) {
-            broca_seed_grammar(gw->topology);
-        }
-    }
+    http_json(fd, 202, "{\"result\":\"accepted\"}");
 }
 
 // POST /feedback - 反馈
@@ -1665,6 +1671,7 @@ int main(int argc, char* argv[]) {
 
     { int pf = socket(AF_INET, SOCK_STREAM, 0); if (pf >= 0) { struct sockaddr_in pa = {.sin_family=AF_INET, .sin_addr.s_addr=inet_addr("127.0.0.1"), .sin_port=htons(port)}; if (connect(pf, (struct sockaddr*)&pa, sizeof(pa)) == 0) { fprintf(stderr, "[gateway] 端口 %d 已被占用，拒绝启动。\n", port); close(pf); return 1; } close(pf); } }
     { int pf = socket(AF_INET, SOCK_STREAM, 0); if (pf >= 0) { struct sockaddr_in pa = {.sin_family=AF_INET, .sin_addr.s_addr=inet_addr("127.0.0.1"), .sin_port=htons(port)}; if (connect(pf, (struct sockaddr*)&pa, sizeof(pa)) == 0) { fprintf(stderr, "[gateway] 端口 %d 已被占用，拒绝启动。\n", port); close(pf); return 1; } close(pf); } }
+    { int pf = socket(AF_INET, SOCK_STREAM, 0); if (pf >= 0) { struct sockaddr_in pa = {.sin_family=AF_INET, .sin_addr.s_addr=inet_addr("127.0.0.1"), .sin_port=htons(port)}; if (connect(pf, (struct sockaddr*)&pa, sizeof(pa)) == 0) { fprintf(stderr, "[gateway] 端口 %d 已被占用，拒绝启动。\n", port); close(pf); return 1; } close(pf); } }
     // 创建监听 socket (先绑定端口，再初始化引擎，避免加载期间 SSH 连不上)
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (server_fd < 0) {
@@ -1693,6 +1700,7 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
+    { FILE* pf = fopen("/tmp/pivotmind.port", "w"); if (pf) { fprintf(pf, "%d", port); fclose(pf); } }
     { FILE* pf = fopen("/tmp/pivotmind.port", "w"); if (pf) { fprintf(pf, "%d", port); fclose(pf); } }
     { FILE* pf = fopen("/tmp/pivotmind.port", "w"); if (pf) { fprintf(pf, "%d", port); fclose(pf); } }
     printf("[gateway] 端口 %d 已绑定 (引擎初始化中...)\n", port);
