@@ -549,6 +549,10 @@ static int search_and_learn(Perception* p, const char* concept, PerceptionSource
 #endif
     }
 
+    /* 将搜索结果文本同步喂入 auto_learn_concepts（组合节点+PMI建边） */
+    extern void auto_learn_concepts(struct MasterTopology*, const char*, void*);
+    auto_learn_concepts(p->topology, merged_text, NULL);
+
     free(merged_text);
 
     /* 累积一定数量后触发 flush */

@@ -949,11 +949,28 @@ int diffusion_generate(DiffusionCtx* ctx,
     }
     if (active_count == 0) return 0;
 
+    /* ── 输入主导语言检测 ── */
+    /* 统计激活节点中 CJK (>0x80) vs ASCII 的比例，决定扩散偏好 */
+    int cjk_nodes = 0, ascii_nodes = 0;
+    for (int a = 0; a < active_count; a++) {
+        ReasoningNode* an = ctx->vocab->net->nodes[active_ids[a]];
+        if (!an || !an->concept) continue;
+        if ((unsigned char)an->concept[0] >= 0x80) cjk_nodes++; else ascii_nodes++;
+    }
+    /* dominant: +1=CJK优先, -1=ASCII优先, 0=混合 */
+    int lang_dom = (cjk_nodes > ascii_nodes * 2) ? 1 :
+                   (ascii_nodes > cjk_nodes * 2) ? -1 : 0;
+
     /* ── 两跳激活扩散：直接匹配 → 一跳邻居 → 两跳邻居，几何衰减 ── */
     /* "苹果"激活 → "红色""水果"一跳 → "颜色""好吃"两跳 */
     #define SPREAD_1HOP 1.0f
     #define SPREAD_2HOP 0.4f
     #define SPREAD_MAX_EXTRA 256
+    #define LANG_BOOST_SAME  1.3f   /* 同语言邻居激活增强 */
+    #define LANG_BOOST_CROSS 0.4f   /* 跨语言邻居激活衰减 */
+    /* 判断节点的语言类型 */
+    #define NODE_IS_CJK(n) ((n) && (n)->concept && (unsigned char)(n)->concept[0] >= 0x80)
+
     int spread1_ids[SPREAD_MAX_EXTRA];
     int spread1_count = 0;
 
@@ -970,7 +987,13 @@ int diffusion_generate(DiffusionCtx* ctx,
             for (int d = 0; d < spread1_count; d++)
                 if (spread1_ids[d] == nb->node_id) { dup = 1; break; }
             if (!dup) {
-                nb->activation += SPREAD_1HOP * src->edges[e].weight;
+                float lang_mult = 1.0f;
+                if (lang_dom != 0 && NODE_IS_CJK(nb)) {
+                    lang_mult = (lang_dom > 0) ? LANG_BOOST_SAME : LANG_BOOST_CROSS;
+                } else if (lang_dom != 0) {
+                    lang_mult = (lang_dom < 0) ? LANG_BOOST_SAME : LANG_BOOST_CROSS;
+                }
+                nb->activation += SPREAD_1HOP * src->edges[e].weight * lang_mult;
                 spread1_ids[spread1_count++] = nb->node_id;
             }
         }
@@ -992,7 +1015,12 @@ int diffusion_generate(DiffusionCtx* ctx,
             for (int d = 0; d < spread2_count; d++)
                 if (spread1_ids[spread1_count + d] == nb->node_id) { dup = 1; break; }
             if (!dup) {
-                nb->activation += SPREAD_2HOP * src->edges[e].weight;
+                float lm2 = 1.0f;
+                if (lang_dom != 0 && NODE_IS_CJK(nb))
+                    lm2 = (lang_dom > 0) ? LANG_BOOST_SAME : LANG_BOOST_CROSS;
+                else if (lang_dom != 0)
+                    lm2 = (lang_dom < 0) ? LANG_BOOST_SAME : LANG_BOOST_CROSS;
+                nb->activation += SPREAD_2HOP * src->edges[e].weight * lm2;
                 spread1_ids[spread1_count + spread2_count] = nb->node_id;
                 spread2_count++;
             }

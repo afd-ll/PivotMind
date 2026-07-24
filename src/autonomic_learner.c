@@ -25,6 +25,7 @@
 #include "error.h"
 #include "autonomic_learner.h"
 #include "common.h"
+#include "huarong_topology.h"
 #include "utf8_tokenizer.h"
 #include "node_hash.h"
 #include "cross_edge_io.h"
@@ -188,11 +189,15 @@ static void do_flush_work(AutonomicState* state, MasterTopology* master, time_t 
                 if (!sub || !sub->net) continue;
                 for (int i = 0; i < sub->net->node_count; i++) {
                     ReasoningNode* node = sub->net->nodes[i];
-                    if (!node || !node->features) continue;
+                    if (!node) continue;
+                    if (!node->features) lazy_alloc_node_features(node);
+                    if (!node->features) continue;
                     for (int c = 0; c < node->edge_count; c++) {
                         if (node->edges[c].confidence < 0.6f) continue;
                         ReasoningNode* nb = node->edges[c].target;
-                        if (!nb || !nb->features || nb->feature_dim != node->feature_dim) continue;
+                        if (!nb) continue;
+                        if (!nb->features) lazy_alloc_node_features(nb);
+                        if (!nb->features || nb->feature_dim != node->feature_dim) continue;
                         hebbian_update(node->features, nb->features, node->feature_dim, 0.01f);
                         attract_count++;
                     }

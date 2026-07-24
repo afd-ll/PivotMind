@@ -267,6 +267,12 @@ int node_cache_freeze(NodeCache* nc, HuarongTopologyNet* net, ReasoningNode* nod
     }
     node->is_cooled = 1;
 
+    /* 3. 释放特征向量（惰性分配后也需腾出内存） */
+    if (node->features) {
+        free(node->features);
+        node->features = NULL;
+    }
+
     __sync_fetch_and_add(&nc->total_freezes, 1);
 
     pthread_mutex_unlock(&net->node_locks[lock_idx]);

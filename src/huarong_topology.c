@@ -27,6 +27,16 @@ static void concept_to_feature_seed(const char* concept, float* feats, int dim) 
     }
 }
 
+/* 惰性特征分配：仅在 features==NULL 时按需分配并用概念哈希初始化 */
+int lazy_alloc_node_features(ReasoningNode* node) {
+    if (!node || node->feature_dim <= 0 || node->feature_dim > 1000000) return -1;
+    if (node->features) return 0;
+    node->features = (float*)malloc(node->feature_dim * sizeof(float));
+    if (!node->features) return -1;
+    concept_to_feature_seed(node->concept, node->features, node->feature_dim);
+    return 0;
+}
+
 // ==================== 推理节点实现 ==================== 
 
 ReasoningNode* create_reasoning_node(int node_id, const char* concept, 
@@ -67,42 +77,19 @@ ReasoningNode* create_reasoning_node(int node_id, const char* concept,
     node->conn_hash_mask = -1;
     node->conn_hash_entries = 0;
     
-    // 分配特征向量
-    if (feature_dim > 0 && feature_dim <= 1000000) {  /* 防止整数溢出 */
+    // 惰性特征分配：仅记录维度，首次激活时按需分配
+    // 若调用方已提供特征数组则立即复制，否则留 NULL 等待惰性分配
+    node->features = NULL;
+    if (feature_dim > 0 && feature_dim <= 1000000 && features) {
         node->features = (float*)malloc(feature_dim * sizeof(float));
         if (node->features) {
-            if (features) {
-                memcpy(node->features, features, feature_dim * sizeof(float));
-            } else {
-                /* 用概念文本哈希生成非零种子特征，而非全零 */
-                concept_to_feature_seed(concept, node->features, feature_dim);
-            }
+            memcpy(node->features, features, feature_dim * sizeof(float));
         }
-        /* 若 node->features==NULL (malloc 失败)，回滚时 free(NULL) 安全，
-           后续 connection 数组分配失败路径会统一释放 */
-    } else {
-        node->features = NULL;
     }
     
-    // 初始化连接数组（预分配 DEFAULT_CONNECTION_CAPACITY 个 Edge 空间）
-    node->edges = (Edge*)calloc(DEFAULT_CONNECTION_CAPACITY, sizeof(Edge));
-    node->edge_capacity = DEFAULT_CONNECTION_CAPACITY;
-
-    if (!node->edges) {
-        free(node->concept);
-        free(node->features);
-        if (node->cognitive_confidence)
-            cognitive_confidence_destroy(node->cognitive_confidence);
-        free(node);
-        return NULL;
-    }
-
-    // 初始化边属性
-    for (int i = 0; i < DEFAULT_CONNECTION_CAPACITY; i++) {
-        node->edges[i].weight = 0.5f;
-        node->edges[i].motivational_bias = 0.5f;
-        node->edges[i].confidence = 0.5f;
-    }
+    // 惰性边分配：不预分配，第一条边加入时按需分配
+    node->edges = NULL;
+    node->edge_capacity = 0;
     
     return node;
 }
@@ -566,7 +553,9 @@ int huarong_net_add_connection(HuarongTopologyNet* net,
             pthread_mutex_unlock(&net->node_locks[li]);
             return -1;
         }
-        int new_cap = from_node->edge_capacity * 2;
+        /* 惰性边分配：edge_capacity==0 时从默认容量起步 */
+        int new_cap = (from_node->edge_capacity > 0) ? from_node->edge_capacity * 2
+                                                      : DEFAULT_CONNECTION_CAPACITY;
         /* 扩容后不得超过硬上限 */
         if (new_cap > PM_AUTONOMIC_MAX_CONN)
             new_cap = PM_AUTONOMIC_MAX_CONN;
@@ -578,7 +567,10 @@ int huarong_net_add_connection(HuarongTopologyNet* net,
             return -1;
         }
 
-        memcpy(new_edges, from_node->edges, from_node->edge_capacity * sizeof(Edge));
+        /* 惰性边分配：旧数组可能为 NULL，仅在有旧数据时复制 */
+        if (from_node->edges && from_node->edge_capacity > 0) {
+            memcpy(new_edges, from_node->edges, from_node->edge_capacity * sizeof(Edge));
+        }
 
         /* 初始化新扩容的槽位（此时 new_edges 尚未挂到 from_node->edges，
          * 但 from_node->edge_capacity 仍是旧值，用 new_cap 作为上限）。 */

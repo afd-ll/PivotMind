@@ -255,6 +255,13 @@ struct MasterTopology;  /* 前向声明 — 避免与 multi_topology.h 循环依
 void huarong_net_cleanup_retired_batch(struct MasterTopology* master);
 
 /**
+ * 惰性特征分配：仅在 features==NULL 时按需分配并用概念哈希初始化
+ * 返回 0=成功/已分配, -1=失败
+ * 调用方无需持锁；内部无竞争操作
+ */
+int lazy_alloc_node_features(ReasoningNode* node);
+
+/**
  * 添加推理节点
  */
 ReasoningNode* huarong_net_add_node(HuarongTopologyNet* net, 

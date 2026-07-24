@@ -482,6 +482,9 @@ int competitive_queue_generate(SubTopology* sub,
 int master_save_state(MasterTopology* master, const char* file_path);
 int master_load_state(MasterTopology* master, const char* file_path);
 
+/* 死节点清理：移除零边零激活的孤立节点 */
+int master_prune_dead_nodes(MasterTopology* master);
+
 // ========== 边重建 ==========
 
 /**

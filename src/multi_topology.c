@@ -3277,6 +3277,37 @@ void huarong_net_cleanup_retired_batch(MasterTopology* master) {
     }
 }
 
+/* ── 死节点清理：移除零边零激活的孤立节点 ── */
+int master_prune_dead_nodes(MasterTopology* master) {
+    if (!master) return 0;
+    int removed = 0;
+    for (int t = 0; t < master->sub_topo_count; t++) {
+        SubTopology* sub = master->sub_topologies[t];
+        if (!sub || !sub->net) continue;
+        int nc = sub->net->node_count;
+        for (int n = nc - 1; n >= 0; n--) {
+            ReasoningNode* node = sub->net->nodes[n];
+            if (!node) continue;
+            if (node->edge_count == 0 && node->activation < 0.01f) {
+                if (node->concept) free(node->concept);
+                if (node->features) free(node->features);
+                free(node);
+                sub->net->nodes[n] = NULL;
+                removed++;
+            }
+        }
+        int write = 0;
+        for (int r = 0; r < nc; r++) {
+            if (sub->net->nodes[r]) {
+                if (r != write) sub->net->nodes[write] = sub->net->nodes[r];
+                write++;
+            }
+        }
+        sub->net->node_count = write;
+    }
+    return removed;
+}
+
 #define STATE_FORMAT_VERSION 5
 
 int master_save_state(MasterTopology* master, const char* file_path) {

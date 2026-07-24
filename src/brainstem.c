@@ -529,8 +529,10 @@ static void* brainstem_loop(void* arg) {
 
         brainstem_tick_freeze(bs, &cp);
 
-        /* 定期存盘：每 300 tick (≈5min) 持久化完整状态，防崩溃丢数据 */
-        if (bs->tick_count % 300 == 0) {
+        /* 定期存盘：每 60 tick (≈17min) 持久化，防重启丢数据 */
+        if (bs->tick_count % 60 == 0) {
+            /* 先清理孤立死节点（并发/learn可能产生重复零边节点） */
+            master_prune_dead_nodes(bs->master);
             int saved = master_save_state(bs->master, "pivotmind_state.dat");
             if (saved > 0 && bs->verbose)
                 LOG_INFO("[存盘] tick=%d 已保存 %d 节点", bs->tick_count, saved);
