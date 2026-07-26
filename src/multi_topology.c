@@ -3285,15 +3285,58 @@ int master_prune_dead_nodes(MasterTopology* master) {
         SubTopology* sub = master->sub_topologies[t];
         if (!sub || !sub->net) continue;
         int nc = sub->net->node_count;
-        for (int n = nc - 1; n >= 0; n--) {
+        if (nc == 0) continue;
+
+        /* 收集死节点 ID（在释放前收集，确保指针有效） */
+        int* dead_ids = (int*)calloc((size_t)nc, sizeof(int));
+        int dead_count = 0;
+        for (int n = 0; n < nc; n++) {
             ReasoningNode* node = sub->net->nodes[n];
             if (!node) continue;
             if (node->edge_count == 0 && node->activation < 0.01f) {
+                dead_ids[dead_count++] = node->node_id;
+            }
+        }
+        if (dead_count == 0) { free(dead_ids); continue; }
+
+        /* 清理所有存活节点中指向死节点的悬垂边 */
+        for (int n = 0; n < nc; n++) {
+            ReasoningNode* node = sub->net->nodes[n];
+            if (!node || !node->edges || node->edge_count == 0) continue;
+            int w = 0;
+            for (int e = 0; e < node->edge_count; e++) {
+                ReasoningNode* tgt = node->edges[e].target;
+                if (!tgt) { /* 跳过已置空的边槽位 */ continue; }
+                int is_dead = 0;
+                for (int d = 0; d < dead_count; d++) {
+                    if (tgt->node_id == dead_ids[d]) { is_dead = 1; break; }
+                }
+                if (is_dead) {
+                    /* 悬垂边：丢入退役链表，不让 save 碰到 */
+                    memset(&node->edges[e], 0, sizeof(Edge));
+                    continue;
+                }
+                if (w != e) node->edges[w] = node->edges[e];
+                w++;
+            }
+            node->edge_count = w;
+        }
+
+        /* 释放死节点 + 压缩数组 */
+        int removed_sub = 0;
+        for (int n = nc - 1; n >= 0; n--) {
+            ReasoningNode* node = sub->net->nodes[n];
+            if (!node) continue;
+            int is_dead = 0;
+            for (int d = 0; d < dead_count; d++) {
+                if (node->node_id == dead_ids[d]) { is_dead = 1; break; }
+            }
+            if (is_dead) {
                 if (node->concept) free(node->concept);
                 if (node->features) free(node->features);
                 free(node);
                 sub->net->nodes[n] = NULL;
-                removed++;
+                removed_sub++;
             }
         }
         int write = 0;
@@ -3304,6 +3347,8 @@ int master_prune_dead_nodes(MasterTopology* master) {
             }
         }
         sub->net->node_count = write;
+        removed += removed_sub;
+        free(dead_ids);
     }
     return removed;
 }
@@ -3386,7 +3431,13 @@ int master_save_state(MasterTopology* master, const char* file_path) {
             if (!node->edges) safe_conn_count = 0;
             fwrite(&safe_conn_count, sizeof(int), 1, fp);
             for (int c = 0; c < safe_conn_count; c++) {
-                if (node->edges[c].target && node->edges[c].target->concept) {
+                /* 双重保险: 检查 target 非 NULL 且非悬垂指针（node_id 回查通过） */
+                ReasoningNode* tgt = node->edges[c].target;
+                int tgt_safe = (tgt && tgt->concept &&
+                                tgt->node_id >= 0 &&
+                                tgt->node_id < sub->net->node_count &&
+                                sub->net->nodes[tgt->node_id] == tgt);
+                if (tgt_safe) {
                     int tgt_len = strlen(node->edges[c].target->concept) + 1;
                     fwrite(&tgt_len, sizeof(int), 1, fp);
                     fwrite(node->edges[c].target->concept, 1, tgt_len, fp);
