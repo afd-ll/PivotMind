@@ -1290,30 +1290,44 @@ int pc_algorithm_parallel(CausalGraph* graph, float** data, int n, int d, float 
         }
     }
 
-// 并行计算所有相关性
+// 并行计算所有相关性 — 每线程预分配缓冲区，消除 per-task malloc 竞争
 #ifdef _OPENMP
-    #pragma omp parallel for schedule(dynamic, 100)
-#endif
+    #pragma omp parallel
+    {
+        float* xi = (float*)malloc(n * sizeof(float));
+        float* xj = (float*)malloc(n * sizeof(float));
+        #pragma omp for schedule(dynamic, 100)
+        for (int t = 0; t < total_tests; t++) {
+            int i = tasks[t].var_i;
+            int j = tasks[t].var_j;
+            for (int k = 0; k < n; k++) {
+                xi[k] = data[k][i];
+                xj[k] = data[k][j];
+            }
+            float corr = compute_correlation(xi, xj, n);
+            tasks[t].corr = corr;
+            tasks[t].independent = (fabsf(corr) < alpha);
+        }
+        free(xi);
+        free(xj);
+    }
+#else
     for (int t = 0; t < total_tests; t++) {
         int i = tasks[t].var_i;
         int j = tasks[t].var_j;
-        
-        // 提取第 i 和第 j 列
         float* xi = (float*)malloc(n * sizeof(float));
         float* xj = (float*)malloc(n * sizeof(float));
-        
         for (int k = 0; k < n; k++) {
             xi[k] = data[k][i];
             xj[k] = data[k][j];
         }
-        
         float corr = compute_correlation(xi, xj, n);
         tasks[t].corr = corr;
         tasks[t].independent = (fabsf(corr) < alpha);
-        
         free(xi);
         free(xj);
     }
+#endif
 
     // 初始化完全无向图（串行，因为需要去重）
     for (int i = 0; i < d; i++) {

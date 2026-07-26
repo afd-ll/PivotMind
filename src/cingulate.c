@@ -11,6 +11,7 @@
 #include "diffusion.h"
 #include "utf8_tokenizer.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <math.h>
 
@@ -30,11 +31,13 @@ static float semantic_consistency(GeneratedSequence* seq,
     if (!vocab || !vocab->net) return 0.5f;
 
     /* 对输入分词，找到对应的词汇拓扑节点ID */
-    char* tokens[64];
-    int tok_count = utf8_tokenize(input, tokens, 64);
-    int input_nids[64];
+    #define CING_TOK_MAX 256
+    char* tokens[CING_TOK_MAX];
+    int tok_count = utf8_tokenize(input, tokens, CING_TOK_MAX);
+    if (tok_count > CING_TOK_MAX) tok_count = CING_TOK_MAX;
+    int input_nids[CING_TOK_MAX];
     int input_nid_count = 0;
-    for (int t = 0; t < tok_count && input_nid_count < 64; t++) {
+    for (int t = 0; t < tok_count && input_nid_count < CING_TOK_MAX; t++) {
         if (!tokens[t]) continue;
         int nid = huarong_net_find_concept(vocab->net, tokens[t]);
         if (nid >= 0) input_nids[input_nid_count++] = nid;
@@ -222,12 +225,13 @@ int cingulate_diffusion_evaluate(MasterTopology* topo,
 
     const char* words[DIFF_MAX_SEQUENCE];
     int n = diffusion_generate(&dctx, input, words, DIFF_MAX_SEQUENCE);
-    if (n < 2) return 0;
+    if (n < 2) { diffusion_cleanup(&dctx); return 0; }
 
     for (int i = 0; i < n && i < MAX_GENERATED_WORDS; i++)
         out_seq->words[i] = words[i];
     out_seq->count = n < MAX_GENERATED_WORDS ? n : MAX_GENERATED_WORDS;
     cingulate_evaluate(out_seq, topo, input, 5);
 
+    diffusion_cleanup(&dctx);
     return n;
 }

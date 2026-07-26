@@ -177,7 +177,7 @@ char* broca_wrap_response(MasterTopology* master, EmergentPOS* ep,
             }
         }
 
-        if (best_tpl >= 0) {
+            if (best_tpl >= 0) {
             /* 模板命中：输出词 + 槽位间连接词 */
             ReasoningNode* tn = tpl_topo->net->nodes[best_tpl];
             for (int k = 0; k < best_len; k++) {
@@ -187,16 +187,16 @@ char* broca_wrap_response(MasterTopology* master, EmergentPOS* ep,
                     if (last >= 0x20 && last < 0x80)
                         buf[out_pos++] = ' ';
                 }
-                int need = snprintf(buf + out_pos, buf_cap - out_pos,
-                                    "%s", words[i + k]);
-                if (need < 0 || out_pos + need >= (int)buf_cap) goto done;
-                out_pos += need;
+                size_t slen = strlen(words[i + k]);
+                if (slen >= (size_t)(buf_cap - out_pos)) goto done;
+                memcpy(buf + out_pos, words[i + k], slen);
+                out_pos += (int)slen;
 
                 if (k < best_len - 1 && tn->tpl_connectors[k][0] != '\0') {
-                    need = snprintf(buf + out_pos, buf_cap - out_pos,
-                                    "%s", tn->tpl_connectors[k]);
-                    if (need < 0 || out_pos + need >= (int)buf_cap) goto done;
-                    out_pos += need;
+                    slen = strlen(tn->tpl_connectors[k]);
+                    if (slen >= (size_t)(buf_cap - out_pos)) goto done;
+                    memcpy(buf + out_pos, tn->tpl_connectors[k], slen);
+                    out_pos += (int)slen;
                 }
             }
             i += best_len;
@@ -208,20 +208,20 @@ char* broca_wrap_response(MasterTopology* master, EmergentPOS* ep,
                 if (last >= 0x20 && last < 0x80)
                     buf[out_pos++] = ' ';
             }
-            int need = snprintf(buf + out_pos, buf_cap - out_pos,
-                                "%s", words[i]);
-            if (need < 0 || out_pos + need >= (int)buf_cap) goto done;
-            out_pos += need;
+            size_t slen = strlen(words[i]);
+            if (slen >= (size_t)(buf_cap - out_pos)) goto done;
+            memcpy(buf + out_pos, words[i], slen);
+            out_pos += (int)slen;
 
             /* 硬编码连接词 */
             if (i + 1 < word_count && can_template) {
                 const char* conn = broca_hardcoded_connector(
                     pos_tags[i], pos_tags[i + 1]);
                 if (conn && conn[0]) {
-                    need = snprintf(buf + out_pos, buf_cap - out_pos,
-                                    "%s", conn);
-                    if (need < 0 || out_pos + need >= (int)buf_cap) goto done;
-                    out_pos += need;
+                    slen = strlen(conn);
+                    if (slen >= (size_t)(buf_cap - out_pos)) goto done;
+                    memcpy(buf + out_pos, conn, slen);
+                    out_pos += (int)slen;
                 }
             }
             i++;

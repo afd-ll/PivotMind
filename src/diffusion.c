@@ -20,6 +20,8 @@
 
 static int is_function_word(const char* word) {
     if (!word || !word[0]) return 0;
+    /* 快速拒绝：停用词最长 7 字节 ("through"/"because") */
+    if (strlen(word) > 7) return 0;
     static const char* stopwords[] = {
         /* 英文虚词 */
         "a", "an", "the",
@@ -772,6 +774,21 @@ int diffusion_init(DiffusionCtx* ctx, MasterTopology* master) {
 }
 
 /* ================================================================
+ *  扩散上下文清理
+ * ================================================================ */
+void diffusion_cleanup(DiffusionCtx* ctx) {
+    if (!ctx) return;
+    free(ctx->_vocab_scores); ctx->_vocab_scores = NULL;
+    free(ctx->_sem_scores);   ctx->_sem_scores   = NULL;
+    free(ctx->_tpl_scores);   ctx->_tpl_scores   = NULL;
+    free(ctx->_emo_scores);   ctx->_emo_scores   = NULL;
+    ctx->_vocab_cap = 0;
+    ctx->_sem_cap   = 0;
+    ctx->_tpl_cap   = 0;
+    ctx->_emo_cap   = 0;
+}
+
+/* ================================================================
  *  单层扩散
  * ================================================================ */
 
@@ -1069,24 +1086,47 @@ int diffusion_generate(DiffusionCtx* ctx,
     float input_boost_score = 1.5f;  /* 高权重确保这些词进入 top-K */
     (void)input_boost_score;
 
-    /* ── 分配/复用评分数组 (静态避免反复calloc) ── */
+    /* ── 分配/复用评分数组 (每层独立容量追踪，避免缓冲区越界) ── */
     int vn = ctx->vocab->net->node_count;
     int sn = ctx->semantic ? ctx->semantic->net->node_count : 0;
     int tn = ctx->template ? ctx->template->net->node_count : 0;
     int en = ctx->emotion  ? ctx->emotion->net->node_count  : 0;
-    int need = vn;
-    if (sn > need) need = sn;
-    if (tn > need) need = tn;
-    if (en > need) need = en;
-    if (!ctx->_vocab_scores || ctx->_score_cap < need) {
-        free(ctx->_vocab_scores); free(ctx->_sem_scores);
-        free(ctx->_tpl_scores);   free(ctx->_emo_scores);
-        ctx->_vocab_scores = (float*)calloc(need, sizeof(float));
-        ctx->_sem_scores   = sn ? (float*)calloc(sn, sizeof(float)) : NULL;
-        ctx->_tpl_scores   = tn ? (float*)calloc(tn, sizeof(float)) : NULL;
-        ctx->_emo_scores   = en ? (float*)calloc(en, sizeof(float)) : NULL;
-        ctx->_score_cap    = need;
+
+    /* 词汇层 — 始终分配 */
+    if (!ctx->_vocab_scores || ctx->_vocab_cap < vn) {
+        free(ctx->_vocab_scores);
+        ctx->_vocab_scores = (float*)calloc(vn, sizeof(float));
+        if (!ctx->_vocab_scores) return -1;
+        ctx->_vocab_cap = vn;
     }
+    /* 语义层 */
+    if (sn > 0 && (!ctx->_sem_scores || ctx->_sem_cap < sn)) {
+        free(ctx->_sem_scores);
+        ctx->_sem_scores = (float*)calloc(sn, sizeof(float));
+        if (!ctx->_sem_scores) return -1;
+        ctx->_sem_cap = sn;
+    } else if (sn == 0) {
+        ctx->_sem_scores = NULL;  /* 无语义层时清零 */
+    }
+    /* 模板层 */
+    if (tn > 0 && (!ctx->_tpl_scores || ctx->_tpl_cap < tn)) {
+        free(ctx->_tpl_scores);
+        ctx->_tpl_scores = (float*)calloc(tn, sizeof(float));
+        if (!ctx->_tpl_scores) return -1;
+        ctx->_tpl_cap = tn;
+    } else if (tn == 0) {
+        ctx->_tpl_scores = NULL;
+    }
+    /* 情绪层 */
+    if (en > 0 && (!ctx->_emo_scores || ctx->_emo_cap < en)) {
+        free(ctx->_emo_scores);
+        ctx->_emo_scores = (float*)calloc(en, sizeof(float));
+        if (!ctx->_emo_scores) return -1;
+        ctx->_emo_cap = en;
+    } else if (en == 0) {
+        ctx->_emo_scores = NULL;
+    }
+
     float* vocab_scores = ctx->_vocab_scores;
     float* sem_scores   = ctx->_sem_scores;
     float* tpl_scores   = ctx->_tpl_scores;
@@ -1114,8 +1154,9 @@ int diffusion_generate(DiffusionCtx* ctx,
             _cross_by_name(ctx->vocab, cur_ids, cur_count,
                             ctx->semantic, sem_scores, cur_decay * 0.4f);
             /* 语义层内部扩散 */
-            int sem_active[64]; int sem_cnt = 0;
-            for (int i = 0; i < sn && sem_cnt < 64; i++) {
+            #define DIFF_ACTIVE_MAX 256
+            int sem_active[DIFF_ACTIVE_MAX]; int sem_cnt = 0;
+            for (int i = 0; i < sn && sem_cnt < DIFF_ACTIVE_MAX; i++) {
                 if (sem_scores[i] > 0.01f) sem_active[sem_cnt++] = i;
             }
             if (sem_cnt > 0) {

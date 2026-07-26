@@ -130,7 +130,7 @@ typedef struct HuarongTopologyNet {
     int is_training;           // 是否处于训练模式
 
     // 线程安全
-    pthread_mutex_t mutex;         // 仅保护 add_connection 扩容路径
+    pthread_rwlock_t mutex;         // 读写锁：find_concept 用读锁，add_node/concept_hash 扩容用写锁
     pthread_mutex_t node_locks[PM_NODE_LOCK_COUNT]; // 节点级锁池
     
     // 延迟释放链表 — 扩容旧数组暂存，epoch 结束统一清理

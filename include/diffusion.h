@@ -62,7 +62,10 @@ typedef struct {
     float*  _sem_scores;
     float*  _tpl_scores;
     float*  _emo_scores;
-    int     _score_cap;       /* 数组容量 */
+    int     _vocab_cap;       /* 词汇层容量 */
+    int     _sem_cap;         /* 语义层容量 */
+    int     _tpl_cap;         /* 模板层容量 */
+    int     _emo_cap;         /* 情绪层容量 */
 
     /* 温度扰动参数 (0=关闭, >0 添加随机扰动, 默认0.15) */
     float   temperature;
@@ -79,6 +82,9 @@ int diffusion_generate(DiffusionCtx* ctx,
 
 /** 初始化扩散上下文（自动定位各子拓扑） */
 int diffusion_init(DiffusionCtx* ctx, MasterTopology* master);
+
+/** 释放扩散上下文堆资源（评分数组等），调用后方可安全销毁 ctx */
+void diffusion_cleanup(DiffusionCtx* ctx);
 
 /** 单层扩散一步：从一组节点扩展到它们的邻居 */
 int diffusion_spread(SubTopology* layer,

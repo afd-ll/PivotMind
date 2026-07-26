@@ -632,6 +632,12 @@ static int gw_system_init(GatewaySystem* gw) {
     return 0;
 }
 
+/* pthread_create 兼容包装 — 消除 cast-function-type 警告 */
+static void* gw_system_init_thread(void* arg) {
+    gw_system_init((GatewaySystem*)arg);
+    return NULL;
+}
+
 // ==================== 保存并关闭 ====================
 
 static void gw_system_shutdown(GatewaySystem* gw) {
@@ -1707,7 +1713,7 @@ int main(int argc, char* argv[]) {
 
     // 后台线程初始化引擎 (避免阻塞主循环，加载期间仍可响应 /health)
     pthread_t init_thread;
-    if (pthread_create(&init_thread, NULL, (void* (*)(void*))gw_system_init, &gw) != 0) {
+    if (pthread_create(&init_thread, NULL, gw_system_init_thread, &gw) != 0) {
         fprintf(stderr, "[gateway] 无法创建初始化线程\n");
         close(server_fd);
         return 1;

@@ -27,15 +27,15 @@ Perception* g_perception = NULL;
 /* ========== 多搜索引擎定义（SearXNG 启发） ========== */
 static SearchEngine g_default_engines[] = {
     /* 搜狗微信搜索 — 微信公众号文章，信息密度高，被反爬概率低 */
-    {"sogou_wx",  "https://weixin.sogou.com/weixin?type=2&query=%s",  5000, 1.0f, 5000, 10},
+    {"sogou_wx",  "https://weixin.sogou.com/weixin?type=2&query=%s",  5000, 1.0f, 5000, 10, 0, 0, 0, 0},
     /* 搜狗移动搜索 — 手机版搜狗，HTML 比 PC 版简单 */
-    {"sogou_m",   "https://m.sogou.com/web/searchList.jsp?keyword=%s", 5000, 0.8f, 3000, 15},
+    {"sogou_m",   "https://m.sogou.com/web/searchList.jsp?keyword=%s", 5000, 0.8f, 3000, 15, 0, 0, 0, 0},
     /* 搜狗 Web 搜索 — 原始 PC 版（保留兼容） */
-    {"sogou_web", "https://www.sogou.com/sie?ie=utf-8&query=%s",       5000, 0.5f, 2000, 10},
+    {"sogou_web", "https://www.sogou.com/sie?ie=utf-8&query=%s",       5000, 0.5f, 2000, 10, 0, 0, 0, 0},
     /* Bing CN — 需 302 重定向 */
-    {"bing_cn",   "https://cn.bing.com/search?q=%s",                   8000, 0.6f, 5000, 10},
+    {"bing_cn",   "https://cn.bing.com/search?q=%s",                   8000, 0.6f, 5000, 10, 0, 0, 0, 0},
     /* 百度移动搜索 — 国内覆盖率最高 */
-    {"baidu_m",   "https://m.baidu.com/s?word=%s",                     6000, 0.7f, 5000, 10},
+    {"baidu_m",   "https://m.baidu.com/s?word=%s",                     6000, 0.7f, 5000, 10, 0, 0, 0, 0},
 };
 #define PM_ENGINE_COUNT (int)(sizeof(g_default_engines) / sizeof(g_default_engines[0]))
 
@@ -1325,9 +1325,11 @@ int perception_extract_qa_pairs(const char* text,
         size_t llen = strlen(lines[i]);
         if (llen < 4 || llen > 500) continue;
 
-        /* 检测问句：以？结尾，或包含疑问词 */
+        /* 检测问句：以 ? 或 ？(UTF-8: EF BC 9F) 结尾，或包含疑问词 */
         int is_question = 0;
-        if (lines[i][llen-1] == '？' || lines[i][llen-1] == '?') {
+        int ends_with_q = (llen >= 1 && lines[i][llen-1] == '?') ||
+                          (llen >= 3 && memcmp(lines[i] + llen - 3, "\xef\xbc\x9f", 3) == 0);
+        if (ends_with_q) {
             is_question = 1;
         } else if (strstr(lines[i], "怎么") || strstr(lines[i], "如何") ||
                    strstr(lines[i], "为什么") || strstr(lines[i], "什么是") ||
@@ -1341,7 +1343,9 @@ int perception_extract_qa_pairs(const char* text,
         size_t alen = strlen(lines[i+1]);
         if (alen < 6 || alen > 2000) continue;
         /* 排除连续问句 */
-        if (lines[i+1][alen-1] == '？' || lines[i+1][alen-1] == '?') continue;
+        int next_is_q = (alen >= 1 && lines[i+1][alen-1] == '?') ||
+                        (alen >= 3 && memcmp(lines[i+1] + alen - 3, "\xef\xbc\x9f", 3) == 0);
+        if (next_is_q) continue;
 
         snprintf(questions[count], PM_QA_MAX_Q_LEN, "%s", lines[i]);
         snprintf(answers[count], PM_QA_MAX_A_LEN, "%s", lines[i+1]);
@@ -1418,11 +1422,24 @@ int perception_feed_learn_text(Perception* p, const char* text) {
     if (!p || !text || !text[0]) return 0;
     if (!p->ar || !p->topology) return 0;
 
-    /* 中文分句：将句号、问号、感叹号、分号替换为换行 */
+    /* 中文分句：将句号、问号、感叹号、分号替换为换行（UTF-8 3字节序列） */
     char* buf = strdup(text);
     if (!buf) return 0;
-    for (char* c = buf; *c; c++)
-        if (*c == '。' || *c == '！' || *c == '？' || *c == '；') *c = '\n';
+    char* dst = buf;
+    for (const char* src = buf; *src; ) {
+        if (src[0] != '\0' && src[1] != '\0' && src[2] != '\0') {
+            if (memcmp(src, "\xe3\x80\x82", 3) == 0 ||  /* 。U+3002 */
+                memcmp(src, "\xef\xbc\x81", 3) == 0 ||  /* ！U+FF01 */
+                memcmp(src, "\xef\xbc\x9f", 3) == 0 ||  /* ？U+FF1F */
+                memcmp(src, "\xef\xbc\x9b", 3) == 0) {  /* ；U+FF1B */
+                *dst++ = '\n';
+                src += 3;
+                continue;
+            }
+        }
+        *dst++ = *src++;
+    }
+    *dst = '\0';
 
     int fed = 0;
     char* line = strtok(buf, "\n");

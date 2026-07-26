@@ -74,10 +74,24 @@ QAMemory* qa_memory_create(const char* pipe_path, int max_entries) {
             e->question = strdup(q);
             e->answer   = strdup(a);
             e->tokens   = (char**)malloc(tc * sizeof(char*));
+            if (!e->question || !e->answer || !e->tokens) {
+                free(e->question); free(e->answer); free(e->tokens);
+                e->question = NULL; e->answer = NULL; e->tokens = NULL;
+                for (int i = 0; i < tc; i++) free(tokens[i]);
+                continue;
+            }
             e->token_count = tc;
+            int alloc_ok = 1;
             for (int i = 0; i < tc; i++) {
                 e->tokens[i] = strdup(tokens[i]);
                 free(tokens[i]);
+                if (!e->tokens[i]) { alloc_ok = 0; break; }
+            }
+            if (!alloc_ok) {
+                for (int i = 0; i < tc && e->tokens[i]; i++) free(e->tokens[i]);
+                free(e->tokens); free(e->question); free(e->answer);
+                e->question = NULL; e->answer = NULL; e->tokens = NULL; e->token_count = 0;
+                continue;
             }
             m->count++;
         } else {
@@ -170,10 +184,24 @@ int qa_memory_add(QAMemory* m, const char* question, const char* answer) {
     e->question = strdup(question);
     e->answer   = strdup(answer);
     e->tokens   = (char**)malloc(tc * sizeof(char*));
+    if (!e->question || !e->answer || !e->tokens) {
+        free(e->question); free(e->answer); free(e->tokens);
+        e->question = NULL; e->answer = NULL; e->tokens = NULL;
+        for (int i = 0; i < tc; i++) free(tokens[i]);
+        return -1;
+    }
     e->token_count = tc;
+    int alloc_ok = 1;
     for (int i = 0; i < tc; i++) {
         e->tokens[i] = strdup(tokens[i]);
         free(tokens[i]);
+        if (!e->tokens[i]) { alloc_ok = 0; break; }
+    }
+    if (!alloc_ok) {
+        for (int i = 0; i < tc && e->tokens[i]; i++) free(e->tokens[i]);
+        free(e->tokens); free(e->question); free(e->answer);
+        e->question = NULL; e->answer = NULL; e->tokens = NULL; e->token_count = 0;
+        return -1;
     }
     m->count++;
     return 0;

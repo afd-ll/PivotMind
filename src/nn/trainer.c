@@ -148,6 +148,15 @@ float trainer_train_batch(Trainer* trainer, Tensor* input_batch, Tensor* target_
     // 反向传播并更新参数(简化:直接使用train_step)
     model_train_step(trainer->model, input_batch, target_batch, trainer->config.learning_rate);
 
+    // 更新统计信息
+    trainer->stats.total_samples += input_batch->shape[0];
+    trainer->stats.train_loss = loss_value;
+
+    // 调用回调
+    if (trainer->callback) {
+        trainer->callback(&trainer->stats, trainer->callback_user_data);
+    }
+
     // 清理
     tensor_destroy(pred);
     tensor_destroy(loss);

@@ -832,7 +832,8 @@ void autonomic_learn_from_dialog(MasterTopology* master,
         if (total_chars > 0 && total_chars <= MAX_CHARS_PER_TEXT + MAX_CHARS_PER_TEXT) {
             const char* concepts[PM_CONCEPT_MAX];
             int concnt = 0;
-            char used[65536] = {0};
+            char* used = (char*)calloc(65536, 1);
+            if (!used) goto skip_cross_topo;  /* OOM — 跳过本轮跨拓扑连接 */
             for (int i = 0; i < input_count && concnt < PM_CONCEPT_MAX; i++) {
                 unsigned int codepoint = 0;
                 const unsigned char* p = (const unsigned char*)input_chars[i];
@@ -855,6 +856,7 @@ void autonomic_learn_from_dialog(MasterTopology* master,
                     concepts[concnt++] = response_chars[i];
                 }
             }
+            free(used);
             if (concnt > 1) {
                 int cross_created = auto_link_activated_nodes(master, concepts, concnt);
                 if (cross_created > 0 && state) {
@@ -863,6 +865,8 @@ void autonomic_learn_from_dialog(MasterTopology* master,
             }
         }
     }
+skip_cross_topo:
+    (void)0;
 
     // 刷盘判断：边数增长到一定程度触发保存
     if (state && state->initialized) {
@@ -881,7 +885,7 @@ void autonomic_decay_all(MasterTopology* master) {
         SubTopology* sub = master->sub_topologies[t];
         if (!sub || !sub->net) continue;
 
-        pthread_mutex_lock(&sub->net->mutex);
+        pthread_rwlock_wrlock(&sub->net->mutex);
         for (int n = 0; n < sub->net->node_count; n++) {
             ReasoningNode* node = sub->net->nodes[n];
             if (!node || node->edge_count < 2) {
@@ -931,7 +935,7 @@ void autonomic_decay_all(MasterTopology* master) {
                 total_decayed++;
             }
         }
-        pthread_mutex_unlock(&sub->net->mutex);
+        pthread_rwlock_unlock(&sub->net->mutex);
     }
     LOG_INFO("[自主学习] 全局衰减: %d 条 (竞争加速: %d, 保留: %d)",
              total_decayed, competition_decayed, preserved);
@@ -1056,7 +1060,7 @@ int autonomic_get_edge_stats(MasterTopology* master,
         SubTopology* sub = master->sub_topologies[t];
         if (!sub || !sub->net) continue;
 
-        pthread_mutex_lock(&sub->net->mutex);
+        pthread_rwlock_wrlock(&sub->net->mutex);
         for (int n = 0; n < sub->net->node_count; n++) {
             ReasoningNode* node = sub->net->nodes[n];
             if (!node) continue;
@@ -1066,7 +1070,7 @@ int autonomic_get_edge_stats(MasterTopology* master,
                 sum_confidence += node->edges[e].confidence;
             }
         }
-        pthread_mutex_unlock(&sub->net->mutex);
+        pthread_rwlock_unlock(&sub->net->mutex);
     }
 
     if (out_total_edges) *out_total_edges = total_edges;

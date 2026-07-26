@@ -225,7 +225,7 @@ int master_add_sub_topology(MasterTopology* master,
     }
     
     // 创建子拓扑
-    SubTopology* sub = (SubTopology*)malloc(sizeof(SubTopology));
+    SubTopology* sub = (SubTopology*)calloc(1, sizeof(SubTopology));
     if (!sub) return -1;
     
     sub->topo_id = master->sub_topo_count;

@@ -53,7 +53,7 @@ typedef struct {
 int feature_learn_graph_smooth(HuarongTopologyNet* net, int iterations) {
     if (!net || net->node_count <= 0 || iterations <= 0) return -1;
 
-    pthread_mutex_lock(&net->mutex);
+    pthread_rwlock_wrlock(&net->mutex);
 
     int total_nodes = net->node_count;
     int dim = NODE_FEATURE_DIM;
@@ -102,7 +102,7 @@ int feature_learn_graph_smooth(HuarongTopologyNet* net, int iterations) {
     if (!merged_feats || !merged_ws) {
         free(merged_feats); free(merged_ws);
         free(thread_feats); free(thread_ws);
-        pthread_mutex_unlock(&net->mutex); return -1;
+        pthread_rwlock_unlock(&net->mutex); return -1;
     }
 
     /* 分配线程局部缓冲区（并行区外分配，一次） */
@@ -256,7 +256,7 @@ int feature_learn_graph_smooth(HuarongTopologyNet* net, int iterations) {
                 for (int t = 0; t < nthreads; t++) { free(thread_feats[t]); free(thread_ws[t]); }
                 free(thread_feats); free(thread_ws);
             }
-            pthread_mutex_unlock(&net->mutex); return -1;
+            pthread_rwlock_unlock(&net->mutex); return -1;
         }
     }
 
@@ -267,7 +267,7 @@ int feature_learn_graph_smooth(HuarongTopologyNet* net, int iterations) {
         free(thread_feats); free(thread_ws);
     }
 
-    pthread_mutex_unlock(&net->mutex);
+    pthread_rwlock_unlock(&net->mutex);
     printf("[特征学习] 图平滑完成 (%d 节点, %d 轮)\n", total_nodes, iter + 1);
     return 0;
 }

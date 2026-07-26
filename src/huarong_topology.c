@@ -113,10 +113,10 @@ void destroy_reasoning_node(ReasoningNode* node) {
 // ==================== 华容道拓扑网络核心实现 ==================== 
 
 HuarongTopologyNet* huarong_net_create(int max_nodes) {
-    HuarongTopologyNet* net = (HuarongTopologyNet*)malloc(sizeof(HuarongTopologyNet));
+    HuarongTopologyNet* net = (HuarongTopologyNet*)calloc(1, sizeof(HuarongTopologyNet));
     if (!net) return NULL;
     
-    pthread_mutex_init(&net->mutex, NULL);
+    pthread_rwlock_init(&net->mutex, NULL);
     for (int i = 0; i < PM_NODE_LOCK_COUNT; i++)
         pthread_mutex_init(&net->node_locks[i], NULL);
     pthread_mutex_init(&net->retire_mutex, NULL);
@@ -127,7 +127,7 @@ HuarongTopologyNet* huarong_net_create(int max_nodes) {
     
     net->nodes = (ReasoningNode**)calloc(max_nodes, sizeof(ReasoningNode*));
     if (!net->nodes) {
-        pthread_mutex_destroy(&net->mutex);
+        pthread_rwlock_destroy(&net->mutex);
         free(net);
         return NULL;
     }
@@ -156,7 +156,7 @@ void huarong_net_destroy(HuarongTopologyNet* net) {
     }
     free(net->nodes);
     
-    pthread_mutex_destroy(&net->mutex);
+    pthread_rwlock_destroy(&net->mutex);
     for (int i = 0; i < PM_NODE_LOCK_COUNT; i++)
         pthread_mutex_destroy(&net->node_locks[i]);
     pthread_mutex_destroy(&net->retire_mutex);
@@ -216,8 +216,8 @@ static void _concept_hash_insert(HuarongTopologyNet* net, const char* name, int 
 
 int huarong_net_find_concept(HuarongTopologyNet* net, const char* concept) {
     if (!net || !net->concept_hash || !concept) return -1;
-    /* 持锁防止与 _concept_hash_insert 扩容（free+realloc）并发 */
-    pthread_mutex_lock(&net->mutex);
+    /* 读锁：与 _concept_hash_insert 扩容（写锁）并发安全 */
+    pthread_rwlock_rdlock(&net->mutex);
     unsigned int mask = (unsigned)net->concept_hash_mask;
     unsigned int h = _chash_djb2(concept) & mask;
     int ret = -1;
@@ -228,7 +228,7 @@ int huarong_net_find_concept(HuarongTopologyNet* net, const char* concept) {
         }
         h = (h + 1) & mask;
     }
-    pthread_mutex_unlock(&net->mutex);
+    pthread_rwlock_unlock(&net->mutex);
     return ret;
 }
 
@@ -238,7 +238,7 @@ ReasoningNode* huarong_net_add_node(HuarongTopologyNet* net,
                                    int feature_dim) {
     if (!net || !concept) return NULL;
     
-    pthread_mutex_lock(&net->mutex);
+    pthread_rwlock_wrlock(&net->mutex);
     
     // 容量满 → 自动扩容 (v0.5.1: 取消硬上限, realloc 而非拒绝)
     if (net->node_count >= net->max_nodes || net->nodes == NULL) {
@@ -248,7 +248,7 @@ ReasoningNode* huarong_net_add_node(HuarongTopologyNet* net,
         ReasoningNode** new_nodes = (ReasoningNode**)realloc(
             net->nodes, (size_t)new_max * sizeof(ReasoningNode*));
         if (!new_nodes) {
-            pthread_mutex_unlock(&net->mutex);
+            pthread_rwlock_unlock(&net->mutex);
             return NULL;  /* OOM — 真·无药可救 */
         }
         net->nodes = new_nodes;
@@ -264,7 +264,7 @@ ReasoningNode* huarong_net_add_node(HuarongTopologyNet* net,
         _concept_hash_insert(net, concept, node_id);
     }
     
-    pthread_mutex_unlock(&net->mutex);
+    pthread_rwlock_unlock(&net->mutex);
     
     return node;
 }
@@ -288,13 +288,13 @@ ReasoningNode* huarong_net_find_or_create_node(HuarongTopologyNet* net,
     }
 
     /* 慢速路径：持锁 double-check */
-    pthread_mutex_lock(&net->mutex);
+    pthread_rwlock_wrlock(&net->mutex);
 
     // 再查一次哈希表（其他线程可能在此间隙创建了）
     if (hash) {
         ReasoningNode* existing = node_hash_find(hash, concept);
         if (existing) {
-            pthread_mutex_unlock(&net->mutex);
+            pthread_rwlock_unlock(&net->mutex);
             return existing;
         }
     }
@@ -305,7 +305,7 @@ ReasoningNode* huarong_net_find_or_create_node(HuarongTopologyNet* net,
         if (node && node->concept && strcmp(node->concept, concept) == 0) {
             // 补入哈希表
             if (hash) node_hash_add(hash, node);
-            pthread_mutex_unlock(&net->mutex);
+            pthread_rwlock_unlock(&net->mutex);
             return node;
         }
     }
@@ -317,7 +317,7 @@ ReasoningNode* huarong_net_find_or_create_node(HuarongTopologyNet* net,
         ReasoningNode** new_nodes = (ReasoningNode**)realloc(
             net->nodes, (size_t)new_max * sizeof(ReasoningNode*));
         if (!new_nodes) {
-            pthread_mutex_unlock(&net->mutex);
+            pthread_rwlock_unlock(&net->mutex);
             return NULL;
         }
         net->nodes = new_nodes;
@@ -332,7 +332,7 @@ ReasoningNode* huarong_net_find_or_create_node(HuarongTopologyNet* net,
         if (hash) node_hash_add(hash, node);
     }
 
-    pthread_mutex_unlock(&net->mutex);
+    pthread_rwlock_unlock(&net->mutex);
     return node;
 }
 
@@ -710,12 +710,12 @@ int* huarong_net_topological_sort(HuarongTopologyNet* net, int* path_length) {
     if (!net || !path_length) return NULL;
     if (net->node_count == 0) { *path_length = 0; return NULL; }
 
-    pthread_mutex_lock(&net->mutex);
+    pthread_rwlock_wrlock(&net->mutex);
     int nc = net->node_count;
 
     // 预建节点指针→索引查找表
     NodeIdxLookup* lookup = (NodeIdxLookup*)malloc(nc * sizeof(NodeIdxLookup));
-    if (!lookup) { pthread_mutex_unlock(&net->mutex); return NULL; }
+    if (!lookup) { pthread_rwlock_unlock(&net->mutex); return NULL; }
     for (int i = 0; i < nc; i++) {
         lookup[i].ptr = net->nodes[i];
         lookup[i].idx = i;
@@ -727,7 +727,7 @@ int* huarong_net_topological_sort(HuarongTopologyNet* net, int* path_length) {
 
     if (!sorted_nodes || !in_degree) {
         free(sorted_nodes); free(in_degree); free(lookup);
-        pthread_mutex_unlock(&net->mutex); return NULL;
+        pthread_rwlock_unlock(&net->mutex); return NULL;
     }
 
     // 计算每个节点的入度 O(N+E)
@@ -743,7 +743,7 @@ int* huarong_net_topological_sort(HuarongTopologyNet* net, int* path_length) {
     int* queue = (int*)malloc(nc * sizeof(int));
     if (!queue) {
         free(sorted_nodes); free(in_degree); free(lookup);
-        pthread_mutex_unlock(&net->mutex); return NULL;
+        pthread_rwlock_unlock(&net->mutex); return NULL;
     }
     int front = 0, rear = 0;
 
@@ -765,7 +765,7 @@ int* huarong_net_topological_sort(HuarongTopologyNet* net, int* path_length) {
         }
     }
 
-    pthread_mutex_unlock(&net->mutex);
+    pthread_rwlock_unlock(&net->mutex);
 
     if (sorted_count != nc) {
         printf("警告：网络中存在环，无法进行拓扑排序\n");
@@ -794,11 +794,11 @@ int huarong_net_dynamic_add_node(HuarongTopologyNet* net,
 int huarong_net_dynamic_remove_node(HuarongTopologyNet* net, int node_id) {
     if (!net || node_id < 0 || node_id >= net->node_count) return -1;
     
-    pthread_mutex_lock(&net->mutex);
+    pthread_rwlock_wrlock(&net->mutex);
     
     ReasoningNode* victim = net->nodes[node_id];
     if (!victim) {
-        pthread_mutex_unlock(&net->mutex);
+        pthread_rwlock_unlock(&net->mutex);
         return -1;
     }
     
@@ -844,7 +844,7 @@ int huarong_net_dynamic_remove_node(HuarongTopologyNet* net, int node_id) {
     net->nodes[net->node_count - 1] = NULL;
     net->node_count--;
 
-    pthread_mutex_unlock(&net->mutex);
+    pthread_rwlock_unlock(&net->mutex);
     
     /* 销毁节点在锁外进行（不涉及共享状态） */
     destroy_reasoning_node(victim);
@@ -859,7 +859,7 @@ void huarong_net_optimize(HuarongTopologyNet* net) {
     
     float threshold = 0.01f;
     
-    pthread_mutex_lock(&net->mutex);
+    pthread_rwlock_wrlock(&net->mutex);
     
     for (int i = 0; i < net->node_count; i++) {
         ReasoningNode* node = net->nodes[i];
@@ -894,7 +894,7 @@ void huarong_net_optimize(HuarongTopologyNet* net) {
         }
     }
 
-    pthread_mutex_unlock(&net->mutex);
+    pthread_rwlock_unlock(&net->mutex);
     
     printf("网络优化完成：移除了权重小于%.3f的冗余连接\n", threshold);
 }
@@ -906,9 +906,9 @@ int huarong_net_prune_edges(HuarongTopologyNet* net, float min_confidence, float
     /* 分批处理：每批在锁内重新读取 node_count 防止并发删除导致的越界 */
     int batch_start = 0;
     while (1) {
-        pthread_mutex_lock(&net->mutex);
+        pthread_rwlock_wrlock(&net->mutex);
         int nc = net->node_count;
-        if (batch_start >= nc) { pthread_mutex_unlock(&net->mutex); break; }
+        if (batch_start >= nc) { pthread_rwlock_unlock(&net->mutex); break; }
         int batch_end = batch_start + PM_PRUNE_BATCH_SIZE;
         if (batch_end > nc) batch_end = nc;
 
@@ -946,7 +946,7 @@ int huarong_net_prune_edges(HuarongTopologyNet* net, float min_confidence, float
             }
         }
 
-        pthread_mutex_unlock(&net->mutex);
+        pthread_rwlock_unlock(&net->mutex);
         batch_start = batch_end;
     }
 

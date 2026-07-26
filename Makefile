@@ -11,6 +11,10 @@ ifeq ($(CCACHE),)
 else
   CC = ccache gcc
 endif
+
+# 并行编译 — 利用全部 CPU 核心
+MAKEFLAGS += -j$(nproc)
+
 CFLAGS = -pipe -Wall -Wextra -O2 -Iinclude -Iinclude/nn -Isrc/nn -I. -Ilibs -std=gnu99 -fopenmp -pthread -MD -MP -D_USE_MATH_DEFINES -D_FORTIFY_SOURCE=2 -flto=auto -DHAS_OPENSSL
 LDFLAGS = -lm -lssl -lcrypto -lcurl -lz -flto=auto
 DEBUG_CFLAGS = -Wall -Wextra -g -O0 -Iinclude -Iinclude/nn -Isrc/nn -I. -Ilibs -std=gnu99 -fopenmp -pthread -MD -MP -DDEBUG -D_FORTIFY_SOURCE=2
@@ -219,6 +223,12 @@ $(BUILD_DIR)/test_pure: tests/unit/test_pure.c $(LIB_NAME)
 $(BUILD_DIR)/test_search: tests/unit/test_search.c $(LIB_NAME)
 	$(CC) $(CFLAGS) -I. -o $@ tests/unit/test_search.c -L. -lpivotmind $(LDFLAGS)
 
+$(BUILD_DIR)/test_pfe_unit: tests/test_pfe_unit.c $(LIB_NAME)
+	$(CC) $(CFLAGS) -I. -o $@ tests/test_pfe_unit.c -L. -lpivotmind $(LDFLAGS)
+
+$(BUILD_DIR)/test_regression: tests/unit/test_regression.c $(LIB_NAME)
+	$(CC) $(CFLAGS) -I. -o $@ tests/unit/test_regression.c -L. -lpivotmind $(LDFLAGS)
+
 $(BUILD_DIR)/test_integration: tests/integration/test_integration.c $(LIB_NAME)
 	$(CC) $(CFLAGS) -I. -o $@ tests/integration/test_integration.c -L. -lpivotmind $(LDFLAGS)
 
@@ -247,6 +257,8 @@ test-media-reader: $(BUILD_DIR)/test_media_reader        # v0.5
 test-visual-cortex: $(BUILD_DIR)/test_visual_cortex       # v0.5
 test-pure: $(BUILD_DIR)/test_pure                           # 纯函数单元测试
 test-search: $(BUILD_DIR)/test_search                        # 多引擎搜索测试
+test-pfe-unit: $(BUILD_DIR)/test_pfe_unit                     # 前额叶执行器测试
+test-regression: $(BUILD_DIR)/test_regression                    # 回归测试 (bug修复验证)
 test-integration: $(BUILD_DIR)/test_integration
 test-cc: $(BUILD_DIR)/test_cognitive_controller
 test-cc-full: $(BUILD_DIR)/test_cognitive_full
@@ -257,10 +269,60 @@ $(BUILD_DIR)/test_runner: tests/test_runner.c $(LIB_NAME)
 
 test-runner: $(BUILD_DIR)/test_runner
 
-# 运行所有测试
-test: test-tensor test-model test-metrics test-trainer test-chinese test-io test-cc test-web-fetch test-dialog-unit test-diffusion-unit test-topology-unit test-memory-unit test-learner-unit test-causal-unit test-forgetting-unit test-media-reader test-visual-cortex test-pure test-search
-	@echo "╔══════════════════════════════════════╗"
-	@echo "║  所有单元测试已完成                  ║"
-	@echo "╚══════════════════════════════════════╝"
+# 运行所有测试（编译 + 执行 + 汇总）
+# 每个测试二进制退出码 0=通过, 非0=失败
+TEST_BINS = $(BUILD_DIR)/test_tensor $(BUILD_DIR)/test_model $(BUILD_DIR)/test_metrics $(BUILD_DIR)/test_trainer $(BUILD_DIR)/test_chinese $(BUILD_DIR)/test_io $(BUILD_DIR)/test_web_fetch $(BUILD_DIR)/test_dialog_unit $(BUILD_DIR)/test_diffusion_unit $(BUILD_DIR)/test_topology_unit $(BUILD_DIR)/test_memory_unit $(BUILD_DIR)/test_learner_unit $(BUILD_DIR)/test_causal_unit $(BUILD_DIR)/test_forgetting_unit $(BUILD_DIR)/test_media_reader $(BUILD_DIR)/test_visual_cortex $(BUILD_DIR)/test_pure $(BUILD_DIR)/test_search $(BUILD_DIR)/test_pfe_unit $(BUILD_DIR)/test_regression $(BUILD_DIR)/test_cognitive_controller
+TEST_FAST_BINS = $(BUILD_DIR)/test_model $(BUILD_DIR)/test_metrics $(BUILD_DIR)/test_visual_cortex $(BUILD_DIR)/test_dialog_unit $(BUILD_DIR)/test_diffusion_unit $(BUILD_DIR)/test_topology_unit $(BUILD_DIR)/test_memory_unit $(BUILD_DIR)/test_learner_unit $(BUILD_DIR)/test_causal_unit $(BUILD_DIR)/test_forgetting_unit $(BUILD_DIR)/test_media_reader $(BUILD_DIR)/test_pure $(BUILD_DIR)/test_search $(BUILD_DIR)/test_pfe_unit $(BUILD_DIR)/test_regression
 
-.PHONY: all linux debug asan digital-life gateway seed-builder debug-seed test-dialog corpus-train batch-learn batch-learn-lowmem template-build path-analyze compare-templates eval-templates qa-crawler run clean install test test-tensor test-model test-metrics test-trainer test-chinese test-io test-web-fetch test-dialog-unit test-diffusion-unit test-topology-unit test-memory-unit test-learner-unit test-causal-unit test-forgetting-unit test-media-reader test-visual-cortex test-pure test-search test-integration test-cc test-cc-full test-runner
+test: test-tensor test-model test-metrics test-trainer test-chinese test-io test-web-fetch test-dialog-unit test-diffusion-unit test-topology-unit test-memory-unit test-learner-unit test-causal-unit test-forgetting-unit test-media-reader test-visual-cortex test-pure test-search test-pfe-unit test-regression test-cc
+	@echo ""
+	@echo "╔══════════════════════════════════════╗"
+	@echo "║  运行单元测试...                     ║"
+	@echo "╚══════════════════════════════════════╝"
+	@echo ""
+	@PASSED=0; FAILED=0; \
+	for t in $(TEST_BINS); do \
+		name=$$(basename $$t); \
+		if [ -x "$$t" ]; then \
+			if timeout 60 $$t > /dev/null 2>&1; then \
+				echo "  PASS  $$name"; PASSED=$$((PASSED+1)); \
+			else \
+				echo "  FAIL  $$name"; FAILED=$$((FAILED+1)); \
+			fi; \
+		else \
+			echo "  MISS  $$name (not built)"; FAILED=$$((FAILED+1)); \
+		fi; \
+	done; \
+	echo ""; \
+	echo "╔══════════════════════════════════════╗"; \
+	printf "║  结果: %2d 通过, %2d 失败             ║\n" $$PASSED $$FAILED; \
+	echo "╚══════════════════════════════════════╝"; \
+	[ $$FAILED -eq 0 ]
+
+# 快速测试（跳过慢速/网络测试）
+test-fast: test-model test-metrics test-visual-cortex test-dialog-unit test-diffusion-unit test-topology-unit test-memory-unit test-learner-unit test-causal-unit test-forgetting-unit test-media-reader test-pure test-search test-pfe-unit test-regression
+	@echo ""
+	@echo "╔══════════════════════════════════════╗"
+	@echo "║  运行快速测试...                     ║"
+	@echo "╚══════════════════════════════════════╝"
+	@echo ""
+	@PASSED=0; FAILED=0; \
+	for t in $(TEST_FAST_BINS); do \
+		name=$$(basename $$t); \
+		if [ -x "$$t" ]; then \
+			if timeout 30 $$t > /dev/null 2>&1; then \
+				echo "  PASS  $$name"; PASSED=$$((PASSED+1)); \
+			else \
+				echo "  FAIL  $$name"; FAILED=$$((FAILED+1)); \
+			fi; \
+		else \
+			echo "  MISS  $$name (not built)"; FAILED=$$((FAILED+1)); \
+		fi; \
+	done; \
+	echo ""; \
+	echo "╔══════════════════════════════════════╗"; \
+	printf "║  结果: %2d 通过, %2d 失败             ║\n" $$PASSED $$FAILED; \
+	echo "╚══════════════════════════════════════╝"; \
+	[ $$FAILED -eq 0 ]
+
+.PHONY: all linux debug asan digital-life gateway seed-builder debug-seed test-dialog corpus-train batch-learn batch-learn-lowmem template-build path-analyze compare-templates eval-templates qa-crawler run clean install test test-fast test-tensor test-model test-metrics test-trainer test-chinese test-io test-web-fetch test-dialog-unit test-diffusion-unit test-topology-unit test-memory-unit test-learner-unit test-causal-unit test-forgetting-unit test-media-reader test-visual-cortex test-pure test-search test-pfe-unit test-regression test-integration test-cc test-cc-full test-runner
