@@ -43,6 +43,9 @@ int semantic_grow_from_vocab(MasterTopology* master) {
         if (assigned[i]) continue;
 
         ReasoningNode* seed = vnet->nodes[sample_ids[i]];
+        if (!seed) continue;
+        if (!seed->features) lazy_alloc_node_features(seed);
+        if (!seed->features) continue;
         float* sf = seed->features;
 
         /* 预计算种子的 L2 范数平方 */
@@ -56,7 +59,9 @@ int semantic_grow_from_vocab(MasterTopology* master) {
         for (int j = i + 1; j < actual; j++) {
             if (assigned[j]) continue;
             ReasoningNode* cand = vnet->nodes[sample_ids[j]];
-            if (!cand || !cand->features) continue;
+            if (!cand) continue;
+            if (!cand->features) lazy_alloc_node_features(cand);
+            if (!cand->features) continue;
 
             float dot = 0.0f, nb = 0.0f;
             for (int d = 0; d < NODE_FEATURE_DIM; d++) {
@@ -88,8 +93,10 @@ int semantic_grow_from_vocab(MasterTopology* master) {
         memset(feat, 0, sizeof(feat));
         for (int m = 0; m < mcnt; m++) {
             ReasoningNode* mn = vnet->nodes[members[m]];
-            if (mn && mn->features)
-                for (int d = 0; d < NODE_FEATURE_DIM; d++) feat[d] += mn->features[d];
+            if (!mn) continue;
+            if (!mn->features) lazy_alloc_node_features(mn);
+            if (!mn->features) continue;
+            for (int d = 0; d < NODE_FEATURE_DIM; d++) feat[d] += mn->features[d];
         }
         for (int d = 0; d < NODE_FEATURE_DIM; d++) feat[d] /= (float)mcnt;
 

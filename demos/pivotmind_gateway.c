@@ -647,14 +647,19 @@ static void gw_system_shutdown(GatewaySystem* gw) {
     // 1. 停止脑干 → 冻结所有活性节点 → 确保状态完整
     if (gw->brainstem) brainstem_stop(gw->brainstem);
 
-    // 2. 保存完整状态到主文件（覆盖旧版本）
+    // 2. 保存完整状态到主文件（空启动保护：总节点 < 20 时跳过，防止覆盖有效存盘）
     if (gw->topology) {
-        int saved = master_save_state(gw->topology, "pivotmind_state.dat");
-        if (saved >= 0) printf("[gateway]   保存拓扑状态: %d 节点\n", saved);
-        int feat_saved = save_features(gw->topology, "features.bin");
-        if (feat_saved > 0) printf("[gateway]   保存特征: %d 节点\n", feat_saved);
-        int cross_saved = save_cross_edges(gw->topology, "cross_edges.bin");
-        if (cross_saved > 0) printf("[gateway]   保存跨拓扑连接: %d 条\n", cross_saved);
+        int total = master_count_total_nodes(gw->topology);
+        if (total >= 20) {
+            int saved = master_save_state(gw->topology, "pivotmind_state.dat");
+            if (saved >= 0) printf("[gateway]   保存拓扑状态: %d 节点\n", saved);
+            int feat_saved = save_features(gw->topology, "features.bin");
+            if (feat_saved > 0) printf("[gateway]   保存特征: %d 节点\n", feat_saved);
+            int cross_saved = save_cross_edges(gw->topology, "cross_edges.bin");
+            if (cross_saved > 0) printf("[gateway]   保存跨拓扑连接: %d 条\n", cross_saved);
+        } else {
+            printf("[gateway]   跳过存盘 (总节点=%d < 门卫阈值 20，避免覆盖有效数据)\n", total);
+        }
     }
     if (gw->memory) {
         int saved = memory_save_seed(gw->memory, "memory_seed.dat");

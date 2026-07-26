@@ -3308,6 +3308,17 @@ int master_prune_dead_nodes(MasterTopology* master) {
     return removed;
 }
 
+int master_count_total_nodes(MasterTopology* master) {
+    if (!master) return 0;
+    int total = 0;
+    for (int t = 0; t < master->sub_topo_count; t++) {
+        SubTopology* sub = master->sub_topologies[t];
+        if (!sub || !sub->net) continue;
+        total += sub->net->node_count;
+    }
+    return total;
+}
+
 #define STATE_FORMAT_VERSION 5
 
 int master_save_state(MasterTopology* master, const char* file_path) {

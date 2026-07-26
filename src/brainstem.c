@@ -530,12 +530,19 @@ static void* brainstem_loop(void* arg) {
         brainstem_tick_freeze(bs, &cp);
 
         /* 定期存盘：每 60 tick (≈17min) 持久化，防重启丢数据 */
+        /* 空启动保护：总节点数 < SAVE_MIN_TOTAL_NODES (50) 时跳过，防止覆盖有效存盘 */
         if (bs->tick_count % 60 == 0) {
-            /* 先清理孤立死节点（并发/learn可能产生重复零边节点） */
-            master_prune_dead_nodes(bs->master);
-            int saved = master_save_state(bs->master, "pivotmind_state.dat");
-            if (saved > 0 && bs->verbose)
-                LOG_INFO("[存盘] tick=%d 已保存 %d 节点", bs->tick_count, saved);
+            if (master_count_total_nodes(bs->master) >= SAVE_MIN_TOTAL_NODES) {
+                /* 先清理孤立死节点（并发/learn可能产生重复零边节点） */
+                master_prune_dead_nodes(bs->master);
+                int saved = master_save_state(bs->master, "pivotmind_state.dat");
+                if (saved > 0 && bs->verbose)
+                    LOG_INFO("[存盘] tick=%d 已保存 %d 节点", bs->tick_count, saved);
+            } else if (bs->verbose) {
+                LOG_INFO("[存盘] tick=%d 跳过 (总节点=%d < 门卫阈值 %d)",
+                         bs->tick_count, master_count_total_nodes(bs->master),
+                         SAVE_MIN_TOTAL_NODES);
+            }
         }
 
         /* 语义拓扑自动生长：每 60 tick (≈1min)，首次在第5tick即触发 */
