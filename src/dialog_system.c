@@ -392,7 +392,7 @@ static int find_node_id_by_concept(MasterTopology* master, const char* concept) 
         // 线性搜索作为备选
         for (int i = 0; i < sub->net->node_count; i++) {
             ReasoningNode* n = sub->net->nodes[i];
-            if (n && strcmp(n->concept, concept) == 0) {
+            if (n && n->concept && strcmp(n->concept, concept) == 0) {
                 return n->node_id;
             }
         }

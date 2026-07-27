@@ -655,9 +655,9 @@ static float self_contradiction_check(CognitiveController* cc,
             for (int ci = 0; ci < ch->node_count; ci++) {
                 ConceptNode* cn = ch->nodes[ci];
                 if (!cn || !cn->name) continue;
-                if (level_from < 0 && strcmp(cn->name, fn->concept) == 0)
+                if (level_from < 0 && fn->concept && strcmp(cn->name, fn->concept) == 0)
                     level_from = (int)cn->level;
-                if (level_to < 0 && strcmp(cn->name, tn->concept) == 0)
+                if (level_to < 0 && tn->concept && strcmp(cn->name, tn->concept) == 0)
                     level_to = (int)cn->level;
                 if (level_from >= 0 && level_to >= 0) break;
             }

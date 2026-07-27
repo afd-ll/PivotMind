@@ -179,7 +179,7 @@ int emergent_pos_init_centroids(EmergentPOS* ep, MasterTopology* master) {
 
             /* 检查是否是种子词 */
             for (int s = 0; s < anchor->seed_count; s++) {
-                if (anchor->seeds[s] && strcmp(node->concept, anchor->seeds[s]) == 0) {
+                if (node->concept && anchor->seeds[s] && strcmp(node->concept, anchor->seeds[s]) == 0) {
                     for (int d = 0; d < PM_NODE_FEATURE_DIM; d++) {
                         sum_feat[d] += node->features[d];
                     }
@@ -207,7 +207,7 @@ int emergent_pos_init_centroids(EmergentPOS* ep, MasterTopology* master) {
                 ReasoningNode* node = vnet->nodes[i];
                 if (!node || !node->concept || !node->features) continue;
                 for (int s = 0; s < anchor->seed_count; s++) {
-                    if (anchor->seeds[s] && strcmp(node->concept, anchor->seeds[s]) == 0) {
+                    if (node->concept && anchor->seeds[s] && strcmp(node->concept, anchor->seeds[s]) == 0) {
                         memcpy(anchor->centroid, node->features,
                                PM_NODE_FEATURE_DIM * sizeof(float));
                         anchor->member_count = 1;

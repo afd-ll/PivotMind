@@ -275,7 +275,7 @@ char* dialog_generate(DialogReasoning* reasoning, const char* input,
                 if (!node || !node->concept || !concept_is_printable(node->concept)) continue;
                 
                 // 去重
-                if (last_concept && strcmp(last_concept, node->concept) == 0) continue;
+                if (last_concept && node->concept && strcmp(last_concept, node->concept) == 0) continue;
                 
                 int prev_nid = path_nodes[p-1];
                 const char* connector = NULL;

@@ -259,7 +259,7 @@ int broca_seed_grammar(MasterTopology* master) {
     for (int i = 0; i < n; i++) {
         int exists = 0;
         for (int j = 0; j < tpl->net->node_count; j++)
-            if (tpl->net->nodes[j] && strcmp(tpl->net->nodes[j]->concept, seeds[i]) == 0)
+            if (tpl->net->nodes[j] && tpl->net->nodes[j]->concept && strcmp(tpl->net->nodes[j]->concept, seeds[i]) == 0)
                 { exists = 1; break; }
         if (exists) continue;
 
