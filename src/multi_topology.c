@@ -426,7 +426,8 @@ int cross_link_exists(MasterTopology* master,
     CrossTopoAdjEntry* entry = master->cross_adj[idx];
     while (entry) {
         if (entry->link_index < master->cross_link_count) {
-            CrossTopologyLink* l = master->cross_links[entry->link_index];
+            CrossTopologyLink* l = (master->cross_links)
+                ? master->cross_links[entry->link_index] : NULL;
             if (l && l->from_topo_id == from_topo &&
                 l->from_node_id == from_node &&
                 l->to_topo_id == to_topo &&

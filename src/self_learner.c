@@ -247,11 +247,13 @@ static int deep_walk(SelfLearner* sl, int start_topo, int start_node,
             if (!jumped) break;
         } else {
             /* 偏弱边选择（同梦境引擎的反向权重逻辑） */
+            /* 完整性校验：edges 可能为悬垂指针（hash overflow 残留脏数据） */
+            if (!node->edges || node->edge_capacity == 0) break;
             float wsum = 0.0f;
             float wbuf[64];
             int nc = node->edge_count < 64 ? node->edge_count : 64;
-            for (int i = 0; i < nc; i++) {
-                float w = (node->edges ? node->edges[i].weight : 0.5f);
+            for (int i = 0; i < nc && i < node->edge_capacity; i++) {
+                float w = node->edges[i].weight;
                 wbuf[i] = (1.0f - w + 0.05f);
                 if (wbuf[i] < 0.01f) wbuf[i] = 0.01f;
                 wsum += wbuf[i];
@@ -260,12 +262,14 @@ static int deep_walk(SelfLearner* sl, int start_topo, int start_node,
             float r = _sl_randf() * wsum;
             float acc = 0.0f;
             int chosen = 0;
-            for (int i = 0; i < nc; i++) {
+            for (int i = 0; i < nc && i < node->edge_capacity; i++) {
                 acc += wbuf[i];
                 if (r <= acc) { chosen = i; break; }
             }
-            /* 守卫：target 可能为 NULL（脏数据或并发冻结） */
-            if (!node->edges || !node->edges[chosen].target) break;
+            /* 三重守卫：edges 非空 + capacity 有效 + target 非空 */
+            if (!node->edges || node->edge_capacity == 0
+                || chosen >= node->edge_capacity
+                || !node->edges[chosen].target) break;
             cur_node = node->edges[chosen].target->node_id;
             /* 图平滑：走过边微量强化 (+0.01)，好路径被随机游走自然加强 */
             {
