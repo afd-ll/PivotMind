@@ -38,6 +38,29 @@ int semantic_grow_from_vocab(MasterTopology* master) {
     int actual = si;
     if (actual < SG_MIN_CLUSTER_SIZE) { free(sample_ids); free(assigned); return 0; }
 
+    /* 预计算所有采样节点的 L2 范数平方（避免内层重复计算） */
+    float* norms = (float*)calloc((size_t)actual, sizeof(float));
+    if (!norms) { free(sample_ids); free(assigned); return 0; }
+    for (int k = 0; k < actual; k++) {
+        ReasoningNode* n = vnet->nodes[sample_ids[k]];
+        if (!n) continue;
+        if (!n->features) lazy_alloc_node_features(n);
+        if (!n->features) continue;
+        float* f = n->features;
+        float n2 = 0.0f;
+        for (int d = 0; d < NODE_FEATURE_DIM; d++) n2 += f[d] * f[d];
+        norms[k] = n2;
+    }
+
+    /* node_id → sample_ids 索引映射（O(1) 成员标记） */
+    int* pos_by_node = (int*)malloc((size_t)vnet->max_nodes * sizeof(int));
+    if (pos_by_node) {
+        for (int k = 0; k < vnet->max_nodes; k++) pos_by_node[k] = -1;
+    }
+    if (pos_by_node) {
+        for (int k = 0; k < actual; k++) pos_by_node[sample_ids[k]] = k;
+    }
+
     int created = 0;
     for (int i = 0; i < actual && created < SG_MAX_NEW_NODES; i++) {
         if (assigned[i]) continue;
@@ -47,10 +70,7 @@ int semantic_grow_from_vocab(MasterTopology* master) {
         if (!seed->features) lazy_alloc_node_features(seed);
         if (!seed->features) continue;
         float* sf = seed->features;
-
-        /* 预计算种子的 L2 范数平方 */
-        float na = 0.0f;
-        for (int d = 0; d < NODE_FEATURE_DIM; d++) na += sf[d] * sf[d];
+        float na = norms[i];
 
         int* members = (int*)malloc((size_t)actual * sizeof(int));
         int mcnt = 0;
@@ -63,13 +83,13 @@ int semantic_grow_from_vocab(MasterTopology* master) {
             if (!cand->features) lazy_alloc_node_features(cand);
             if (!cand->features) continue;
 
-            float dot = 0.0f, nb = 0.0f;
-            for (int d = 0; d < NODE_FEATURE_DIM; d++) {
-                dot += sf[d] * cand->features[d];
-                nb  += cand->features[d] * cand->features[d];
-            }
-            float sim = (na > 0.0f && nb > 0.0f)
-                        ? dot / (sqrtf(na) * sqrtf(nb)) : 0.0f;
+            float nb = norms[j];
+            if (na <= 0.0f || nb <= 0.0f) continue;
+            float dot = 0.0f;
+            float* cf = cand->features;
+            for (int d = 0; d < NODE_FEATURE_DIM; d++)
+                dot += sf[d] * cf[d];
+            float sim = dot / (sqrtf(na) * sqrtf(nb));
 
             if (sim >= SG_COSINE_THRESHOLD)
                 members[mcnt++] = sample_ids[j];
@@ -77,11 +97,18 @@ int semantic_grow_from_vocab(MasterTopology* master) {
 
         if (mcnt < SG_MIN_CLUSTER_SIZE) { free(members); continue; }
 
-        /* 标记成员为已分配 */
+        /* 标记成员为已分配 — 用 pos_by_node 做 O(1) 查找 */
         assigned[i] = 1;
-        for (int m = 1; m < mcnt; m++)
-            for (int k = 0; k < actual; k++)
-                if (sample_ids[k] == members[m]) { assigned[k] = 1; break; }
+        if (pos_by_node) {
+            for (int m = 1; m < mcnt; m++) {
+                int k = pos_by_node[members[m]];
+                if (k >= 0) assigned[k] = 1;
+            }
+        } else {
+            for (int m = 1; m < mcnt; m++)
+                for (int k = 0; k < actual; k++)
+                    if (sample_ids[k] == members[m]) { assigned[k] = 1; break; }
+        }
 
         /* 构建语义节点名 */
         char sname[128];
@@ -113,5 +140,7 @@ int semantic_grow_from_vocab(MasterTopology* master) {
 
     free(sample_ids);
     free(assigned);
+    free(norms);
+    free(pos_by_node);
     return created;
 }

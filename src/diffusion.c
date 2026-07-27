@@ -839,12 +839,11 @@ static int _cross_by_name(SubTopology* src, int* src_ids, int src_count,
     for (int i = 0; i < src_count; i++) {
         ReasoningNode* sn = src->net->nodes[src_ids[i]];
         if (!sn || !sn->concept) continue;
-        for (int j = 0; j < dst->net->node_count; j++) {
-            ReasoningNode* dn = dst->net->nodes[j];
-            if (dn && dn->concept && strcmp(sn->concept, dn->concept) == 0) {
-                scores[j] += weight;
-                spread++;
-            }
+        /* O(1) 哈希查找替代 O(N) 线性 strcmp 扫描 */
+        int dst_id = huarong_net_find_concept(dst->net, sn->concept);
+        if (dst_id >= 0) {
+            scores[dst_id] += weight;
+            spread++;
         }
     }
     return spread;
@@ -906,6 +905,19 @@ static int _cand_cmp(const void* a, const void* b) {
     float sa = ((const DiffusionCandidate*)a)->total_score;
     float sb = ((const DiffusionCandidate*)b)->total_score;
     return (sa < sb) ? 1 : (sa > sb) ? -1 : 0;
+}
+
+/* 部分选择：只找前 K 个最大元素（无需完整排序） */
+static void _sel_top_k(DiffusionCandidate* arr, int n, int k) {
+    if (n <= k) return;
+    for (int i = 0; i < k && i < n; i++) {
+        int best = i;
+        for (int j = i + 1; j < n; j++)
+            if (arr[j].total_score > arr[best].total_score) best = j;
+        if (best != i) {
+            DiffusionCandidate t = arr[i]; arr[i] = arr[best]; arr[best] = t;
+        }
+    }
 }
 
 /* ================================================================
@@ -1194,7 +1206,7 @@ int diffusion_generate(DiffusionCtx* ctx,
                 tmp_cnt++;
             }
         }
-        qsort(tmp, tmp_cnt, sizeof(DiffusionCandidate), _cand_cmp);
+        _sel_top_k(tmp, tmp_cnt, ctx->top_k);
 
         cur_count = tmp_cnt < ctx->top_k ? tmp_cnt : ctx->top_k;
         for (int i = 0; i < cur_count; i++) {

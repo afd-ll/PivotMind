@@ -229,7 +229,9 @@ static int deep_walk(SelfLearner* sl, int start_topo, int start_node,
                 if (adj < sl->master->cross_adj_count) {
                     CrossTopoAdjEntry* e = sl->master->cross_adj[adj];
                     while (e) {
-                        CrossTopologyLink* l = (e->link_index < sl->master->cross_link_count)
+                        CrossTopologyLink* l = (sl->master->cross_links
+                            && e->link_index >= 0
+                            && e->link_index < sl->master->cross_link_count)
                             ? sl->master->cross_links[e->link_index] : NULL;
                         if (l && l->to_topo_id != cur_topo
                             && l->to_topo_id >= 0 && l->to_topo_id < sl->master->sub_topo_count) {
@@ -280,7 +282,9 @@ static int deep_walk(SelfLearner* sl, int start_topo, int start_node,
                 if (adj < sl->master->cross_adj_count) {
                     CrossTopoAdjEntry* e = sl->master->cross_adj[adj];
                     if (e) {
-                        CrossTopologyLink* l = (e->link_index < sl->master->cross_link_count)
+                        CrossTopologyLink* l = (sl->master->cross_links
+                            && e->link_index >= 0
+                            && e->link_index < sl->master->cross_link_count)
                             ? sl->master->cross_links[e->link_index] : NULL;
                         if (l && l->to_topo_id != cur_topo
                             && l->to_topo_id >= 0 && l->to_topo_id < sl->master->sub_topo_count) {
@@ -340,8 +344,8 @@ static int audit_path(SelfLearner* sl, WalkStep* steps, int len) {
                         sl->total_created++;
                         mods++;
                         LOG_INFO("[自学] 语义关联 %s(%d) ↔ %s(%d) sim=%.2f",
-                                 na->concept, steps[a].topo_id,
-                                 nc->concept, steps[c].topo_id, sim);
+                                 na->concept ? na->concept : "?", steps[a].topo_id,
+                                 nc->concept ? nc->concept : "?", steps[c].topo_id, sim);
                     }
                 }
             }
@@ -354,7 +358,7 @@ static int audit_path(SelfLearner* sl, WalkStep* steps, int len) {
             if (b2 < len) {
                 ReasoningNode* na2 = steps[a].ptr;
                 ReasoningNode* nb2 = steps[b2].ptr;
-                if (na2 && nb2) {
+                if (na2 && nb2 && na2->edges) {
                     for (int ci = 0; ci < na2->edge_count; ci++) {
                         if (na2->edges[ci].target == nb2) {
                             float w = (na2->edges ? na2->edges[ci].weight : 0.0f);

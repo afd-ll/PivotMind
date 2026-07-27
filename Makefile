@@ -229,6 +229,9 @@ $(BUILD_DIR)/test_pfe_unit: tests/test_pfe_unit.c $(LIB_NAME)
 $(BUILD_DIR)/test_regression: tests/unit/test_regression.c $(LIB_NAME)
 	$(CC) $(CFLAGS) -I. -o $@ tests/unit/test_regression.c -L. -lpivotmind $(LDFLAGS)
 
+$(BUILD_DIR)/test_semantic_growth: tests/unit/test_semantic_growth.c $(LIB_NAME)
+	$(CC) $(CFLAGS) -I. -o $@ tests/unit/test_semantic_growth.c -L. -lpivotmind $(LDFLAGS)
+
 $(BUILD_DIR)/test_integration: tests/integration/test_integration.c $(LIB_NAME)
 	$(CC) $(CFLAGS) -I. -o $@ tests/integration/test_integration.c -L. -lpivotmind $(LDFLAGS)
 
@@ -259,6 +262,7 @@ test-pure: $(BUILD_DIR)/test_pure                           # 纯函数单元测
 test-search: $(BUILD_DIR)/test_search                        # 多引擎搜索测试
 test-pfe-unit: $(BUILD_DIR)/test_pfe_unit                     # 前额叶执行器测试
 test-regression: $(BUILD_DIR)/test_regression                    # 回归测试 (bug修复验证)
+test-semantic-growth: $(BUILD_DIR)/test_semantic_growth           # 语义生长回归测试
 test-integration: $(BUILD_DIR)/test_integration
 test-cc: $(BUILD_DIR)/test_cognitive_controller
 test-cc-full: $(BUILD_DIR)/test_cognitive_full

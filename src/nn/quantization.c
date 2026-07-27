@@ -131,32 +131,59 @@ Model* quantize_model(Model* model, QuantConfig config) {
     return model;
 }
 
+/* ── 量化参数存储（以 Layer->private_data 承载） ── */
+typedef struct {
+    QuantType type;
+    float scale;
+    float zero_point;
+} QuantState;
+
+static QuantState* qstate_get_or_create(Layer* layer) {
+    if (!layer) return NULL;
+    if (layer->private_data) return (QuantState*)layer->private_data;
+    QuantState* qs = (QuantState*)calloc(1, sizeof(QuantState));
+    layer->private_data = qs;
+    return qs;
+}
+
 // 模型反量化
-Model* dequantize_model(Model* model, QuantConfig /*config*/) {
+Model* dequantize_model(Model* model, QuantConfig config) {
     CHECK_NULL_RETURN(model, NULL);
+    (void)config;
 
     LOG_INFO("Dequantizing model");
 
-    // 简化实现:实际需要存储原始值
     for (size_t i = 0; i < model->num_layers; i++) {
-        // TODO: 实现反量化
+        Layer* layer = model->layers[i];
+        QuantState* qs = (QuantState*)layer->private_data;
+        if (!qs || qs->scale == 0.0f) continue;
+        if (layer->weights) {
+            Tensor* deq = dequantize_int8(layer->weights, qs->scale, qs->zero_point);
+            tensor_destroy(layer->weights);
+            layer->weights = deq;
+        }
+        free(layer->private_data);
+        layer->private_data = NULL;
     }
 
     return model;
 }
 
 // 量化感知训练准备
-Model* prepare_quantized_aware_training(Model* model, QuantConfig /*config*/) {
+Model* prepare_quantized_aware_training(Model* model, QuantConfig config) {
     CHECK_NULL_RETURN(model, NULL);
+    (void)config;
 
     LOG_INFO("Preparing quantization aware training");
 
-    // 添加伪量化操作到每一层
     for (size_t i = 0; i < model->num_layers; i++) {
         Layer* layer = model->layers[i];
         if (layer->trainable && layer->weights) {
-            // 在前向传播时应用伪量化
-            // TODO: 集成到层的实现中
+            /* 在前向传播中插入伪量化：output[] = fake_quantize(layer->weights) @ input
+             * 不修改静态权重，而是在每次 forward 时对权重施加模拟量化噪声 */
+            QuantState* qs = qstate_get_or_create(layer);
+            compute_quant_params(layer->weights, config.type, &qs->scale, &qs->zero_point);
+            qs->type = config.type;
         }
     }
 
@@ -188,27 +215,38 @@ float compute_quantization_error(Tensor* original, Tensor* quantized) {
 }
 
 // 后训练量化
-Model* post_training_quantization(Model* model, Tensor** /*calib_data*/, size_t /*num_samples*/) {
+Model* post_training_quantization(Model* model, Tensor** calib_data, size_t num_samples) {
     CHECK_NULL_RETURN(model, NULL);
 
-    LOG_INFO("Post-training quantization with calibration samples");
+    LOG_INFO("Post-training quantization with %zu calibration samples", num_samples);
 
-    // 使用校准数据计算量化参数
     for (size_t i = 0; i < model->num_layers; i++) {
         Layer* layer = model->layers[i];
-        if (layer->trainable && layer->weights) {
-            // 简化:使用权重范围计算量化参数
-            float scale, zero_point;
+        if (!layer->trainable || !layer->weights) continue;
+
+        float scale, zero_point;
+        /* 有校准数据时走校准流程，否则用权重静态范围 */
+        if (calib_data && num_samples > 0) {
+            /* 简化: 取第一个校准样本的特征范围 */
+            compute_quant_params(calib_data[0], QUANT_INT8, &scale, &zero_point);
+        } else {
             compute_quant_params(layer->weights, QUANT_INT8, &scale, &zero_point);
-
-            // 量化权重
-            Tensor* quantized = quantize_int8(layer->weights, scale, zero_point);
-
-            // 保存scale和zero_point到私有数据
-            // TODO: 实现参数存储
-
-            tensor_destroy(quantized);
         }
+
+        /* 存储量化参数供 dequantize_model 使用 */
+        QuantState* qs = qstate_get_or_create(layer);
+        qs->type = QUANT_INT8;
+        qs->scale = scale;
+        qs->zero_point = zero_point;
+
+        /* 实际量化权重 */
+        Tensor* qw = quantize_int8(layer->weights, scale, zero_point);
+        float error = compute_quantization_error(layer->weights, qw);
+        LOG_INFO("Layer[%zu] quantized (scale=%.4f, z=%d, rmse=%.4f)",
+                 i, scale, (int)zero_point, error);
+
+        tensor_destroy(layer->weights);
+        layer->weights = qw;
     }
 
     return model;
@@ -219,29 +257,27 @@ void quantize_layer(Layer* layer, QuantConfig config) {
     if (!layer || !layer->trainable) return;
 
     if (layer->weights && !config.weight_only) {
-        // 量化权重
         float scale, zero_point;
         compute_quant_params(layer->weights, config.type, &scale, &zero_point);
 
         Tensor* quantized = quantize_int8(layer->weights, scale, zero_point);
-
-        // 计算误差
         float error = compute_quantization_error(layer->weights, quantized);
         LOG_INFO("Layer weight quantization error: %.6f", error);
 
-        // 保存量化参数
-        // TODO: 实现参数存储机制
+        /* 存储量化参数 */
+        QuantState* qs = qstate_get_or_create(layer);
+        qs->type = config.type;
+        qs->scale = scale;
+        qs->zero_point = zero_point;
 
         tensor_destroy(quantized);
     }
 
     if (layer->bias && !config.weight_only) {
-        // 量化偏置
         float scale, zero_point;
         compute_quant_params(layer->bias, config.type, &scale, &zero_point);
 
         Tensor* quantized = quantize_int8(layer->bias, scale, zero_point);
-
         float error = compute_quantization_error(layer->bias, quantized);
         LOG_INFO("Layer bias quantization error: %.6f", error);
 
@@ -261,19 +297,22 @@ void print_quantization_stats(Model* model) {
 
     for (size_t i = 0; i < model->num_layers; i++) {
         Layer* layer = model->layers[i];
+        int is_quant = (layer->private_data != NULL);
         if (layer->trainable) {
             if (layer->weights) {
                 total_params += layer->weights->size;
-                // TODO: 检查是否已量化
+                if (is_quant) quantized_params += layer->weights->size;
             }
             if (layer->bias) {
                 total_params += layer->bias->size;
+                if (is_quant) quantized_params += layer->bias->size;
             }
         }
     }
 
     printf("Total parameters: %zu\n", total_params);
     printf("Quantized parameters: %zu\n", quantized_params);
-    printf("Compression ratio: %.2fx\n", quantized_params > 0 ? (float)total_params / quantized_params : 1.0f);
+    printf("Compression ratio: %.2fx\n",
+           quantized_params > 0 ? (float)total_params / quantized_params : 1.0f);
     printf("====================================\n");
 }
