@@ -149,7 +149,8 @@ static int sample_by_curiosity(SelfLearner* sl, int* out_topo, int* out_node, in
         int per_topo = 128 / sl->master->sub_topo_count + 1;
         for (int s = 0; s < per_topo && pool_n < 128; s++) {
             int ni = _sl_rand(sub->net->node_count);
-            if (sub->net->nodes[ni] && sub->net->nodes[ni]->concept) {
+            if (sub->net->nodes[ni] && sub->net->nodes[ni]->concept
+                && !sub->net->nodes[ni]->is_cooled) {
                 pool[pool_n].topo  = sub->topo_id;
                 pool[pool_n].node  = ni;
                 pool[pool_n].score = curiosity_score(sl, sub->topo_id, ni);
@@ -198,17 +199,26 @@ static int deep_walk(SelfLearner* sl, int start_topo, int start_node,
     int cur_topo = start_topo;
     int cur_node = start_node;
 
+    /* 入口边界检查：防止采样到的 topo_id 意外越界 */
+    if (cur_topo < 0 || cur_topo >= sl->master->sub_topo_count) return 0;
+
     for (int hop = 0; hop < sl->cfg.walk_depth && len < max_steps; hop++) {
+        /* 跨拓扑跳转后可能越界 */
+        if (cur_topo < 0 || cur_topo >= sl->master->sub_topo_count) break;
+
         SubTopology* sub = sl->master->sub_topologies[cur_topo];
-        if (!sub || !sub->net || cur_node >= sub->net->node_count) break;
+        if (!sub || !sub->net || cur_node < 0 || cur_node >= sub->net->node_count) break;
         ReasoningNode* node = sub->net->nodes[cur_node];
         if (!node) break;
 
-        /* 记录当前步 */
+        /* 记录当前步（冻节点也记录，但不在其上继续行走） */
         steps[len].topo_id = cur_topo;
         steps[len].node_id = cur_node;
         steps[len].ptr     = node;
         len++;
+
+        /* 冻节点：连接数据已释放不可遍历，记录后终止本路径 */
+        if (node->is_cooled) break;
 
         /* 选择下一跳：偏向低权重的边（探索未知） */
         if (node->edge_count == 0) {
@@ -221,7 +231,8 @@ static int deep_walk(SelfLearner* sl, int start_topo, int start_node,
                     while (e) {
                         CrossTopologyLink* l = (e->link_index < sl->master->cross_link_count)
                             ? sl->master->cross_links[e->link_index] : NULL;
-                        if (l && l->to_topo_id != cur_topo) {
+                        if (l && l->to_topo_id != cur_topo
+                            && l->to_topo_id >= 0 && l->to_topo_id < sl->master->sub_topo_count) {
                             cur_topo = l->to_topo_id;
                             cur_node = l->to_node_id;
                             jumped = 1;
@@ -251,6 +262,8 @@ static int deep_walk(SelfLearner* sl, int start_topo, int start_node,
                 acc += wbuf[i];
                 if (r <= acc) { chosen = i; break; }
             }
+            /* 守卫：target 可能为 NULL（脏数据或并发冻结） */
+            if (!node->edges || !node->edges[chosen].target) break;
             cur_node = node->edges[chosen].target->node_id;
             /* 图平滑：走过边微量强化 (+0.01)，好路径被随机游走自然加强 */
             {
@@ -269,7 +282,8 @@ static int deep_walk(SelfLearner* sl, int start_topo, int start_node,
                     if (e) {
                         CrossTopologyLink* l = (e->link_index < sl->master->cross_link_count)
                             ? sl->master->cross_links[e->link_index] : NULL;
-                        if (l && l->to_topo_id != cur_topo) {
+                        if (l && l->to_topo_id != cur_topo
+                            && l->to_topo_id >= 0 && l->to_topo_id < sl->master->sub_topo_count) {
                             cur_topo = l->to_topo_id;
                             cur_node = l->to_node_id;
                         }
