@@ -1,3 +1,4 @@
+#include "common.h"
 #include "causal_reasoning.h"
 #include "huarong_topology.h"
 #include "utf8_tokenizer.h"
@@ -2276,7 +2277,7 @@ CausalGraph* infer_causal_graph_from_master_topology(MasterTopology* master,
             // 去重：检查是否已存在
             bool exists = false;
             for (int j = 0; j < actual_nodes; j++) {
-                if (strcmp(concept_names[j], node->concept) == 0) {
+                if (strcmp_null(concept_names[j], node->concept) == 0) {
                     exists = true;
                     graph->node_mapping[j] = node->node_id;
                     break;
@@ -2305,7 +2306,7 @@ CausalGraph* infer_causal_graph_from_master_topology(MasterTopology* master,
             // 找该节点在因果图中的ID
             int cause_cg_id = -1;
             for (int j = 0; j < actual_nodes; j++) {
-                if (strcmp(concept_names[j], node->concept) == 0) {
+                if (strcmp_null(concept_names[j], node->concept) == 0) {
                     cause_cg_id = j;
                     break;
                 }
@@ -2324,7 +2325,7 @@ CausalGraph* infer_causal_graph_from_master_topology(MasterTopology* master,
 
                 int effect_cg_id = -1;
                 for (int j = 0; j < actual_nodes; j++) {
-                    if (strcmp(concept_names[j], target->concept) == 0) {
+                    if (strcmp_null(concept_names[j], target->concept) == 0) {
                         effect_cg_id = j;
                         break;
                     }
@@ -2356,7 +2357,7 @@ CausalGraph* infer_causal_graph_from_master_topology(MasterTopology* master,
 
             int cause_cg_id = -1;
             for (int j = 0; j < actual_nodes; j++) {
-                if (strcmp(concept_names[j], node->concept) == 0) {
+                if (strcmp_null(concept_names[j], node->concept) == 0) {
                     cause_cg_id = j;
                     break;  
                 }
@@ -2484,7 +2485,7 @@ CausalSearchResult* causal_associative_search(MasterTopology* master,
             } else {
                 for (int j = 0; j < vocab->net->node_count; j++) {
                     if (vocab->net->nodes[j] && vocab->net->nodes[j]->concept &&
-                        strcmp(vocab->net->nodes[j]->concept, tokens[i]) == 0) {
+                        strcmp_null(vocab->net->nodes[j]->concept, tokens[i]) == 0) {
                         node = vocab->net->nodes[j];
                         break;
                     }
@@ -2505,7 +2506,7 @@ CausalSearchResult* causal_associative_search(MasterTopology* master,
                     for (int k = 0; k < sub->net->node_count && !found; k++) {
                         ReasoningNode* n = sub->net->nodes[k];
                         if (n && n->concept && 
-                            strcmp(n->concept, node->concept) == 0) {
+                            strcmp_null(n->concept, node->concept) == 0) {
                             // 这个节点在因果图中有对应的ID
                             // 用因果图节点索引作为source_id
                             found = true;
@@ -2676,7 +2677,7 @@ int infer_causal_direction_from_hierarchy(CausalGraph* graph,
         // 找到词汇拓扑中同名的节点
         for (int j = 0; j < vocab->net->node_count; j++) {
             ReasoningNode* rn = vocab->net->nodes[j];
-            if (rn && rn->concept && strcmp(rn->concept, cn->name) == 0) {
+            if (rn && rn->concept && strcmp_null(rn->concept, cn->name) == 0) {
                 topo_to_level[j] = (int)cn->level;
                 break;
             }

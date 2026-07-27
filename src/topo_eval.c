@@ -904,7 +904,7 @@ int topo_find_node_by_concept(MasterTopology* master,
         for (int n = 0; n < sub->net->node_count; n++) {
             ReasoningNode* node = sub->net->nodes[n];
             if (node && node->concept &&
-                strcmp(node->concept, concept) == 0) {
+                strcmp_null(node->concept, concept) == 0) {
                 *out_topo_id = t;
                 return n;
             }

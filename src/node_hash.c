@@ -1,3 +1,4 @@
+#include "common.h"
 #include "node_hash.h"
 #include "node_cache.h"
 #include <stdlib.h>
@@ -125,7 +126,7 @@ ReasoningNode* node_hash_find(NodeHashTable* hash, const char* concept) {
     // 遍历链表查找
     while (entry) {
         if (entry->node && entry->node->concept) {
-            if (strcmp(entry->node->concept, concept) == 0) {
+            if (strcmp_null(entry->node->concept, concept) == 0) {
                 return entry->node;
             }
         }
@@ -160,7 +161,7 @@ int node_hash_remove(NodeHashTable* hash, const char* concept) {
     
     while (entry) {
         if (entry->node && entry->node->concept) {
-            if (strcmp(entry->node->concept, concept) == 0) {
+            if (strcmp_null(entry->node->concept, concept) == 0) {
                 // 找到，从链表中删除
                 if (prev) {
                     prev->next = entry->next;

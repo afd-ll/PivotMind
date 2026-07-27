@@ -1,3 +1,4 @@
+#include "common.h"
 /**
  * @file hippocampus.c
  * @brief 海马体实现 — 记忆系统 + 巩固 + 感觉皮层联动
@@ -72,8 +73,8 @@ int hippocampus_consolidate(Hippocampus* hc) {
                         for (int i = 0; i < vocab->net->node_count; i++) {
                             ReasoningNode* n = vocab->net->nodes[i];
                             if (n && n->concept) {
-                                if (qid < 0 && strcmp(n->concept, qw) == 0) qid = i;
-                                if (aid < 0 && strcmp(n->concept, aw) == 0) aid = i;
+                                if (qid < 0 && strcmp_null(n->concept, qw) == 0) qid = i;
+                                if (aid < 0 && strcmp_null(n->concept, aw) == 0) aid = i;
                                 if (qid >= 0 && aid >= 0) break;
                             }
                         }

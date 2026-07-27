@@ -188,7 +188,7 @@ static int link_topos_by_name(MasterTopology* master,
                 ReasoningNode* tn = to_sub->net->nodes[ti];
                 if (!tn || !tn->concept) continue;
                 if (fi == ti && from_sub->type == to_sub->type) continue;
-                if (strcmp(fn->concept, tn->concept) == 0) {
+                if (strcmp_null(fn->concept, tn->concept) == 0) {
                     int ret = master_add_cross_link(master,
                         from_sub->topo_id, fn->node_id,
                         to_sub->topo_id, tn->node_id,
@@ -233,7 +233,7 @@ static int link_topos_by_substr(MasterTopology* master,
             if (!tn || !tn->concept) continue;
 
             // avoid duplicate with exact match
-            if (strcmp(fn->concept, tn->concept) == 0) continue;
+            if (strcmp_null(fn->concept, tn->concept) == 0) continue;
 
                 if (strstr(tn->concept, fn->concept) || strstr(fn->concept, tn->concept)) {
                 // fast lookup
@@ -282,7 +282,8 @@ static int link_topos_by_features(MasterTopology* master,
         for (int ti = 0; ti < to_sub->net->node_count; ti++) {
             ReasoningNode* tn = to_sub->net->nodes[ti];
             if (!tn || !tn->features || tn->feature_dim != fn->feature_dim) continue;
-            if (strcmp(fn->concept, tn->concept) == 0) continue; // already exact matched
+            if (fn->concept && tn->concept &&
+                strcmp_null(fn->concept, tn->concept) == 0) continue; // already exact matched
 
             float sim = cosine_similarity(fn->features, tn->features, fn->feature_dim);
             if (isnan(sim) || isinf(sim)) sim = 0.0f;
@@ -408,7 +409,7 @@ static int ensure_nodes_in_target(MasterTopology* master,
         } else {
             for (int ti = 0; ti < target->net->node_count; ti++) {
                 ReasoningNode* tn = target->net->nodes[ti];
-                if (tn && tn->concept && strcmp(tn->concept, sn->concept) == 0) {
+                if (tn && tn->concept && strcmp_null(tn->concept, sn->concept) == 0) {
                     existing = tn;
                     break;
                 }

@@ -1,3 +1,4 @@
+#include "common.h"
 /**
  * @file perception.c
  * @brief 感觉皮层实现 — 好奇心驱动自主搜索学习
@@ -1254,7 +1255,7 @@ int perception_expand_query(Perception* p, const char* concept,
 
     for (int i = 0; i < source->edge_count && rc < 32; i++) {
         ReasoningNode* tgt = source->edges[i].target;
-        if (!tgt || !tgt->concept || strcmp(tgt->concept, concept) == 0) continue;
+        if (!tgt || !tgt->concept || strcmp_null(tgt->concept, concept) == 0) continue;
         snprintf(related[rc].word, sizeof(related[rc].word), "%s", tgt->concept);
         related[rc].strength = source->edges[i].weight;
         rc++;

@@ -302,7 +302,7 @@ ReasoningNode* huarong_net_find_or_create_node(HuarongTopologyNet* net,
     // 再线性扫描（容错：哈希表可能不完整）
     for (int i = 0; i < net->node_count; i++) {
         ReasoningNode* node = net->nodes[i];
-        if (node && node->concept && strcmp(node->concept, concept) == 0) {
+        if (node && node->concept && strcmp_null(node->concept, concept) == 0) {
             // 补入哈希表
             if (hash) node_hash_add(hash, node);
             pthread_rwlock_unlock(&net->mutex);

@@ -1,3 +1,4 @@
+#include "common.h"
 /**
  * @file prefrontal.c
  * @brief 前额叶皮层实现 — 对话+意图+认知控制
@@ -124,7 +125,7 @@ char* prefrontal_chat(Prefrontal* pf, const char* input) {
                 for (int vi = 0; vi < vocab->net->node_count; vi++) {
                     ReasoningNode* vn = vocab->net->nodes[vi];
                     if (vn && vn->concept) {
-                        if (attr_nid < 0 && strcmp(vn->concept, attr_type) == 0)
+                        if (attr_nid < 0 && strcmp_null(vn->concept, attr_type) == 0)
                             attr_nid = vi;
                     }
                 }
@@ -137,7 +138,7 @@ char* prefrontal_chat(Prefrontal* pf, const char* input) {
                             memcpy(sub, input + ci, w * 3 < 15 ? w * 3 : 15);
                             for (int vi = 0; vi < vocab->net->node_count; vi++) {
                                 ReasoningNode* vn = vocab->net->nodes[vi];
-                                if (vn && vn->concept && strcmp(vn->concept, sub) == 0)
+                                if (vn && vn->concept && strcmp_null(vn->concept, sub) == 0)
                                 { subj_nid = vi; break; }
                             }
                             if (subj_nid >= 0) break;
