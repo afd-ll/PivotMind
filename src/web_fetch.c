@@ -48,6 +48,37 @@
 static CrawlPolicy g_policy;
 static int         g_initialized = 0;
 
+/* 全局互斥锁：保护 curl_easy_perform 防止 SSL 多线程初始化竞态 */
+#ifndef _WIN32
+#include <pthread.h>
+static pthread_mutex_t g_fetch_lock = PTHREAD_MUTEX_INITIALIZER;
+#else
+static CRITICAL_SECTION g_fetch_lock;
+static int g_fetch_lock_init_done = 0;
+static void fetch_lock_init(void) {
+    if (!g_fetch_lock_init_done) {
+        InitializeCriticalSection(&g_fetch_lock);
+        g_fetch_lock_init_done = 1;
+    }
+}
+#endif
+
+static void web_fetch_lock(void) {
+#ifdef _WIN32
+    fetch_lock_init();
+    EnterCriticalSection(&g_fetch_lock);
+#else
+    pthread_mutex_lock(&g_fetch_lock);
+#endif
+}
+static void web_fetch_unlock(void) {
+#ifdef _WIN32
+    LeaveCriticalSection(&g_fetch_lock);
+#else
+    pthread_mutex_unlock(&g_fetch_lock);
+#endif
+}
+
 /* ================================================================
  *  UA 轮换池 — 5 个真实浏览器 UA（无 PivotMind 字样）
  *  覆盖 Chrome/Edge/Firefox/Safari，降低指纹识别
@@ -397,7 +428,9 @@ static void robots_fetch(const char* domain) {
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &wbuf);
 
+    web_fetch_lock();
     CURLcode res = curl_easy_perform(curl);
+    web_fetch_unlock();
     if (res == CURLE_OK && wbuf.len > 0) {
         robots_parse(rc, wbuf.data, wbuf.len);
     } else {
@@ -619,7 +652,9 @@ FetchResult* web_fetch(const char* url) {
         hd.content_type = NULL;
         hd.status_code = 0;
 
-        CURLcode res = curl_easy_perform(tls_curl);
+    web_fetch_lock();
+    CURLcode res = curl_easy_perform(tls_curl);
+    web_fetch_unlock();
 
         /* 获取状态码 */
         long http_code = 0;
@@ -754,6 +789,21 @@ int web_fetch_init(const CrawlPolicy* policy) {
 
     /* 初始化 libcurl */
     curl_global_init(CURL_GLOBAL_DEFAULT);
+
+    /* SSL 预热：主线程做一次 curl_easy_init→perform 强制 OpenSSL 初始化，
+     * 避免后续多线程并发时 OPENSSL_init_ssl 竞态崩溃 */
+    {
+        CURL* warmup = curl_easy_init();
+        if (warmup) {
+            /* 设置一个无效 URL 确保不会实际联网，只触发 SSL 初始化 */
+            curl_easy_setopt(warmup, CURLOPT_URL, "https://127.0.0.1:1/");
+            curl_easy_setopt(warmup, CURLOPT_TIMEOUT, 1L);
+            curl_easy_setopt(warmup, CURLOPT_CONNECTTIMEOUT, 1L);
+            curl_easy_setopt(warmup, CURLOPT_NOSIGNAL, 1L);
+            curl_easy_perform(warmup);  /* 立即失败，但触发 OpenSSL init */
+            curl_easy_cleanup(warmup);
+        }
+    }
 
     g_initialized = 1;
 
