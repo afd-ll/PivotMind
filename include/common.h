@@ -23,6 +23,12 @@
 
 // ========== Utility Functions ==========
 
+/** 安全 strcmp：任一参数 NULL 返回非 0（视为不相等），避免野指针崩溃 */
+static inline int strcmp_null(const char* a, const char* b) {
+    if (!a || !b) return (a == b) ? 0 : 1;
+    return strcmp(a, b);
+}
+
 /** 向量的余弦相似度，任一指针为NULL或dim<=0返回0 */
 static inline float cosine_similarity(const float* a, const float* b, int dim) {
     if (!a || !b || dim <= 0) return 0.0f;

@@ -203,7 +203,7 @@ static void _concept_hash_insert(HuarongTopologyNet* net, const char* name, int 
     }
     unsigned int h = _chash_djb2(name) & (unsigned)net->concept_hash_mask;
     while (net->concept_hash[h].name) {
-        if (strcmp(net->concept_hash[h].name, name) == 0) {
+        if (strcmp_null(net->concept_hash[h].name, name) == 0) {
             net->concept_hash[h].node_id = nid; return;  /* 更新 */
         }
         h = (h + 1) & (unsigned)net->concept_hash_mask;
@@ -222,7 +222,7 @@ int huarong_net_find_concept(HuarongTopologyNet* net, const char* concept) {
     unsigned int h = _chash_djb2(concept) & mask;
     int ret = -1;
     while (net->concept_hash[h].name) {
-        if (strcmp(net->concept_hash[h].name, concept) == 0) {
+        if (strcmp_null(net->concept_hash[h].name, concept) == 0) {
             ret = net->concept_hash[h].node_id;
             break;
         }
