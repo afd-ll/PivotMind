@@ -112,7 +112,7 @@ void destroy_reasoning_node(ReasoningNode* node) {
 
 // ==================== 华容道拓扑网络核心实现 ==================== 
 
-HuarongTopologyNet* huarong_net_create(int max_nodes) {
+HuarongTopologyNet* huarong_net_create(size_t max_nodes) {
     HuarongTopologyNet* net = (HuarongTopologyNet*)calloc(1, sizeof(HuarongTopologyNet));
     if (!net) return NULL;
     
@@ -241,8 +241,8 @@ ReasoningNode* huarong_net_add_node(HuarongTopologyNet* net,
     pthread_rwlock_wrlock(&net->mutex);
     
     // 容量满 → 自动扩容 (v0.5.1: 取消硬上限, realloc 而非拒绝)
-    if (net->node_count >= net->max_nodes || net->nodes == NULL) {
-        int new_max = net->max_nodes + (net->max_nodes / 2);
+    if ((size_t)net->node_count >= net->max_nodes || net->nodes == NULL) {
+        size_t new_max = net->max_nodes + (net->max_nodes / 2);
         if (new_max < net->max_nodes + 100) new_max = net->max_nodes + 100;
         
         ReasoningNode** new_nodes = (ReasoningNode**)realloc(
@@ -311,8 +311,8 @@ ReasoningNode* huarong_net_find_or_create_node(HuarongTopologyNet* net,
     }
 
     // 没有找到 → 创建新节点。容量满则自动扩容
-    if (net->node_count >= net->max_nodes || net->nodes == NULL) {
-        int new_max = net->max_nodes + (net->max_nodes / 2);
+    if ((size_t)net->node_count >= net->max_nodes || net->nodes == NULL) {
+        size_t new_max = net->max_nodes + (net->max_nodes / 2);
         if (new_max < net->max_nodes + 100) new_max = net->max_nodes + 100;
         ReasoningNode** new_nodes = (ReasoningNode**)realloc(
             net->nodes, (size_t)new_max * sizeof(ReasoningNode*));

@@ -120,8 +120,8 @@ typedef struct ReasoningNode {
  */
 typedef struct HuarongTopologyNet {
     ReasoningNode** nodes;     // 所有推理节点数组
-    int node_count;            // 节点总数
-    int max_nodes;             // 最大节点容量
+    int node_count;            // 节点总数 (int 兼容存量; 超 2G 时需升级)
+    size_t max_nodes;          // 最大节点容量
     void* _pad_state1;         // 保留：二进制兼容（原 current_state）
     void* _pad_state2;         // 保留：二进制兼容（原 initial_state）
     void* _pad_state3;         // 保留：二进制兼容（原 target_state）
@@ -225,7 +225,7 @@ void node_conn_hash_free(ReasoningNode* node);
 /**
  * 创建华容道拓扑网络
  */
-HuarongTopologyNet* huarong_net_create(int max_nodes);
+HuarongTopologyNet* huarong_net_create(size_t max_nodes);
 
 /**
  * 销毁华容道拓扑网络

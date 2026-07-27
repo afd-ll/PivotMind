@@ -144,12 +144,12 @@ int insert_node_dynamic(MasterTopology* master, int topo_id,
     if (!sub || !sub->net) return -1;
 
     // 检查容量（用实际容量，不是全局上限）
-    if (sub->net->node_count >= sub->net->max_nodes) {
+    if ((size_t)sub->net->node_count >= sub->net->max_nodes) {
         // 尝试自动扩展
         if (check_growth_needed(master, topo_id)) {
             auto_extend_topology(master, topo_id);
         }
-        if (sub->net->node_count >= sub->net->max_nodes) {
+        if ((size_t)sub->net->node_count >= sub->net->max_nodes) {
             return -1;
         }
     }
@@ -387,8 +387,8 @@ int auto_extend_topology(MasterTopology* master, int topo_id) {
     HuarongTopologyNet* net = sub->net;
 
     // 计算需要扩展的容量 (v0.5.1: 取消硬天花板, huarong_net_add_node 已自动扩容)
-    int current_capacity = net->max_nodes;
-    int new_capacity = current_capacity + config->growth_increment;
+    size_t current_capacity = net->max_nodes;
+    size_t new_capacity = current_capacity + (size_t)config->growth_increment;
 
     if (new_capacity <= current_capacity) {
         return 0;  // 无需扩展
@@ -400,7 +400,7 @@ int auto_extend_topology(MasterTopology* master, int topo_id) {
     if (!new_nodes) return -1;
 
     // 初始化新空间
-    for (int i = current_capacity; i < new_capacity; i++) {
+    for (size_t i = current_capacity; i < new_capacity; i++) {
         new_nodes[i] = NULL;
     }
 
@@ -436,9 +436,9 @@ int auto_shrink_topology(MasterTopology* master, int topo_id) {
     }
 
     // 计算新的容量
-    int new_capacity = net->max_nodes - config->growth_increment;
-    if (new_capacity < net->node_count) {
-        new_capacity = net->node_count + 10;  // 保留一些余量
+    size_t new_capacity = net->max_nodes - (size_t)config->growth_increment;
+    if (new_capacity < (size_t)net->node_count) {
+        new_capacity = (size_t)net->node_count + 10;  // 保留一些余量
     }
 
     // 不收缩太多
@@ -537,7 +537,7 @@ int topology_load_balancing(MasterTopology* master) {
             if (!node_to_move) break;
 
             // 检查目标拓扑是否有空间
-            if (dst->net->node_count >= dst->net->max_nodes) {
+            if ((size_t)dst->net->node_count >= dst->net->max_nodes) {
                 // 尝试扩展目标拓扑
                 int new_cap = dst->net->max_nodes + 100;
                 ReasoningNode** new_nodes = (ReasoningNode**)realloc(
