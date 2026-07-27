@@ -261,6 +261,7 @@ int master_add_sub_topology(MasterTopology* master,
         free(sub);
         return -1;
     }
+    node_hash_set_net(sub->node_hash, sub->net);
 
     // P0-2: 预分配容量，避免后续扩容开销
     if (initial_capacity > 100) {
@@ -1651,6 +1652,21 @@ int master_find_template_for_pair(MasterTopology* master,
     int tpl_id = master_find_template_for_pair_nolock(master, vocab_topo_id, node_a, node_b);
     pthread_rwlock_unlock(&master->rwlock);
     return tpl_id;
+}
+
+/**
+ * 对话管道按需解冻 — 遍历所有子拓扑的 node_hash 查找概念
+ * 找到后若为冻节点自动解冻（受 auto_thaw_ok 控制）
+ */
+ReasoningNode* master_find_or_thaw(MasterTopology* master, const char* concept) {
+    if (!master || !concept) return NULL;
+    for (int t = 0; t < master->sub_topo_count; t++) {
+        SubTopology* sub = master->sub_topologies[t];
+        if (!sub || !sub->node_hash) continue;
+        ReasoningNode* node = node_hash_find_or_thaw(sub->node_hash, concept);
+        if (node) return node;
+    }
+    return NULL;
 }
 
 /** 获取模板节点的槽位间连接词 */

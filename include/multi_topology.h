@@ -354,6 +354,13 @@ int master_find_template_for_pair_nolock(MasterTopology* master,
                                           int node_a, int node_b);
 
 /**
+ * 对话管道按需解冻 — 通过 node_hash 查找概念并自动解冻
+ * 仅在对话锚点词匹配时调用，不会盲解无关节点
+ * @return 找到的节点指针（已解冻），未找到返回 NULL
+ */
+ReasoningNode* master_find_or_thaw(MasterTopology* master, const char* concept);
+
+/**
  * 获取词汇节点对应的 POS 标签
  * 通过跨拓扑连接 vocab → TOPO_SYNTAX 查找
  */

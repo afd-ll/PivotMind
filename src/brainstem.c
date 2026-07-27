@@ -32,6 +32,7 @@
 #include <unistd.h>
 #include <math.h>
 #include <stdint.h>
+#include <limits.h>
 #include <time.h>
 
 #ifdef _WIN32
@@ -284,6 +285,13 @@ static void brainstem_tick_subcortical(Brainstem* bs, const CircadianParams* cp)
         CognitiveController* cc = (CognitiveController*)
             thalamus_get_utility(th, THAL_UTIL_COGNITIVE_CTRL);
         health_monitor_tick(bs->health_monitor, bs->master, cc);
+
+        /* 同步自动解冻开关到 NodeCache：内存紧张时禁止解冻，防止越解越糟 */
+        NodeCache* nc = (NodeCache*)thalamus_get_utility(th, THAL_UTIL_NODE_CACHE);
+        if (nc) {
+            HealthLevel hl = health_get_level(bs->health_monitor);
+            nc->auto_thaw_ok = (hl == HM_GREEN) ? 1 : 0;
+        }
     }
 
     if (bs->tick_count % 60 == 0) {
@@ -466,21 +474,43 @@ static void brainstem_tick_learning_scan(Brainstem* bs, const CircadianParams* c
     }
 }
 
-/* 冷节点冻结 */
+/* 冷节点冻结 — 由内感受 (health_monitor) 驱动力度 */
 static void brainstem_tick_freeze(Brainstem* bs, const CircadianParams* cp) {
-    int freeze_interval = (int)(600.0f * (2.0f - 1.0f * cp->circadian));
-    if (bs->tick_count % freeze_interval != 0) return;
     Thalamus* th = bs->thalamus;
     if (!th) return;
     NodeCache* nc = (NodeCache*)thalamus_get_utility(th, THAL_UTIL_NODE_CACHE);
     if (!nc) return;
 
+    /* 从内感受获取当前健康等级 */
+    HealthLevel hl = bs->health_monitor ? health_get_level(bs->health_monitor) : HM_GREEN;
+
+    /* 根据健康等级调整冻结间隔和上限 */
+    int freeze_interval;
+    int max_freeze_per_tick;
+    switch (hl) {
+        case HM_RED:
+            freeze_interval    = 1;    /* 每 tick 都冻，不限量 */
+            max_freeze_per_tick = INT_MAX;
+            break;
+        case HM_YELLOW:
+            freeze_interval    = 200;
+            max_freeze_per_tick = 50;
+            break;
+        default: /* HM_GREEN */
+            freeze_interval    = (int)(600.0f * (2.0f - 1.0f * cp->circadian));
+            max_freeze_per_tick = 10;
+            break;
+    }
+
+    if (bs->tick_count % freeze_interval != 0) return;
+
     int frozen = 0;
-    for (int t = 0; t < bs->master->sub_topo_count && frozen < 10; t++) {
+    for (int t = 0; t < bs->master->sub_topo_count && frozen < max_freeze_per_tick; t++) {
         SubTopology* sub = bs->master->sub_topologies[t];
-        if (!sub || !sub->net) continue;
+        if (!sub || !sub->net || sub->net->node_count == 0) continue;
         pthread_rwlock_rdlock(&sub->rwlock);
-        for (int attempt = 0; attempt < 50 && frozen < 10; attempt++) {
+        int attempts = (hl == HM_RED) ? 200 : 50;
+        for (int attempt = 0; attempt < attempts && frozen < max_freeze_per_tick; attempt++) {
             int idx = local_rand(&bs->_rng_seed) % sub->net->node_count;
             ReasoningNode* node = sub->net->nodes[idx];
             if (!node || node->is_cooled) continue;
@@ -491,8 +521,23 @@ static void brainstem_tick_freeze(Brainstem* bs, const CircadianParams* cp) {
         }
         pthread_rwlock_unlock(&sub->rwlock);
     }
+
     if (frozen > 0 && bs->verbose) {
-        LOG_INFO("[脑干] 本轮冻结 %d 个冷节点", frozen);
+        LOG_INFO("[脑干] 本轮冻结 %d 个冷节点 (健康=%s)", frozen,
+                 hl == HM_RED ? "RED" : hl == HM_YELLOW ? "YELLOW" : "GREEN");
+    }
+
+    /* RED 级别：冻结后删孤立节点（冻结清空了边，正好清理） */
+    if (hl == HM_RED && frozen > 0) {
+        int pruned = 0;
+        for (int t = 0; t < bs->master->sub_topo_count; t++) {
+            pruned += prune_isolated_nodes(bs->master, t);
+        }
+        if (pruned > 0) {
+            LOG_WARNING("[内感受] RED 修剪: 删除 %d 个孤立冻节点", pruned);
+            /* 修剪后清理悬垂死节点 */
+            master_prune_dead_nodes(bs->master);
+        }
     }
 }
 
@@ -545,11 +590,15 @@ static void* brainstem_loop(void* arg) {
             }
         }
 
-        /* 语义拓扑自动生长：每 60 tick (≈1min)，首次在第5tick即触发 */
+        /* 语义拓扑自动生长：每 60 tick (≈1min)，首次在第5tick即触发
+         * RED 健康级别暂停增长，先腾出内存再恢复 */
         if (bs->tick_count == 3 || bs->tick_count % 5 == 0) {
-            int grown = semantic_grow_from_vocab(bs->master);
-            if (grown > 0 && bs->verbose)
-                LOG_INFO("[语义生长] tick=%d 新增 %d 语义节点", bs->tick_count, grown);
+            HealthLevel hl_grow = bs->health_monitor ? health_get_level(bs->health_monitor) : HM_GREEN;
+            if (hl_grow < HM_RED) {
+                int grown = semantic_grow_from_vocab(bs->master);
+                if (grown > 0 && bs->verbose)
+                    LOG_INFO("[语义生长] tick=%d 新增 %d 语义节点", bs->tick_count, grown);
+            }
         }
     }
 

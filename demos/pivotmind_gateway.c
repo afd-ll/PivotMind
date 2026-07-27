@@ -496,6 +496,13 @@ static int gw_system_init(GatewaySystem* gw) {
     }
     fprintf(stderr, "[gateway]   节点缓存就绪\n");
 
+    /* 注入缓存到所有子拓扑的哈希表，启用自动解冻 */
+    for (int t = 0; t < gw->topology->sub_topo_count; t++) {
+        SubTopology* sub = gw->topology->sub_topologies[t];
+        if (sub && sub->node_hash)
+            node_hash_set_cache(sub->node_hash, gw->brain_cache);
+    }
+
     /* ================================================================
      *  丘脑信号总线 — 注册所有脑区 + 工具组件 + 拓扑归属
      * ================================================================ */

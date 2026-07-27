@@ -1,4 +1,5 @@
 #include "node_hash.h"
+#include "node_cache.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -7,7 +8,7 @@
  * DJB2 字符串哈希函数
  * 效果好且计算快速
  */
-static unsigned int hash_string(const char* str, int bucket_count) {
+static unsigned int hash_string(const char* str, size_t bucket_count) {
     if (!str) return 0;
     
     unsigned int hash = 5381;
@@ -24,8 +25,8 @@ static unsigned int hash_string(const char* str, int bucket_count) {
 /**
  * 创建节点哈希表
  */
-NodeHashTable* node_hash_create(int bucket_count) {
-    if (bucket_count <= 0) {
+NodeHashTable* node_hash_create(size_t bucket_count) {
+    if (bucket_count == 0) {
         bucket_count = 1009;  // 默认使用素数
     }
     
@@ -46,6 +47,14 @@ NodeHashTable* node_hash_create(int bucket_count) {
     return hash;
 }
 
+void node_hash_set_cache(NodeHashTable* hash, struct NodeCache* cache) {
+    if (hash) hash->cache = cache;
+}
+
+void node_hash_set_net(NodeHashTable* hash, struct HuarongTopologyNet* net) {
+    if (hash) hash->net = net;
+}
+
 /**
  * 释放哈希表
  */
@@ -53,7 +62,7 @@ void node_hash_free(NodeHashTable* hash) {
     if (!hash) return;
     
     // 释放所有链表节点
-    for (int i = 0; i < hash->bucket_count; i++) {
+    for (size_t i = 0; i < hash->bucket_count; i++) {
         NodeHashEntry* entry = hash->buckets[i];
         while (entry) {
             NodeHashEntry* next = entry->next;
@@ -127,6 +136,17 @@ ReasoningNode* node_hash_find(NodeHashTable* hash, const char* concept) {
 }
 
 /**
+ * 查找节点并自动解冻（按需使用）
+ */
+ReasoningNode* node_hash_find_or_thaw(NodeHashTable* hash, const char* concept) {
+    ReasoningNode* node = node_hash_find(hash, concept);
+    if (node && node->is_cooled && hash->cache && hash->cache->auto_thaw_ok) {
+        node_cache_thaw(hash->cache, hash->net, node);
+    }
+    return node;
+}
+
+/**
  * 从哈希表中删除节点
  */
 int node_hash_remove(NodeHashTable* hash, const char* concept) {
@@ -166,7 +186,7 @@ int node_hash_remove(NodeHashTable* hash, const char* concept) {
 void node_hash_clear(NodeHashTable* hash) {
     if (!hash) return;
     
-    for (int i = 0; i < hash->bucket_count; i++) {
+    for (size_t i = 0; i < hash->bucket_count; i++) {
         NodeHashEntry* entry = hash->buckets[i];
         while (entry) {
             NodeHashEntry* next = entry->next;
@@ -195,7 +215,7 @@ void node_hash_stats(NodeHashTable* hash,
     int total_len = 0;
     int non_empty_buckets = 0;
     
-    for (int i = 0; i < hash->bucket_count; i++) {
+    for (size_t i = 0; i < hash->bucket_count; i++) {
         int len = 0;
         NodeHashEntry* entry = hash->buckets[i];
         while (entry) {
@@ -250,20 +270,20 @@ int node_hash_add_all_from_net(NodeHashTable* hash, HuarongTopologyNet* net) {
 /**
  * 预留节点容量（提前分配内存，避免多次扩容）
  */
-void node_hash_reserve(NodeHashTable* hash, int node_count) {
-    if (!hash || node_count <= 0) return;
+void node_hash_reserve(NodeHashTable* hash, size_t node_count) {
+    if (!hash || node_count == 0) return;
 
     // 计算合适的桶数量（负载因子约0.75）
-    int ideal_buckets = (int)(node_count / 0.75f) + 1;
+    size_t ideal_buckets = (size_t)(node_count / 0.75f) + 1;
 
     // 如果当前桶数足够，不需要扩容
-    if (hash->bucket_count >= ideal_buckets) return;
+    if ((size_t)hash->bucket_count >= ideal_buckets) return;
 
     // 找到下一个素数作为桶数量
-    int new_buckets = ideal_buckets | 1;  // 确保为奇数
+    size_t new_buckets = ideal_buckets | 1;  // 确保为奇数
     while (1) {
         int is_prime = 1;
-        for (int i = 3; i * i <= new_buckets; i += 2) {
+        for (size_t i = 3; i * i <= new_buckets; i += 2) {
             if (new_buckets % i == 0) {
                 is_prime = 0;
                 break;
@@ -278,7 +298,7 @@ void node_hash_reserve(NodeHashTable* hash, int node_count) {
     if (!new_buckets_arr) return;
 
     // 重新哈希所有现有条目
-    for (int i = 0; i < hash->bucket_count; i++) {
+    for (size_t i = 0; i < hash->bucket_count; i++) {
         NodeHashEntry* entry = hash->buckets[i];
         while (entry) {
             NodeHashEntry* next = entry->next;
@@ -314,7 +334,7 @@ void node_hash_stats_ex(NodeHashTable* hash,
     int total_len = 0;
     int non_empty_buckets = 0;
 
-    for (int i = 0; i < hash->bucket_count; i++) {
+    for (size_t i = 0; i < hash->bucket_count; i++) {
         int len = 0;
         NodeHashEntry* entry = hash->buckets[i];
         while (entry) {
@@ -363,7 +383,7 @@ void node_hash_print_info(NodeHashTable* hash) {
 
     // 统计链长度分布
     int dist[10] = {0};  // 0-1, 1-2, 2-5, 5-10, 10+
-    for (int i = 0; i < hash->bucket_count; i++) {
+    for (size_t i = 0; i < hash->bucket_count; i++) {
         int len = 0;
         NodeHashEntry* entry = hash->buckets[i];
         while (entry) { len++; entry = entry->next; }
@@ -377,8 +397,8 @@ void node_hash_print_info(NodeHashTable* hash) {
     }
 
     printf("\n=== 哈希表信息 ===\n");
-    printf("  节点数: %d\n", hash->node_count);
-    printf("  桶数量: %d\n", hash->bucket_count);
+    printf("  节点数: %zu\n", hash->node_count);
+    printf("  桶数量: %zu\n", hash->bucket_count);
     printf("  负载因子: %.3f\n", load_factor);
     printf("  最大链长度: %d\n", max_chain);
     printf("  平均链长度: %.2f\n", avg_chain);
@@ -395,8 +415,8 @@ int node_hash_validate(NodeHashTable* hash, HuarongTopologyNet* net) {
     if (!hash) return -1;
 
     // 检查节点计数一致性
-    int actual_count = 0;
-    for (int i = 0; i < hash->bucket_count; i++) {
+    size_t actual_count = 0;
+    for (size_t i = 0; i < hash->bucket_count; i++) {
         NodeHashEntry* entry = hash->buckets[i];
         while (entry) {
             actual_count++;
@@ -405,14 +425,14 @@ int node_hash_validate(NodeHashTable* hash, HuarongTopologyNet* net) {
     }
 
     if (actual_count != hash->node_count) {
-        printf("[哈希表] 验证失败：记录节点数=%d，实际节点数=%d\n",
+        printf("[哈希表] 验证失败：记录节点数=%zu，实际节点数=%zu\n",
                hash->node_count, actual_count);
         return -1;
     }
 
     // 如果提供了网络指针，检查节点引用有效性
     if (net) {
-        for (int i = 0; i < hash->bucket_count; i++) {
+        for (size_t i = 0; i < hash->bucket_count; i++) {
             NodeHashEntry* entry = hash->buckets[i];
             while (entry) {
                 if (entry->node) {
@@ -451,7 +471,7 @@ int node_hash_search_by_prefix(NodeHashTable* hash, const char* prefix,
     int found = 0;
 
     // 遍历所有桶
-    for (int i = 0; i < hash->bucket_count && found < max_results; i++) {
+    for (size_t i = 0; i < hash->bucket_count && found < max_results; i++) {
         NodeHashEntry* entry = hash->buckets[i];
         while (entry && found < max_results) {
             if (entry->node && entry->node->concept) {

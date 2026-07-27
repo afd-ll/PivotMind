@@ -1424,6 +1424,22 @@ char* dialog_process(DialogSystem* sys, const char* user_input, DialogReasoning*
         ui_print_thinking_line("实体", entities_info);
     }
 
+    /* 按需解冻：只解冻当前输入涉及的锚点概念，不盲扫全局 */
+    {
+        int thawed = 0;
+        /* 实体词 */
+        for (int i = 0; i < sem->entity_count && i < 16; i++) {
+            if (master_find_or_thaw(sys->master, sem->entities[i].text)) thawed++;
+        }
+        /* 分词 token */
+        for (int i = 0; i < sem->token_count && i < 32; i++) {
+            if (master_find_or_thaw(sys->master, sem->tokens[i])) thawed++;
+        }
+        if (thawed > 0) {
+            LOG_INFO("[解冻] 本轮按需解冻 %d 个节点", thawed);
+        }
+    }
+
     if (sem->causal_query) {
         ui_print_thinking_line("因果", "检测到因果查询，正在构建因果图...");
         

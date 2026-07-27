@@ -21,8 +21,10 @@ typedef struct NodeHashEntry {
  */
 typedef struct NodeHashTable {
     NodeHashEntry** buckets;      // 哈希桶数组
-    int bucket_count;             // 桶数量
-    int node_count;               // 节点总数
+    size_t bucket_count;          // 桶数量
+    size_t node_count;            // 节点总数
+    struct NodeCache* cache;      // 节点冷热缓存（用于自动解冻）
+    struct HuarongTopologyNet* net; // 所属拓扑网络（解冻时重建边引用用）
 } NodeHashTable;
 
 /**
@@ -30,7 +32,7 @@ typedef struct NodeHashTable {
  * @param bucket_count 桶数量（建议使用素数，如 1009, 2003, 5003）
  * @return 哈希表指针
  */
-NodeHashTable* node_hash_create(int bucket_count);
+NodeHashTable* node_hash_create(size_t bucket_count);
 
 /**
  * 释放哈希表
@@ -53,6 +55,22 @@ int node_hash_add(NodeHashTable* hash, ReasoningNode* node);
  * @return 节点指针，未找到返回 NULL
  */
 ReasoningNode* node_hash_find(NodeHashTable* hash, const char* concept);
+
+/**
+ * 查找节点并自动解冻（按需使用）
+ * 对话/推理管线在需要激活冷节点时调用，盲扫不用
+ */
+ReasoningNode* node_hash_find_or_thaw(NodeHashTable* hash, const char* concept);
+
+/**
+ * 设置节点缓存引用（用于 node_hash_find 自动解冻）
+ */
+void node_hash_set_cache(NodeHashTable* hash, struct NodeCache* cache);
+
+/**
+ * 设置所属拓扑网络引用（解冻时重建边引用用）
+ */
+void node_hash_set_net(NodeHashTable* hash, struct HuarongTopologyNet* net);
 
 /**
  * 从哈希表中删除节点
@@ -93,7 +111,7 @@ int node_hash_add_all_from_net(NodeHashTable* hash, HuarongTopologyNet* net);
  * @param hash 哈希表指针
  * @param node_count 预计节点数量
  */
-void node_hash_reserve(NodeHashTable* hash, int node_count);
+void node_hash_reserve(NodeHashTable* hash, size_t node_count);
 
 /**
  * 获取哈希表统计信息（扩展版）

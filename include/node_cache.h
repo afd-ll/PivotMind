@@ -38,6 +38,7 @@ typedef struct NodeCache {
     int    total_cooled;        /* 当前冷却节点数 */
     long   total_thaws;         /* 累计唤醒次数 */
     long   total_freezes;       /* 累计冻结次数 */
+    int    auto_thaw_ok;        /* 自动解冻开关：内存充足=1，紧张=0 */
 
     /* 索引表（内存驻留，O(1) 定位） */
     uint8_t*  bitmap;           /* 节点存在位图 (node_count bits) */
@@ -88,6 +89,15 @@ int node_cache_thaw(NodeCache* nc, HuarongTopologyNet* net, ReasoningNode* node)
  */
 static inline int node_is_cooled(ReasoningNode* node) {
     return node ? node->is_cooled : 0;
+}
+
+/**
+ * 设置自动解冻开关
+ * @param nc      缓存句柄
+ * @param allowed  1=允许自动解冻, 0=禁止
+ */
+static inline void node_cache_set_auto_thaw(NodeCache* nc, int allowed) {
+    if (nc) nc->auto_thaw_ok = allowed;
 }
 
 #ifdef __cplusplus
