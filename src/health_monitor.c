@@ -16,11 +16,11 @@ HealthMonitor* health_monitor_create(void) {
     HealthMonitor* hm = (HealthMonitor*)calloc(1, sizeof(HealthMonitor));
     if (!hm) return NULL;
 
-    /* 默认阈值 — 针对 3.8G 板子的保守设置 */
-    hm->rss_yellow_mb     = 520.0f;
-    hm->rss_red_mb        = 600.0f;
-    hm->rss_growth_yellow = 0.5f;   /* MB/min */
-    hm->rss_growth_red    = 1.5f;
+    /* 默认阈值 — 针对 3.8G 板子，留足喂料缓冲 */
+    hm->rss_yellow_mb     = 800.0f;
+    hm->rss_red_mb        = 1000.0f;
+    hm->rss_growth_yellow = 2.0f;   /* MB/min */
+    hm->rss_growth_red    = 5.0f;
     hm->conn_growth_yellow = 500;
     hm->conn_growth_red    = 2000;
     hm->frozen_yellow      = 500;
