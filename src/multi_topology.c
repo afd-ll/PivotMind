@@ -269,9 +269,9 @@ int master_add_sub_topology(MasterTopology* master,
     }
 
     // 批量添加现有节点到哈希表（加速后续 O(1) 查找）
-    int nodes_added = node_hash_add_all_from_net(sub->node_hash, sub->net);
+    size_t nodes_added = node_hash_add_all_from_net(sub->node_hash, sub->net);
     if (nodes_added > 0) {
-        LOG_INFO("[主拓扑] %s 哈希表已填充 %d 个节点", name, nodes_added);
+        LOG_INFO("[主拓扑] %s 哈希表已填充 %zu 个节点", name, nodes_added);
         // P0-2: 打印哈希表详细信息
         node_hash_print_info(sub->node_hash);
     }
@@ -3366,6 +3366,27 @@ int master_prune_dead_nodes(MasterTopology* master) {
         sub->net->node_count = write;
         removed += removed_sub;
         free(dead_ids);
+        
+        /* 清理指向已释放节点的悬垂边 */
+        if (removed_sub > 0) {
+            for (int i = 0; i < sub->net->node_count; i++) {
+                ReasoningNode* rn = sub->net->nodes[i];
+                if (!rn || !rn->edges) continue;
+                int w = 0;
+                for (int e = 0; e < rn->edge_count; e++) {
+                    if (rn->edges[e].target && rn->edges[e].target->concept) {
+                        if (e != w) rn->edges[w] = rn->edges[e];
+                        w++;
+                    }
+                }
+                rn->edge_count = w;
+            }
+            /* 重建哈希表：清除指向已释放节点的悬垂条目 */
+            if (sub->node_hash) {
+                node_hash_clear(sub->node_hash);
+                node_hash_add_all_from_net(sub->node_hash, sub->net);
+            }
+        }
     }
     return removed;
 }
