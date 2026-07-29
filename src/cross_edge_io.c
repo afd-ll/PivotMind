@@ -591,7 +591,7 @@ int auto_link_activated_nodes(MasterTopology* master,
                     if (!na || !na->features || na->feature_dim <= 0) continue;
 
                     for (int cj = ci + 1; cj < concept_count && feat_created < 20; cj++) {
-                        if (strcmp(concepts[ci], concepts[cj]) == 0) continue;
+                        if (strcmp_null(concepts[ci], concepts[cj]) == 0) continue;
 
                         ReasoningNode* nb = node_hash_find(tb->node_hash, concepts[cj]);
                         if (!nb || !nb->features || nb->feature_dim != na->feature_dim) continue;

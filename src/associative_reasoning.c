@@ -13,6 +13,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include "common.h"
 #include "multi_topology.h"
 #include "node_hash.h"
 #include "utf8_tokenizer.h"
@@ -133,7 +134,7 @@ void add_association(AssociativeEngine* engine, const char* concept,
     
     // 检查是否已存在
     for (int i = 0; i < engine->assoc_count; i++) {
-        if (strcmp(engine->associations[i].concept, concept) == 0) {
+        if (strcmp_null(engine->associations[i].concept, concept) == 0) {
             // 更新激活值（取最大）
             if (activation > engine->associations[i].activation) {
                 engine->associations[i].activation = activation;

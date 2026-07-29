@@ -355,7 +355,7 @@ int extract_key_concepts(SemanticUnderstanding* sem, char** concepts, int max_co
             // 检查是否已存在
             int exists = 0;
             for (int k = 0; k < count; k++) {
-                if (strcmp(concepts[k], sem->tokens[i]) == 0) {
+                if (strcmp_null(concepts[k], sem->tokens[i]) == 0) {
                     exists = 1;
                     break;
                 }
@@ -815,7 +815,7 @@ void dialog_add_association(DialogReasoning* reasoning, const char* concept,
     
     // 检查是否已存在，取最大激活值
     for (int i = 0; i < reasoning->assoc_count; i++) {
-        if (strcmp(reasoning->associations[i].concept, concept) == 0) {
+        if (strcmp_null(reasoning->associations[i].concept, concept) == 0) {
             if (activation > reasoning->associations[i].activation) {
                 reasoning->associations[i].activation = activation;
                 reasoning->associations[i].hop_count = hop_count;
