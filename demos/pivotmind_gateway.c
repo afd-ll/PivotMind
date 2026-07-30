@@ -900,7 +900,7 @@ static int _learn_tokens(SubTopology* vocab, const char* text,
     while (tok) {
         if (strlen(tok) >= 2) {
             int nid = huarong_net_find_concept(vocab->net, tok);
-            if (nid < 0 && vocab->net->node_count < vocab->net->max_nodes) {
+            if (nid < 0 && (size_t)vocab->net->node_count < vocab->net->max_nodes) {
                 nid = huarong_net_dynamic_add_node(vocab->net, tok, NULL, 0);
                 if (nid >= 0) {
                     added++;
