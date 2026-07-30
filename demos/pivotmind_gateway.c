@@ -961,7 +961,7 @@ static void* _learn_worker(void* arg) {
     
     SubTopology* topo = NULL;
     for (int t = 0; t < gw->topology->sub_topo_count; t++) {
-        if (gw->topology->sub_topologies[t] && gw->topology->sub_topologies[t]->type == target_topo)
+        if (gw->topology->sub_topologies[t] && (int)gw->topology->sub_topologies[t]->type == target_topo)
             { topo = gw->topology->sub_topologies[t]; break; }
     }
     if (topo && topo->net) {
