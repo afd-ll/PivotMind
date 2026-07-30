@@ -539,8 +539,9 @@ static int gw_system_init(GatewaySystem* gw) {
 
     // 设置子拓扑按脑区归属（每个脑区只负责自己的子拓扑）
     {
-        int prefrontal_topo[]  = {TOPO_VOCABULARY, TOPO_SEMANTIC, TOPO_PRAGMA, TOPO_CONCEPT};
+        int prefrontal_topo[]  = {TOPO_VOCABULARY, TOPO_SEMANTIC, TOPO_PRAGMA, TOPO_CONCEPT, TOPO_DOMAIN};
         int hippocampus_topo[] = {TOPO_CONTEXT, TOPO_DOMAIN};
+        thalamus_set_partition(gw->thalamus, THAL_PREFRONTAL,  prefrontal_topo,  5);
         int broca_topo[]       = {TOPO_SYNTAX, TOPO_TEMPLATE};
         int amygdala_topo[]    = {TOPO_EMOTION, TOPO_CULTURE};
         int perception_topo[]  = {TOPO_VISUAL};                      /* v0.5 视觉拓扑归属感知 */
@@ -938,24 +939,38 @@ static int _learn_tokens(SubTopology* vocab, const char* text,
     return added;
 }
 
+/* _learn_task — 异步学习参数 */
+typedef struct {
+    char*  msg;
+    char   domain[64];  /* "medical", "legal", "" = default vocab */
+} LearnTask;
+
 /* _learn_worker — 异步学习线程 */
 static void* _learn_worker(void* arg) {
-    char* msg = (char*)arg;
-    if (!msg) return NULL;
+    LearnTask* task = (LearnTask*)arg;
+    if (!task || !task->msg) { free(task); return NULL; }
     GatewaySystem* gw = g_gw;
-    if (!gw || !gw->topology) { free(msg); return NULL; }
-    SubTopology* vocab = NULL;
-    for (int t = 0; t < gw->topology->sub_topo_count; t++) {
-        if (gw->topology->sub_topologies[t] && gw->topology->sub_topologies[t]->type == TOPO_VOCABULARY)
-            { vocab = gw->topology->sub_topologies[t]; break; }
+    if (!gw || !gw->topology) { free(task->msg); free(task); return NULL; }
+    
+    /* 按域名选择目标拓扑 */
+    int target_topo = TOPO_VOCABULARY;
+    if (task->domain[0]) {
+        target_topo = TOPO_DOMAIN;
+        printf("[gateway] [领域] '%s' → 领域拓扑\n", task->domain);
     }
-    if (vocab && vocab->net) {
+    
+    SubTopology* topo = NULL;
+    for (int t = 0; t < gw->topology->sub_topo_count; t++) {
+        if (gw->topology->sub_topologies[t] && gw->topology->sub_topologies[t]->type == target_topo)
+            { topo = gw->topology->sub_topologies[t]; break; }
+    }
+    if (topo && topo->net) {
         int prev_id = -1;
         EmergentPOS* ep = (gw->prefrontal && gw->prefrontal->controller)
                           ? gw->prefrontal->controller->emergent_pos : NULL;
-        _learn_tokens(vocab, msg, &prev_id, ep);
-        auto_learn_concepts(gw->topology, msg, NULL);
-        if (gw->perception) perception_feed_learn_text(gw->perception, msg);
+        _learn_tokens(topo, task->msg, &prev_id, ep);
+        auto_learn_concepts(gw->topology, task->msg, NULL);
+        if (gw->perception) perception_feed_learn_text(gw->perception, task->msg);
         __sync_fetch_and_add(&gw->total_learning_cycles, 1);
         /* 语法种子注入 */
         SubTopology* tpl = NULL;
@@ -964,7 +979,8 @@ static void* _learn_worker(void* arg) {
                 { tpl = gw->topology->sub_topologies[t]; break; }
         if (tpl && tpl->net && tpl->net->node_count < 8) broca_seed_grammar(gw->topology);
     }
-    free(msg);
+    free(task->msg);
+    free(task);
     return NULL;
 }
 
@@ -990,15 +1006,18 @@ static void handle_learn(GatewaySystem* gw, int fd, const char* body) {
     }
 
     /* 异步学习：spawn detach thread, 立即返回 */
-    char* msg_copy = strdup(msg);
-    if (!msg_copy) { http_json(fd, 500, "{\"error\":\"oom\"}"); return; }
+    LearnTask* task = (LearnTask*)calloc(1, sizeof(LearnTask));
+    if (!task) { http_json(fd, 500, "{\"error\":\"oom\"}"); return; }
+    task->msg = strdup(msg);
+    if (!task->msg) { free(task); http_json(fd, 500, "{\"error\":\"oom\"}"); return; }
+    json_extract_string(body, "domain", task->domain, sizeof(task->domain));
 
     pthread_t tid;
     pthread_attr_t attr;
     pthread_attr_init(&attr);
     pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
-    if (pthread_create(&tid, &attr, _learn_worker, msg_copy) != 0) {
-        free(msg_copy);
+    if (pthread_create(&tid, &attr, _learn_worker, task) != 0) {
+        free(task->msg); free(task);
         http_json(fd, 500, "{\"error\":\"thread failed\"}");
         return;
     }
