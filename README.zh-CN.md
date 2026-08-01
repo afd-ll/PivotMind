@@ -7,7 +7,7 @@
 
 [English](README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [Русский](README.ru.md)
 
-[![Version](https://img.shields.io/badge/version-v0.5.5-blue.svg)](changelogs/)
+[![Version](https://img.shields.io/badge/version-v0.5.7-blue.svg)](changelogs/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green.svg)](LICENSE)
 [![Language](https://img.shields.io/badge/C-99%2B-orange.svg)](https://zh.wikipedia.org/wiki/C99)
 [![Platform](https://img.shields.io/badge/ARM-RK3399%20%7C%20x86__64-lightgrey.svg)](#运行平台)
@@ -29,7 +29,7 @@
 没有 Transformer 外部依赖，没有预训练 embedding 向量。
 节点、边、激活、衰减 —— 以及一个永不停歇的后台时钟驱动整个系统。
 
-**当前版本：v0.5.5** —— 14 脑区完整架构、涌现式词类系统、多学习器并行、PFE 推理编排、512 维特征向量、POS 语法映射、边特异性权重、**多模态视觉管线 + /learn PMI 词共现管线（VisualCortex + MediaReader）**、编译零警告。
+**当前版本：v0.5.7** —— 14 脑区完整架构、涌现式词类系统、多学习器并行、PFE 推理编排、512 维特征向量、POS 语法映射、边特异性权重、**词层语义场（词巩固 + 语义拓扑聚类）**、**话题性生成（相关性评分 + 有界联想）**、**PFE 推理管线（子目标分解 + 因果搜索 + 推理链）**、多模态视觉管线 + /learn PMI 词共现管线（VisualCortex + MediaReader）、编译零警告。
 
 **代码规模：88 个源文件（~49,600 行 C） + 91 个头文件（~12,800 行） + 工具/测试/演示（~13,000 行）= 约 75,500 行。**
 
@@ -60,45 +60,7 @@
 玄枢按哺乳动物大脑皮层的功能分区建模，14 个脑区/子系统各司其职，通过丘脑信号总线通信。
 **全部 14 个脑区均已完成实现，无占位代码。**
 
-```mermaid
-graph TB
-    PF["🧠 前额叶<br/>对话/决策入口"]
-    PFE["🎯 前额叶执行器<br/>6模式推理"]
-    HC["📚 海马体<br/>记忆巩固"]
-    DMN["💭 默认模式网络<br/>梦境联想"]
-    AMY["😊 杏仁核<br/>情绪调控"]
-    PERC["🔍 感知皮层<br/>联网搜索"]
-    BROCA["📝 布罗卡区<br/>模板生成"]
-    CB["⚖️ 小脑<br/>BPTT/资源保护"]
-    BS["⏰ 脑干<br/>昼夜节律"]
-    HYPO["🔥 下丘脑<br/>需求驱动"]
-    ACC["✅ 扣带回<br/>4D评估"]
-    ARENA["🏟️ 想法竞技场<br/>多候选竞争"]
-    RET["⚡ 网状激活<br/>警觉调节"]
-    VC["👁️ 视觉皮层 v0.5<br/>多模态管线"]
-
-    TH["📡 丘脑<br/>信号总线 + 资源门控"]
-
-    PF --> TH
-    PFE --> TH
-    HC --> TH
-    DMN --> TH
-    AMY --> TH
-    PERC --> TH
-    BROCA --> TH
-    CB --> TH
-    BS --> TH
-    HYPO --> TH
-    ACC --> TH
-    ARENA --> TH
-    RET --> TH
-    VC --> TH
-
-    TH --> PF
-    TH --> HC
-    TH --> PERC
-    TH --> VC
-```
+<p align="center"><img src="diagrams/brain-regions.png" alt="脑区架构" width="780"/></p>
 
 | 脑区             | 文件                       | 行数 | 职责                                                         |
 |------------------|----------------------------|------|--------------------------------------------------------------|
@@ -174,28 +136,7 @@ graph TB
 
 视觉皮层脑区通过两条数据管线将视频/音频内容转化为拓扑网络知识：
 
-```mermaid
-flowchart LR
-    subgraph PipelineA["管线A: 字幕管道"]
-        V1["🎬 视频文件"] --> FF1["ffprobe 检测字幕"]
-        FF1 --> FF2["ffmpeg 提取 SRT"]
-        FF2 --> SRT["SRT 解析器"]
-        SRT --> PMI["article_process_line PMI词发现"]
-        PMI --> TOPO1["词汇拓扑 + 建边"]
-    end
-
-    subgraph PipelineB["管线B: 视觉皮层"]
-        V2["🎬 视频文件"] --> FK["ffprobe 关键帧"]
-        FK --> FEAT["512维特征向量"]
-        V2 --> SUB["ffmpeg SRT 时间戳"]
-        SUB --> ALIGN["时间窗对齐"]
-        FEAT --> ALIGN
-        ALIGN --> CROSS["跨拓扑边<br/>vocab↔visual"]
-    end
-
-    TOPO1 --> NET["🧠 拓扑网络"]
-    CROSS --> NET
-```
+<p align="center"><img src="diagrams/multimodal-pipeline.png" alt="多模态管线" width="700"/></p>
 
 任务队列模式：网关入队 → 脑干 tick（丘脑门控）→ 每 tick 出队1个文件 → 帧+字幕+对齐+建边。
 
@@ -365,8 +306,10 @@ pivotmind/
 | **v0.4.12** | 对话质量全线攻坚 (在线词汇学习 + 多轮上下文 + 输出长度控制) |
 | **v0.4.13** | POS 语法映射、边特异性权重、编译警告清零 |
 | **v0.5.5** | **多模态管线** — 视觉皮层脑区、MediaReader 字幕管道、跨模态对齐、任务队列 |
+| **v0.5.6** | rwlock 死锁修复（写锁内嵌套读锁）、gateway 拓扑容量、知识存活保护（加载保护 + 保底激活） |
+| **v0.5.7** | **词层语义场**（词巩固、词-词共现边、语义拓扑聚类、语义场查询）、**话题性生成**（相关性评分、有界联想、话题序组装）、**PFE 推理管线**（子目标分解、因果搜索、推理链、四大 O(N²) 修复）、知识存活全面加固（30 分钟加载保护、is_cooled 修剪保护） |
 
-> 详细变更：v0.3.0 → [changelogs/032-v0.3.0-reasoning-architecture.md](changelogs/032-v0.3.0-reasoning-architecture.md) ｜ v0.4.0 → [changelogs/034-v0.4.0-code-simplify-brain-boundary.md](changelogs/034-v0.4.0-code-simplify-brain-boundary.md) ｜ v0.4.3 → [changelogs/042-emergent-pos-anchor.md](changelogs/042-emergent-pos-anchor.md) ｜ v0.5.5 → [changelogs/055-multimodal-v0.5.5.md](changelogs/055-multimodal-v0.5.5.md)
+> 详细变更：v0.3.0 → [changelogs/032-v0.3.0-reasoning-architecture.md](changelogs/032-v0.3.0-reasoning-architecture.md) ｜ v0.4.0 → [changelogs/034-v0.4.0-code-simplify-brain-boundary.md](changelogs/034-v0.4.0-code-simplify-brain-boundary.md) ｜ v0.4.3 → [changelogs/042-emergent-pos-anchor.md](changelogs/042-emergent-pos-anchor.md) ｜ v0.5.5 → [changelogs/055-multimodal-v0.5.5.md](changelogs/055-multimodal-v0.5.5.md) ｜ v0.5.7 → [changelogs/062-word-semantic-field-reasoning-pipeline.md](changelogs/062-word-semantic-field-reasoning-pipeline.md) (changelogs/055-multimodal-v0.5.5.md)
 
 ---
 
