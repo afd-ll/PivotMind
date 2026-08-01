@@ -1454,7 +1454,7 @@ int diffusion_generate(DiffusionCtx* ctx,
             if (lang_dom > 0 && (unsigned char)word_prio[p][0] < 0x80) continue;
             if (lang_dom < 0 && (unsigned char)word_prio[p][0] >= 0x80) continue;
             /* 中文单字不输出（v0.6：口语至少 2 字词，"出大的只了"类噪声） */
-            if (lang_dom > 0 && strlen(word_prio[p]) == 3) continue;
+            if ((unsigned char)word_prio[p][0] >= 0x80 && strlen(word_prio[p]) == 3) continue;
             int dup = 0;
             for (int w = 0; w < word_count; w++) {
                 if (strcmp(word_prio[p], word_buf[w]) == 0) { dup = 1; break; }
@@ -1482,7 +1482,7 @@ int diffusion_generate(DiffusionCtx* ctx,
             if (final[i].relevance < 0.3f) continue;
             if (is_function_word(final[i].word)) continue;
             /* 中文单字不输出（v0.6） */
-            if (lang_dom > 0 && strlen(final[i].word) == 3) continue;
+            if ((unsigned char)final[i].word[0] >= 0x80 && strlen(final[i].word) == 3) continue;
 
             /* 去重 */
             int dup = 0;
@@ -1518,7 +1518,7 @@ int diffusion_generate(DiffusionCtx* ctx,
                     if (lang_dom > 0 && (unsigned char)nb->concept[0] < 0x80) continue;
                     if (lang_dom < 0 && (unsigned char)nb->concept[0] >= 0x80) continue;
                     /* 中文单字不输出（v0.6） */
-                    if (lang_dom > 0 && strlen(nb->concept) == 3) continue;
+                    if ((unsigned char)nb->concept[0] >= 0x80 && strlen(nb->concept) == 3) continue;
                     int dup = 0;
                     for (int w2 = 0; w2 < word_count; w2++)
                         if (strcmp(nb->concept, word_buf[w2]) == 0) { dup = 1; break; }
@@ -1561,7 +1561,7 @@ int diffusion_generate(DiffusionCtx* ctx,
             if (is_function_word(word_prio[p])) continue;
             if (lang_dom > 0 && (unsigned char)word_prio[p][0] < 0x80) continue;
             if (lang_dom < 0 && (unsigned char)word_prio[p][0] >= 0x80) continue;
-            if (lang_dom > 0 && strlen(word_prio[p]) == 3) continue;  /* 中文单字 */
+            if ((unsigned char)word_prio[p][0] >= 0x80 && strlen(word_prio[p]) == 3) continue;  /* 中文单字 */
             output_words[out_fallback++] = word_prio[p];
             selected[sel++] = word_prio[p];
         }
@@ -1576,6 +1576,8 @@ int diffusion_generate(DiffusionCtx* ctx,
             if (strncmp(final[i].word, "sem_", 4) == 0) continue;   /* semantic_growth 匿名节点 */
             /* fallback 路径不强制语言过滤（保证有输出，避免空回复/句号） */
             if (is_function_word(final[i].word)) continue;
+            /* 中文单字不输出（v0.6，降级路径也生效——"时间是"的"是"） */
+            if ((unsigned char)final[i].word[0] >= 0x80 && strlen(final[i].word) == 3) continue;
 
             int inhibited = 0;
             for (int s = 0; s < sel; s++) {

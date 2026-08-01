@@ -1916,7 +1916,7 @@ CausalPath** find_strongest_causal_path_astar(CausalGraph* graph, int source, in
      * 会扩展 14^5≈53 万节点（10-20s 卡死）；超限快速失败，
      * 调用方（pfe_solve_subgoal）回退 diffusion 保证响应。 */
     int expansions = 0;
-    const int max_expansions = 8000;
+    const int max_expansions = 2000;
 
     while (open_set->size > 0 && found_count < max_paths) {
         if (++expansions > max_expansions) break;
@@ -2668,7 +2668,9 @@ CausalSearchResult* causal_associative_search(MasterTopology* master,
     // 清理
     for (int i = 0; i < token_count; i++) free(tokens[i]);
     free(source_ids);
-    causal_graph_destroy(graph);
+    /* v0.5.7: 图是共享缓存（g_cg_cache），不在这里 destroy——
+     * 原代码 destroy 缓存图导致悬垂指针（下次调用 pool_destroy 崩） */
+    /* causal_graph_destroy(graph); */
 
     *out_count = result_count;
     return results;

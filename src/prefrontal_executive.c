@@ -204,26 +204,50 @@ static void extract_subject(const char* question, char* out, int max_len) {
     if (!question || !out) return;
     out[0] = '\0';
 
-    /* 简单启发式：取"为什么"之后、"是"之前的内容 */
-    const char* start = NULL;
-    const char* end   = NULL;
-
-    /* 找 "为什么" */
+    /* v0.5.7: 中文疑问句主语提取改进：
+     *  "历史为什么重要" → 取疑问词前（"历史"）
+     *  "为什么时间重要" → 取疑问词后、去尾巴词（"时间"）
+     *  "什么是时间"     → "是"截断（原逻辑） */
     const char* why = strstr(question, "为什么");
-    if (why) start = why + strlen("为什么");
-    else {
-        /* 找 "怎么" */
-        const char* how = strstr(question, "怎么");
-        if (how) start = how + strlen("怎么");
-        else start = question;  /* 直接用全问题 */
-    }
+    const char* how = strstr(question, "怎么");
+    const char* w   = why ? why : how;
 
-    /* 找结束标记 */
-    const char* markers[] = {"是", "的", "不", "会", "能", "可以", "？", "?", "吗"};
-    end = start + strlen(start);
-    for (int i = 0; i < 9; i++) {
-        const char* pos = strstr(start, markers[i]);
-        if (pos && pos < end) end = pos;
+    const char* start = question;
+    const char* end   = question + strlen(question);
+
+    if (w && w > question) {
+        /* 疑问词在句中：主语在疑问词前（"历史为什么重要"→"历史"） */
+        end = w;
+        /* 去掉前面的连接词/虚词尾巴（"那/所以/如果"等） */
+        while (end > start) {
+            const char* conn[] = {"所以", "那", "如果", "因为", "然后", "但"};
+            int hit = 0;
+            for (int i = 0; i < 6; i++) {
+                int cl = (int)strlen(conn[i]);
+                if (end - start >= cl && strncmp(end - cl, conn[i], cl) == 0) {
+                    end -= cl; hit = 1; break;
+                }
+            }
+            if (!hit) break;
+        }
+    } else if (w) {
+        /* 疑问词在句首："为什么时间重要" → 取疑问词后的内容 */
+        start = w + (why ? 9 : 6);  /* strlen("为什么")=9, strlen("怎么")=6 (UTF-8) */
+        end = start + strlen(start);
+        /* 截掉尾巴词（重要/关键/这样/那样/会/能/吗/？） */
+        const char* tails[] = {"重要", "关键", "这样", "那样", "会", "能",
+                               "吗", "？", "?", "很", "特别", "如此"};
+        for (int i = 0; i < 12; i++) {
+            const char* pos = strstr(start, tails[i]);
+            if (pos && pos < end) end = pos;
+        }
+    } else {
+        /* 无疑问词：原逻辑（"是/的/吗"等截断） */
+        const char* markers[] = {"是", "的", "不", "会", "能", "可以", "？", "?", "吗"};
+        for (int i = 0; i < 9; i++) {
+            const char* pos = strstr(start, markers[i]);
+            if (pos && pos < end) end = pos;
+        }
     }
 
     int copy_len = (int)(end - start);
