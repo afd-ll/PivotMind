@@ -11,8 +11,15 @@
 #include <stdlib.h>
 #include <string.h>
 
-int semantic_grow_from_vocab(MasterTopology* master) {
-    SubTopology* vocab = master_get_sub_topology_by_type(master, TOPO_VOCABULARY);
+/* v0.5.7: 激活降序比较（语义生长采样用） */
+typedef struct { int id; float act; } SgActItem;
+static int sg_act_cmp(const void* a, const void* b) {
+    float da = ((const SgActItem*)a)->act, db = ((const SgActItem*)b)->act;
+    return (da > db) ? -1 : (da < db) ? 1 : 0;
+}
+
+int semantic_grow_from_topology(MasterTopology* master, int topo_type) {
+    SubTopology* vocab = master_get_sub_topology_by_type(master, topo_type);
     SubTopology* sem   = master_get_sub_topology_by_type(master, TOPO_SEMANTIC);
     if (!vocab || !vocab->net || vocab->net->node_count < SG_MIN_CLUSTER_SIZE) return 0;
     if (!sem   || !sem->net)   return 0;
@@ -21,21 +28,27 @@ int semantic_grow_from_vocab(MasterTopology* master) {
     int vcount = vnet->node_count;
     int sample_n = (vcount < SG_MAX_SAMPLE) ? vcount : SG_MAX_SAMPLE;
 
-    /* 采样：选激活值最高的前 sample_n 个节点 */
+    /* v0.5.7: 采样按激活值降序排序（原等间隔采样漏高频词——"时间"
+     * 可能不在采样点，聚类成员缺高频核心词，语义场查询失败）。
+     * 选激活最高的前 sample_n 个节点。 */
     int* sample_ids = (int*)malloc((size_t)sample_n * sizeof(int));
     int* assigned   = (int*)calloc((size_t)sample_n, sizeof(int));
     if (!sample_ids || !assigned) { free(sample_ids); free(assigned); return 0; }
 
-    int step = (vcount > sample_n) ? (vcount / sample_n) : 1;
-    if (step < 1) step = 1;
-    int si = 0;
-    for (int i = 0; i < vcount && si < sample_n; i += step) {
+    SgActItem* items = (SgActItem*)malloc((size_t)vcount * sizeof(SgActItem));
+    if (!items) { free(sample_ids); free(assigned); return 0; }
+    int icnt = 0;
+    for (int i = 0; i < vcount; i++) {
         ReasoningNode* n = vnet->nodes[i];
         if (!n || !n->features || n->feature_dim != NODE_FEATURE_DIM) continue;
-        sample_ids[si] = i;
-        si++;
+        items[icnt].id = i;
+        items[icnt].act = n->activation;
+        icnt++;
     }
-    int actual = si;
+    qsort(items, (size_t)icnt, sizeof(SgActItem), sg_act_cmp);
+    int actual = (icnt < sample_n) ? icnt : sample_n;
+    for (int k = 0; k < actual; k++) sample_ids[k] = items[k].id;
+    free(items);
     if (actual < SG_MIN_CLUSTER_SIZE) { free(sample_ids); free(assigned); return 0; }
 
     /* 预计算所有采样节点的 L2 范数平方（避免内层重复计算） */
@@ -47,6 +60,34 @@ int semantic_grow_from_vocab(MasterTopology* master) {
         if (!n->features) lazy_alloc_node_features(n);
         if (!n->features) continue;
         float* f = n->features;
+        /* v0.5.7: 词节点特征为 0（建节点时 NULL，从未训练）→ 用
+         * cross-link 的成员字特征均值填充——"时间"= 时+间 特征均值，
+         * 与"过去"（同语境词）特征相似，词聚类才能形成语义场 */
+        if (topo_type == TOPO_CONCEPT && master->cross_links &&
+            master->cross_link_count > 0) {
+            int is_zero = 1;
+            for (int d = 0; d < NODE_FEATURE_DIM; d++)
+                if (f[d] != 0.0f) { is_zero = 0; break; }
+            if (is_zero) {
+                float* acc = (float*)calloc((size_t)NODE_FEATURE_DIM, sizeof(float));
+                int cnt = 0;
+                for (int li = 0; li < master->cross_link_count; li++) {
+                    CrossTopologyLink* l = master->cross_links[li];
+                    if (!l || l->from_topo_id != TOPO_CONCEPT ||
+                        l->from_node_id != n->node_id ||
+                        l->to_topo_id != TOPO_VOCABULARY) continue;
+                    if (l->to_node_id >= vnet->node_count) continue;
+                    ReasoningNode* cn = vnet->nodes[l->to_node_id];
+                    if (!cn || !cn->features) continue;
+                    for (int d = 0; d < NODE_FEATURE_DIM; d++) acc[d] += cn->features[d];
+                    cnt++;
+                }
+                if (cnt > 0) {
+                    for (int d = 0; d < NODE_FEATURE_DIM; d++) f[d] = acc[d] / (float)cnt;
+                }
+                free(acc);
+            }
+        }
         float n2 = 0.0f;
         for (int d = 0; d < NODE_FEATURE_DIM; d++) n2 += f[d] * f[d];
         norms[k] = n2;
@@ -143,4 +184,16 @@ int semantic_grow_from_vocab(MasterTopology* master) {
     free(norms);
     free(pos_by_node);
     return created;
+}
+
+/* 兼容旧名：字拓扑语义生长（brainstem 原调用） */
+int semantic_grow_from_vocab(MasterTopology* master) {
+    return semantic_grow_from_topology(master, TOPO_VOCABULARY);
+}
+
+/* v0.5.7: 词级语义场——从概念拓扑（词节点）聚类生成语义概念。
+ * 词特征（共现分布）相似者聚类（时间/过去/钟表 → 时间概念场），
+ * 语义节点 cross-link 回成员词——语义场查询（词→概念→成员词）。 */
+int semantic_grow_from_concepts(MasterTopology* master) {
+    return semantic_grow_from_topology(master, TOPO_CONCEPT);
 }

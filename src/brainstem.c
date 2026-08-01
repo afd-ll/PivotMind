@@ -615,6 +615,10 @@ static void* brainstem_loop(void* arg) {
                 int grown = semantic_grow_from_vocab(bs->master);
                 if (grown > 0 && bs->verbose)
                     LOG_INFO("[语义生长] tick=%d 新增 %d 语义节点", bs->tick_count, grown);
+                /* v0.5.7: 词级语义场——概念拓扑（词节点）聚类 */
+                int grown_c = semantic_grow_from_concepts(bs->master);
+                if (grown_c > 0 && bs->verbose)
+                    LOG_INFO("[词语义生长] tick=%d 新增 %d 词聚类语义节点", bs->tick_count, grown_c);
             }
         }
     }

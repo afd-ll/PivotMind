@@ -1009,6 +1009,39 @@ int diffusion_generate(DiffusionCtx* ctx,
                             }
                         }
                     }
+
+                    /* 语义场查询（v0.5.7）：词 → 所属语义概念（cross-link）
+                     * → 概念的成员词（语义场词）——聚类语义场优先于
+                     * 共现近似（时间 → 时间概念场：过去/钟表/现在） */
+                    if (wnode && ctx->master->cross_links &&
+                        ctx->master->cross_link_count > 0) {
+                        for (int li = 0; li < ctx->master->cross_link_count; li++) {
+                            CrossTopologyLink* l = ctx->master->cross_links[li];
+                            if (!l || l->from_topo_id != TOPO_CONCEPT ||
+                                l->from_node_id != cnid ||
+                                l->to_topo_id != TOPO_SEMANTIC) continue;
+                            int snid = l->to_node_id;
+                            for (int li2 = 0; li2 < ctx->master->cross_link_count; li2++) {
+                                CrossTopologyLink* l2 = ctx->master->cross_links[li2];
+                                if (!l2 || l2->from_topo_id != TOPO_SEMANTIC ||
+                                    l2->from_node_id != snid ||
+                                    l2->to_topo_id != TOPO_CONCEPT ||
+                                    l2->to_node_id == cnid) continue;
+                                if (l2->to_node_id >= ctx->concept->net->node_count) continue;
+                                ReasoningNode* mw = ctx->concept->net->nodes[l2->to_node_id];
+                                if (!mw || !mw->concept || !mw->concept[0]) continue;
+                                if (is_function_word(mw->concept)) continue;
+                                int dup4 = 0;
+                                for (int k4 = 0; k4 < word_prio_count; k4++)
+                                    if (strcmp(word_prio[k4], mw->concept) == 0) { dup4 = 1; break; }
+                                if (!dup4) {
+                                    word_prio[word_prio_count++] = mw->concept;
+                                    if (word_prio_count >= 16) break;
+                                }
+                            }
+                            break;   /* 只查第一个语义概念 */
+                        }
+                    }
                 }
 
                 /* 词节点 → cross-link → 组成字，激活字节点 */
