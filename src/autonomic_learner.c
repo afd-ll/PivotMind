@@ -1167,7 +1167,7 @@ int main() {
 /* ==================== 词巩固（字拓扑 → 概念拓扑晋升） ==================== */
 
 #define CC_MIN_EDGES       5      /* 字节点边数下限（防稀疏噪声） */
-#define CC_THRESHOLD_DEF  2.0f   /* 默认相对强度阈值：w(A,B) > avg(A)*N（可调） */
+#define CC_THRESHOLD_DEF  1.5f   /* 默认相对强度阈值：w(A,B) > avg(A)*N（可调，2.0 太严，高频字组合如"三国"涌现不出） */
 #define CC_MAX_WORDS       2000   /* 每周期涌现上限（20 本书 200 个远不够） */
 #define CC_STRENGTH_CAP    0.9f   /* cross-link 权重上限 */
 
@@ -1178,6 +1178,26 @@ static int cc_is_cjk_char(const char* s) {
     unsigned char c = (unsigned char)s[0];
     if (c >= 0xE0 && c <= 0xEF)
         return (s[1] != 0 && s[2] != 0 && s[3] == 0) ? 1 : 0;
+    return 0;
+}
+
+/* 纯虚字表：这些字参与的"词"大多是虚词/短语噪声（的武/你是/很大），
+ * 涌现实义词（三国/关羽/武器）才有语义价值（v0.6 调参） */
+static int cc_is_void_char(const char* s) {
+    static const char* voids[] = {
+        "的","了","是","不","也","都","就","很","在","有","这","那",
+        "和","与","或","之","其","于","以","而","且","吧","吗","呢",
+        "啊","个","们","着","过","被","把","从","向","对","比","里",
+        "上","下","中","到","得","为","由","并","又","再","还","已",
+        "经","会","能","可","要","想","说","去","来","出","进","起",
+        "等","如","若","当","因","但","而","虽","然","如","何","哪",
+        "怎","么","什","谁","几","两","多","少","大","小","好","快",
+        "新","老","高","低","长","短","真","假","正","反","总","分",
+        NULL
+    };
+    for (int i = 0; voids[i]; i++) {
+        if (strcmp(s, voids[i]) == 0) return 1;
+    }
     return 0;
 }
 
@@ -1208,6 +1228,11 @@ static int cc_cmp(const void* a, const void* b) {
  */
 int autonomic_compound_consolidate(MasterTopology* master) {
     if (!master) return 0;
+
+    /* 全程持写锁：遍历 vocab 边权 + 建词节点期间阻塞其他线程
+     * （对话学习/扩散/健康扫描），防 realloc 悬垂导致的 SIGSEGV
+     * （v0.6 实测：并发下 gateway 反复崩 139） */
+    pthread_rwlock_wrlock(&master->rwlock);
 
     SubTopology* vocab = NULL;
     SubTopology* concept = NULL;
@@ -1252,19 +1277,26 @@ int autonomic_compound_consolidate(MasterTopology* master) {
             if (!b->concept || !cc_is_cjk_char(b->concept)) continue;
             if (b->edge_count < CC_MIN_EDGES) continue;
 
+            /* 虚字过滤：含纯虚字的字对跳过（防"的武/你是/很大"类
+             * 虚词噪声占据候选榜，让实义词（三国/关羽）能涌现） */
+            if (cc_is_void_char(a->concept) || cc_is_void_char(b->concept)) continue;
+
             float w_ab = e->weight;   /* A→B（语序方向） */
 
             /* 反向边（B→A）用于方向判定：若反向更强，词序取 BA */
             int ri = cc_find_edge(b, a);
             float w_ba = (ri >= 0) ? b->edges[ri].weight : 0.0f;
 
-            /* 高频方向 = 词序；相对强度只查高频方向 */
+            /* 高频方向 = 词序；相对强度只查高频方向。
+             * 双通道（v0.6）：相对强度超阈值（低频字组合如"衣服"）
+             * 或绝对强度高（高频实体词如"三国"共现几百次边权饱和到
+             * 0.9，但相对强度因高频字 avg 高而不突出）都涌现 */
             int fwd = (w_ab >= w_ba);
             float w_hi = fwd ? w_ab : w_ba;
             float avg_hi = fwd ? avg_w[i] : avg_w[b->node_id];
             if (avg_hi <= 0.001f) continue;
             float rel = w_hi / avg_hi;
-            if (rel < g_compound_threshold) continue;
+            if (rel < g_compound_threshold && w_hi < 0.85f) continue;
 
             /* 方向确定性：两个方向都强且接近 → 可能是回文/噪声，跳过 */
             float w_lo = fwd ? w_ba : w_ab;
@@ -1292,16 +1324,21 @@ int autonomic_compound_consolidate(MasterTopology* master) {
         if (huarong_net_find_concept(concept->net, c->word) >= 0) continue; /* 已存在 */
         ReasoningNode* wn = huarong_net_add_node(concept->net, c->word, NULL, 0);
         if (!wn) continue;
+        /* 词节点热值：初值 0 会被 RED 冻结当冷节点删光（实测 343 词
+         * 全灭）——新涌现的词是重要知识，给 0.5 热值保活 */
+        wn->activation = 0.5f;
         node_hash_add(concept->node_hash, wn);
 
         float w = 0.3f + c->strength * 0.15f;
         if (w > CC_STRENGTH_CAP) w = CC_STRENGTH_CAP;
-        master_add_cross_link(master, TOPO_CONCEPT, wn->node_id,
-                              TOPO_VOCABULARY, c->node_a, w, "compound");
-        master_add_cross_link(master, TOPO_CONCEPT, wn->node_id,
-                              TOPO_VOCABULARY, c->node_b, w, "compound");
+        master_add_cross_link_nolock(master, TOPO_CONCEPT, wn->node_id,
+                                     TOPO_VOCABULARY, c->node_a, w, "compound");
+        master_add_cross_link_nolock(master, TOPO_CONCEPT, wn->node_id,
+                                     TOPO_VOCABULARY, c->node_b, w, "compound");
         created++;
     }
+
+    pthread_rwlock_unlock(&master->rwlock);
 
     free(cands);
     free(avg_w);

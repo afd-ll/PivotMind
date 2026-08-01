@@ -419,7 +419,7 @@ int auto_extend_topology(MasterTopology* master, int topo_id) {
 }
 
 int auto_shrink_topology(MasterTopology* master, int topo_id) {
-    if (!master || master->load_protect > 0) return -1;  /* 加载保护期：不收缩（v0.6） */
+    if (!master || master_load_protected(master)) return -1;  /* 加载保护期：不收缩（v0.6） */
     TopologyGrowthConfig* config = topology_growth_get_default_config();
     if (!config->auto_shrink_enabled) return -1;
 
@@ -646,6 +646,9 @@ int prune_low_connectivity(MasterTopology* master, int topo_id,
     int removed = 0;
     for (int i = 0; i < sub->net->node_count; i++) {
         ReasoningNode* node = sub->net->nodes[i];
+        /* 跳过冻结节点（is_cooled）：冻结是 lazy memory 缓存释放（边数据
+         * 已存盘可恢复），不是孤立垃圾——RED 修剪不该删它们（v0.6） */
+        if (node && node->is_cooled) continue;
         if (node && node->edge_count < min_connections) {
             if (remove_node_dynamic(master, topo_id, i, false) == 0) {
                 removed++;
@@ -657,10 +660,10 @@ int prune_low_connectivity(MasterTopology* master, int topo_id,
 }
 
 int prune_isolated_nodes(MasterTopology* master, int topo_id) {
-    /* 加载保护期：状态加载后 60 tick 内不清理孤立节点（brainstem 每 tick
-     * 递减 load_protect，此处只读检查）。新喂知识刚加载时边恢复/自主学习
-     * 尚未完成，立即清理会把知识当"孤立节点"连锁删光。 */
-    if (master && master->load_protect > 0) return 0;
+    /* 加载保护期：状态加载后 30 分钟内不清理孤立节点（按时间，不受
+     * tick 速率影响）。新喂知识刚加载时边恢复/自主学习尚未完成，
+     * 立即清理会把知识当"孤立节点"连锁删光。 */
+    if (master_load_protected(master)) return 0;
     return prune_low_connectivity(master, topo_id, 1);
 }
 

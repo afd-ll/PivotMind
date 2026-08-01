@@ -435,11 +435,6 @@ static void brainstem_tick_learning_scan(Brainstem* bs, const CircadianParams* c
     Thalamus* th = bs->thalamus;
     if (!th) return;
 
-    /* 加载保护期递减：master_load_state 后 60 tick 内跳过孤立节点
-     * 清理（v0.6：新喂知识存活窗口，防 active_learner 清光知识） */
-    if (bs->master && bs->master->load_protect > 0)
-        bs->master->load_protect--;
-
     if (bs->tick_count % cp->selflearn_interval == 0) {
         SelfLearner* sl = (SelfLearner*)thalamus_get_utility(th, THAL_UTIL_SELF_LEARNER);
         if (sl) {
@@ -493,6 +488,13 @@ static void brainstem_tick_learning_scan(Brainstem* bs, const CircadianParams* c
 static void brainstem_tick_freeze(Brainstem* bs, const CircadianParams* cp) {
     Thalamus* th = bs->thalamus;
     if (!th) return;
+
+    /* 加载保护期：状态加载后 60 tick 内不执行冻结/修剪（v0.6）。
+     * 加载大状态后 RSS 增长会误触发 RED → 每 tick 冻结+删除冷节点，
+     * 把刚加载的知识当"死节点"连锁清光（实测 4 分钟 3 万→2 千）。
+     * 保护期内跳过，给自主学习/词巩固时间把知识"热"起来。 */
+    if (master_load_protected(bs->master)) return;
+
     NodeCache* nc = (NodeCache*)thalamus_get_utility(th, THAL_UTIL_NODE_CACHE);
     if (!nc) return;
 

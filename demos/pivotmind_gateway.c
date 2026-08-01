@@ -808,6 +808,29 @@ static void handle_chat(GatewaySystem* gw, int fd, const char* body) {
         }
     }
 
+    /* 功能词兜底（v0.6）：回复若只有"很+X"类功能词组合（很大/很快）
+     * 或纯标点/单字重复 → 替换为礼貌默认。扩散组装在无实义词时
+     * 会选 ADJ 组合当主语，这是"很大。"泛滥的根源。 */
+    if (response) {
+        int len = (int)strlen(response);
+        int cjk_cnt = 0, punct_cnt = 0;
+        for (const char* p = response; *p; p++) {
+            unsigned char c = (unsigned char)*p;
+            if (c >= 0x80) cjk_cnt++;
+            else if (c == ' ' || c == '.' || c == '。' || c == '、' ||
+                     c == ',' || c == '，' || c == '!' || c == '！')
+                punct_cnt++;
+        }
+        int wordish = (cjk_cnt / 3);  /* 汉字数（含标点容差，如"很大。"=3） */
+        int is_void = (wordish <= 3) ||              /* ≤1 个实义词 */
+                      (strstr(response, "很大") && wordish <= 3) ||
+                      (strstr(response, "很快") && wordish <= 3) ||
+                      (strstr(response, "很好") && wordish <= 3) ||
+                      (strstr(response, "好的") && wordish <= 3) ||
+                      (strstr(response, "、") && wordish <= 3);
+        if (is_void) { free(response); response = strdup("好的。"); }
+    }
+
     if (response) {
         char escaped[GW_MAX_RESPONSE];
         json_escape(response, escaped, sizeof(escaped));

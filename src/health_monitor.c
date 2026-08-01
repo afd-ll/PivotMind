@@ -18,13 +18,13 @@ HealthMonitor* health_monitor_create(void) {
 
     /* 默认阈值 — 针对 3.8G 板子，留足喂料缓冲 */
     hm->rss_yellow_mb     = 800.0f;
-    hm->rss_red_mb        = 1000.0f;
+    hm->rss_red_mb        = 1200.0f;  /* v0.6: 板子 4GB，v6 大状态 RSS 1G+ 属正常负载 */
     hm->rss_growth_yellow = 2.0f;   /* MB/min */
-    hm->rss_growth_red    = 5.0f;
+    hm->rss_growth_red    = 30.0f;  /* v0.6: 加载/词巩固高峰 +76MB/min 会误判 RED */
     hm->conn_growth_yellow = 500;
     hm->conn_growth_red    = 2000;
     hm->frozen_yellow      = 500;
-    hm->frozen_red         = 2000;
+    hm->frozen_red         = 10000; /* v0.6: 正常学习也会累计冻结计数，2000 太易触发 RED 锁存 */
 
     hm->level  = HM_GREEN;
     hm->reason = "系统正常";

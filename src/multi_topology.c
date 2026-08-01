@@ -321,14 +321,12 @@ static int cross_link_exists_nolock(MasterTopology* master,
                                     int from_topo, int from_node,
                                     int to_topo, int to_node);
 
-int master_add_cross_link(MasterTopology* master,
-                         int from_topo_id, int from_node_id,
-                         int to_topo_id, int to_node_id,
-                         float weight,
-                         const char* relation) {
+int master_add_cross_link_nolock(MasterTopology* master,
+                                 int from_topo_id, int from_node_id,
+                                 int to_topo_id, int to_node_id,
+                                 float weight,
+                                 const char* relation) {
     if (!master || !relation) return -1;
-    
-    pthread_rwlock_wrlock(&master->rwlock);
     
     int result = -1;
 
@@ -344,7 +342,7 @@ int master_add_cross_link(MasterTopology* master,
                 l->to_topo_id == to_topo_id &&
                 l->to_node_id == to_node_id) {
                 result = l->link_id;
-                goto unlock;
+                return -1;
             }
         }
     }
@@ -356,14 +354,14 @@ int master_add_cross_link(MasterTopology* master,
             master->cross_links,
             new_capacity * sizeof(CrossTopologyLink*)
         );
-        if (!new_links) goto unlock;
+        if (!new_links) return -1;
         master->cross_links = new_links;
         master->cross_link_capacity = new_capacity;
     }
     
     // 创建跨拓扑连接
     CrossTopologyLink* link = (CrossTopologyLink*)malloc(sizeof(CrossTopologyLink));
-    if (!link) goto unlock;
+    if (!link) return -1;
     
     link->link_id = master->cross_link_count;
     link->from_topo_id = from_topo_id;
@@ -413,9 +411,21 @@ int master_add_cross_link(MasterTopology* master,
     
     result = link->link_id;
 
-unlock:
-    pthread_rwlock_unlock(&master->rwlock);
     return result;
+}
+
+int master_add_cross_link(MasterTopology* master,
+                         int from_topo_id, int from_node_id,
+                         int to_topo_id, int to_node_id,
+                         float weight,
+                         const char* relation) {
+    if (!master || !relation) return -1;
+    pthread_rwlock_wrlock(&master->rwlock);
+    int ret = master_add_cross_link_nolock(master, from_topo_id, from_node_id,
+                                           to_topo_id, to_node_id,
+                                           weight, relation);
+    pthread_rwlock_unlock(&master->rwlock);
+    return ret;
 }
 
 /**
@@ -3319,6 +3329,10 @@ void huarong_net_cleanup_retired_batch(MasterTopology* master) {
 /* ── 死节点清理：移除零边零激活的孤立节点 ── */
 int master_prune_dead_nodes(MasterTopology* master) {
     if (!master) return 0;
+    /* 加载保护期：RED 修剪/存盘前不删死节点（v0.6）。
+     * 冻结清边后节点 edge_count=0 + act 衰减 <0.01，若无保护会被
+     * RED 修剪当死节点连锁删光（实测 3 万知识 4 分钟清光）。 */
+    if (master_load_protected(master)) return 0;
     int removed = 0;
     for (int t = 0; t < master->sub_topo_count; t++) {
         SubTopology* sub = master->sub_topologies[t];
@@ -3332,6 +3346,9 @@ int master_prune_dead_nodes(MasterTopology* master) {
         for (int n = 0; n < nc; n++) {
             ReasoningNode* node = sub->net->nodes[n];
             if (!node) continue;
+            /* 跳过冻结节点（is_cooled）：冻结 = 边数据已存盘可恢复，
+             * 不是死节点（v0.6 RED 修剪不该删它们） */
+            if (node->is_cooled) continue;
             if (node->edge_count == 0 && node->activation < 0.01f) {
                 dead_ids[dead_count++] = node->node_id;
             }
@@ -3745,10 +3762,10 @@ int master_load_state(MasterTopology* master, const char* file_path) {
         }
         if (node) {
             node->activation = activation;
-            /* 加载保底：冷节点（activation<0.01）设为 0.01 初始热值，
-             * 防止 prune（edge_count==0 && act<0.01）把新喂的知识当死节点
-             * 连锁清除（v0.6 词巩固架构：知识必须在板子上存活） */
-            if (node->activation < 0.01f) node->activation = 0.01f;
+            /* 加载保底：冷节点初始热值 0.3（30 分钟衰减 ×0.99^360≈0.027
+             * 后仍 ~0.008 > 冻结线 0.005，防保护期到期后 RED 冻结雪崩）。
+             * v0.6 词巩固架构：知识必须在板子上存活 */
+            if (node->activation < 0.3f) node->activation = 0.3f;
             // [v4] 恢复特征向量
             if (has_v4_features) {
                 if (!node->features) {
@@ -4010,7 +4027,7 @@ int master_load_state(MasterTopology* master, const char* file_path) {
 
     /* v0.6 加载保护期：60 tick 内跳过孤立节点清理，
      * 给新喂知识存活窗口（边恢复/自主学习尚未完成） */
-    master->load_protect = 60;
+    master->load_protect = (int)time(NULL);  /* 加载保护期：30 分钟（按时间） */
 
     return loaded_nodes;
 

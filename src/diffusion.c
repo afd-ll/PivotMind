@@ -952,6 +952,11 @@ int diffusion_generate(DiffusionCtx* ctx,
     int active_ids[DIFF_MAX_CANDIDATES];
     int active_count = 0;
 
+    /* 词锚定优先输出队列：命中的词节点 concept 直接进输出候选
+     * （v0.6 Phase 2b：输入关联的实义词优先于散字联想） */
+    const char* word_prio[16];
+    int word_prio_count = 0;
+
     /* ── 第0步A：词锚定（v0.6）──
      * 滑窗先查概念拓扑（词层）→ 命中词节点 → 通过 cross-link
      * 激活其组成字（组合强化）。词从语料统计自己长出来（词巩固），
@@ -970,6 +975,18 @@ int diffusion_generate(DiffusionCtx* ctx,
 
                 int cnid = huarong_net_find_concept(ctx->concept->net, sub);
                 if (cnid < 0) continue;
+
+                /* 词节点 concept 进优先输出队列（输入直接关联的实义词） */
+                if (cnid < ctx->concept->net->node_count) {
+                    ReasoningNode* wnode = ctx->concept->net->nodes[cnid];
+                    if (wnode && wnode->concept && wnode->concept[0] &&
+                        word_prio_count < 16) {
+                        int dup2 = 0;
+                        for (int k2 = 0; k2 < word_prio_count; k2++)
+                            if (strcmp(word_prio[k2], wnode->concept) == 0) { dup2 = 1; break; }
+                        if (!dup2) word_prio[word_prio_count++] = wnode->concept;
+                    }
+                }
 
                 /* 词节点 → cross-link → 组成字，激活字节点 */
                 for (int li = 0; li < ctx->master->cross_link_count; li++) {
@@ -1277,7 +1294,25 @@ int diffusion_generate(DiffusionCtx* ctx,
             degree_penalty = 1.0f / log2f((float)(n->edge_count));
             if (degree_penalty < 0.05f) degree_penalty = 0.05f;  /* 软底，不完全抹零 */
         }
-        final[final_cnt].total_score    = vocab_scores[i] * degree_penalty;
+
+        /* P2: 话题相关性（v0.6）— 候选与输入锚定节点集的边权关联。
+         * 话题聚焦：强边邻居（三国→演义/关羽）相关性高 → 主输出；
+         * 高频噪声（时间）与锚定集无强边 → 相关性低 → 降权。
+         * 联想发散：弱边/两跳候选相关性低但保留（扩散激活兜底）。 */
+        float relevance = 0.0f;
+        for (int a = 0; a < active_count; a++) {
+            ReasoningNode* anchor = ctx->vocab->net->nodes[active_ids[a]];
+            if (!anchor || !anchor->edges) continue;
+            for (int e = 0; e < anchor->edge_count; e++) {
+                if (anchor->edges[e].target == n) {
+                    float w = anchor->edges[e].weight;
+                    if (w > relevance) relevance = w;
+                    break;
+                }
+            }
+        }
+        final[final_cnt].total_score    = vocab_scores[i] * degree_penalty *
+                                          (0.3f + 1.7f * relevance);
         final[final_cnt].word = n->concept;
         final[final_cnt].used = 0;
         final_cnt++;
@@ -1407,6 +1442,26 @@ int diffusion_generate(DiffusionCtx* ctx,
         POSTag      word_pos[DIFF_MAX_SEQUENCE];    /* 栈数组 128B */
         const char* word_buf[DIFF_MAX_SEQUENCE];    /* 栈数组 256B */
         int         word_count = 0;
+
+        /* 第0.5遍: 词锚定优先 — 命中的词节点先入候选（输入直接关联的
+         * 实义词，如"三国"→直接输出三国/演义），再让散字扩散补充 */
+        for (int p = 0; p < word_prio_count && word_count < DIFF_MAX_SEQUENCE; p++) {
+            if (!word_prio[p] || strlen(word_prio[p]) < 2) continue;
+            if (is_function_word(word_prio[p])) continue;
+            if (lang_dom > 0 && (unsigned char)word_prio[p][0] < 0x80) continue;
+            if (lang_dom < 0 && (unsigned char)word_prio[p][0] >= 0x80) continue;
+            int dup = 0;
+            for (int w = 0; w < word_count; w++) {
+                if (strcmp(word_prio[p], word_buf[w]) == 0) { dup = 1; break; }
+            }
+            if (dup) continue;
+            word_buf[word_count] = word_prio[p];
+            word_pos[word_count] = emergent_pos_tag(
+                ctx->emergent_pos, ctx->master, word_prio[p]);
+            if (word_pos[word_count] == POS_UNKNOWN)
+                word_pos[word_count] = english_pos_lookup(word_prio[p]);
+            word_count++;
+        }
 
         /* 第一遍: 收集有效候选词 + POS 标注 */
         for (int i = 0; i < final_cnt && word_count < DIFF_MAX_SEQUENCE; i++) {

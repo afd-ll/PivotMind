@@ -153,8 +153,9 @@ typedef struct MasterTopology {
     CrossTopoAdjEntry** cross_adj;       // 扁平数组索引
     int cross_adj_count;                 // 索引条目数
 
-    // 加载保护期：master_load_state 后 N tick 内跳过孤立节点清理
-    // （v0.6：新喂知识给存活窗口，防 active_learner 边恢复未完成就清光）
+    // 加载保护期：master_load_state 成功后 30 分钟（PM_LOAD_PROTECT_SECONDS）
+    // 内跳过冻结/孤立清理/收缩（v0.6：新喂知识存活窗口，防 RED 冻结
+    // 与遗忘机制把刚加载的知识当死节点清光）。存加载时间戳，0 = 无保护。
     int load_protect;
 
     // 当前激活状态
@@ -208,6 +209,16 @@ typedef struct MasterTopology {
     int _legacy_context_node;
 } MasterTopology;
 
+/* 是否在加载保护期内（按时间，不受 tick 速率影响）。
+ * master_load_state 成功后 30 分钟（PM_LOAD_PROTECT_SECONDS）内
+ * 跳过冻结/孤立清理/收缩（v0.6：新喂知识存活窗口，防 RED 冻结
+ * 与遗忘机制把刚加载的知识当死节点清光） */
+#define PM_LOAD_PROTECT_SECONDS 1800
+static inline int master_load_protected(const MasterTopology* master) {
+    return master && master->load_protect > 0 &&
+           (int)time(NULL) - master->load_protect < PM_LOAD_PROTECT_SECONDS;
+}
+
 /* 便捷访问：获取全局认知状态（需外部包含 cognitive_params.h 后方可用） */
 #ifdef HAS_COGNITIVE_PARAMS
 static inline float master_get_valence(const MasterTopology* m) {
@@ -240,10 +251,16 @@ SubTopology* master_get_sub_topology_by_type(MasterTopology* master,
 // ========== 跨拓扑连接管理 ==========
 
 int master_add_cross_link(MasterTopology* master,
-                         int from_topo_id, int from_node_id,
-                         int to_topo_id, int to_node_id,
-                         float weight,
-                         const char* relation);
+                          int from_topo_id, int from_node_id,
+                          int to_topo_id, int to_node_id,
+                          float weight,
+                          const char* relation);
+/* 无锁版：调用方必须已持有 master->rwlock 写锁（词巩固等批量场景） */
+int master_add_cross_link_nolock(MasterTopology* master,
+                                 int from_topo_id, int from_node_id,
+                                 int to_topo_id, int to_node_id,
+                                 float weight,
+                                 const char* relation);
 
 /**
  * 快速查重：使用邻接表索引 O(出度)
