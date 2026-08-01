@@ -37,6 +37,22 @@ static void _cjk_insert_spaces(const char* src, char* dst, int dst_sz) {
  */
 #define HEBBIAN_DELTA 0.05f
 
+/* v0.5.7: 词级虚字表——只放"绝对虚字"（的/了/是/在/和/与/或/也/都/就/
+ * 很/不/要/会/能/吗/呢/吧/啊/这/那/有/我/你/他/她/它/们）。
+ * 用户纠正：词级审视不能照搬字级虚字表——"过去/将来/上面/儿子"等
+ * 真词含"过/来/去/上/下/子/儿"（字级虚字）但整体是实义词，必须保留。
+ * 只有"绝对虚"组合（"是流"类）才跳过。 */
+static int cc_is_void_char(const char* s) {
+    static const char* voids[] = {"的","了","是","在","和","与","或","也","都",
+        "就","很","不","要","会","能","吗","呢","吧","啊","这","那","有","我",
+        "你","他","她","它","们",
+        NULL};
+    if (!s || !s[0]) return 0;
+    for (int i = 0; voids[i]; i++)
+        if (strcmp(s, voids[i]) == 0) return 1;
+    return 0;
+}
+
 static int is_ascii_token(const char* s) {
     return (unsigned char)s[0] < 0x80;
 }
@@ -122,6 +138,46 @@ static int learn_tokens(SubTopology* vocab, SubTopology* concept,
                     hebbian_edge(topo->net, prev, cur);
                 }
                 *p_prev = nid;
+
+                /* 词级语义场（v0.5.7）：2 字窗口配对 + 词-词共现边。
+                 * 每 2 个连续中文字配成一个窗口词（时间/早晨…）——
+                 * 窗口间共现建边（时间→早晨）；错位窗口（间早）不产生。
+                 * 虚字过滤：窗口词含虚字跳过；失败窗口不更新 prev_word，
+                 * 实义词段直接共现。 */
+                if (!is_en && concept && concept->net) {
+                    static int   cn_seq = 0;      /* 连续中文字计数（每2一组） */
+                    static char  word_win[8] = {0};
+                    static char  prev_word[8] = {0};
+                    cn_seq++;
+                    if (cn_seq % 2 == 1) {
+                        /* 奇位置 = 窗口首字 */
+                        snprintf(word_win, sizeof(word_win), "%s", tok);
+                    } else {
+                        /* 偶位置 = 窗口尾字——完整窗口 cand */
+                        char cand[8];
+                        snprintf(cand, sizeof(cand), "%s%s", word_win, tok);
+                        if (!cc_is_void_char(word_win) && !cc_is_void_char(tok)) {
+                            int cnid = huarong_net_find_concept(concept->net, cand);
+                            if (cnid < 0 && (size_t)concept->net->node_count < concept->net->max_nodes) {
+                                cnid = huarong_net_dynamic_add_node(concept->net, cand, NULL, 0);
+                                if (cnid >= 0)
+                                    node_hash_add(concept->node_hash, concept->net->nodes[cnid]);
+                            }
+                            if (cnid >= 0) {
+                                concept->net->nodes[cnid]->activation += 0.05f;
+                                if (prev_word[0]) {
+                                    int pnid = huarong_net_find_concept(concept->net, prev_word);
+                                    if (pnid >= 0 && pnid != cnid) {
+                                        ReasoningNode* pn = concept->net->nodes[pnid];
+                                        ReasoningNode* cn = concept->net->nodes[cnid];
+                                        hebbian_edge(concept->net, pn, cn);
+                                    }
+                                }
+                                snprintf(prev_word, sizeof(prev_word), "%s", cand);
+                            }
+                        }
+                    }
+                }
             }
         }
         tok = strtok(NULL, " \t\n\r。，！？、；：\"\"''（）《》…—");

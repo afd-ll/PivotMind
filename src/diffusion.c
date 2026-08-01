@@ -988,6 +988,27 @@ int diffusion_generate(DiffusionCtx* ctx,
                         fprintf(stderr, "[词锚定DBG] win=%d 命中词节点: %s\n",
                                 win_chars, wnode->concept);
                     }
+
+                    /* 词级语义场（v0.5.7）：词节点的词-词邻居（概念拓扑
+                     * 共现边）→ 语义场词进优先队列——"时间"→
+                     * "时间 过去 钟表"，子目标答案有实质内容 */
+                    if (wnode && wnode->edges && word_prio_count < 16) {
+                        for (int we = 0; we < wnode->edge_count; we++) {
+                            ReasoningNode* wnb = wnode->edges[we].target;
+                            if (!wnb || !wnb->concept || !wnb->concept[0]) continue;
+                            if (wnb->node_id == cnid) continue;
+                            float w = wnode->edges[we].weight;
+                            if (w < 0.3f) continue;      /* 弱边不构成语义场 */
+                            if (is_function_word(wnb->concept)) continue;
+                            int dup3 = 0;
+                            for (int k3 = 0; k3 < word_prio_count; k3++)
+                                if (strcmp(word_prio[k3], wnb->concept) == 0) { dup3 = 1; break; }
+                            if (!dup3) {
+                                word_prio[word_prio_count++] = wnb->concept;
+                                if (word_prio_count >= 16) break;
+                            }
+                        }
+                    }
                 }
 
                 /* 词节点 → cross-link → 组成字，激活字节点 */
