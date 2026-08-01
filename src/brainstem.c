@@ -435,6 +435,11 @@ static void brainstem_tick_learning_scan(Brainstem* bs, const CircadianParams* c
     Thalamus* th = bs->thalamus;
     if (!th) return;
 
+    /* 加载保护期递减：master_load_state 后 60 tick 内跳过孤立节点
+     * 清理（v0.6：新喂知识存活窗口，防 active_learner 清光知识） */
+    if (bs->master && bs->master->load_protect > 0)
+        bs->master->load_protect--;
+
     if (bs->tick_count % cp->selflearn_interval == 0) {
         SelfLearner* sl = (SelfLearner*)thalamus_get_utility(th, THAL_UTIL_SELF_LEARNER);
         if (sl) {

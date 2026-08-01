@@ -68,6 +68,9 @@ MasterTopology* master_topology_create(int max_sub_topos) {
     
     master->sub_topologies = (SubTopology**)calloc(capacity, sizeof(SubTopology*));
     master->sub_topo_count = 0;
+
+    /* v0.6: 加载保护期初始 0（master_load_state 成功后才启用） */
+    master->load_protect = 0;
     master->sub_topo_capacity = capacity;
     
     master->cross_links = (CrossTopologyLink**)calloc(
