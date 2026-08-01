@@ -29,7 +29,7 @@ PivotMind is a **brain-inspired cognitive engine** built on
 No external Transformer dependencies. No pretrained embedding vectors.
 Just nodes, edges, activation, and decay — powered by a relentless background clock.
 
-**Current Version: v0.5.5** — 14 fully-implemented brain regions, emergent POS system, parallel multi-learner, PFE reasoning orchestration, 512-dim feature vectors, POS grammar mapping, edge specificity weighting, multi-modal visual pipeline (VisualCortex + MediaReader), **Bing RSS web crawler + PMI knowledge graph builder + /learn PMI pipeline**, zero compile warnings.
+**Current Version: v0.5.7** — 14 fully-implemented brain regions, emergent POS system, parallel multi-learner, PFE reasoning orchestration, 512-dim feature vectors, POS grammar mapping, edge specificity weighting, multi-modal visual pipeline (VisualCortex + MediaReader), **word-layer semantic field (word consolidation + semantic topology clustering)**, **topic-aware generation (relevance scoring + bounded association)**, **PFE reasoning pipeline (subgoal decomposition + causal search + reasoning chain)**, **Bing RSS web crawler + PMI knowledge graph builder + /learn PMI pipeline**, zero compile warnings.
 
 **Codebase: 88 source files (~49,600 lines C) + 91 headers (~12,800 lines) + tools/tests/demos (~13,000 lines) = ~75,500 total lines.**
 
@@ -61,45 +61,7 @@ Activation diffuses simultaneously across layers, with competition selecting the
 PivotMind models mammalian cortical functional divisions — 14 brain regions/subsystems, each with dedicated responsibilities, communicating through the Thalamus signal bus.
 **All 14 regions are fully implemented with zero stub code.**
 
-```mermaid
-graph TB
-    PF["🧠 Prefrontal Cortex<br/>Dialog / Decision Entry"]
-    PFE["🎯 Prefrontal Exec<br/>6-Mode Reasoning"]
-    HC["📚 Hippocampus<br/>Memory Consolidation"]
-    DMN["💭 DMN<br/>Dream / Idle"]
-    AMY["😊 Amygdala<br/>Emotion"]
-    PERC["🔍 Perception<br/>Web Search"]
-    BROCA["📝 Broca<br/>Template Builder"]
-    CB["⚖️ Cerebellum<br/>BPTT / Protect"]
-    BS["⏰ Brainstem<br/>Circadian Clock"]
-    HYPO["🔥 Hypothalamus<br/>Drives"]
-    ACC["✅ ACC<br/>4D Evaluation"]
-    ARENA["🏟️ IdeaArena<br/>Candidate Competition"]
-    RET["⚡ Reticular<br/>Arousal"]
-    VC["👁️ VisualCortex v0.5<br/>Multi-Modal Pipeline"]
-
-    TH["📡 Thalamus<br/>Signal Bus + Resource Gate"]
-
-    PF --> TH
-    PFE --> TH
-    HC --> TH
-    DMN --> TH
-    AMY --> TH
-    PERC --> TH
-    BROCA --> TH
-    CB --> TH
-    BS --> TH
-    HYPO --> TH
-    ACC --> TH
-    ARENA --> TH
-    RET --> TH
-    VC --> TH
-
-    TH --> PF
-    TH --> HC
-    TH --> PERC
-    TH --> VC
-```
+<p align="center"><img src="diagrams/brain-regions.png" alt="Brain Regions Architecture" width="780"/></p>
 
 | Brain Region       | File                       | Lines | Function                                                       |
 |--------------------|----------------------------|-------|----------------------------------------------------------------|
@@ -175,28 +137,7 @@ Continuously monitors RSS memory, connection growth rate, and reasoning latency 
 
 The VisualCortex brain region ingests video/audio content through two data pipelines:
 
-```mermaid
-flowchart LR
-    subgraph PipelineA["Pipeline A: Subtitle"]
-        V1["🎬 Video File"] --> FF1["ffprobe detect subs"]
-        FF1 --> FF2["ffmpeg extract SRT"]
-        FF2 --> SRT["SRT Parser"]
-        SRT --> PMI["article_process_line PMI"]
-        PMI --> TOPO1["Vocab Topology +edges"]
-    end
-
-    subgraph PipelineB["Pipeline B: Visual Cortex"]
-        V2["🎬 Video File"] --> FK["ffprobe keyframes"]
-        FK --> FEAT["512-dim Features"]
-        V2 --> SUB["ffmpeg SRT timestamps"]
-        SUB --> ALIGN["Time-window Alignment"]
-        FEAT --> ALIGN
-        ALIGN --> CROSS["Cross-Topology Edge<br/>vocab↔visual"]
-    end
-
-    TOPO1 --> NET["🧠 Topology Network"]
-    CROSS --> NET
-```
+<p align="center"><img src="diagrams/multimodal-pipeline.png" alt="Multi-Modal Pipeline" width="700"/></p>
 
 Task queue: Gateway enqueue → Brainstem tick (throttle-gated) → dequeue 1 file/tick → frames+SRT+align+edges.
 
@@ -368,8 +309,10 @@ pivotmind/
 | **v0.5.0** | **Multi-modal pipeline** — VisualCortex brain region, MediaReader SRT pipeline, cross-modal alignment, task queue model |
 | **v0.5.1** | Code reorganization — NN subsystem split (21 src, 15 headers), ccache+LTO build optimization, pure function unit tests |
 | **v0.5.5** | Bing RSS web crawler + PMI knowledge graph (52 articles, 4733 nodes, 7820 edges), diffusion UTF-8 character-window fix, edge builder tool |
+| **v0.5.6** | rwlock deadlock fix (write-lock nested read), gateway topology capacity, knowledge survival protection (load protect + floor activation) |
+| **v0.5.7** | **Word-layer semantic field** (word consolidation, word-word co-occurrence edges, semantic topology clustering, semantic-field query), **topic-aware generation** (relevance scoring, bounded association, topic-ordered assembly), **PFE reasoning pipeline** (subgoal decomposition, causal search, reasoning chain, 4x O(N²) fixes), knowledge survival overhaul (30-min load protection, is_cooled prune protection) |
 
-> Detailed changelogs: v0.3.0 → [changelogs/032-v0.3.0-reasoning-architecture.md](changelogs/032-v0.3.0-reasoning-architecture.md) ｜ v0.4.0 → [changelogs/034-v0.4.0-code-simplify-brain-boundary.md](changelogs/034-v0.4.0-code-simplify-brain-boundary.md) ｜ v0.4.3 → [changelogs/042-emergent-pos-anchor.md](changelogs/042-emergent-pos-anchor.md) ｜ v0.5.0 → [changelogs/055-multimodal-v0.5.0.md](changelogs/055-multimodal-v0.5.0.md) ｜ v0.5.5 → [changelogs/055-diffusion-char-window.md](changelogs/055-diffusion-char-window.md)
+> Detailed changelogs: v0.3.0 → [changelogs/032-v0.3.0-reasoning-architecture.md](changelogs/032-v0.3.0-reasoning-architecture.md) ｜ v0.4.0 → [changelogs/034-v0.4.0-code-simplify-brain-boundary.md](changelogs/034-v0.4.0-code-simplify-brain-boundary.md) ｜ v0.4.3 → [changelogs/042-emergent-pos-anchor.md](changelogs/042-emergent-pos-anchor.md) ｜ v0.5.0 → [changelogs/055-multimodal-v0.5.0.md](changelogs/055-multimodal-v0.5.0.md) ｜ v0.5.5 → [changelogs/055-diffusion-char-window.md](changelogs/055-diffusion-char-window.md) ｜ v0.5.7 → [changelogs/062-word-semantic-field-reasoning-pipeline.md](changelogs/062-word-semantic-field-reasoning-pipeline.md)
 
 ---
 
