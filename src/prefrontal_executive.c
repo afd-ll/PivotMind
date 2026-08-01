@@ -122,10 +122,19 @@ int pfe_assess_complexity(PrefrontalExecutive* pfe, const char* question) {
     if (qmarks >= 2) score++;
     if (commas >= 3) score++;
 
+    /* 推理问句保底触发（v0.5.7）：含"为什么/怎么/如何/如果/比较/区别
+     * 等推理词即走 PFE 子目标推理——单关键词此前 score=1 被 <=1 拒掉；
+     * "什么"类定义问句（什么是X）不走 PFE（直接 diffusion 话题应答更好） */
+    int has_reason = strstr(question, "为什么") || strstr(question, "原因") ||
+                     strstr(question, "怎么")   || strstr(question, "如何") ||
+                     strstr(question, "如果")   || strstr(question, "比较") ||
+                     strstr(question, "区别")   || strstr(question, "假设") ||
+                     strstr(question, "类比")   || strstr(question, "类似");
+
     /* 复杂度分级 */
-    if (score <= 1)  return 0;   /* 简单 → 直接联想 */
-    if (score <= 3)  return 1;   /* 中等 → 2步分解 */
-    return 2;                     /* 复杂 → 多层分解 */
+    if (score <= 1 && !has_reason) return 0;   /* 简单 → 直接联想 */
+    if (score <= 3)                return 1;   /* 中等 → 2步分解 */
+    return 2;                                  /* 复杂 → 多层分解 */
 }
 
 /* ================================================================

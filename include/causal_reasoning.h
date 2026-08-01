@@ -382,7 +382,10 @@ void causal_graph_destroy(CausalGraph* graph);
  * @return 边ID, -1 失败
  */
 int add_causal_edge(CausalGraph* graph, int cause_id, int effect_id,
-                  CausalEdgeType type, float strength);
+                    CausalEdgeType type, float strength);
+/* 无查重版（v0.5.7）：批量建图用，跳过 find_edge_index 线性扫描（O(E²) 爆炸） */
+int add_causal_edge_no_check(CausalGraph* graph, int cause_id, int effect_id,
+                             CausalEdgeType type, float strength);
 
 /**
  * 移除因果边

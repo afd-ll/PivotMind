@@ -275,7 +275,7 @@ static bool has_cycle_dfs(CausalGraph* graph, int node, int* visited, int* rec_s
     rec_stack[node] = 1;
 
     for (int i = 0; i < graph->outgoing_count[node]; i++) {
-        int neighbor = graph->outgoing[node][i];
+        int neighbor = (graph->edges[graph->outgoing[node][i]] ? graph->edges[graph->outgoing[node][i]]->effect_node_id : -1);
         if (!visited[neighbor]) {
             if (has_cycle_dfs(graph, neighbor, visited, rec_stack)) {
                 return true;
@@ -437,10 +437,21 @@ int add_causal_edge(CausalGraph* graph, int cause_id, int effect_id,
     if (cause_id >= graph->node_count || effect_id >= graph->node_count) return -1;
     if (strength < 0 || strength > 1) strength = CLAMP(strength, 0.0f, 1.0f);
 
-    // 检查边是否已存在
+    /* v0.5.7: 查重线性扫描 O(E) 在批量建图（infer）时 O(E²) 爆炸，
+     * 批量场景用 add_causal_edge_no_check（遍历天然近似去重） */
     if (find_edge_index(graph, cause_id, effect_id) >= 0) {
         return -1;  // 边已存在
     }
+    return add_causal_edge_no_check(graph, cause_id, effect_id, type, strength);
+}
+
+/* 无查重版：批量建图（infer_causal_graph_*）用——跳过 find_edge_index
+ * 线性扫描，避免 O(E²)。调用方负责近似去重。 */
+int add_causal_edge_no_check(CausalGraph* graph, int cause_id, int effect_id,
+                             CausalEdgeType type, float strength) {
+    if (!graph || cause_id < 0 || effect_id < 0) return -1;
+    if (cause_id >= graph->node_count || effect_id >= graph->node_count) return -1;
+    if (strength < 0 || strength > 1) strength = CLAMP(strength, 0.0f, 1.0f);
 
     // 扩容
     if (graph->edge_count >= graph->edge_capacity) {
@@ -474,7 +485,7 @@ int add_causal_edge(CausalGraph* graph, int cause_id, int effect_id,
         graph->outgoing[cause_id], (graph->outgoing_count[cause_id] + 1) * sizeof(int));
     if (!new_out) return -1;
     graph->outgoing[cause_id] = new_out;
-    graph->outgoing[cause_id][graph->outgoing_count[cause_id]++] = effect_id;
+    graph->outgoing[cause_id][graph->outgoing_count[cause_id]++] = edge->edge_id;
 
     int* new_in = (int*)realloc(
         graph->incoming[effect_id], (graph->incoming_count[effect_id] + 1) * sizeof(int));
@@ -482,20 +493,10 @@ int add_causal_edge(CausalGraph* graph, int cause_id, int effect_id,
     graph->incoming[effect_id] = new_in;
     graph->incoming[effect_id][graph->incoming_count[effect_id]++] = cause_id;
 
-    // 更新统计
-    graph->avg_causal_strength = 0.0f;
-    for (int i = 0; i < graph->edge_count; i++) {
-        graph->avg_causal_strength += graph->edges[i]->strength;
-    }
-    graph->avg_causal_strength /= graph->edge_count;
-
-    // 检查是否有环（修复内存泄漏：分配后必须释放）
-    int* visited = (int*)calloc(graph->node_count, sizeof(int));
-    int* rec_stack = (int*)calloc(graph->node_count, sizeof(int));
-    graph->is_dag = !has_cycle_dfs(graph, cause_id, visited, rec_stack);
-    free(visited);
-    free(rec_stack);
-
+    /* v0.5.7: 批量建图（infer）不更新统计/环检查——
+     * avg_causal_strength 循环 O(E)、has_cycle_dfs O(N+E) 每次加边
+     * 都跑 = O(E²)/O(E(N+E)) 爆炸（70 万边建图卡死）。
+     * 单边动态场景（add_causal_edge）才需要这两项。 */
     graph->last_updated = time(NULL);
     return edge->edge_id;
 }
@@ -518,7 +519,9 @@ int remove_causal_edge(CausalGraph* graph, int cause_id, int effect_id) {
 
     // 更新邻接表
     for (int i = 0; i < graph->outgoing_count[cause_id]; i++) {
-        if (graph->outgoing[cause_id][i] == effect_id) {
+        int oi = graph->outgoing[cause_id][i];
+        if (oi >= 0 && oi < graph->edge_count && graph->edges[oi] &&
+            graph->edges[oi]->effect_node_id == effect_id) {
             for (int j = i; j < graph->outgoing_count[cause_id] - 1; j++) {
                 graph->outgoing[cause_id][j] = graph->outgoing[cause_id][j + 1];
             }
@@ -542,12 +545,28 @@ int remove_causal_edge(CausalGraph* graph, int cause_id, int effect_id) {
 }
 
 CausalEdge* get_causal_edge(CausalGraph* graph, int cause_id, int effect_id) {
-    int idx = find_edge_index(graph, cause_id, effect_id);
-    return (idx >= 0) ? graph->edges[idx] : NULL;
+    /* v0.5.7: 原 find_edge_index 全边扫描 O(E)——A* 扩展循环里
+     * 调用爆炸。改邻接表查询 O(度)。 */
+    if (!graph || cause_id < 0 || cause_id >= graph->node_count) return NULL;
+    for (int i = 0; i < graph->outgoing_count[cause_id]; i++) {
+        int oi = graph->outgoing[cause_id][i];
+        if (oi >= 0 && oi < graph->edge_count && graph->edges[oi] &&
+            graph->edges[oi]->effect_node_id == effect_id) return graph->edges[oi];
+    }
+    return NULL;
 }
 
 bool causal_edge_exists(CausalGraph* graph, int cause_id, int effect_id) {
-    return find_edge_index(graph, cause_id, effect_id) >= 0;
+    /* v0.5.7: 原 find_edge_index 全边线性扫描 O(E)——A* 启发式/搜索
+     * 循环里调用爆炸（O(E×N)）。改邻接表查询 O(度)。 */
+    if (!graph) return false;
+    if (cause_id < 0 || cause_id >= graph->node_count) return false;
+    for (int i = 0; i < graph->outgoing_count[cause_id]; i++) {
+        int oi = graph->outgoing[cause_id][i];
+        if (oi >= 0 && oi < graph->edge_count && graph->edges[oi] &&
+            graph->edges[oi]->effect_node_id == effect_id) return true;
+    }
+    return false;
 }
 
 // ==================== 从拓扑网络构建因果图 ==========
@@ -571,7 +590,7 @@ CausalGraph* infer_causal_graph_from_topology(HuarongTopologyNet* topo_net,
             float weight = node->edges[j].weight;
 
             if (weight >= min_strength) {
-                add_causal_edge(graph, i, target_id, CAUSAL_DIRECT, weight);
+                add_causal_edge_no_check(graph, i, target_id, CAUSAL_DIRECT, weight);
             }
         }
     }
@@ -838,7 +857,7 @@ CausalPath** find_all_causal_paths(CausalGraph* graph, int source,
 
         // 扩展
         for (int i = 0; i < graph->outgoing_count[current.node]; i++) {
-            int next_node = graph->outgoing[current.node][i];
+            int next_node = (graph->edges[graph->outgoing[current.node][i]] ? graph->edges[graph->outgoing[current.node][i]]->effect_node_id : -1);
 
             // 检查是否在路径中 (避免循环)
             bool in_path = false;
@@ -981,7 +1000,7 @@ CausalPath** find_causal_paths_astar(CausalGraph* graph, int source, int target,
         
         // 扩展当前节点的所有邻居
         for (int i = 0; i < graph->outgoing_count[current.node_id]; i++) {
-            int neighbor = graph->outgoing[current.node_id][i];
+            int neighbor = (graph->edges[graph->outgoing[current.node_id][i]] ? graph->edges[graph->outgoing[current.node_id][i]]->effect_node_id : -1);
             
             // 计算经过当前路径到 neighbor 的 g_score
             CausalEdge* edge = get_causal_edge(graph, current.node_id, neighbor);
@@ -1795,7 +1814,7 @@ int get_child_nodes(CausalGraph* graph, int node_id, int** children) {
 
     int* child_list = (int*)malloc(graph->outgoing_count[node_id] * sizeof(int));
     for (int i = 0; i < graph->outgoing_count[node_id]; i++) {
-        child_list[i] = graph->outgoing[node_id][i];
+        child_list[i] = (graph->edges[graph->outgoing[node_id][i]] ? graph->edges[graph->outgoing[node_id][i]]->effect_node_id : -1);
     }
 
     if (children) {
@@ -1893,7 +1912,14 @@ CausalPath** find_strongest_causal_path_astar(CausalGraph* graph, int source, in
     pq_push(open_set, &start_node);
     best_g[source] = 0.0f;
 
+    /* v0.5.7: 扩展次数上限——5 万节点密集图上 max_length=5 的 A*
+     * 会扩展 14^5≈53 万节点（10-20s 卡死）；超限快速失败，
+     * 调用方（pfe_solve_subgoal）回退 diffusion 保证响应。 */
+    int expansions = 0;
+    const int max_expansions = 8000;
+
     while (open_set->size > 0 && found_count < max_paths) {
+        if (++expansions > max_expansions) break;
         AStarNode current;
         pq_pop(open_set, &current);
         
@@ -1916,7 +1942,7 @@ CausalPath** find_strongest_causal_path_astar(CausalGraph* graph, int source, in
         
         // 扩展邻居
         for (int i = 0; i < graph->outgoing_count[current.node_id]; i++) {
-            int neighbor = graph->outgoing[current.node_id][i];
+            int neighbor = (graph->edges[graph->outgoing[current.node_id][i]] ? graph->edges[graph->outgoing[current.node_id][i]]->effect_node_id : -1);
             
             // 避免循环
             bool in_path = false;
@@ -2051,7 +2077,7 @@ bool conditional_path_reachability(CausalGraph* graph, int source, int target,
         
         // 检查出边
         for (int i = 0; i < graph->outgoing_count[node]; i++) {
-            int neighbor = graph->outgoing[node][i];
+            int neighbor = (graph->edges[graph->outgoing[node][i]] ? graph->edges[graph->outgoing[node][i]]->effect_node_id : -1);
             if (visited[neighbor] || blocked[neighbor]) continue;
             
             if (neighbor == target) {
@@ -2179,7 +2205,7 @@ CausalPath** conditional_strongest_paths(CausalGraph* graph, int source, int tar
         
         // 扩展邻居（跳过阻塞节点）
         for (int i = 0; i < graph->outgoing_count[current.node_id]; i++) {
-            int neighbor = graph->outgoing[current.node_id][i];
+            int neighbor = (graph->edges[graph->outgoing[current.node_id][i]] ? graph->edges[graph->outgoing[current.node_id][i]]->effect_node_id : -1);
             if (blocked[neighbor]) continue;
             
             bool in_path = false;
@@ -2241,6 +2267,68 @@ CausalPath** conditional_strongest_paths(CausalGraph* graph, int source, int tar
  * @param min_strength 最小连接强度阈值
  * @return 因果图，需调用者释放
  */
+/* ==================== 因果图构建哈希索引（v0.5.7） ====================
+ * infer_causal_graph_from_master_topology 原实现用线性搜索去重/建边
+ * （O(N²)），5 万节点拓扑上卡死（PFE 因果搜索 93% CPU 忙转）。
+ * 改为 djb2 哈希桶：O(1) 查询。 */
+typedef struct CgNameEntry {
+    const char* name;
+    int         cg_id;
+    struct CgNameEntry* next;
+} CgNameEntry;
+
+typedef struct {
+    CgNameEntry** buckets;
+    int size;
+} CgNameMap;
+
+static unsigned long cg_name_hash(const char* s) {
+    unsigned long h = 5381;
+    while (*s) h = h * 33 + (unsigned char)*s++;
+    return h;
+}
+
+static CgNameMap* cg_namemap_create(int size) {
+    if (size < 1024) size = 1024;
+    CgNameMap* m = (CgNameMap*)calloc(1, sizeof(CgNameMap));
+    if (!m) return NULL;
+    m->buckets = (CgNameEntry**)calloc((size_t)size, sizeof(CgNameEntry*));
+    if (!m->buckets) { free(m); return NULL; }
+    m->size = size;
+    return m;
+}
+
+/* 返回 cg_id；未命中返回 -1 */
+static int cg_namemap_get(CgNameMap* m, const char* name) {
+    if (!m || !name) return -1;
+    unsigned long h = cg_name_hash(name) % (unsigned long)m->size;
+    for (CgNameEntry* e = m->buckets[h]; e; e = e->next) {
+        if (strcmp(e->name, name) == 0) return e->cg_id;
+    }
+    return -1;
+}
+
+static void cg_namemap_put(CgNameMap* m, const char* name, int cg_id) {
+    if (!m || !name) return;
+    unsigned long h = cg_name_hash(name) % (unsigned long)m->size;
+    CgNameEntry* e = (CgNameEntry*)malloc(sizeof(CgNameEntry));
+    if (!e) return;
+    e->name = name;
+    e->cg_id = cg_id;
+    e->next = m->buckets[h];
+    m->buckets[h] = e;
+}
+
+static void cg_namemap_free(CgNameMap* m) {
+    if (!m) return;
+    for (int i = 0; i < m->size; i++) {
+        CgNameEntry* e = m->buckets[i];
+        while (e) { CgNameEntry* n = e->next; free(e); e = n; }
+    }
+    free(m->buckets);
+    free(m);
+}
+
 CausalGraph* infer_causal_graph_from_master_topology(MasterTopology* master,
                                                      float min_strength) {
     if (!master) return NULL;
@@ -2260,9 +2348,9 @@ CausalGraph* infer_causal_graph_from_master_topology(MasterTopology* master,
     if (!graph) return NULL;
     graph->topo_node_count = total_nodes;
 
-    // 第二步：构建概念名 → 因果图节点ID的映射
-    // 用简单的线性搜索（节点数不多）
-    char** concept_names = (char**)calloc(total_nodes, sizeof(char*));
+    // 第二步：构建概念名 → 因果图节点ID的映射（v0.5.7 哈希版）
+    CgNameMap* namemap = cg_namemap_create(total_nodes * 2);
+    if (!namemap) { causal_graph_destroy(graph); return NULL; }
     int actual_nodes = 0;
 
     // 先收集所有子拓扑的节点
@@ -2274,17 +2362,11 @@ CausalGraph* infer_causal_graph_from_master_topology(MasterTopology* master,
             ReasoningNode* node = sub->net->nodes[i];
             if (!node || !node->concept) continue;
 
-            // 去重：检查是否已存在
-            bool exists = false;
-            for (int j = 0; j < actual_nodes; j++) {
-                if (strcmp_null(concept_names[j], node->concept) == 0) {
-                    exists = true;
-                    graph->node_mapping[j] = node->node_id;
-                    break;
-                }
-            }
-            if (!exists) {
-                concept_names[actual_nodes] = strdup(node->concept);
+            int cg = cg_namemap_get(namemap, node->concept);
+            if (cg >= 0) {
+                graph->node_mapping[cg] = node->node_id;   /* 同名合并 */
+            } else {
+                cg_namemap_put(namemap, node->concept, actual_nodes);
                 graph->node_mapping[actual_nodes] = node->node_id;
                 actual_nodes++;
             }
@@ -2303,14 +2385,8 @@ CausalGraph* infer_causal_graph_from_master_topology(MasterTopology* master,
             ReasoningNode* node = sub->net->nodes[i];
             if (!node || !node->concept) continue;
 
-            // 找该节点在因果图中的ID
-            int cause_cg_id = -1;
-            for (int j = 0; j < actual_nodes; j++) {
-                if (strcmp_null(concept_names[j], node->concept) == 0) {
-                    cause_cg_id = j;
-                    break;
-                }
-            }
+            // 找该节点在因果图中的ID（哈希 O(1)）
+            int cause_cg_id = cg_namemap_get(namemap, node->concept);
             if (cause_cg_id < 0) continue;
 
             // 遍历连接边
@@ -2323,13 +2399,7 @@ CausalGraph* infer_causal_graph_from_master_topology(MasterTopology* master,
                                node->edges[c].weight : 0.5f;
                 if (weight < min_strength) continue;
 
-                int effect_cg_id = -1;
-                for (int j = 0; j < actual_nodes; j++) {
-                    if (strcmp_null(concept_names[j], target->concept) == 0) {
-                        effect_cg_id = j;
-                        break;
-                    }
-                }
+                int effect_cg_id = cg_namemap_get(namemap, target->concept);
                 if (effect_cg_id < 0) continue;
                 if (cause_cg_id == effect_cg_id) continue;
 
@@ -2338,10 +2408,11 @@ CausalGraph* infer_causal_graph_from_master_topology(MasterTopology* master,
                 if (cause_cg_id >= graph->node_count) continue;
                 if (effect_cg_id >= graph->node_count) continue;
 
-                if (!causal_edge_exists(graph, cause_cg_id, effect_cg_id)) {
-                    add_causal_edge(graph, cause_cg_id, effect_cg_id, 
-                                   CAUSAL_DIRECT, weight);
-                }
+                /* v0.5.7: 批量建图不查重（no_check）——causal_edge_exists
+                 * 线性扫描在循环里 O(E²) 爆炸；同名合并产生的重复边
+                 * 无害（A* 容忍） */
+                add_causal_edge_no_check(graph, cause_cg_id, effect_cg_id, 
+                                         CAUSAL_DIRECT, weight);
             }
         }
     }
@@ -2355,13 +2426,7 @@ CausalGraph* infer_causal_graph_from_master_topology(MasterTopology* master,
             ReasoningNode* node = sub->net->nodes[i];
             if (!node || !node->concept) continue;
 
-            int cause_cg_id = -1;
-            for (int j = 0; j < actual_nodes; j++) {
-                if (strcmp_null(concept_names[j], node->concept) == 0) {
-                    cause_cg_id = j;
-                    break;  
-                }
-            }
+            int cause_cg_id = cg_namemap_get(namemap, node->concept);
             if (cause_cg_id < 0) continue;
 
             // 跨拓扑连接（通过交叉连接索引）
@@ -2386,22 +2451,15 @@ CausalGraph* infer_causal_graph_from_master_topology(MasterTopology* master,
                                 ReasoningNode* to_node = 
                                     to_sub->net->nodes[link->to_node_id];
                                 if (to_node && to_node->concept) {
-                                    int effect_cg_id = -1;
-                                    for (int j = 0; j < actual_nodes; j++) {
-                                        if (strcmp(concept_names[j], 
-                                                   to_node->concept) == 0) {
-                                            effect_cg_id = j;
-                                            break;
-                                        }
-                                    }
+                                    int effect_cg_id = cg_namemap_get(namemap, to_node->concept);
                                     if (effect_cg_id >= 0 && 
                                         effect_cg_id != cause_cg_id &&
                                         effect_cg_id < graph->node_count) {
                                         if (!causal_edge_exists(graph, cause_cg_id, 
                                                               effect_cg_id)) {
-                                            add_causal_edge(graph, cause_cg_id,
-                                                          effect_cg_id,
-                                                          CAUSAL_INDIRECT,
+                                            add_causal_edge_no_check(graph, cause_cg_id,
+                                                               effect_cg_id,
+                                                               CAUSAL_INDIRECT,
                                                           link->weight *
                                                           link->transfer_rate);
                                         }
@@ -2417,10 +2475,7 @@ CausalGraph* infer_causal_graph_from_master_topology(MasterTopology* master,
     }
 
     // 清理
-    for (int i = 0; i < actual_nodes; i++) {
-        free(concept_names[i]);
-    }
-    free(concept_names);
+    cg_namemap_free(namemap);
 
     return graph;
 }
@@ -2451,10 +2506,29 @@ CausalSearchResult* causal_associative_search(MasterTopology* master,
     }
     *out_count = 0;
 
-    // 1. 构建因果图
-    CausalGraph* graph = infer_causal_graph_from_master_topology(master, 0.2f);
+    /* v0.5.7: 因果图缓存——PFE 子目标/重试多次调用不必每次全图重建
+     * （5 万节点/70 万边建图 ~1-2s，多次调用拖垮响应）。
+     * 指纹 = 总节点数 + 跨拓扑连接数（结构变化时重建）。 */
+    static CausalGraph* g_cg_cache = NULL;
+    static int g_cg_cache_fp = 0;
+    static pthread_mutex_t g_cg_cache_lock = PTHREAD_MUTEX_INITIALIZER;
+
+    int fp = master_count_total_nodes(master) + master->cross_link_count;
+    pthread_mutex_lock(&g_cg_cache_lock);
+    /* 指纹容差：学习/词巩固的节点数小变化（<500）不重建——
+     * 否则 PFE 请求期间缓存永不命中，每次都全图重建拖垮响应 */
+    if (g_cg_cache && (fp < g_cg_cache_fp - 500 || fp > g_cg_cache_fp + 500)) {
+        causal_graph_destroy(g_cg_cache);
+        g_cg_cache = NULL;
+    }
+    if (!g_cg_cache) {
+        g_cg_cache = infer_causal_graph_from_master_topology(master, 0.35f);
+        g_cg_cache_fp = fp;
+    }
+    CausalGraph* graph = g_cg_cache;
+    pthread_mutex_unlock(&g_cg_cache_lock);
+
     if (!graph || graph->edge_count == 0) {
-        if (graph) causal_graph_destroy(graph);
         return NULL;
     }
 
@@ -2547,8 +2621,8 @@ CausalSearchResult* causal_associative_search(MasterTopology* master,
     if (source_count > 0) {
         int explored = 0;
         
-        for (int s = 0; s < source_count && result_count < max_results && explored < 500; s++) {
-            for (int t = 0; t < graph->node_count && result_count < max_results; t++) {
+        for (int s = 0; s < source_count && result_count < max_results && explored < 100; s++) {
+            for (int t = 0; t < graph->node_count && result_count < max_results && explored < 100; t++) {
                 if (t == source_ids[s]) continue;
                 explored++;
                 
