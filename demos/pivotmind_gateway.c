@@ -323,17 +323,17 @@ static int gw_system_init(GatewaySystem* gw) {
     gw->topology = master_topology_create(16);
     if (!gw->topology) { fprintf(stderr, "[gateway] 拓扑网络创建失败\n"); return -1; }
 
-    master_add_sub_topology(gw->topology, TOPO_VOCABULARY, "词汇拓扑", 30000, 10);
-    master_add_sub_topology(gw->topology, TOPO_SEMANTIC,  "语义拓扑", 12000, 9);
+    master_add_sub_topology(gw->topology, TOPO_VOCABULARY, "词汇拓扑", 100000, 10);
+    master_add_sub_topology(gw->topology, TOPO_SEMANTIC,  "语义拓扑", 50000, 9);
     master_add_sub_topology(gw->topology, TOPO_EMOTION,   "情绪拓扑", 4000, 8);
     master_add_sub_topology(gw->topology, TOPO_SYNTAX,    "语法拓扑", 1000, 7);
     master_add_sub_topology(gw->topology, TOPO_CONTEXT,  "上下文拓扑", 1000, 6);
     master_add_sub_topology(gw->topology, TOPO_DOMAIN,    "领域拓扑", 1000, 5);
     master_add_sub_topology(gw->topology, TOPO_PRAGMA,   "语用拓扑", 1000, 4);
     master_add_sub_topology(gw->topology, TOPO_CULTURE,  "文化拓扑", 1000, 3);
-    master_add_sub_topology(gw->topology, TOPO_CONCEPT,  "概念拓扑", 12000, 9);
+    master_add_sub_topology(gw->topology, TOPO_CONCEPT,  "概念拓扑", 50000, 9);
     master_add_sub_topology(gw->topology, TOPO_MASTER,   "主拓扑", 100, 0);
-    master_add_sub_topology(gw->topology, TOPO_TEMPLATE, "模板拓扑", 4000, 8);
+    master_add_sub_topology(gw->topology, TOPO_TEMPLATE, "模板拓扑", 20000, 8);
 
     // 初始知识
     SubTopology* vocab = master_get_sub_topology_by_type(gw->topology, TOPO_VOCABULARY);

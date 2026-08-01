@@ -313,6 +313,11 @@ SubTopology* master_get_sub_topology_by_type(MasterTopology* master,
 
 // ==================== 跨拓扑连接实现 ====================
 
+/* 前置声明：master_add_cross_link 内部使用（见 cross_link_exists 定义处） */
+static int cross_link_exists_nolock(MasterTopology* master,
+                                    int from_topo, int from_node,
+                                    int to_topo, int to_node);
+
 int master_add_cross_link(MasterTopology* master,
                          int from_topo_id, int from_node_id,
                          int to_topo_id, int to_node_id,
@@ -325,8 +330,9 @@ int master_add_cross_link(MasterTopology* master,
     int result = -1;
 
     // TOCTOU 防护：wrlock 下检查是否已存在（调用方可能在无锁时做了检查）
-    if (cross_link_exists(master, from_topo_id, from_node_id,
-                          to_topo_id, to_node_id)) {
+    // 用 nolock 版：本函数已持有写锁，再请求读锁在 glibc 下会 EDEADLK 并破坏锁状态
+    if (cross_link_exists_nolock(master, from_topo_id, from_node_id,
+                                 to_topo_id, to_node_id)) {
         // 返回已有连接的 link_id（遍历查找）
         for (int i = 0; i < master->cross_link_count; i++) {
             CrossTopologyLink* l = master->cross_links[i];
@@ -413,16 +419,17 @@ unlock:
  * 快速查重：使用邻接表索引判断跨拓扑连接是否已存在
  * O(出度) 而非 O(N)
  */
-int cross_link_exists(MasterTopology* master,
-                      int from_topo, int from_node,
-                      int to_topo, int to_node) {
+/* 无锁版 — 调用方必须已持有 master->rwlock 写锁（如 master_add_cross_link 内部）。
+ * glibc 下写锁内请求读锁返回 EDEADLK，若忽略返回值再 unlock 会破坏锁状态
+ * （后续 wrlock 永久卡死）；bionic 宽松故手机不触发。见 2026-08-01 修复。 */
+static int cross_link_exists_nolock(MasterTopology* master,
+                                    int from_topo, int from_node,
+                                    int to_topo, int to_node) {
     if (!master || from_topo < 0 || to_topo < 0) return 0;
-    
-    pthread_rwlock_rdlock(&master->rwlock);
-    
+
     int exists = 0;
     int idx = from_topo * MAX_NODES_PER_TOPO + from_node;
-    if (idx >= master->cross_adj_count) goto unlock;
+    if (idx >= master->cross_adj_count) return 0;
     CrossTopoAdjEntry* entry = master->cross_adj[idx];
     while (entry) {
         if (entry->link_index < master->cross_link_count) {
@@ -433,12 +440,24 @@ int cross_link_exists(MasterTopology* master,
                 l->to_topo_id == to_topo &&
                 l->to_node_id == to_node) {
                 exists = 1;
-                goto unlock;
+                break;
             }
         }
         entry = entry->next;
     }
-unlock:
+    return exists;
+}
+
+int cross_link_exists(MasterTopology* master,
+                      int from_topo, int from_node,
+                      int to_topo, int to_node) {
+    if (!master || from_topo < 0 || to_topo < 0) return 0;
+
+    pthread_rwlock_rdlock(&master->rwlock);
+
+    int exists = cross_link_exists_nolock(master, from_topo, from_node,
+                                          to_topo, to_node);
+
     pthread_rwlock_unlock(&master->rwlock);
     return exists;
 }
