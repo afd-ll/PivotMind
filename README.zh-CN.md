@@ -309,7 +309,7 @@ pivotmind/
 | **v0.5.6** | rwlock 死锁修复（写锁内嵌套读锁）、gateway 拓扑容量、知识存活保护（加载保护 + 保底激活） |
 | **v0.5.7** | **词层语义场**（词巩固、词-词共现边、语义拓扑聚类、语义场查询）、**话题性生成**（相关性评分、有界联想、话题序组装）、**PFE 推理管线**（子目标分解、因果搜索、推理链、四大 O(N²) 修复）、知识存活全面加固（30 分钟加载保护、is_cooled 修剪保护） |
 
-> 详细变更：v0.3.0 → [changelogs/032-v0.3.0-reasoning-architecture.md](changelogs/032-v0.3.0-reasoning-architecture.md) ｜ v0.4.0 → [changelogs/034-v0.4.0-code-simplify-brain-boundary.md](changelogs/034-v0.4.0-code-simplify-brain-boundary.md) ｜ v0.4.3 → [changelogs/042-emergent-pos-anchor.md](changelogs/042-emergent-pos-anchor.md) ｜ v0.5.5 → [changelogs/055-multimodal-v0.5.5.md](changelogs/055-multimodal-v0.5.5.md) ｜ v0.5.7 → [changelogs/062-word-semantic-field-reasoning-pipeline.md](changelogs/062-word-semantic-field-reasoning-pipeline.md) (changelogs/055-multimodal-v0.5.5.md)
+> 详细变更：v0.3.0 → [changelogs/032-v0.3.0-reasoning-architecture.md](changelogs/032-v0.3.0-reasoning-architecture.md) ｜ v0.4.0 → [changelogs/034-v0.4.0-code-simplify-brain-boundary.md](changelogs/034-v0.4.0-code-simplify-brain-boundary.md) ｜ v0.4.3 → [changelogs/042-emergent-pos-anchor.md](changelogs/042-emergent-pos-anchor.md) ｜ v0.5.5 → [changelogs/055-multimodal-v0.5.5.md](changelogs/055-multimodal-v0.5.5.md) ｜ v0.5.6 → [changelogs/061-lazy-memory-optimization.md](changelogs/061-lazy-memory-optimization.md) ｜ v0.5.7 → [changelogs/062-word-semantic-field-reasoning-pipeline.md](changelogs/062-word-semantic-field-reasoning-pipeline.md) (changelogs/055-multimodal-v0.5.5.md)
 
 ---
 
