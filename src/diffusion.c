@@ -759,6 +759,7 @@ int diffusion_init(DiffusionCtx* ctx, MasterTopology* master) {
             case TOPO_SEMANTIC:   ctx->semantic  = sub; break;
             case TOPO_TEMPLATE:   ctx->template  = sub; break;
             case TOPO_EMOTION:    ctx->emotion   = sub; break;
+            case TOPO_CONCEPT:    ctx->concept   = sub; break;
             default: break;
         }
     }
@@ -951,8 +952,48 @@ int diffusion_generate(DiffusionCtx* ctx,
     int active_ids[DIFF_MAX_CANDIDATES];
     int active_count = 0;
 
-    /* 从 5字窗口 到 1字窗口，长匹配优先 */
-    for (int win_chars = 5; win_chars >= 1 && active_count == 0; win_chars--) {
+    /* ── 第0步A：词锚定（v0.6）──
+     * 滑窗先查概念拓扑（词层）→ 命中词节点 → 通过 cross-link
+     * 激活其组成字（组合强化）。词从语料统计自己长出来（词巩固），
+     * 生成端先词后字：词级语义聚焦，字级细粒度兜底。 */
+    if (ctx->concept && ctx->concept->net && ctx->master->cross_link_count > 0) {
+        for (int win_chars = 5; win_chars >= 2 && active_count < 64; win_chars--) {
+            for (int ci = 0; ci + win_chars <= char_count; ci++) {
+                if (active_count >= 64) break;
+                int byte_start = char_pos[ci];
+                int byte_end   = char_pos[ci + win_chars];
+                int byte_len   = byte_end - byte_start;
+                if (byte_len <= 0 || byte_len > 31) continue;
+                char sub[32];
+                memcpy(sub, input + byte_start, byte_len);
+                sub[byte_len] = 0;
+
+                int cnid = huarong_net_find_concept(ctx->concept->net, sub);
+                if (cnid < 0) continue;
+
+                /* 词节点 → cross-link → 组成字，激活字节点 */
+                for (int li = 0; li < ctx->master->cross_link_count; li++) {
+                    CrossTopologyLink* l = ctx->master->cross_links[li];
+                    if (!l || l->from_topo_id != TOPO_CONCEPT ||
+                        l->from_node_id != cnid ||
+                        l->to_topo_id != TOPO_VOCABULARY) continue;
+                    int vid = l->to_node_id;
+                    if (vid < 0 || vid >= ctx->vocab->net->node_count) continue;
+                    ReasoningNode* vn = ctx->vocab->net->nodes[vid];
+                    if (!vn) continue;
+                    vn->activation += 0.3f;
+                    int dup = 0;
+                    for (int d = 0; d < active_count; d++)
+                        if (active_ids[d] == vid) { dup = 1; break; }
+                    if (!dup) active_ids[active_count++] = vid;
+                }
+            }
+            if (active_count > 0) break;  /* 长词优先 */
+        }
+    }
+
+    /* 从 5字窗口 到 1字窗口，长匹配优先（字拓扑单字兜底，补全非词覆盖的字） */
+    for (int win_chars = 5; win_chars >= 1; win_chars--) {
         for (int ci = 0; ci + win_chars <= char_count; ci++) {
             if (active_count >= 64) break;
             int byte_start = char_pos[ci];
@@ -1373,6 +1414,9 @@ int diffusion_generate(DiffusionCtx* ctx,
             if (!final[i].word || strlen(final[i].word) < 2) continue;
             if (final[i].word[0] == '@' || final[i].word[0] == '?' ||
                 (final[i].word[0] == 'H' && final[i].word[1] == 'e')) continue;
+            if (strncmp(final[i].word, "sem_", 4) == 0) continue;   /* semantic_growth 匿名节点 */
+            if (lang_dom > 0 && (unsigned char)final[i].word[0] < 0x80) continue;  /* 中文主导：过滤英文词 */
+            if (lang_dom < 0 && (unsigned char)final[i].word[0] >= 0x80) continue; /* 英文主导：过滤中文词 */
             if (is_function_word(final[i].word)) continue;
 
             /* 去重 */
@@ -1445,6 +1489,8 @@ int diffusion_generate(DiffusionCtx* ctx,
             if (!final[i].word || strlen(final[i].word) < 2) continue;
             if (final[i].word[0] == '@' || final[i].word[0] == '?' ||
                 (final[i].word[0] == 'H' && final[i].word[1] == 'e')) continue;
+            if (strncmp(final[i].word, "sem_", 4) == 0) continue;   /* semantic_growth 匿名节点 */
+            /* fallback 路径不强制语言过滤（保证有输出，避免空回复/句号） */
             if (is_function_word(final[i].word)) continue;
 
             int inhibited = 0;
@@ -1455,6 +1501,9 @@ int diffusion_generate(DiffusionCtx* ctx,
                 }
             }
             if (inhibited) continue;
+            /* 语言一致性：fallback 也过滤跨语言词（避免中文输入输出英文） */
+            if (lang_dom > 0 && (unsigned char)final[i].word[0] < 0x80) continue;
+            if (lang_dom < 0 && (unsigned char)final[i].word[0] >= 0x80) continue;
 
             /* 模板连接词: 每2个实词插一次 */
             if (out_fallback > 0 && (out_fallback % 3 == 0)) {

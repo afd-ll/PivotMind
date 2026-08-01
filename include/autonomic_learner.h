@@ -172,6 +172,14 @@ void autonomic_learn_from_dialog(MasterTopology* master,
 void autonomic_decay_all(MasterTopology* master);
 
 /**
+ * 词巩固：字拓扑 → 概念拓扑晋升（词涌现）
+ * 扫描字拓扑边权，相对强度超阈值的字对晋升为词节点（Hebbian，
+ * 词从共现统计自己长出来）。返回新建词节点数。
+ * 调用方不应持有 master->rwlock。
+ */
+int autonomic_compound_consolidate(MasterTopology* master);
+
+/**
  * 获取拓扑中总边数和平均置信度
  * 用于验证学习效果
  */

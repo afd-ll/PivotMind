@@ -1163,3 +1163,147 @@ int main() {
     return 0;
 }
 #endif
+
+/* ==================== 词巩固（字拓扑 → 概念拓扑晋升） ==================== */
+
+#define CC_MIN_EDGES       5      /* 字节点边数下限（防稀疏噪声） */
+#define CC_THRESHOLD_DEF  2.0f   /* 默认相对强度阈值：w(A,B) > avg(A)*N（可调） */
+#define CC_MAX_WORDS       2000   /* 每周期涌现上限（20 本书 200 个远不够） */
+#define CC_STRENGTH_CAP    0.9f   /* cross-link 权重上限 */
+
+/* 全局可调阈值（后续调参用）：词巩固相对强度阈值 */
+float g_compound_threshold = CC_THRESHOLD_DEF;
+
+static int cc_is_cjk_char(const char* s) {
+    unsigned char c = (unsigned char)s[0];
+    if (c >= 0xE0 && c <= 0xEF)
+        return (s[1] != 0 && s[2] != 0 && s[3] == 0) ? 1 : 0;
+    return 0;
+}
+
+static int cc_find_edge(ReasoningNode* n, ReasoningNode* target) {
+    if (!n || !n->edges) return -1;
+    for (int i = 0; i < n->edge_count; i++)
+        if (n->edges[i].target == target) return i;
+    return -1;
+}
+
+typedef struct {
+    char word[64];
+    int  node_a, node_b;
+    float strength;
+} CCWordCand;
+
+static int cc_cmp(const void* a, const void* b) {
+    float sa = ((const CCWordCand*)a)->strength;
+    float sb = ((const CCWordCand*)b)->strength;
+    return (sa > sb) ? -1 : (sa < sb) ? 1 : 0;
+}
+
+/**
+ * 词巩固：扫描字拓扑边权，按相对强度（Hebbian）把高绑定字对
+ * 晋升为词节点到概念拓扑，cross-link 连回组成字。
+ * 词从语料共现统计自己长出来（边权=共现计数），不依赖外部词典。
+ * 返回新建词节点数。调用方不应持有 master->rwlock（内部函数自管锁）。
+ */
+int autonomic_compound_consolidate(MasterTopology* master) {
+    if (!master) return 0;
+
+    SubTopology* vocab = NULL;
+    SubTopology* concept = NULL;
+    for (int t = 0; t < master->sub_topo_count; t++) {
+        SubTopology* sub = master->sub_topologies[t];
+        if (!sub) continue;
+        if ((int)sub->type == TOPO_VOCABULARY) vocab = sub;
+        else if ((int)sub->type == TOPO_CONCEPT) concept = sub;
+    }
+    if (!vocab || !vocab->net || !concept || !concept->net) return 0;
+    if (vocab->net->node_count <= 0) return 0;
+
+    int vn = vocab->net->node_count;
+    float* avg_w = (float*)calloc((size_t)vn, sizeof(float));
+    if (!avg_w) return 0;
+
+    /* 1. 边权均值（Hebbian 边权 = 共现计数） */
+    for (int i = 0; i < vn; i++) {
+        ReasoningNode* n = vocab->net->nodes[i];
+        if (!n || !n->edges || n->edge_count == 0) continue;
+        float sum = 0.0f;
+        for (int j = 0; j < n->edge_count; j++) sum += n->edges[j].weight;
+        avg_w[i] = sum / (float)n->edge_count;
+    }
+
+    /* 2. 候选收集（高频方向定词序） */
+    CCWordCand* cands = (CCWordCand*)malloc(sizeof(CCWordCand) * (size_t)(vn * 2));
+    if (!cands) { free(avg_w); return 0; }
+    int cand_count = 0;
+
+    for (int i = 0; i < vn && cand_count < vn * 2; i++) {
+        ReasoningNode* a = vocab->net->nodes[i];
+        if (!a || !a->edges || a->edge_count < CC_MIN_EDGES) continue;
+        if (avg_w[i] <= 0.001f) continue;
+        if (!a->concept || !cc_is_cjk_char(a->concept)) continue;
+
+        for (int j = 0; j < a->edge_count; j++) {
+            Edge* e = &a->edges[j];
+            if (!e->target || e->weight <= 0.0f) continue;
+            ReasoningNode* b = e->target;
+            if (b->node_id <= a->node_id) continue;
+            if (!b->concept || !cc_is_cjk_char(b->concept)) continue;
+            if (b->edge_count < CC_MIN_EDGES) continue;
+
+            float w_ab = e->weight;   /* A→B（语序方向） */
+
+            /* 反向边（B→A）用于方向判定：若反向更强，词序取 BA */
+            int ri = cc_find_edge(b, a);
+            float w_ba = (ri >= 0) ? b->edges[ri].weight : 0.0f;
+
+            /* 高频方向 = 词序；相对强度只查高频方向 */
+            int fwd = (w_ab >= w_ba);
+            float w_hi = fwd ? w_ab : w_ba;
+            float avg_hi = fwd ? avg_w[i] : avg_w[b->node_id];
+            if (avg_hi <= 0.001f) continue;
+            float rel = w_hi / avg_hi;
+            if (rel < g_compound_threshold) continue;
+
+            /* 方向确定性：两个方向都强且接近 → 可能是回文/噪声，跳过 */
+            float w_lo = fwd ? w_ba : w_ab;
+            if (w_lo > 0.0f && w_hi / w_lo < 1.5f) continue;
+
+            CCWordCand* c = &cands[cand_count++];
+            c->node_a = a->node_id;
+            c->node_b = b->node_id;
+            c->strength = rel;
+            if (fwd)
+                snprintf(c->word, sizeof(c->word), "%s%s", a->concept, b->concept);
+            else
+                snprintf(c->word, sizeof(c->word), "%s%s", b->concept, a->concept);
+        }
+    }
+
+    /* 3. 按强度排序 + 限量（防爆炸） */
+    qsort(cands, (size_t)cand_count, sizeof(CCWordCand), cc_cmp);
+    if (cand_count > CC_MAX_WORDS) cand_count = CC_MAX_WORDS;
+
+    /* 4. 建词节点 + cross-link（master_add_cross_link 内部自管锁） */
+    int created = 0;
+    for (int k = 0; k < cand_count; k++) {
+        CCWordCand* c = &cands[k];
+        if (huarong_net_find_concept(concept->net, c->word) >= 0) continue; /* 已存在 */
+        ReasoningNode* wn = huarong_net_add_node(concept->net, c->word, NULL, 0);
+        if (!wn) continue;
+        node_hash_add(concept->node_hash, wn);
+
+        float w = 0.3f + c->strength * 0.15f;
+        if (w > CC_STRENGTH_CAP) w = CC_STRENGTH_CAP;
+        master_add_cross_link(master, TOPO_CONCEPT, wn->node_id,
+                              TOPO_VOCABULARY, c->node_a, w, "compound");
+        master_add_cross_link(master, TOPO_CONCEPT, wn->node_id,
+                              TOPO_VOCABULARY, c->node_b, w, "compound");
+        created++;
+    }
+
+    free(cands);
+    free(avg_w);
+    return created;
+}

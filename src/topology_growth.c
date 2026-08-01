@@ -419,8 +419,7 @@ int auto_extend_topology(MasterTopology* master, int topo_id) {
 }
 
 int auto_shrink_topology(MasterTopology* master, int topo_id) {
-    if (!master) return -1;
-
+    if (!master || master->load_protect > 0) return -1;  /* 加载保护期：不收缩（v0.6） */
     TopologyGrowthConfig* config = topology_growth_get_default_config();
     if (!config->auto_shrink_enabled) return -1;
 
@@ -658,6 +657,13 @@ int prune_low_connectivity(MasterTopology* master, int topo_id,
 }
 
 int prune_isolated_nodes(MasterTopology* master, int topo_id) {
+    /* 加载保护期：状态加载后前 60 tick 不清理孤立节点。
+     * 新喂知识刚加载时边恢复/自主学习尚未完成，立即清理会把
+     * 知识当"孤立节点"连锁删光（v0.6 实测：3 万节点 75 秒清到 1 千）。 */
+    if (master && master->load_protect > 0) {
+        master->load_protect--;
+        return 0;
+    }
     return prune_low_connectivity(master, topo_id, 1);
 }
 

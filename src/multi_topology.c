@@ -3742,6 +3742,10 @@ int master_load_state(MasterTopology* master, const char* file_path) {
         }
         if (node) {
             node->activation = activation;
+            /* 加载保底：冷节点（activation<0.01）设为 0.01 初始热值，
+             * 防止 prune（edge_count==0 && act<0.01）把新喂的知识当死节点
+             * 连锁清除（v0.6 词巩固架构：知识必须在板子上存活） */
+            if (node->activation < 0.01f) node->activation = 0.01f;
             // [v4] 恢复特征向量
             if (has_v4_features) {
                 if (!node->features) {
@@ -3861,6 +3865,11 @@ int master_load_state(MasterTopology* master, const char* file_path) {
                             ReasoningNode* tgt = node_hash_find(
                                 p2_topo->node_hash, tgt_concept);
                             if (tgt && tgt != node) {
+                                /* 边权保底：老状态衰减过的低权边恢复为 0.2，
+                                 * 防遗忘机制（cleanup ≤0.15 清边）把加载的
+                                 * 知识当"遗忘知识"清光（v0.6 实测 3 万节点
+                                 * 被清到 2 千） */
+                                if (conn_w < 0.2f) conn_w = 0.2f;
                                 int ret = huarong_net_add_connection(
                                     p2_topo->net, node->node_id, tgt->node_id, conn_w);
                                 if (ret == 0) {
@@ -3995,6 +4004,10 @@ int master_load_state(MasterTopology* master, const char* file_path) {
             loaded_nodes, loaded_links, (long)(t1 - t0));
     LOG_INFO("[状态持久化] 已从 %s 加载 (节点=%d, 链接=%d)",
            file_path, loaded_nodes, loaded_links);
+
+    /* v0.6 加载保护期：60 tick 内跳过孤立节点清理，
+     * 给新喂知识存活窗口（边恢复/自主学习尚未完成） */
+    master->load_protect = 60;
 
     return loaded_nodes;
 

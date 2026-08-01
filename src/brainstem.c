@@ -18,6 +18,7 @@
 #include "cerebellum.h"
 #include "reticular.h"
 #include "self_learner.h"
+#include "autonomic_learner.h"   /* autonomic_compound_consolidate 词巩固 */
 #include "topology_brain.h"
 #include "topology_growth.h"
 #include "broca.h"
@@ -450,6 +451,15 @@ static void brainstem_tick_learning_scan(Brainstem* bs, const CircadianParams* c
             if (mig > 0 && bs->verbose)
                 LOG_INFO("[脑区索引] 本轮 %d 个节点发生脑区迁移", mig);
         }
+    }
+
+    /* 词巩固：字拓扑 → 概念拓扑晋升（相对强度涌现词节点）
+     * 频率 = 海马体巩固节奏（consolidate_every_n_ticks），
+     * 限量防爆炸，词从共现统计自己长出来 */
+    if (bs->tick_count % bs->consolidate_every_n_ticks == 0) {
+        int words = autonomic_compound_consolidate(bs->master);
+        if (words > 0 && bs->verbose)
+            LOG_INFO("[词巩固] 涌现 %d 个词节点（字→概念拓扑）", words);
     }
 
     /* 定期拓扑扩容检查 + 模板构建 */

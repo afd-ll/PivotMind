@@ -793,6 +793,21 @@ static void handle_chat(GatewaySystem* gw, int fd, const char* body) {
         }
     }
 
+    /* 语言一致性兜底（v0.6）：中文输入不应返回纯英文回复。
+     * PFE/graph 合成路径可能混入英文节点名，此处统一拦截，
+     * 丢弃后走 prefrontal_chat / 默认回复路径。 */
+    if (response) {
+        int msg_cjk = 0;
+        for (const char* p = msg; *p; p++)
+            if ((unsigned char)*p >= 0x80) { msg_cjk = 1; break; }
+        if (msg_cjk) {
+            int resp_cjk = 0;
+            for (const char* p = response; *p; p++)
+                if ((unsigned char)*p >= 0x80) { resp_cjk = 1; break; }
+            if (!resp_cjk) { free(response); response = NULL; }
+        }
+    }
+
     if (response) {
         char escaped[GW_MAX_RESPONSE];
         json_escape(response, escaped, sizeof(escaped));

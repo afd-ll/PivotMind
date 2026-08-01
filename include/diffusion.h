@@ -56,6 +56,7 @@ typedef struct {
     SubTopology*    semantic;
     SubTopology*    template;
     SubTopology*    emotion;
+    SubTopology*    concept;          /* 概念拓扑（词层）— 词锚定 */
 
     /* 预分配评分数组 (避免每次calloc/free造成的堆碎片) */
     float*  _vocab_scores;

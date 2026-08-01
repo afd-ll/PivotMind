@@ -153,6 +153,10 @@ typedef struct MasterTopology {
     CrossTopoAdjEntry** cross_adj;       // 扁平数组索引
     int cross_adj_count;                 // 索引条目数
 
+    // 加载保护期：master_load_state 后 N tick 内跳过孤立节点清理
+    // （v0.6：新喂知识给存活窗口，防 active_learner 边恢复未完成就清光）
+    int load_protect;
+
     // 当前激活状态
     int active_topo_id;
     int* active_node_ids;
