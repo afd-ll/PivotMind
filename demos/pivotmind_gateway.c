@@ -755,7 +755,10 @@ static void handle_chat(GatewaySystem* gw, int fd, const char* body) {
 
     if (gw->pfe) {
         int complexity = pfe_assess_complexity(gw->pfe, msg);
-        if (complexity > 0) {
+        /* v0.6: PFE 门槛从 >0 提到 >=3——简单输入（单话题词）走
+         * diffusion 话题序输出（词锚定+relevance），PFE 合成在
+         * 低复杂度下反而输出乱序词库词序列（"衣服历史时间关系"） */
+        if (complexity >= 3) {
             /* 中高复杂度 → PFE 推理管线 */
             char pfe_answer[GW_MAX_RESPONSE];
             int pfe_ok = pfe_reason(gw->pfe, msg, pfe_answer, sizeof(pfe_answer));
@@ -770,18 +773,11 @@ static void handle_chat(GatewaySystem* gw, int fd, const char* body) {
     }
 
     /* 回退到旧路径：简单问题或 PFE 失败
-     * v0.4.3: 注入上一轮回复作为上下文，使扩散引擎匹配历史 token */
+     * v0.6: 禁用上一轮回复注入——历史串扰会让词锚定命中旧回复的
+     * 词（"衣服"回复拼进"历史"输入 → 输出"衣服历史"），话题性
+     * 阶段输入必须是纯当前话题。等上下文机制重做后再启用。 */
     if (!response) {
-        if (gw->dialog_context_ready && gw->last_answer[0]) {
-            /* 拼接: 上轮回复 + 当前输入 → 扩散引擎能匹配新旧 token */
-            char ctx_input[3072];
-            int clen = (int)strlen(gw->last_answer);
-            if (clen > 512) clen = 512; /* 截断过长上下文 */
-            snprintf(ctx_input, sizeof(ctx_input), "%.*s %s", clen, gw->last_answer, msg);
-            response = prefrontal_chat(gw->prefrontal, ctx_input);
-        } else {
-            response = prefrontal_chat(gw->prefrontal, msg);
-        }
+        response = prefrontal_chat(gw->prefrontal, msg);
     }
 
     /* 最终兜底：QA 记忆检索（扩散和联想推理都无产出） */

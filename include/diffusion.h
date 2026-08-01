@@ -41,6 +41,7 @@ typedef struct {
     float  template_score;    /* 模板层得分 */
     float  emotion_score;     /* 情绪层得分 */
     float  total_score;       /* 加权综合 */
+    float  relevance;         /* 话题相关性（与输入锚定集的边权，v0.6） */
     int    used;              /* 已选标记（侧抑制） */
     const char* word;
 } DiffusionCandidate;

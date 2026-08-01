@@ -985,6 +985,8 @@ int diffusion_generate(DiffusionCtx* ctx,
                         for (int k2 = 0; k2 < word_prio_count; k2++)
                             if (strcmp(word_prio[k2], wnode->concept) == 0) { dup2 = 1; break; }
                         if (!dup2) word_prio[word_prio_count++] = wnode->concept;
+                        fprintf(stderr, "[词锚定DBG] win=%d 命中词节点: %s\n",
+                                win_chars, wnode->concept);
                     }
                 }
 
@@ -1313,6 +1315,7 @@ int diffusion_generate(DiffusionCtx* ctx,
         }
         final[final_cnt].total_score    = vocab_scores[i] * degree_penalty *
                                           (0.3f + 1.7f * relevance);
+        final[final_cnt].relevance      = relevance;
         final[final_cnt].word = n->concept;
         final[final_cnt].used = 0;
         final_cnt++;
@@ -1450,6 +1453,8 @@ int diffusion_generate(DiffusionCtx* ctx,
             if (is_function_word(word_prio[p])) continue;
             if (lang_dom > 0 && (unsigned char)word_prio[p][0] < 0x80) continue;
             if (lang_dom < 0 && (unsigned char)word_prio[p][0] >= 0x80) continue;
+            /* 中文单字不输出（v0.6：口语至少 2 字词，"出大的只了"类噪声） */
+            if (lang_dom > 0 && strlen(word_prio[p]) == 3) continue;
             int dup = 0;
             for (int w = 0; w < word_count; w++) {
                 if (strcmp(word_prio[p], word_buf[w]) == 0) { dup = 1; break; }
@@ -1472,7 +1477,12 @@ int diffusion_generate(DiffusionCtx* ctx,
             if (strncmp(final[i].word, "sem_", 4) == 0) continue;   /* semantic_growth 匿名节点 */
             if (lang_dom > 0 && (unsigned char)final[i].word[0] < 0x80) continue;  /* 中文主导：过滤英文词 */
             if (lang_dom < 0 && (unsigned char)final[i].word[0] >= 0x80) continue; /* 英文主导：过滤中文词 */
+            /* 话题分级（v0.6）：relevance<0.3 的候选是"高频噪声激活"
+             * （如"时间"被无关输入激活），不进入主输出——话题聚焦 */
+            if (final[i].relevance < 0.3f) continue;
             if (is_function_word(final[i].word)) continue;
+            /* 中文单字不输出（v0.6） */
+            if (lang_dom > 0 && strlen(final[i].word) == 3) continue;
 
             /* 去重 */
             int dup = 0;
@@ -1491,46 +1501,50 @@ int diffusion_generate(DiffusionCtx* ctx,
             final[i].used = 1;
         }
 
-        /* 第二遍: 动词配价语法组装 */
-        out = 0;
-
-        /* 检测语言 */
-        int lang_en = 0;
-        for (int w = 0; w < word_count; w++) {
-            if (word_buf[w] && word_buf[w][0]) {
-                lang_en = ((unsigned char)word_buf[w][0] < 0x80);
-                break;
+        /* 有界联想回退（v0.6）：主输出为空（relevance 过滤后无候选）
+         * 时，从锚定集一跳内选次相关节点（边权 0.3-0.5）作为联想，
+         * 替代原"全图自由激活"（"时间很大"胡话的病根）。
+         * 联想是诚实的次相关，不是随机跳跃。 */
+        if (word_count == 0) {
+            for (int a = 0; a < active_count && word_count < DIFF_MAX_SEQUENCE; a++) {
+                ReasoningNode* anchor = ctx->vocab->net->nodes[active_ids[a]];
+                if (!anchor || !anchor->edges) continue;
+                for (int e = 0; e < anchor->edge_count; e++) {
+                    float w = anchor->edges[e].weight;
+                    if (w < 0.3f || w >= 0.6f) continue;  /* 次相关窗口 */
+                    ReasoningNode* nb = anchor->edges[e].target;
+                    if (!nb || !nb->concept || strlen(nb->concept) < 2) continue;
+                    if (is_function_word(nb->concept)) continue;
+                    if (lang_dom > 0 && (unsigned char)nb->concept[0] < 0x80) continue;
+                    if (lang_dom < 0 && (unsigned char)nb->concept[0] >= 0x80) continue;
+                    /* 中文单字不输出（v0.6） */
+                    if (lang_dom > 0 && strlen(nb->concept) == 3) continue;
+                    int dup = 0;
+                    for (int w2 = 0; w2 < word_count; w2++)
+                        if (strcmp(nb->concept, word_buf[w2]) == 0) { dup = 1; break; }
+                    if (dup) continue;
+                    word_buf[word_count] = nb->concept;
+                    word_pos[word_count] = emergent_pos_tag(
+                        ctx->emergent_pos, ctx->master, nb->concept);
+                    if (word_pos[word_count] == POS_UNKNOWN)
+                        word_pos[word_count] = english_pos_lookup(nb->concept);
+                    word_count++;
+                }
             }
         }
 
-        /* 动词配价驱动 */
-        out = diffusion_assemble_grammar(word_buf, word_pos, word_count,
-                                          output_words, max_output,
-                                          lang_en, ctx);
-
-        /* 语法组装失败 → 回退名词短语 */
-        if (out < 1) {
-            out = diffusion_assemble_scaffold_fallback(word_buf, word_pos,
-                                                        word_count, output_words,
-                                                        max_output, lang_en);
-        }
-
-        /* 最终回退: POS 优先级平铺 */
-        if (out < 1) {
-            const POSTag priority[] = {
-                POS_NOUN, POS_VERB, POS_ADJ, POS_ADV,
-                POS_NUM, POS_PRON, POS_PREP, POS_CONJ,
-                POS_PARTICLE, POS_INTERJ, POS_UNKNOWN
-            };
-            const int pri_count = sizeof(priority) / sizeof(priority[0]);
-
-            for (int pi = 0; pi < pri_count && out < max_output; pi++) {
-                for (int w = 0; w < word_count && out < max_output; w++) {
-                    if (!word_buf[w]) continue;
-                    if (word_pos[w] != priority[pi]) continue;
-                    output_words[out++] = word_buf[w];
-                    word_buf[w] = NULL;
-                }
+        /* 话题序输出（v0.6）：word_buf 已按话题相关性排序
+         * （word_prio 词锚定在前 + final 按 relevance），直接输出
+         * 前几个实词（口语短句）。
+         * 语法组装（assemble_grammar）暂缓：当前 POS 标注质量下
+         * 组装反而乱序（"个人家后来说话..."），话题序更符合中文
+         * 口语习惯——等词性标注成熟后再启用语法组装。 */
+        out = 0;
+        {
+            const int max_reply_words = 4;   /* 口语短句：≤4 实词 */
+            for (int w = 0; w < word_count && out < max_reply_words; w++) {
+                if (!word_buf[w]) continue;
+                output_words[out++] = word_buf[w];
             }
         }
     } else {
@@ -1539,9 +1553,24 @@ int diffusion_generate(DiffusionCtx* ctx,
         const char* selected[DIFF_MAX_SEQUENCE];
         int sel = 0;
 
+        /* 词锚定优先（v0.6）：命中词节点先输出（降级路径也生效，
+         * 否则词锚定只在 emergent_pos 分支工作，普通对话走降级时
+         * 词库词被 final 顺序淹没——"衣服"→"历史时间"的病根） */
+        for (int p = 0; p < word_prio_count && out_fallback < max_output; p++) {
+            if (!word_prio[p] || strlen(word_prio[p]) < 2) continue;
+            if (is_function_word(word_prio[p])) continue;
+            if (lang_dom > 0 && (unsigned char)word_prio[p][0] < 0x80) continue;
+            if (lang_dom < 0 && (unsigned char)word_prio[p][0] >= 0x80) continue;
+            if (lang_dom > 0 && strlen(word_prio[p]) == 3) continue;  /* 中文单字 */
+            output_words[out_fallback++] = word_prio[p];
+            selected[sel++] = word_prio[p];
+        }
+
         for (int i = 0; i < final_cnt && out_fallback < max_output; i++) {
             if (final[i].used) continue;
             if (!final[i].word || strlen(final[i].word) < 2) continue;
+            /* 口语短句截断（v0.6） */
+            if (out_fallback >= 4) break;
             if (final[i].word[0] == '@' || final[i].word[0] == '?' ||
                 (final[i].word[0] == 'H' && final[i].word[1] == 'e')) continue;
             if (strncmp(final[i].word, "sem_", 4) == 0) continue;   /* semantic_growth 匿名节点 */
