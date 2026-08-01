@@ -755,10 +755,9 @@ static void handle_chat(GatewaySystem* gw, int fd, const char* body) {
 
     if (gw->pfe) {
         int complexity = pfe_assess_complexity(gw->pfe, msg);
-        /* v0.6: PFE 门槛从 >0 提到 >=3——简单输入（单话题词）走
-         * diffusion 话题序输出（词锚定+relevance），PFE 合成在
-         * 低复杂度下反而输出乱序词库词序列（"衣服历史时间关系"） */
-        if (complexity >= 3) {
+        /* v0.6 测试：PFE 门槛恢复 >0 验证（diffusion 降级路径已话题化，
+         * PFE 的 answer_text 应随 diffusion 修复而修复） */
+        if (complexity > 0) {
             /* 中高复杂度 → PFE 推理管线 */
             char pfe_answer[GW_MAX_RESPONSE];
             int pfe_ok = pfe_reason(gw->pfe, msg, pfe_answer, sizeof(pfe_answer));
