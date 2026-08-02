@@ -555,6 +555,13 @@ static int gw_system_init(GatewaySystem* gw) {
 
     // 绑定丘脑到脑干（脑干通过丘脑获取所有其他脑区的引用）
     brainstem_set_thalamus(gw->brainstem, gw->thalamus);
+
+    /* v0.5.7: 注册大脑缓存到丘脑工具槽——brainstem 冻结/解冻
+     * 通过 THAL_UTIL_NODE_CACHE 取用（此前从未注册，node_cache_freeze
+     * 收到 NULL 空转，冻结机制实际未生效——假日志） */
+    if (gw->brain_cache) {
+        thalamus_register_utility(gw->thalamus, THAL_UTIL_NODE_CACHE, gw->brain_cache);
+    }
     brainstem_set_verbose(gw->brainstem, 1);  /* 开启脑区日志 */
 
     printf("[gateway]   丘脑信号总线就绪 (%d 脑区, %d 工具槽)\n",
