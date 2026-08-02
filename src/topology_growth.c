@@ -636,6 +636,17 @@ int prune_node_importance(MasterTopology* master, int topo_id,
     return removed;
 }
 
+/* v0.5.7: 垃圾概念（//家 类 URL/路径残留）——无条件视为孤立删除。
+ * 喂料时 http:// 过滤了但 "//xxx" 漏网（状态里 442 个），感知皮层
+ * 随机抽到会搜索空转。这些节点无语义价值，有边也删。 */
+static int is_junk_concept(const char* c) {
+    if (!c || !c[0]) return 1;
+    if (strstr(c, "//") || strstr(c, "http") || strstr(c, "www.")) return 1;
+    char ch = c[0];
+    if (ch == '/' || ch == '.' || ch == '-' || ch == '_' || ch == '\\' || ch == '#') return 1;
+    return 0;
+}
+
 int prune_low_connectivity(MasterTopology* master, int topo_id,
                           int min_connections) {
     if (!master || min_connections < 0) return 0;
@@ -649,6 +660,13 @@ int prune_low_connectivity(MasterTopology* master, int topo_id,
         /* 跳过冻结节点（is_cooled）：冻结是 lazy memory 缓存释放（边数据
          * 已存盘可恢复），不是孤立垃圾——RED 修剪不该删它们（v0.6） */
         if (node && node->is_cooled) continue;
+        /* v0.5.7: 垃圾概念（//家 类）无条件删——无语义价值，感知皮层抽到会空转 */
+        if (node && is_junk_concept(node->concept)) {
+            if (remove_node_dynamic(master, topo_id, i, false) == 0) {
+                removed++;
+            }
+            continue;
+        }
         if (node && node->edge_count < min_connections) {
             if (remove_node_dynamic(master, topo_id, i, false) == 0) {
                 removed++;
