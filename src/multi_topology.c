@@ -3346,8 +3346,7 @@ int master_prune_dead_nodes(MasterTopology* master) {
         for (int n = 0; n < nc; n++) {
             ReasoningNode* node = sub->net->nodes[n];
             if (!node) continue;
-            /* 跳过冻结节点（is_cooled）：冻结 = 边数据已存盘可恢复，
-             * 不是死节点（v0.6 RED 修剪不该删它们） */
+            /* 跳过冻结节点（is_cooled）：冻结 = 缓存释放，修剪不删知识 */
             if (node->is_cooled) continue;
             if (node->edge_count == 0 && node->activation < 0.01f) {
                 dead_ids[dead_count++] = node->node_id;

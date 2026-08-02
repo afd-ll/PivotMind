@@ -701,11 +701,23 @@ int pfe_solve_subgoal(PrefrontalExecutive* pfe, int goal_index) {
         if (satisfaction > best_satisfaction) {
             best_satisfaction = satisfaction;
 
-            /* 拼合输出文本 */
+            /* 拼合输出文本（v0.5.7：语义场描述——取前 3 个实义词，
+             * 跳过虚词/中文单字："时间是"→"时间 过去 钟表"，
+             * 语义场词才是答案的实质内容） */
             int pos = 0;
-            for (int i = 0; i < seq.count && pos < (int)sizeof(best_text) - 10; i++)
+            int out_cnt = 0;
+            for (int i = 0; i < seq.count && out_cnt < 3 && pos < (int)sizeof(best_text) - 10; i++) {
+                const char* w = seq.words[i];
+                if (!w || !w[0]) continue;
+                /* 高频虚词/单字过滤（"是/的/了"类尾巴） */
+                if (strcmp(w, "是") == 0 || strcmp(w, "的") == 0 ||
+                    strcmp(w, "了") == 0 || strcmp(w, "在") == 0 ||
+                    strcmp(w, "有") == 0 || strcmp(w, "和") == 0) continue;
+                if ((unsigned char)w[0] >= 0x80 && strlen(w) == 3) continue;
                 pos += snprintf(best_text + pos, sizeof(best_text) - (size_t)pos,
-                                "%s", seq.words[i]);
+                                "%s", w);
+                out_cnt++;
+            }
 
             /* 从词汇拓扑查找节点 ID */
             SubTopology* vocab = master_get_sub_topology_by_type(pfe->master, TOPO_VOCABULARY);
