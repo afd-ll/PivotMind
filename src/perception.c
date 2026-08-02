@@ -668,6 +668,34 @@ static int _gap_topology_queries(Perception* p, const char** out_queries,
  *  tick 入口（重写：三维度知识缺口驱动搜索）
  * ================================================================ */
 
+/* v0.5.7: 合法查询词检查——防垃圾词污染（FDCDF 乱码/数字串）。
+ * 中文：2-6 字；英文：纯字母 3-20 长度 + 含元音（FDCDF 无元音=乱码）。 */
+static int is_valid_query(const char* c) {
+    if (!c || !c[0]) return 0;
+    size_t len = strlen(c);
+    if (len < 2 || len > 24) return 0;
+    if (strstr(c, "//") || strstr(c, "http") || strstr(c, "www.")) return 0;
+    char ch0 = c[0];
+    if (ch0 == '/' || ch0 == '.' || ch0 == '-' || ch0 == '_' || ch0 == '\\' || ch0 == '#') return 0;
+    /* 中文（UTF-8 首字节 >= 0x80） */
+    if ((unsigned char)c[0] >= 0x80) {
+        for (size_t i = 0; i < len; i++) {
+            unsigned char b = (unsigned char)c[i];
+            if (b >= 0x80 && (b < 0xC0 || b > 0xEF)) return 0;  /* 非中文 UTF-8 */
+        }
+        return len >= 2 && len <= 18;  /* 2-6 个中文字 */
+    }
+    /* 英文：纯字母 + 含元音 */
+    int has_vowel = 0;
+    for (size_t i = 0; i < len; i++) {
+        char b = c[i];
+        if (!isalpha((unsigned char)b)) return 0;
+        if (b == 'a' || b == 'e' || b == 'i' || b == 'o' || b == 'u' ||
+            b == 'A' || b == 'E' || b == 'I' || b == 'O' || b == 'U') has_vowel = 1;
+    }
+    return has_vowel;
+}
+
 int perception_tick(Perception* p, float throttle) {
     (void)throttle;  /* 纯随机模式不再需要 throttle 抽签 */
     if (!p) return 0;
@@ -680,9 +708,11 @@ int perception_tick(Perception* p, float throttle) {
     if (p->tick_counter < p->cfg.cycle_interval_ticks) { pthread_mutex_unlock(&p->mutex); return 0; }
     p->tick_counter = 0;
 
-    /* 从词汇拓扑中随机选节点进行搜索 */
+    /* v0.5.7: 分层爬取——50% 词库（概念拓扑实义词，丰富已有概念），
+     * 50% 词汇拓扑（过滤后合法节点，扩充新数据）。垃圾词过滤防污染。 */
     SubTopology* vocab = master_get_sub_topology_by_type(p->topology, TOPO_VOCABULARY);
     if (!vocab || !vocab->net || vocab->net->node_count == 0) { pthread_mutex_unlock(&p->mutex); return 0; }
+    SubTopology* concept = master_get_sub_topology_by_type(p->topology, TOPO_CONCEPT);
 
     int max_searches = p->cfg.max_searches_per_cycle;
     if (max_searches < 1) max_searches = 1;
@@ -691,15 +721,22 @@ int perception_tick(Perception* p, float throttle) {
     int searched = 0;
     unsigned int rng = (unsigned int)time(NULL) ^ (unsigned int)(uintptr_t)p;
     for (int i = 0; i < max_searches && searched < max_searches; i++) {
-        int idx = _perception_rand(&rng) % vocab->net->node_count;
-        ReasoningNode* node = vocab->net->nodes[idx];
-        if (!node || !node->concept || strlen(node->concept) < 2) continue;
-
-        /* v0.5.7: 过滤垃圾查询词（//家 类 URL/路径残留——状态里 442 个
-         * "//" 前缀垃圾节点会随机抽到，搜索空转浪费 CPU/带宽） */
-        const char* c = node->concept;
-        if (strstr(c, "//") || strstr(c, "http") || strstr(c, "www.")) continue;
-        if (c[0] == '/' || c[0] == '.' || c[0] == '-' || c[0] == '_' || c[0] == '\\') continue;
+        ReasoningNode* node = NULL;
+        int tries = 0;
+        while (tries++ < 32) {
+            if ((i % 2 == 0) && concept && concept->net && concept->net->node_count > 0) {
+                /* 词库层：随机概念词 */
+                int idx = _perception_rand(&rng) % concept->net->node_count;
+                ReasoningNode* cn = concept->net->nodes[idx];
+                if (cn && cn->concept && is_valid_query(cn->concept)) { node = cn; break; }
+            } else {
+                /* 词汇拓扑层：随机节点（过滤垃圾） */
+                int idx = _perception_rand(&rng) % vocab->net->node_count;
+                ReasoningNode* vn = vocab->net->nodes[idx];
+                if (vn && vn->concept && is_valid_query(vn->concept)) { node = vn; break; }
+            }
+        }
+        if (!node || !node->concept) continue;
 
         if (search_and_learn(p, node->concept, PERCEPT_CURIOSITY) >= 0) {
             searched++;
