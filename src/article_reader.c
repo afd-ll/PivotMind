@@ -377,14 +377,14 @@ static int _ar_build_topo(ArticleReader* ar, SubTopology* topo) {
                 int has_vowel = 0, has_underscore = 0, has_digit = 0, has_lower = 0;
                 for (const char* cp = w; *cp; cp++) {
                     char ch = *cp;
-                    if (ch == '_') has_underscore = 1;
+                    if (ch == '_' || ch == '-') has_underscore = 1;
                     if (ch >= '0' && ch <= '9') has_digit = 1;
                     if (islower((unsigned char)ch)) has_lower = 1;
                     if (ch=='a'||ch=='e'||ch=='i'||ch=='o'||ch=='u'||
                         ch=='A'||ch=='E'||ch=='I'||ch=='O'||ch=='U') has_vowel = 1;
                 }
                 if (wl < 2 || has_underscore || has_digit ||
-                    (!has_vowel && wl < 6) || (!has_lower && wl >= 5)) continue;
+                    (!has_vowel && wl < 6) || (!has_lower && wl >= 4)) continue;
             }
 
             // insert_node_dynamic：具备自动扩容 + 全局统计
