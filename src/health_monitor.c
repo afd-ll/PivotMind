@@ -146,24 +146,16 @@ void health_monitor_tick(HealthMonitor* hm,
     HealthLevel new_level = HM_GREEN;
     const char* reason = "系统正常";
 
-    /* v0.5.7: RED 只由内存占用触发（85% = 3400MB）——瞬时增速已两次误判
-     * （176MB +142/min、389MB +2092/min 都触发 RED 删节点），
-     * 增速采样间隔不可靠，彻底去掉增速判定 */
+    /* v0.5.7: RED 只由内存占用触发（85% = 3400MB）——瞬时增速两次误判
+     * （176MB +142/min、389MB +2092/min 删节点）+ 冻结计数累计误判
+     * （正常学习累计 5.6 万冻结超 10000 触发 RED）。采样不可靠的
+     * 指标全部不参与 RED 判定，只有真实内存占用才算数 */
     if (hm->rss_mb > hm->rss_red_mb) {
         new_level = HM_RED;
         reason    = "RSS超标";
-    } else if (hm->conn_growth > hm->conn_growth_red) {
-        new_level = HM_RED;
-        reason    = "连接膨胀失控";
-    } else if (hm->rss_mb > hm->rss_yellow_mb || hm->rss_growth_mb_min > hm->rss_growth_yellow) {
+    } else if (hm->rss_mb > hm->rss_yellow_mb) {
         new_level = HM_YELLOW;
-        reason    = hm->rss_mb > hm->rss_yellow_mb ? "RSS接近上限" : "内存增速偏快";
-    } else if (hm->conn_growth > hm->conn_growth_yellow) {
-        new_level = HM_YELLOW;
-        reason    = "连接增速偏快";
-    } else if (hm->frozen_nodes > hm->frozen_red) {
-        new_level = HM_RED;
-        reason    = "节点冻结过多";
+        reason    = "RSS接近上限";
     } else if (hm->frozen_nodes > hm->frozen_yellow) {
         new_level = HM_YELLOW;
         reason    = "冻结速率偏高";
