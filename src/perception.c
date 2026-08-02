@@ -695,6 +695,12 @@ int perception_tick(Perception* p, float throttle) {
         ReasoningNode* node = vocab->net->nodes[idx];
         if (!node || !node->concept || strlen(node->concept) < 2) continue;
 
+        /* v0.5.7: 过滤垃圾查询词（//家 类 URL/路径残留——状态里 442 个
+         * "//" 前缀垃圾节点会随机抽到，搜索空转浪费 CPU/带宽） */
+        const char* c = node->concept;
+        if (strstr(c, "//") || strstr(c, "http") || strstr(c, "www.")) continue;
+        if (c[0] == '/' || c[0] == '.' || c[0] == '-' || c[0] == '_' || c[0] == '\\') continue;
+
         if (search_and_learn(p, node->concept, PERCEPT_CURIOSITY) >= 0) {
             searched++;
         }
