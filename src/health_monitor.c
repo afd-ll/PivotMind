@@ -20,7 +20,7 @@ HealthMonitor* health_monitor_create(void) {
     hm->rss_yellow_mb     = 2720.0f;  /* 4GB 的 68% */
     hm->rss_red_mb        = 3400.0f;  /* v0.5.7: 板子 4GB 的 85%——内存占用 85% 才 RED（用户方案：防增速误判修剪过头） */
     hm->rss_growth_yellow = 2.0f;   /* MB/min */
-    hm->rss_growth_red    = 500.0f;  /* v0.5.7: 瞬时增速会误判（RSS 176MB +142/min 触发 RED 删 2.8 万节点）；500 防真实泄漏 */
+    hm->rss_growth_red    = 500.0f;  /* v0.5.7: 不再用于 RED 判定（增速采样不可靠，已两次误判）——保留字段兼容 */
     hm->conn_growth_yellow = 500;
     hm->conn_growth_red    = 2000;
     hm->frozen_yellow      = 500;
@@ -146,9 +146,12 @@ void health_monitor_tick(HealthMonitor* hm,
     HealthLevel new_level = HM_GREEN;
     const char* reason = "系统正常";
 
-    if (hm->rss_mb > hm->rss_red_mb || hm->rss_growth_mb_min > hm->rss_growth_red) {
+    /* v0.5.7: RED 只由内存占用触发（85% = 3400MB）——瞬时增速已两次误判
+     * （176MB +142/min、389MB +2092/min 都触发 RED 删节点），
+     * 增速采样间隔不可靠，彻底去掉增速判定 */
+    if (hm->rss_mb > hm->rss_red_mb) {
         new_level = HM_RED;
-        reason    = hm->rss_mb > hm->rss_red_mb ? "RSS超标" : "内存增速过快";
+        reason    = "RSS超标";
     } else if (hm->conn_growth > hm->conn_growth_red) {
         new_level = HM_RED;
         reason    = "连接膨胀失控";
