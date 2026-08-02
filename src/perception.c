@@ -487,6 +487,17 @@ static int search_and_learn(Perception* p, const char* concept, PerceptionSource
 
         if (text_len < 10) { free(text); continue; }
 
+        /* v0.5.7: 验证码页检测——搜狗/必应风控返回验证码 HTML，
+         * 解析后全是垃圾词（实测抽查 67 个新词 ~90% 来自验证码页）
+         * ——丢弃不学习 */
+        if (strstr(text, "验证码") || strstr(text, "captcha") ||
+            strstr(text, "安全验证") || strstr(text, "请输入验证")) {
+            if (p->cfg.verbose)
+                fprintf(stderr, "[感觉皮层]   %s 验证码页，丢弃\n", prov_names[prov]);
+            free(text);
+            continue;
+        }
+
         /* 拼接：加来源标注 */
         int space_left = MAX_SEARCH_TEXT - merged_len - 128;
         if (space_left > 0) {
@@ -685,15 +696,19 @@ static int is_valid_query(const char* c) {
         }
         return len >= 2 && len <= 18;  /* 2-6 个中文字 */
     }
-    /* 英文：纯字母 + 含元音 */
-    int has_vowel = 0;
+    /* 英文：纯字母 + 含元音 + 不全大写乱码（FBFDABDDA 类漏网——
+     * 全大写 5+ 多为缩写/乱码串） */
+    int has_vowel = 0, has_lower = 0;
     for (size_t i = 0; i < len; i++) {
         char b = c[i];
         if (!isalpha((unsigned char)b)) return 0;
+        if (islower((unsigned char)b)) has_lower = 1;
         if (b == 'a' || b == 'e' || b == 'i' || b == 'o' || b == 'u' ||
             b == 'A' || b == 'E' || b == 'I' || b == 'O' || b == 'U') has_vowel = 1;
     }
-    return has_vowel;
+    if (!has_vowel) return 0;
+    if (!has_lower && len >= 5) return 0;  /* 全大写 5+ 乱码/缩写 */
+    return 1;
 }
 
 int perception_tick(Perception* p, float throttle) {

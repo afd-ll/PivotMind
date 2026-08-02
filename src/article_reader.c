@@ -367,6 +367,25 @@ static int _ar_build_topo(ArticleReader* ar, SubTopology* topo) {
                 cp += b;
             }
             if (has_punct) continue;
+            if (strstr(we->text, "//")) continue;  /* URL/路径残留 */
+
+            /* v0.5.7: 英文垃圾词过滤（请求参数/cookie 名/乱码——实测
+             * 抽查 67 个新词 ~90% 是 _G/SID/wXMLH 这类） */
+            if ((unsigned char)we->text[0] < 0x80) {  /* ASCII 词 */
+                const char* w = we->text;
+                size_t wl = strlen(w);
+                int has_vowel = 0, has_underscore = 0, has_digit = 0, has_lower = 0;
+                for (const char* cp = w; *cp; cp++) {
+                    char ch = *cp;
+                    if (ch == '_') has_underscore = 1;
+                    if (ch >= '0' && ch <= '9') has_digit = 1;
+                    if (islower((unsigned char)ch)) has_lower = 1;
+                    if (ch=='a'||ch=='e'||ch=='i'||ch=='o'||ch=='u'||
+                        ch=='A'||ch=='E'||ch=='I'||ch=='O'||ch=='U') has_vowel = 1;
+                }
+                if (wl < 2 || has_underscore || has_digit ||
+                    (!has_vowel && wl < 6) || (!has_lower && wl >= 5)) continue;
+            }
 
             // insert_node_dynamic：具备自动扩容 + 全局统计
             nid = insert_node_dynamic(ar->master, topo->topo_id,
@@ -374,6 +393,8 @@ static int _ar_build_topo(ArticleReader* ar, SubTopology* topo) {
             if (nid >= 0 && nid < topo->net->node_count && topo->net->nodes[nid]) {
                 created++;
                 if (ar->p_added_nodes) (*ar->p_added_nodes)++;
+                /* v0.5.7: 抽查——打印实际进拓扑的新词（污染比例分析） */
+                LOG_INFO("[文章阅读] 新词抽查: %s", we->text);
 
                 // 基于词文本的确定性特征向量初始化
                 ReasoningNode* node = topo->net->nodes[nid];
@@ -729,14 +750,7 @@ int _article_flush_locked(ArticleReader* ar, SubTopology* topo) {
             LOG_INFO("[文章阅读] 刷新: %d 新词, 共 %d 词, 累计 %d 不同字符, %d 字符对",
                    new_words, ar->word_count,
                    ar->char_count, ar->pair_count);
-            /* v0.5.7: 抽查——新词列表（污染比例分析用，最多 30 个） */
-            if (new_words > 0 && ar->words) {
-                int start = ar->word_count - new_words;
-                if (start < 0) start = 0;
-                for (int wi = start; wi < ar->word_count && wi < start + 30; wi++) {
-                    LOG_INFO("[文章阅读] 新词抽查: %s", ar->words[wi].text);
-                }
-            }
+
         }
 
         // === 新词 → 模板反馈：为新词建立与已有模板的跨拓扑连接 ===
