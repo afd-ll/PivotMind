@@ -36,7 +36,7 @@ static SearchEngine g_default_engines[] = {
     /* Bing CN — 需 302 重定向 */
     {"bing_cn",   "https://cn.bing.com/search?q=%s",                   8000, 0.6f, 5000, 10, 0, 0, 0, 0},
     /* 百度移动搜索 — 国内覆盖率最高 */
-    {"baidu_m",   "https://m.baidu.com/s?word=%s",                     6000, 0.7f, 5000, 10, 0, 0, 0, 0},
+    {"baidu_m",   "https://m.baidu.com/s?wd=%s",                       6000, 0.7f, 5000, 10, 0, 0, 0, 0},
 };
 #define PM_ENGINE_COUNT (int)(sizeof(g_default_engines) / sizeof(g_default_engines[0]))
 
@@ -393,7 +393,7 @@ static void _provider_check_http_status(Perception* p, int prov_idx, WebResult* 
 static WebResult* _try_provider(Perception* p, int prov_idx,
                                 const char* encoded_query) {
     /* 映射旧 provider 索引到引擎数组 */
-    static const int prov_to_eng[] = {2, 3, 2};  /* SOGOU→sogou_web[2], BING→bing_cn[3], SOGOU2→sogou_web[2] */
+    static const int prov_to_eng[] = {4, 3, 4};  /* v0.5.7: SOGOU→baidu_m[4]（搜狗PC验证码重灾）, BING→bing_cn[3], SOGOU2→baidu_m[4] */
     if (prov_idx < 0 || prov_idx >= 3) return NULL;
     int eng_idx = prov_to_eng[prov_idx];
     if (eng_idx >= p->engine_count) return NULL;
