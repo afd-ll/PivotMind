@@ -17,10 +17,10 @@ HealthMonitor* health_monitor_create(void) {
     if (!hm) return NULL;
 
     /* 默认阈值 — 针对 3.8G 板子，留足喂料缓冲 */
-    hm->rss_yellow_mb     = 800.0f;
-    hm->rss_red_mb        = 1200.0f;  /* v0.6: 板子 4GB，v6 大状态 RSS 1G+ 属正常负载 */
+    hm->rss_yellow_mb     = 2720.0f;  /* 4GB 的 68% */
+    hm->rss_red_mb        = 3400.0f;  /* v0.5.7: 板子 4GB 的 85%——内存占用 85% 才 RED（用户方案：防增速误判修剪过头） */
     hm->rss_growth_yellow = 2.0f;   /* MB/min */
-    hm->rss_growth_red    = 30.0f;  /* v0.6: 加载/词巩固高峰 +76MB/min 会误判 RED */
+    hm->rss_growth_red    = 500.0f;  /* v0.5.7: 瞬时增速会误判（RSS 176MB +142/min 触发 RED 删 2.8 万节点）；500 防真实泄漏 */
     hm->conn_growth_yellow = 500;
     hm->conn_growth_red    = 2000;
     hm->frozen_yellow      = 500;
