@@ -729,6 +729,14 @@ int _article_flush_locked(ArticleReader* ar, SubTopology* topo) {
             LOG_INFO("[文章阅读] 刷新: %d 新词, 共 %d 词, 累计 %d 不同字符, %d 字符对",
                    new_words, ar->word_count,
                    ar->char_count, ar->pair_count);
+            /* v0.5.7: 抽查——新词列表（污染比例分析用，最多 30 个） */
+            if (new_words > 0 && ar->words) {
+                int start = ar->word_count - new_words;
+                if (start < 0) start = 0;
+                for (int wi = start; wi < ar->word_count && wi < start + 30; wi++) {
+                    LOG_INFO("[文章阅读] 新词抽查: %s", ar->words[wi].text);
+                }
+            }
         }
 
         // === 新词 → 模板反馈：为新词建立与已有模板的跨拓扑连接 ===
