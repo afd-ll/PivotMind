@@ -188,6 +188,49 @@ int remove_node_dynamic(MasterTopology* master, int topo_id,
         return -1;  // 有连接，不能删除
     }
 
+    /* v0.5.7-A: 全图反向清理——其他节点指向本节点的边（入边）也必须清除，
+     * 否则删除后 target 悬垂（保存时解引用会写坏状态文件，加载时边恢复失败） */
+    for (int t = 0; t < master->sub_topo_count; t++) {
+        SubTopology* st = master->sub_topologies[t];
+        if (!st || !st->net) continue;
+        for (int ni = 0; ni < st->net->node_count; ni++) {
+            ReasoningNode* other = st->net->nodes[ni];
+            if (!other || other == node || other->edge_count == 0) continue;
+            int changed = 0;
+            for (int j = 0; j < other->edge_count; ) {
+                if (other->edges[j].target == node) {
+                    for (int k = j; k < other->edge_count - 1; k++)
+                        other->edges[k] = other->edges[k + 1];
+                    other->edge_count--;
+                    changed = 1;
+                } else {
+                    j++;
+                }
+            }
+            /* 边数组变了——连接哈希重建（防查错） */
+            if (changed && other->conn_hash) {
+                /* 简单重建：清除后全量重加（删除不频繁，可接受） */
+                for (int hi = 0; hi <= other->conn_hash_mask; hi++) {
+                    other->conn_hash[hi].target = NULL;
+                    other->conn_hash[hi].is_deleted = 0;
+                }
+                other->conn_hash_entries = 0;
+                for (int e2 = 0; e2 < other->edge_count; e2++) {
+                    if (!other->edges[e2].target) continue;
+                    int idx = e2;
+                    unsigned int h = (unsigned int)(uintptr_t)other->edges[e2].target & (unsigned int)other->conn_hash_mask;
+                    while (other->conn_hash[h].target != NULL && !other->conn_hash[h].is_deleted) {
+                        h = (h + 1) & (unsigned int)other->conn_hash_mask;
+                    }
+                    other->conn_hash[h].target = other->edges[e2].target;
+                    other->conn_hash[h].index = idx;
+                    other->conn_hash[h].is_deleted = 0;
+                    other->conn_hash_entries++;
+                }
+            }
+        }
+    }
+
     // 移除连接
     if (node->edge_count > 0) {
         for (int i = 0; i < node->edge_count; i++) {
