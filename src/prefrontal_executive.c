@@ -713,6 +713,18 @@ int pfe_solve_subgoal(PrefrontalExecutive* pfe, int goal_index) {
                 if (strcmp(w, "是") == 0 || strcmp(w, "的") == 0 ||
                     strcmp(w, "了") == 0 || strcmp(w, "在") == 0 ||
                     strcmp(w, "有") == 0 || strcmp(w, "和") == 0) continue;
+                /* v0.5.7: 子问题模板词过滤（PFE 子目标"X的操作步骤"的
+                 * 框架词——操作/步骤/条件/小标 不是答案内容） */
+                {
+                    static const char* TPL2[] = {"操作", "步骤", "方法", "前置", "条件",
+                        "资源", "概念", "相关", "小标", "起来", "需要", "影响", "方面",
+                        "什么", "怎么", "如何", "为什么"};
+                    int tpl = 0;
+                    for (int ti = 0; ti < (int)(sizeof(TPL2)/sizeof(TPL2[0])); ti++) {
+                        if (strcmp(w, TPL2[ti]) == 0) { tpl = 1; break; }
+                    }
+                    if (tpl) continue;
+                }
                 if ((unsigned char)w[0] >= 0x80 && strlen(w) == 3) continue;
                 pos += snprintf(best_text + pos, sizeof(best_text) - (size_t)pos,
                                 "%s", w);
@@ -748,8 +760,9 @@ int pfe_solve_subgoal(PrefrontalExecutive* pfe, int goal_index) {
             memcpy(g->answer_nodes, best_node_ids, (size_t)best_node_len * sizeof(int));
             g->answer_len = best_node_len;
         }
-    } else if (best_satisfaction > 0.2f && best_text[0]) {
-        /* 部分成功：有生成但评分偏低 */
+    } else if (best_satisfaction > 0.38f && best_text[0]) {
+        /* 部分成功：有生成但评分偏低（v0.5.7: 门槛 0.2→0.38——
+         * 22% 的"建议虑可以"类垃圾不再通过，宁缺毋滥） */
         g->status    = PFE_GOAL_SOLVED;
         g->answer_score = best_satisfaction * 0.85f;  /* 弱答案折扣 */
         snprintf(g->answer_text, sizeof(g->answer_text), "%s", best_text);

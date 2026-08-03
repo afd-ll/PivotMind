@@ -1505,6 +1505,19 @@ int diffusion_generate(DiffusionCtx* ctx,
         for (int p = 0; p < word_prio_count && word_count < DIFF_MAX_SEQUENCE; p++) {
             if (!word_prio[p] || strlen(word_prio[p]) < 2) continue;
             if (is_function_word(word_prio[p])) continue;
+            /* v0.5.7: 子问题模板词过滤——PFE 子目标"X的操作步骤/前置条件"
+             * 里的模板词（操作/步骤/方法/条件）会命中概念拓扑并被输出，
+             * 污染答案（实测"操作小标起来"）。这些是问题框架词不是内容 */
+            {
+                static const char* TPL_WORDS[] = {"操作", "步骤", "方法", "前置", "条件",
+                    "资源", "概念", "相关", "以及", "然后", "所以", "因为", "什么",
+                    "怎么", "如何", "为什么", "小标", "起来", "需要", "影响", "方面"};
+                int tpl = 0;
+                for (int ti = 0; ti < (int)(sizeof(TPL_WORDS)/sizeof(TPL_WORDS[0])); ti++) {
+                    if (strcmp(word_prio[p], TPL_WORDS[ti]) == 0) { tpl = 1; break; }
+                }
+                if (tpl) continue;
+            }
             if (lang_dom > 0 && (unsigned char)word_prio[p][0] < 0x80) continue;
             if (lang_dom < 0 && (unsigned char)word_prio[p][0] >= 0x80) continue;
             /* 中文单字不输出（v0.6：口语至少 2 字词，"出大的只了"类噪声） */
