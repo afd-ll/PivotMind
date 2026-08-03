@@ -468,6 +468,7 @@ static int gw_system_init(GatewaySystem* gw) {
     if (feat_loaded > 0) fprintf(stderr, "[gateway]   加载特征向量: %d 节点\n", feat_loaded);
     else { int initted = init_random_features(gw->topology); fprintf(stderr, "[gateway]   初始化特征向量: %d 节点\n", initted); }
 
+
     /* 跨拓扑连接已在 master_load_state 中加载，无需重复 */
     fprintf(stderr, "[gateway]   跨拓扑连接已随状态加载 (节点=%d)\n",
             gw->topology->cross_link_count);

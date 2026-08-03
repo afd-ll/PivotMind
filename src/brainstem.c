@@ -442,6 +442,9 @@ static void brainstem_tick_learning_scan(Brainstem* bs, const CircadianParams* c
             if (mods > 0 && bs->verbose)
                 LOG_INFO("[自主学习] 本轮修改 %d 条边", mods);
         }
+
+        /* v0.5.7: 领域归纳（与自我学习同周期——概念词归入领域种子） */
+        autonomic_domain_induction(bs->master);
     }
 
     if (bs->tick_count % 600 == 0) {
@@ -651,6 +654,10 @@ Brainstem* brainstem_create(MasterTopology* master, MemorySystem* memory, Cognit
 
     /* 内感受自检（由 brainstem_destroy 统一清理） */
     bs->health_monitor = health_monitor_create();
+
+    /* v0.5.7: 拓扑种子注入（领域/语法/上下文种子——此前依赖对话
+     * 路径从不触发，领域拓扑 0 节点） */
+    autonomic_seed_topologies(master);
 
     return bs;
 }

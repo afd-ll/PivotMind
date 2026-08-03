@@ -157,6 +157,8 @@ void autonomic_stop_async_flush(AutonomicState* state);
  * @param ai_response AI回复文本
  * @param state   状态累积器（可为NULL，跳过刷盘）
  */
+void autonomic_seed_topologies(MasterTopology* master);
+
 void autonomic_learn_from_dialog(MasterTopology* master,
                                  const char* user_input,
                                  const char* ai_response,
@@ -206,3 +208,5 @@ int autonomic_learn_from_text(MasterTopology* master,
                               AutonomicState* state);
 
 #endif // AUTONOMIC_LEARNER_H
+/* v0.5.7: 领域归纳——概念词归入领域种子（跨拓扑边，不复制） */
+void autonomic_domain_induction(MasterTopology* master);

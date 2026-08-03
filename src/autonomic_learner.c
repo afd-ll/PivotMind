@@ -514,6 +514,60 @@ static void boost_connection_weighted(SubTopology* topo, ReasoningNode* a, Reaso
 
 // ==================== 核心API实现 ====================
 
+
+/* v0.5.7: 拓扑种子注入（独立挂载——brainstem 启动时调用，
+ * 不依赖对话路径。此前种子注入嵌在 autonomic_learn_from_dialog
+ * 里，对话少/走 PFE 路径时从不触发 → 领域拓扑永远 0 节点） */
+void autonomic_seed_topologies(MasterTopology* master) {
+    if (!master) return;
+    SubTopology* vocab = NULL, *semantic = NULL, *concept_t = NULL;
+    SubTopology* emotion = NULL, *syntax = NULL, *context = NULL;
+    SubTopology* domain = NULL, *pragma = NULL, *culture = NULL;
+    for (int t = 0; t < master->sub_topo_count; t++) {
+        SubTopology* sub = master->sub_topologies[t];
+        if (!sub) continue;
+        switch (sub->type) {
+            case TOPO_VOCABULARY: vocab = sub; break;
+            case TOPO_SEMANTIC:   semantic = sub; break;
+            case TOPO_CONCEPT:    concept_t = sub; break;
+            case TOPO_EMOTION:    emotion = sub; break;
+            case TOPO_SYNTAX:     syntax = sub; break;
+            case TOPO_CONTEXT:    context = sub; break;
+            case TOPO_DOMAIN:     domain = sub; break;
+            case TOPO_PRAGMA:     pragma = sub; break;
+            case TOPO_CULTURE:    culture = sub; break;
+            default: break;
+        }
+    }
+    if (!vocab || !vocab->net) return;
+
+    /* 种子节点：为空拓扑注入初始数据（仅首次运行） */
+    {
+        SubTopology* seeds[] = { syntax, context, domain, pragma, culture };
+        const char* seed_names[] = {
+            /* syntax: 基础POS标签 */
+            "NOUN\0VERB\0ADJ\0ADV\0PRON\0PREP\0CONJ\0NUM\0PART\0INTJ",
+            /* context: 上下文类型 */
+            "Q&A\0CHAT\0EXPLAIN\0HOWTO\0GREET",
+            /* domain: 领域标签（v0.5.7 扩展心理/医疗/情绪域） */
+            "TECH\0LIFE\0SCIENCE\0HISTORY\0GEOGRAPHY\0PSYCHOLOGY\0MEDICAL\0EMOTION\0LAW\0ECONOMICS",
+            /* pragma: 语用功能 */
+            "ASK\0TELL\0REQUEST\0SUGGEST\0GREET",
+            /* culture: 文化元素 */
+            "CN_CULTURE\0FESTIVAL\0CUSTOM\0LANGUAGE\0HISTORY"
+        };
+        for (int si = 0; si < 5; si++) {
+            SubTopology* st = seeds[si];
+            if (!st || !st->net || st->net->node_count > 0) continue;
+            const char* names = seed_names[si];
+            while (*names) {
+                huarong_net_find_or_create_node(st->net, names, NULL, 0, st->node_hash);
+                names += strlen(names) + 1;
+            }
+        }
+    }
+}
+
 void autonomic_learn_from_dialog(MasterTopology* master,
                                  const char* user_input,
                                  const char* ai_response,
@@ -1343,4 +1397,74 @@ int autonomic_compound_consolidate(MasterTopology* master) {
     free(cands);
     free(avg_w);
     return created;
+}
+
+/* v0.5.7: 领域归纳——概念词通过与领域锚点的共现关联，归入
+ * 领域种子（跨拓扑建边，不复制节点——防镜像爆炸）。
+ * 领域锚点 = 领域标签的中文代表词（概念拓扑里的词节点）。
+ * 归纳结果：焦虑→PSYCHOLOGY、发烧→MEDICAL（真正的上位归纳） */
+void autonomic_domain_induction(MasterTopology* master) {
+    if (!master) return;
+
+    SubTopology *concept = NULL, *domain = NULL;
+    for (int t = 0; t < master->sub_topo_count; t++) {
+        SubTopology* sub = master->sub_topologies[t];
+        if (!sub) continue;
+        if (sub->type == TOPO_CONCEPT) concept = sub;
+        else if (sub->type == TOPO_DOMAIN) domain = sub;
+    }
+    if (!concept || !concept->net || !concept->node_hash) return;
+    if (!domain || !domain->net || !domain->node_hash) return;
+    if (domain->net->node_count == 0) return;  /* 种子未注入 */
+
+    /* 领域锚点：英文标签 + 中文代表词（概念拓扑里的词） */
+    static const struct { const char* label; const char* anchor; } ANCHORS[] = {
+        {"PSYCHOLOGY", "心理"}, {"PSYCHOLOGY", "情绪"}, {"PSYCHOLOGY", "焦虑"},
+        {"MEDICAL",    "健康"}, {"MEDICAL",    "医疗"}, {"MEDICAL",    "医生"},
+        {"EMOTION",    "心情"}, {"EMOTION",    "感情"},
+        {"TECH",       "技术"}, {"LIFE",       "生活"},
+        {"SCIENCE",    "科学"}, {"HISTORY",    "历史"},
+        {"GEOGRAPHY",  "地理"}, {"LAW",        "法律"}, {"ECONOMICS",  "经济"},
+    };
+    const int N_ANCHORS = (int)(sizeof(ANCHORS) / sizeof(ANCHORS[0]));
+
+    /* 锚点节点缓存（概念拓扑里找代表词） */
+    ReasoningNode* anchor_nodes[32];
+    for (int a = 0; a < N_ANCHORS; a++)
+        anchor_nodes[a] = node_hash_find(concept->node_hash, ANCHORS[a].anchor);
+
+    /* 扫描概念拓扑：词 ↔ 锚点共现边权 → 最强领域 */
+    int induced = 0;
+    pthread_rwlock_wrlock(&master->rwlock);
+    for (int i = 0; i < concept->net->node_count && induced < 3000; i++) {
+        ReasoningNode* node = concept->net->nodes[i];
+        if (!node || !node->concept || node->edge_count == 0) continue;
+
+        const char* best_label = NULL;
+        float best_w = 0.35f;  /* 阈值：共现边权 > 0.35 才算关联 */
+        for (int a = 0; a < N_ANCHORS; a++) {
+            ReasoningNode* anchor = anchor_nodes[a];
+            if (!anchor || anchor == node) continue;
+            /* 在 node 的边里找 anchor */
+            for (int e = 0; e < node->edge_count; e++) {
+                if (node->edges[e].target == anchor && node->edges[e].weight > best_w) {
+                    best_w = node->edges[e].weight;
+                    best_label = ANCHORS[a].label;
+                }
+            }
+        }
+        if (best_label) {
+            ReasoningNode* seed = node_hash_find(domain->node_hash, best_label);
+            if (seed) {
+                master_add_cross_link_nolock(master, TOPO_CONCEPT, node->node_id,
+                                             TOPO_DOMAIN, seed->node_id,
+                                             best_w, "domain-induction");
+                induced++;
+            }
+        }
+    }
+    pthread_rwlock_unlock(&master->rwlock);
+
+    if (induced > 0)
+        LOG_INFO("[领域归纳] %d 个概念归入领域拓扑", induced);
 }
