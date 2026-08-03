@@ -16,9 +16,12 @@ HealthMonitor* health_monitor_create(void) {
     HealthMonitor* hm = (HealthMonitor*)calloc(1, sizeof(HealthMonitor));
     if (!hm) return NULL;
 
-    /* 默认阈值 — 针对 3.8G 板子，留足喂料缓冲 */
-    hm->rss_yellow_mb     = 2720.0f;  /* 4GB 的 68% */
-    hm->rss_red_mb        = 3400.0f;  /* v0.5.7: 板子 4GB 的 85%——内存占用 85% 才 RED（用户方案：防增速误判修剪过头） */
+    /* v0.5.7: 阈值改为系统总内存占用率（物理内存 85% 触发 RED——
+     * 用户方案正确落地：监控系统总占用（/proc/meminfo），
+     * 不是进程 RSS——进程 RSS 的"4GB 的 85%"永远到不了，
+     * 系统在 1.3GB 时就 OOM 强杀，RED 形同虚设） */
+    hm->rss_yellow_mb     = 0.68f;   /* 系统总占用 68% → YELLOW */
+    hm->rss_red_mb        = 0.85f;   /* 系统总占用 85% → RED */
     hm->rss_growth_yellow = 2.0f;   /* MB/min */
     hm->rss_growth_red    = 500.0f;  /* v0.5.7: 不再用于 RED 判定（增速采样不可靠，已两次误判）——保留字段兼容 */
     hm->conn_growth_yellow = 500;
@@ -108,6 +111,23 @@ void health_monitor_tick(HealthMonitor* hm,
     { long rss_kb = 0;
       if (pm_get_process_memory(&rss_kb, NULL) == 0)
           hm->rss_mb = (float)rss_kb / 1024.0f;
+
+    /* v0.5.7: 系统总内存占用率（/proc/meminfo）——RED 判定的
+     * 主信号：物理内存占用 85% 就是该 RED，不管进程 RSS */
+    {
+        long mem_total = 0, mem_avail = 0;
+        FILE* mf = fopen("/proc/meminfo", "r");
+        if (mf) {
+            char key[64]; long val;
+            while (fscanf(mf, "%63s %ld", key, &val) == 2) {
+                if (strcmp(key, "MemTotal:") == 0) mem_total = val;
+                else if (strcmp(key, "MemAvailable:") == 0) { mem_avail = val; break; }
+            }
+            fclose(mf);
+        }
+        if (mem_total > 0)
+            hm->sys_usage_ratio = 1.0f - (float)mem_avail / (float)mem_total;
+    }
     }
 
     hm->total_nodes = 0;
@@ -150,10 +170,11 @@ void health_monitor_tick(HealthMonitor* hm,
      * （176MB +142/min、389MB +2092/min 删节点）+ 冻结计数累计误判
      * （正常学习累计 5.6 万冻结超 10000 触发 RED）。采样不可靠的
      * 指标全部不参与 RED 判定，只有真实内存占用才算数 */
-    if (hm->rss_mb > hm->rss_red_mb) {
+    /* v0.5.7: 用系统总占用率判定（物理内存 85%）——进程 RSS 只作参考 */
+    if (hm->sys_usage_ratio > hm->rss_red_mb) {
         new_level = HM_RED;
-        reason    = "RSS超标";
-    } else if (hm->rss_mb > hm->rss_yellow_mb) {
+        reason    = "系统内存占用超标";
+    } else if (hm->sys_usage_ratio > hm->rss_yellow_mb) {
         new_level = HM_YELLOW;
         reason    = "RSS接近上限";
     } else if (hm->frozen_nodes > hm->frozen_yellow) {
@@ -163,16 +184,16 @@ void health_monitor_tick(HealthMonitor* hm,
 
     /* ── 调度器干预 ── */
     if (new_level >= HM_YELLOW && hm->level < HM_YELLOW) {
-        LOG_WARNING("[内感受] ⚠ YELLOW → %s | RSS=%.1fMB(+%.2f/min) 连接=%d(+%d) 冻结=%d",
-                reason, hm->rss_mb, hm->rss_growth_mb_min, hm->total_conns, conn_delta, hm->frozen_nodes);
+        LOG_WARNING("[内感受] ⚠ YELLOW → %s | RSS=%.1fMB(+%.2f/min) 连接=%d(+%d) 冻结=%d 系统占用=%.0f%%",
+                reason, hm->rss_mb, hm->rss_growth_mb_min, hm->total_conns, conn_delta, hm->frozen_nodes, hm->sys_usage_ratio * 100.0f);
         if (controller) {
             controller->satisfaction_threshold = 0.5f;     /* 提高门槛保质量 */
         }
     }
 
     if (new_level == HM_RED && hm->level < HM_RED) {
-        LOG_ERROR("[内感受] 🔴 RED → %s | RSS=%.1fMB(+%.2f/min) 连接=%d 冻结=%d",
-                reason, hm->rss_mb, hm->rss_growth_mb_min, hm->total_conns, hm->frozen_nodes);
+        LOG_ERROR("[内感受] 🔴 RED → %s | RSS=%.1fMB(+%.2f/min) 连接=%d 冻结=%d 系统占用=%.0f%%",
+                reason, hm->rss_mb, hm->rss_growth_mb_min, hm->total_conns, hm->frozen_nodes, hm->sys_usage_ratio * 100.0f);
         _emergency_save(master);
         _aggressive_prune(master);
         hm->emergency_saves++;

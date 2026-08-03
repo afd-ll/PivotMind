@@ -32,6 +32,7 @@ typedef enum {
 typedef struct {
     /* 当前快照 */
     float rss_mb;            /* 当前 RSS */
+    float sys_usage_ratio;   /* 系统总内存占用率 0-1（v0.5.7: RED 主信号） */
     float rss_growth_mb_min; /* RSS 增速 */
     int   total_conns;        /* 连接总数 */
     int   conn_growth;        /* 上次快照后的连接增长 */
