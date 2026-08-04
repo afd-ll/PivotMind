@@ -26,6 +26,7 @@
 #include <ctype.h>
 #include <unistd.h>
 #include <signal.h>
+#include <execinfo.h>
 #include <errno.h>
 #include <time.h>
 #include <pthread.h>
@@ -1682,6 +1683,20 @@ static void handle_qa(GatewaySystem* gw, int fd, const char* body) {
 }
 
 
+/* v0.5.7: 崩溃捕获——SIGSEGV/SIGABRT 打印调用栈到 stderr，
+ * 板子上定位周期性崩溃（脑区索引后崩/爬虫后崩——无 core dump 难查） */
+static void gw_crash_handler(int sig) {
+    fprintf(stderr, "\n[CRASH] 信号 %d (%s) — 调用栈:\n", sig,
+            sig == SIGSEGV ? "SIGSEGV" : sig == SIGABRT ? "SIGABRT" : "?");
+    void* bt[32];
+    int n = backtrace(bt, 32);
+    char** syms = backtrace_symbols(bt, n);
+    for (int i = 0; i < n; i++) fprintf(stderr, "  %s\n", syms ? syms[i] : "?");
+    if (syms) free(syms);
+    fflush(stderr);
+    _exit(128 + sig);
+}
+
 int main(int argc, char* argv[]) {
     setvbuf(stdout, NULL, _IOLBF, 0);  /* 行缓冲，确保所有线程日志即时可见 */
     printf("[gateway] PivotMind v%s\n", PIVOTMIND_VERSION);
@@ -1755,6 +1770,8 @@ int main(int argc, char* argv[]) {
     // 信号处理
     signal(SIGINT, gw_signal_handler);
     signal(SIGTERM, gw_signal_handler);
+    signal(SIGSEGV, gw_crash_handler);   /* v0.5.7: 崩溃定位 */
+    signal(SIGABRT, gw_crash_handler);
     signal(SIGPIPE, SIG_IGN); // 忽略断开连接的写
 
     { int pf = socket(AF_INET, SOCK_STREAM, 0); if (pf >= 0) { struct sockaddr_in pa = {.sin_family=AF_INET, .sin_addr.s_addr=inet_addr("127.0.0.1"), .sin_port=htons(port)}; if (connect(pf, (struct sockaddr*)&pa, sizeof(pa)) == 0) { fprintf(stderr, "[gateway] 端口 %d 已被占用，拒绝启动。\n", port); close(pf); return 1; } close(pf); } }
