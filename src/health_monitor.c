@@ -170,16 +170,28 @@ void health_monitor_tick(HealthMonitor* hm,
      * （176MB +142/min、389MB +2092/min 删节点）+ 冻结计数累计误判
      * （正常学习累计 5.6 万冻结超 10000 触发 RED）。采样不可靠的
      * 指标全部不参与 RED 判定，只有真实内存占用才算数 */
-    /* v0.5.7: 用系统总占用率判定（物理内存 85%）——进程 RSS 只作参考 */
+    /* v0.5.7: 用系统总占用率判定（物理内存 85%）——进程 RSS 只作参考。
+     * 连续采样确认（3 次都超才升级）：MemAvailable 含 Cached 可回收
+     * 部分，读取瞬间可能瞬时归零（实测 RSS 273MB/698MB 时报 100%），
+     * 单次采样不可信，必须连续稳定超阈值才触发 */
     if (hm->sys_usage_ratio > hm->rss_red_mb) {
-        new_level = HM_RED;
-        reason    = "系统内存占用超标";
-    } else if (hm->sys_usage_ratio > hm->rss_yellow_mb) {
-        new_level = HM_YELLOW;
-        reason    = "RSS接近上限";
-    } else if (hm->frozen_nodes > hm->frozen_yellow) {
-        new_level = HM_YELLOW;
-        reason    = "冻结速率偏高";
+        hm->red_streak++;
+        if (hm->red_streak >= 3) {
+            new_level = HM_RED;
+            reason    = "系统内存占用超标";
+        } else {
+            new_level = HM_YELLOW;  /* 未确认前先黄，不触发 RED 动作 */
+            reason    = "系统占用高（确认中）";
+        }
+    } else {
+        hm->red_streak = 0;
+        if (hm->sys_usage_ratio > hm->rss_yellow_mb) {
+            new_level = HM_YELLOW;
+            reason    = "RSS接近上限";
+        } else if (hm->frozen_nodes > hm->frozen_yellow) {
+            new_level = HM_YELLOW;
+            reason    = "冻结速率偏高";
+        }
     }
 
     /* ── 调度器干预 ── */
