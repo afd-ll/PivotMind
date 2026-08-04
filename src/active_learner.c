@@ -569,6 +569,11 @@ void discover_new_relations(ActiveLearner* learner) {
 
     if (!learner->master) return;
 
+    /* v0.5.7: 全程持 master 写锁——discover/update 遍历 net->nodes
+     * 并写边/改权重，与 brainstem 冻结/删除/扩容并发会踩悬垂
+     * （实测 RED 修剪 + 扩容 realloc 时 SIGSEGV，同词巩固崩溃类）*/
+    pthread_rwlock_wrlock(&learner->master->rwlock);
+
     int total_new_relations = 0;
     int total_updated_weights = 0;
 
@@ -596,6 +601,8 @@ void discover_new_relations(ActiveLearner* learner) {
     } else {
         printf("  - 暂无新关系需要建立\n");
     }
+
+    pthread_rwlock_unlock(&learner->master->rwlock);
 }
 
 // ==================== 快照版关系发现 ====================

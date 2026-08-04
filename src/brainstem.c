@@ -548,17 +548,22 @@ static void brainstem_tick_freeze(Brainstem* bs, const CircadianParams* cp) {
                  hl == HM_RED ? "RED" : hl == HM_YELLOW ? "YELLOW" : "GREEN");
     }
 
-    /* RED 级别：冻结后删孤立节点（冻结清空了边，正好清理） */
+    /* RED 级别：冻结后删孤立节点（冻结清空了边，正好清理）
+     * v0.5.7: 全程持 master 写锁——prune_isolated_nodes 遍历删节点，
+     * master_prune_dead_nodes_nolock free 节点/压缩数组，与对话线程/
+     * 冻结序列化并发会踩悬垂（实测 RED 修剪时 SIGSEGV @ nc_write_node_at） */
     if (hl == HM_RED && frozen > 0) {
         int pruned = 0;
+        pthread_rwlock_wrlock(&bs->master->rwlock);
         for (int t = 0; t < bs->master->sub_topo_count; t++) {
             pruned += prune_isolated_nodes(bs->master, t);
         }
         if (pruned > 0) {
             LOG_WARNING("[内感受] RED 修剪: 删除 %d 个孤立冻节点", pruned);
             /* 修剪后清理悬垂死节点 */
-            master_prune_dead_nodes(bs->master);
+            master_prune_dead_nodes_nolock(bs->master);
         }
+        pthread_rwlock_unlock(&bs->master->rwlock);
     }
 }
 

@@ -3261,6 +3261,11 @@ int master_rebuild_edges_batch(MasterTopology* master, float threshold,
 
     int total_edges = 0;
 
+    /* v0.5.7: 全程持 master 写锁——遍历 net->nodes 做相似度建边，
+     * 与 brainstem 冻结/删除节点/拓扑扩容并发会踩悬垂指针
+     * （实测 RED 修剪 + 扩容 realloc 时 SIGSEGV @ nc_write_node_at）*/
+    pthread_rwlock_wrlock(&master->rwlock);
+
     for (int t = 0; t < master->sub_topo_count; t++) {
         SubTopology* sub = master->sub_topologies[t];
         if (!sub || !sub->net || !sub->node_hash) continue;
@@ -3313,6 +3318,7 @@ int master_rebuild_edges_batch(MasterTopology* master, float threshold,
     }
 
     LOG_INFO("[边重建] 基于特征相似度重建 %d 条边", total_edges);
+    pthread_rwlock_unlock(&master->rwlock);
     return total_edges;
 }
 
@@ -3327,7 +3333,7 @@ void huarong_net_cleanup_retired_batch(MasterTopology* master) {
 }
 
 /* ── 死节点清理：移除零边零激活的孤立节点 ── */
-int master_prune_dead_nodes(MasterTopology* master) {
+int master_prune_dead_nodes_nolock(MasterTopology* master) {
     if (!master) return 0;
     /* 加载保护期：RED 修剪/存盘前不删死节点（v0.6）。
      * 冻结清边后节点 edge_count=0 + act 衰减 <0.01，若无保护会被
@@ -3426,6 +3432,17 @@ int master_prune_dead_nodes(MasterTopology* master) {
             }
         }
     }
+    return removed;
+}
+
+int master_prune_dead_nodes(MasterTopology* master) {
+    if (!master) return 0;
+    /* v0.5.7: 写锁包装——nolock 版供 RED 修剪（已持锁）复用，本版供
+     * 外部调用（存盘路径等）加锁。删除节点/压缩数组/重建哈希与
+     * 冻结序列化/对话线程并发会踩悬垂（实测 SIGSEGV @ nc_write_node_at）。 */
+    pthread_rwlock_wrlock(&master->rwlock);
+    int removed = master_prune_dead_nodes_nolock(master);
+    pthread_rwlock_unlock(&master->rwlock);
     return removed;
 }
 

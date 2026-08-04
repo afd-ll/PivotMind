@@ -144,7 +144,7 @@ static int nc_node_data_size(ReasoningNode* node) {
 }
 
 /** 序列化一个节点到内存缓冲区 */
-static int nc_serialize_node(ReasoningNode* node, uint8_t* buf, int buf_sz) {
+static int nc_serialize_node(HuarongTopologyNet* net, ReasoningNode* node, uint8_t* buf, int buf_sz) {
     if (!node || !buf) return -1;
 
     const char* concept = node->concept ? node->concept : "";
@@ -171,11 +171,19 @@ static int nc_serialize_node(ReasoningNode* node, uint8_t* buf, int buf_sz) {
     }
     p += node->feature_dim * sizeof(float);
 
-    /* connections: 每条边保存 target 的 node_id + weight + bias + confidence */
+    /* connections: 每条边保存 target 的 node_id + weight + bias + confidence
+     * v0.5.7: node_id 回查防御——target 可能是悬垂指针（RED 修剪删节点后
+     * 跨拓扑入边残留），非 NULL 但已 free。回查 net->nodes 确认身份，
+     * 不通过则置 0，宁可丢边不崩溃（实测 SIGSEGV @ 此处）。 */
     for (int i = 0; i < node->edge_count; i++) {
         int target_id = 0;
-        if (node->edges && node->edges[i].target)
-            target_id = node->edges[i].target->node_id;
+        if (node->edges && node->edges[i].target && net) {
+            ReasoningNode* tgt = node->edges[i].target;
+            if (tgt->node_id >= 0 && tgt->node_id < net->node_count &&
+                net->nodes[tgt->node_id] == tgt) {
+                target_id = tgt->node_id;
+            }
+        }
         float w  = (node->edges && i < node->edge_capacity) ? node->edges[i].weight : 0.0f;
         float mb = (node->edges && i < node->edge_capacity) ? node->edges[i].motivational_bias : 0.0f;
         float cf = (node->edges && i < node->edge_capacity) ? node->edges[i].confidence : 0.0f;
@@ -198,7 +206,7 @@ static int nc_write_node_at(NodeCache* nc, HuarongTopologyNet* net, ReasoningNod
     uint8_t* buf = (uint8_t*)malloc(size);
     if (!buf) return -1;
 
-    int written = nc_serialize_node(node, buf, size);
+    int written = nc_serialize_node(net, node, buf, size);
     if (written > 0) {
         fseeko(nc->fp, offset, SEEK_SET);
         size_t _nw2 = fwrite(buf, 1, (size_t)written, nc->fp);
