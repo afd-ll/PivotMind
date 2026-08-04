@@ -179,11 +179,11 @@ void health_monitor_tick(HealthMonitor* hm,
      * （176MB +142/min、389MB +2092/min 删节点）+ 冻结计数累计误判
      * （正常学习累计 5.6 万冻结超 10000 触发 RED）。采样不可靠的
      * 指标全部不参与 RED 判定，只有真实内存占用才算数 */
-    /* v0.5.7: 用系统总占用率判定（物理内存 85%）——进程 RSS 只作参考。
-     * 连续采样确认（3 次都超才升级）：MemAvailable 含 Cached 可回收
-     * 部分，读取瞬间可能瞬时归零（实测 RSS 273MB/698MB 时报 100%），
-     * 单次采样不可信，必须连续稳定超阈值才触发 */
-    if (hm->sys_usage_ratio > hm->rss_red_mb) {
+    /* v0.5.7: RED 双重确认——系统占用 >85% 且 RSS >1500MB 才触发。
+     * 系统占用率含 Shmem/瞬时波动（实测 RSS 699MB 时误报超标，
+     * 实际玄枢+其他进程封顶 ~78%），单看占用率不可靠。
+     * RSS 是玄枢自己的真实内存，到 1.5GB 才接近系统压力。 */
+    if (hm->sys_usage_ratio > hm->rss_red_mb && hm->rss_mb > 1500.0f) {
         hm->red_streak++;
         if (hm->red_streak >= 3) {
             new_level = HM_RED;
