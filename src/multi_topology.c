@@ -3450,6 +3450,11 @@ int master_save_state(MasterTopology* master, const char* file_path) {
         LOG_ERROR("[状态持久化] 无法创建文件: %s", file_path);
         return -1;
     }
+
+    /* v0.5.7: 存盘全程持读锁——防对话/自学习线程并发 realloc
+     * 节点/边数组导致悬垂崩溃（实测：存盘中崩溃 → 状态文件写坏
+     * → 加载只剩 1 节点 → 知识全丢）。读锁允许并发读，阻塞写 */
+    pthread_rwlock_rdlock(&master->rwlock);
     
     // 写文件头: 格式版本 + 特征维度校验
     int fmt_ver = STATE_FORMAT_VERSION;
@@ -3599,6 +3604,7 @@ int master_save_state(MasterTopology* master, const char* file_path) {
     }
     
     fclose(fp);
+    pthread_rwlock_unlock(&master->rwlock);
     LOG_INFO("[状态持久化] 已保存到 %s (节点=%d, 链接=%d)", 
            file_path, saved_nodes, saved_links);
     
