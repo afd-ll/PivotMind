@@ -1347,6 +1347,10 @@ int autonomic_compound_consolidate(MasterTopology* master) {
              * 0.9，但相对强度因高频字 avg 高而不突出）都涌现 */
             int fwd = (w_ab >= w_ba);
             float w_hi = fwd ? w_ab : w_ba;
+            /* v0.5.7: 边界保护——字拓扑删除节点后 node_id 有空洞
+             * （node_id 可 >= 当前 node_count），avg_w[b->node_id] 越界
+             * → SIGSEGV（实测崩溃：autonomic_compound_consolidate:1350） */
+            if (b->node_id < 0 || b->node_id >= vn) continue;
             float avg_hi = fwd ? avg_w[i] : avg_w[b->node_id];
             if (avg_hi <= 0.001f) continue;
             float rel = w_hi / avg_hi;
