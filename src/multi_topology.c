@@ -3528,10 +3528,16 @@ int master_save_state(MasterTopology* master, const char* file_path) {
             if (node->is_cooled && master->node_cache) {
                 /* v0.5.7: 冻结节点——边从 brain_state.dat 导出到主状态
                  * （不落地内存——thaw_all 的内存峰值替代方案）。
-                 * 冻结的边必须进主状态，否则加载孤立→prune 删光 */
-                extern int node_cache_export_frozen_edges(void* nc, MasterTopology* m,
-                    HuarongTopologyNet* net, ReasoningNode* nd, FILE* fpx);
-                node_cache_export_frozen_edges(master->node_cache, master, sub->net, node, fp);
+                 * 冻结的边必须进主状态，否则加载孤立→prune 删光
+                 * v0.5.7: 检查导出返回值——bitmap 缺失/偏移无效时该函数
+                 * 静默返回 0 且不写任何字节，导致文件流缺失边段→加载错位
+                 * （实测：存盘后只剩 1 节点能读回）。失败时必须补写
+                 * conn_count=0 保持格式连续。 */
+                int exported = node_cache_export_frozen_edges(master->node_cache, master, sub->net, node, fp);
+                if (exported < 0) {
+                    int zero_conn = 0;
+                    fwrite(&zero_conn, sizeof(int), 1, fp);
+                }
             } else {
             int safe_conn_count = node->edge_count;
             if (!node->edges) safe_conn_count = 0;

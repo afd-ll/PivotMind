@@ -410,19 +410,23 @@ int node_cache_thaw_all(NodeCache* nc, MasterTopology* master) {
 int node_cache_export_frozen_edges(NodeCache* nc, MasterTopology* master,
                                    HuarongTopologyNet* net, ReasoningNode* node,
                                    FILE* fp) {
-    if (!nc || !node || !node->is_cooled || !fp) return 0;
-    if (!bitmap_test(nc->bitmap, node->node_id)) return 0;
+    /* v0.5.7: 失败返回 -1（不写任何字节），成功返回导出边数（≥0）。
+     * 调用方 master_save_state 靠 <0 识别"文件流缺失"并补写 conn_count=0。
+     * 此前失败返回 0 与"成功但 0 条边"无法区分→存盘文件流错位→
+     * 加载只剩 1 节点（实测 216M 状态读完只剩"我"） */
+    if (!nc || !node || !node->is_cooled || !fp) return -1;
+    if (!bitmap_test(nc->bitmap, node->node_id)) return -1;
 
     pthread_mutex_lock(&nc->lock);
     int64_t offset = nc->offsets[node->node_id];
     int size = nc->sizes[node->node_id];
-    if (offset <= 0 || size <= 0) { pthread_mutex_unlock(&nc->lock); return 0; }
+    if (offset <= 0 || size <= 0) { pthread_mutex_unlock(&nc->lock); return -1; }
     uint8_t* buf = (uint8_t*)malloc((size_t)size);
-    if (!buf) { pthread_mutex_unlock(&nc->lock); return 0; }
+    if (!buf) { pthread_mutex_unlock(&nc->lock); return -1; }
     fseeko(nc->fp, offset, SEEK_SET);
     int nread = (int)fread(buf, 1, (size_t)size, nc->fp);
     pthread_mutex_unlock(&nc->lock);
-    if (nread < 12) { free(buf); return 0; }
+    if (nread < 12) { free(buf); return -1; }
 
     uint8_t* p = buf;
     int concept_len, feat_dim, conn_count;
@@ -430,7 +434,7 @@ int node_cache_export_frozen_edges(NodeCache* nc, MasterTopology* master,
     memcpy(&feat_dim, p, 4);    p += 4;
     memcpy(&conn_count, p, 4);  p += 4;
     if (concept_len < 0 || concept_len > 4096 || conn_count < 0 || conn_count > 65536) {
-        free(buf); return 0;
+        free(buf); return -1;
     }
     p += concept_len + 1;
     p += (size_t)feat_dim * sizeof(float);
