@@ -115,18 +115,27 @@ void health_monitor_tick(HealthMonitor* hm,
     /* v0.5.7: 系统总内存占用率（/proc/meminfo）——RED 判定的
      * 主信号：物理内存占用 85% 就是该 RED，不管进程 RSS */
     {
-        long mem_total = 0, mem_avail = 0;
+        /* v0.5.7: 真实占用（不含可回收 cache）——MemAvailable 含 Cached
+         * 波动，读取瞬间可瞬时归零（实测 RSS 273MB 时报系统占用 100%），
+         * 不能做 RED 信号。真实占用 = MemTotal - MemFree - Buffers - Cached，
+         * 稳定不随 cache 回收波动 */
+        long mem_total = 0, mem_free = 0, mem_buffers = 0, mem_cached = 0;
         FILE* mf = fopen("/proc/meminfo", "r");
         if (mf) {
             char key[64]; long val;
             while (fscanf(mf, "%63s %ld", key, &val) == 2) {
                 if (strcmp(key, "MemTotal:") == 0) mem_total = val;
-                else if (strcmp(key, "MemAvailable:") == 0) { mem_avail = val; break; }
+                else if (strcmp(key, "MemFree:") == 0) mem_free = val;
+                else if (strcmp(key, "Buffers:") == 0) mem_buffers = val;
+                else if (strcmp(key, "Cached:") == 0) { mem_cached = val; break; }
             }
             fclose(mf);
         }
-        if (mem_total > 0)
-            hm->sys_usage_ratio = 1.0f - (float)mem_avail / (float)mem_total;
+        if (mem_total > 0) {
+            long used = mem_total - mem_free - mem_buffers - mem_cached;
+            if (used < 0) used = 0;
+            hm->sys_usage_ratio = (float)used / (float)mem_total;
+        }
     }
     }
 
