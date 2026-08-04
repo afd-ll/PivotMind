@@ -461,6 +461,14 @@ static int gw_system_init(GatewaySystem* gw) {
     fprintf(stderr, "[gateway]   加载持久化状态...\n");
     if (access("pivotmind_state.dat", F_OK) == 0) {
         int loaded = master_load_state(gw->topology, "pivotmind_state.dat");
+        /* v0.5.7: 状态加载后强制初始化 POS 锚点中心——懒初始化只在
+         * emergent_pos_tag 调用时触发，启动后无对话则永不触发 →
+         * 锚点 0 激活 → POS 从未工作（实测"0 硬编码锚点"）。
+         * 加载后词汇拓扑就绪，立即用种子词初始化中心向量 */
+        if (loaded > 0) {
+            int pos_init = cc_init_emergent_pos(gw->prefrontal->controller, "zh");
+            fprintf(stderr, "[gateway] POS 锚点初始化: %d 个\n", pos_init);
+        }
         if (loaded >= 0) fprintf(stderr, "[gateway]   加载拓扑状态: %d 节点\n", loaded);
     }
 
