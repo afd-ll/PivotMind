@@ -122,12 +122,19 @@ void health_monitor_tick(HealthMonitor* hm,
         long mem_total = 0, mem_free = 0, mem_buffers = 0, mem_cached = 0;
         FILE* mf = fopen("/proc/meminfo", "r");
         if (mf) {
-            char key[64]; long val;
-            while (fscanf(mf, "%63s %ld", key, &val) == 2) {
-                if (strcmp(key, "MemTotal:") == 0) mem_total = val;
-                else if (strcmp(key, "MemFree:") == 0) mem_free = val;
-                else if (strcmp(key, "Buffers:") == 0) mem_buffers = val;
-                else if (strcmp(key, "Cached:") == 0) { mem_cached = val; break; }
+            /* v0.5.7: 逐行 fgets 解析——fscanf("%63s %ld") 会被值后的
+             * "kB" 单位坑：第2轮 %s 读到 "kB"、%ld 读 "MemFree:" 失败
+             * → 循环退出 → MemFree/Buffers/Cached 全 0 → 占用率恒 100%！
+             * （实测 RSS 695MB 报 100%，RED 门禁形同虚设） */
+            char line[128];
+            while (fgets(line, sizeof(line), mf)) {
+                char key[64]; long val;
+                if (sscanf(line, "%63s %ld", key, &val) == 2) {
+                    if (strcmp(key, "MemTotal:") == 0) mem_total = val;
+                    else if (strcmp(key, "MemFree:") == 0) mem_free = val;
+                    else if (strcmp(key, "Buffers:") == 0) mem_buffers = val;
+                    else if (strcmp(key, "Cached:") == 0) { mem_cached = val; break; }
+                }
             }
             fclose(mf);
         }
