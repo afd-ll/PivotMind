@@ -605,6 +605,19 @@ static void* brainstem_loop(void* arg) {
                 int saved = master_save_state(bs->master, "pivotmind_state.dat");
                 if (saved > 0 && bs->verbose)
                     LOG_INFO("[存盘] tick=%d 已保存 %d 节点", bs->tick_count, saved);
+
+                /* v0.5.7: 存盘同时保存 POS 锚点——此前 emergent_pos_save
+                 * 只在每 5000 次分类触发，从未落盘 → 重启后 POS 从种子
+                 * 重新长 → 配合周期崩溃重启，POS 永远不成熟（对话组装
+                 * 弱的原因之一） */
+                {
+                    CognitiveController* cc = (CognitiveController*)
+                        thalamus_get_utility(th, THAL_UTIL_COGNITIVE_CTRL);
+                    if (cc && cc->emergent_pos) {
+                        if (emergent_pos_save(cc->emergent_pos, NULL) == 0 && bs->verbose)
+                            LOG_INFO("[存盘] POS 锚点已保存 (emergent_pos.bin)");
+                    }
+                }
             } else if (bs->verbose) {
                 LOG_INFO("[存盘] tick=%d 跳过 (总节点=%d < 门卫阈值 %d)",
                          bs->tick_count, master_count_total_nodes(bs->master),
