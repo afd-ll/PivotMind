@@ -23,6 +23,7 @@
 #include "topology_growth.h"
 #include "broca.h"
 #include "hypothalamus.h"
+#include "emergent_pos.h"
 #include "visual_cortex.h"    /* v0.5 视觉皮层 — 多模态感知 */
 #include "semantic_growth.h"  /* 语义拓扑自动生长 */
 #include "error.h"
