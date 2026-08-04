@@ -200,6 +200,9 @@ static void ws_add_subgoal(PFEReasonWorkspace* ws, const char* question,
 }
 
 /* 依据关键词从问题中提取主体词汇 */
+static int pfe_semantic_field_answer(PrefrontalExecutive* pfe, const char* subject,
+                                  char* out, int out_sz);
+
 static void extract_subject(const char* question, char* out, int max_len) {
     if (!question || !out) return;
     out[0] = '\0';
@@ -675,6 +678,28 @@ int pfe_solve_subgoal(PrefrontalExecutive* pfe, int goal_index) {
 
             /* 因果搜索无结果 → 回退到扩散引擎 */
             if (results) causal_search_results_free(results, causal_count);
+        }
+    }
+
+    /* ── v0.5.7: 语义场检索优先 ──
+     * 子问题提取主语（"X的操作步骤"→X），查概念拓扑语义场，
+     * 有结果直接用——不扩散整句（整句含模板词会出垃圾） */
+    {
+        char subj[128] = {0};
+        extract_subject(g->question, subj, sizeof(subj));
+        if (subj[0]) {
+            char sf_answer[PFE_MAX_ANSWER_TEXT];
+            sf_answer[0] = '\0';
+            int sf_len = pfe_semantic_field_answer(pfe, subj, sf_answer,
+                                                   sizeof(sf_answer));
+            if (sf_len > 0) {
+                snprintf(g->answer_text, sizeof(g->answer_text), "%s", sf_answer);
+                g->answer_score = 0.55f;
+                g->status = PFE_GOAL_SOLVED;
+                g->answer_len = 1;
+                LOG_INFO("[PFE] 语义场检索求解子目标%d: %s", goal_index, sf_answer);
+                return 0;
+            }
         }
     }
 
@@ -1624,4 +1649,48 @@ int pfe_resume_reason(PrefrontalExecutive* pfe,
 
     pthread_mutex_unlock(&pfe->lock);
     return 0;
+}
+
+/* v0.5.7: 语义场检索——子问题主语在概念拓扑的语义场（词-词邻居）
+ * 取前 3 个实义词作答案（"焦虑"→ 紧张/担心/失眠 类语义场词）。
+ * PFE 子目标升级第一环：不扩散整句（含"操作/步骤"模板词会出垃圾），
+ * 只检索主语语义场——语义场词就是答案的实质内容 */
+static int pfe_semantic_field_answer(PrefrontalExecutive* pfe, const char* subject,
+                                     char* out, int out_sz) {
+    if (!pfe || !subject || !subject[0] || !out || out_sz < 16) return 0;
+
+    SubTopology* concept = NULL;
+    for (int t = 0; t < pfe->master->sub_topo_count; t++) {
+        SubTopology* sub = pfe->master->sub_topologies[t];
+        if (sub && sub->type == TOPO_CONCEPT) { concept = sub; break; }
+    }
+    if (!concept || !concept->net) return 0;
+
+    int cnid = huarong_net_find_concept(concept->net, subject);
+    if (cnid < 0 || cnid >= concept->net->node_count) return 0;
+    ReasoningNode* wnode = concept->net->nodes[cnid];
+    if (!wnode || !wnode->edges || wnode->edge_count == 0) return 0;
+
+    /* 子问题模板词/虚词过滤（与 diffusion 端一致） */
+    static const char* TPL[] = {"操作", "步骤", "方法", "前置", "条件", "资源",
+        "概念", "相关", "小标", "起来", "需要", "影响", "方面", "什么",
+        "怎么", "如何", "为什么", "是", "的", "了", "在", "有", "和", "吗"};
+
+    int pos = 0, cnt = 0;
+    for (int e = 0; e < wnode->edge_count && cnt < 3 && pos < out_sz - 10; e++) {
+        ReasoningNode* nb = wnode->edges[e].target;
+        if (!nb || !nb->concept || !nb->concept[0]) continue;
+        if (nb->node_id == cnid) continue;
+        if (wnode->edges[e].weight < 0.3f) continue;  /* 弱关联跳过 */
+        int skip = 0;
+        for (int ti = 0; ti < (int)(sizeof(TPL)/sizeof(TPL[0])); ti++)
+            if (strcmp(nb->concept, TPL[ti]) == 0) { skip = 1; break; }
+        if (skip) continue;
+        /* 中文单字不输出 */
+        if ((unsigned char)nb->concept[0] >= 0x80 && strlen(nb->concept) == 3) continue;
+        pos += snprintf(out + pos, (size_t)(out_sz - pos), "%s", nb->concept);
+        cnt++;
+        if (cnt < 3) pos += snprintf(out + pos, (size_t)(out_sz - pos), " ");
+    }
+    return pos;
 }
