@@ -562,6 +562,8 @@ static int gw_system_init(GatewaySystem* gw) {
      * 收到 NULL 空转，冻结机制实际未生效——假日志） */
     if (gw->brain_cache) {
         thalamus_register_utility(gw->thalamus, THAL_UTIL_NODE_CACHE, gw->brain_cache);
+        /* v0.5.7: 注入 master——存盘时导出冻结边用 */
+        gw->topology->node_cache = gw->brain_cache;
     }
     brainstem_set_verbose(gw->brainstem, 1);  /* 开启脑区日志 */
 

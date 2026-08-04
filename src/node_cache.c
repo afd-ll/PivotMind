@@ -394,3 +394,66 @@ int node_cache_thaw_all(NodeCache* nc, MasterTopology* master) {
     }
     return thawed;
 }
+
+/* v0.5.7: 存盘导出——冻结节点的边从 brain_state.dat 读回，
+ * 直接写入主状态文件（不落地内存——thaw_all 的内存峰值替代方案）。
+ * 冻结数据块: hdr(12B) + concept + features + edges(16B each)
+ * 主状态边格式: tgt_len(4) + tgt_concept + w(4) + mb(4) + cf(4) */
+int node_cache_export_frozen_edges(NodeCache* nc, MasterTopology* master,
+                                   HuarongTopologyNet* net, ReasoningNode* node,
+                                   FILE* fp) {
+    if (!nc || !node || !node->is_cooled || !fp) return 0;
+    if (!bitmap_test(nc->bitmap, node->node_id)) return 0;
+
+    pthread_mutex_lock(&nc->lock);
+    int64_t offset = nc->offsets[node->node_id];
+    int size = nc->sizes[node->node_id];
+    if (offset <= 0 || size <= 0) { pthread_mutex_unlock(&nc->lock); return 0; }
+    uint8_t* buf = (uint8_t*)malloc((size_t)size);
+    if (!buf) { pthread_mutex_unlock(&nc->lock); return 0; }
+    fseeko(nc->fp, offset, SEEK_SET);
+    int nread = (int)fread(buf, 1, (size_t)size, nc->fp);
+    pthread_mutex_unlock(&nc->lock);
+    if (nread < 12) { free(buf); return 0; }
+
+    uint8_t* p = buf;
+    int concept_len, feat_dim, conn_count;
+    memcpy(&concept_len, p, 4); p += 4;
+    memcpy(&feat_dim, p, 4);    p += 4;
+    memcpy(&conn_count, p, 4);  p += 4;
+    if (concept_len < 0 || concept_len > 4096 || conn_count < 0 || conn_count > 65536) {
+        free(buf); return 0;
+    }
+    p += concept_len + 1;
+    p += (size_t)feat_dim * sizeof(float);
+
+    /* 主状态格式：conn_count(4) + 边(tgt_len+concept+3f) */
+    fwrite(&conn_count, sizeof(int), 1, fp);
+    int written = 0;
+    for (int i = 0; i < conn_count; i++) {
+        int target_id; float w, mb, cf;
+        memcpy(&target_id, p, 4);  p += 4;
+        memcpy(&w, p, 4);          p += 4;
+        memcpy(&mb, p, 4);         p += 4;
+        memcpy(&cf, p, 4);         p += 4;
+        /* 找目标节点 concept（全图按 node_id 查） */
+        const char* tgt_concept = NULL;
+        for (int t = 0; t < master->sub_topo_count && !tgt_concept; t++) {
+            SubTopology* st = master->sub_topologies[t];
+            if (!st || !st->net || target_id < 0 || target_id >= st->net->node_count) continue;
+            ReasoningNode* tn = st->net->nodes[target_id];
+            if (tn && tn->concept) tgt_concept = tn->concept;
+        }
+        if (tgt_concept) {
+            int tlen = (int)strlen(tgt_concept) + 1;
+            fwrite(&tlen, sizeof(int), 1, fp);
+            fwrite(tgt_concept, 1, (size_t)tlen, fp);
+            fwrite(&w, sizeof(float), 1, fp);
+            fwrite(&mb, sizeof(float), 1, fp);
+            fwrite(&cf, sizeof(float), 1, fp);
+            written++;
+        }
+    }
+    free(buf);
+    return written;
+}

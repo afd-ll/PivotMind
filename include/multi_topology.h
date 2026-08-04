@@ -138,6 +138,7 @@ typedef struct {
 typedef struct MasterTopology {
     // 字符串池（共享）
     StringPool* string_pool;
+    void* node_cache;   /* v0.5.7: node_cache 指针（存盘导出冻结边用，gateway 注入） */
 
     // 子拓扑管理
     SubTopology** sub_topologies;

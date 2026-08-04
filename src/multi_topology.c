@@ -3503,6 +3503,14 @@ int master_save_state(MasterTopology* master, const char* file_path) {
             }
             
             // [v3] 写连接数 + 连接数据 (target_concept_len, target_concept, weight, bias, confidence)
+            if (node->is_cooled && master->node_cache) {
+                /* v0.5.7: 冻结节点——边从 brain_state.dat 导出到主状态
+                 * （不落地内存——thaw_all 的内存峰值替代方案）。
+                 * 冻结的边必须进主状态，否则加载孤立→prune 删光 */
+                extern int node_cache_export_frozen_edges(void* nc, MasterTopology* m,
+                    HuarongTopologyNet* net, ReasoningNode* nd, FILE* fpx);
+                node_cache_export_frozen_edges(master->node_cache, master, sub->net, node, fp);
+            } else {
             int safe_conn_count = node->edge_count;
             if (!node->edges) safe_conn_count = 0;
             fwrite(&safe_conn_count, sizeof(int), 1, fp);
@@ -3527,6 +3535,7 @@ int master_save_state(MasterTopology* master, const char* file_path) {
                 fwrite(&w, sizeof(float), 1, fp);
                 fwrite(&b, sizeof(float), 1, fp);
                 fwrite(&c2, sizeof(float), 1, fp);
+            }
             }
             
             saved_nodes++;
@@ -3810,6 +3819,8 @@ int master_load_state(MasterTopology* master, const char* file_path) {
         const uint8_t* pass1_end = p;
         p = node_section_start;
         int restored_edges = 0;
+    int p2_fail_notfound = 0;   /* 目标节点哈希查找失败 */
+    int p2_fail_self = 0;       /* 自环 */
 
         while (p < pass1_end) {
             int topo_type;
@@ -3850,11 +3861,11 @@ int master_load_state(MasterTopology* master, const char* file_path) {
                 SKIP(NODE_FEATURE_DIM * (int)sizeof(float));
             }
 
+            // 找到拓扑和节点（用概念名哈希查找，不用文件 node_id）
             int conn_count;
             if (p + (int)sizeof(int) > end) break;
             READ(&conn_count, sizeof(int));
 
-            // 找到拓扑和节点（用概念名哈希查找，不用文件 node_id）
             SubTopology* p2_topo = NULL;
             for (int t = 0; t < master->sub_topo_count; t++) {
                 SubTopology* sub = master->sub_topologies[t];
@@ -3883,7 +3894,9 @@ int master_load_state(MasterTopology* master, const char* file_path) {
                         if (node && p2_topo->node_hash) {
                             ReasoningNode* tgt = node_hash_find(
                                 p2_topo->node_hash, tgt_concept);
-                            if (tgt && tgt != node) {
+                            if (!tgt) { p2_fail_notfound++; }
+                            else if (tgt == node) { p2_fail_self++; }
+                            else {
                                 /* 边权保底：老状态衰减过的低权边恢复为 0.2，
                                  * 防遗忘机制（cleanup ≤0.15 清边）把加载的
                                  * 知识当"遗忘知识"清光（v0.6 实测 3 万节点
@@ -3923,7 +3936,7 @@ int master_load_state(MasterTopology* master, const char* file_path) {
         }
 
         p = pass1_end;  // 恢复到跨拓扑段前
-        fprintf(stderr, "[状态加载] Pass 2 完成: 恢复 %d 条边\n", restored_edges);
+        fprintf(stderr, "[状态加载] Pass 2 完成: 恢复 %d 条边 (目标缺失 %d, 自环 %d)\n", restored_edges, p2_fail_notfound, p2_fail_self);
     }
 
     /* === 跨拓扑连接加载 === */
