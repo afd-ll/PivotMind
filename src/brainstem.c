@@ -598,6 +598,16 @@ static void* brainstem_loop(void* arg) {
         /* 空启动保护：总节点数 < SAVE_MIN_TOTAL_NODES (50) 时跳过，防止覆盖有效存盘 */
         if (bs->tick_count % 60 == 0) {
             if (master_count_total_nodes(bs->master) >= SAVE_MIN_TOTAL_NODES) {
+                /* v0.5.7: 存盘前批量解冻——冻结的边必须回主状态，
+                 * 否则存盘丢边 → 加载孤立 → prune 删光（vocab 3万→52） */
+                {
+                    NodeCache* nc = (NodeCache*)thalamus_get_utility(th, THAL_UTIL_NODE_CACHE);
+                    if (nc) {
+                        int t = node_cache_thaw_all(nc, bs->master);
+                        if (t > 0 && bs->verbose)
+                            LOG_INFO("[存盘] 解冻 %d 节点（lazy memory 回主状态）", t);
+                    }
+                }
                 /* 先清理孤立死节点（并发/learn可能产生重复零边节点） */
                 master_prune_dead_nodes(bs->master);
                 int saved = master_save_state(bs->master, "pivotmind_state.dat");

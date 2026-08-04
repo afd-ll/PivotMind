@@ -4,6 +4,7 @@
  */
 
 #include "node_cache.h"
+#include "multi_topology.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -372,4 +373,24 @@ int node_cache_thaw(NodeCache* nc, HuarongTopologyNet* net, ReasoningNode* node)
     node->is_cooled = 0;
     __sync_fetch_and_add(&nc->total_thaws, 1);
     return 0;
+}
+
+/* v0.5.7: 批量解冻所有冻结节点（存盘前调用）。
+ * 此前冻结（lazy memory）的边存 brain_state.dat，但主状态
+ * 存盘/加载不回读 → 冻结 = 永久丢边 → 运行越久边越少 →
+ * 存盘边少 → 加载孤立 → prune 删光（vocab 3万→52 实测）。
+ * 存盘前全部 thaw 回内存，主状态包含所有边，闭环完整。 */
+int node_cache_thaw_all(NodeCache* nc, MasterTopology* master) {
+    if (!nc || !master) return 0;
+    int thawed = 0;
+    for (int t = 0; t < master->sub_topo_count; t++) {
+        SubTopology* sub = master->sub_topologies[t];
+        if (!sub || !sub->net) continue;
+        for (int n = 0; n < sub->net->node_count; n++) {
+            ReasoningNode* node = sub->net->nodes[n];
+            if (!node || !node->is_cooled) continue;
+            if (node_cache_thaw(nc, sub->net, node) == 0) thawed++;
+        }
+    }
+    return thawed;
 }

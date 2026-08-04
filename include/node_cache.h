@@ -21,6 +21,7 @@
 #define NODE_CACHE_H
 
 #include "huarong_topology.h"
+typedef struct MasterTopology MasterTopology;
 #include <stdint.h>
 #include <stdio.h>
 #include <pthread.h>
@@ -83,6 +84,7 @@ int node_cache_freeze(NodeCache* nc, HuarongTopologyNet* net, ReasoningNode* nod
  * @return 0 成功, -1 失败
  */
 int node_cache_thaw(NodeCache* nc, HuarongTopologyNet* net, ReasoningNode* node);
+int node_cache_thaw_all(NodeCache* nc, MasterTopology* master);
 
 /**
  * 查询节点是否已冷却
