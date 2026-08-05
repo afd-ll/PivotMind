@@ -3339,7 +3339,66 @@ int master_prune_dead_nodes_nolock(MasterTopology* master) {
      * 冻结清边后节点 edge_count=0 + act 衰减 <0.01，若无保护会被
      * RED 修剪当死节点连锁删光（实测 3 万知识 4 分钟清光）。 */
     if (master_load_protected(master)) return 0;
+
+    /* v0.5.8 修复（08-05 事故，83281→7169 两次）：跨拓扑引用是节点活着的证据。
+     * 实测 98% 词节点的边都在 cross_links 里（node->edges 为空），激活值又天然
+     * 趋零（稀疏激活，均值 <0.01），旧判定把它们全当死节点误杀 91%——每次重启
+     * 30 分钟保护期一过，第一次存盘前的 prune 准时清空（定时炸弹）。
+     * 修复①：有 cross_links 引用的节点永不判死。 */
+    size_t _prune_topo_count = (size_t)master->sub_topo_count;
+    unsigned char** has_ref = (unsigned char**)calloc(_prune_topo_count, sizeof(unsigned char*));
+    if (!has_ref) return 0;
+    for (int t = 0; t < master->sub_topo_count; t++) {
+        SubTopology* sub = master->sub_topologies[t];
+        if (sub && sub->net && sub->net->max_nodes > 0) {
+            has_ref[t] = (unsigned char*)calloc(sub->net->max_nodes, 1);
+        }
+    }
+    for (int i = 0; i < master->cross_link_count; i++) {
+        CrossTopologyLink* l = master->cross_links[i];
+        if (!l) continue;
+        if (l->from_topo_id >= 0 && l->from_topo_id < master->sub_topo_count &&
+            has_ref[l->from_topo_id] && l->from_node_id >= 0) {
+            SubTopology* fs = master->sub_topologies[l->from_topo_id];
+            if (fs && fs->net && (size_t)l->from_node_id < fs->net->max_nodes)
+                has_ref[l->from_topo_id][l->from_node_id] = 1;
+        }
+        if (l->to_topo_id >= 0 && l->to_topo_id < master->sub_topo_count &&
+            has_ref[l->to_topo_id] && l->to_node_id >= 0) {
+            SubTopology* ts = master->sub_topologies[l->to_topo_id];
+            if (ts && ts->net && (size_t)l->to_node_id < ts->net->max_nodes)
+                has_ref[l->to_topo_id][l->to_node_id] = 1;
+        }
+    }
+
     int removed = 0;
+    /* 修复②：护栏——先预检候选死节点数，超过总数 50% 直接中止（防一切同类误判） */
+    long _total_dead = 0;
+    for (int t = 0; t < master->sub_topo_count; t++) {
+        SubTopology* sub = master->sub_topologies[t];
+        if (!sub || !sub->net) continue;
+        int nc = sub->net->node_count;
+        if (nc == 0) continue;
+        for (int n = 0; n < nc; n++) {
+            ReasoningNode* node = sub->net->nodes[n];
+            if (!node || node->is_cooled) continue;
+            if (node->edge_count == 0 && node->activation < 0.01f) {
+                if (has_ref[t] && node->node_id >= 0 &&
+                    (size_t)node->node_id < sub->net->max_nodes &&
+                    has_ref[t][node->node_id]) continue;
+                _total_dead++;
+            }
+        }
+    }
+    long _total_nodes = master_count_total_nodes(master);
+    if (_total_nodes > 0 && _total_dead > _total_nodes / 2) {
+        fprintf(stderr, "[prune] 中止: 死节点候选 %ld/%ld 超 50%%，判定疑似误判 (v0.5.8 护栏)\n",
+                _total_dead, _total_nodes);
+        for (int t = 0; t < master->sub_topo_count; t++) free(has_ref[t]);
+        free(has_ref);
+        return 0;
+    }
+
     for (int t = 0; t < master->sub_topo_count; t++) {
         SubTopology* sub = master->sub_topologies[t];
         if (!sub || !sub->net) continue;
@@ -3355,6 +3414,10 @@ int master_prune_dead_nodes_nolock(MasterTopology* master) {
             /* 跳过冻结节点（is_cooled）：冻结 = 缓存释放，修剪不删知识 */
             if (node->is_cooled) continue;
             if (node->edge_count == 0 && node->activation < 0.01f) {
+                /* v0.5.8: 有跨拓扑引用 = 活着（cross_links 是它的命脉），不判死 */
+                if (has_ref[t] && node->node_id >= 0 &&
+                    (size_t)node->node_id < sub->net->max_nodes &&
+                    has_ref[t][node->node_id]) continue;
                 dead_ids[dead_count++] = node->node_id;
             }
         }
@@ -3432,6 +3495,8 @@ int master_prune_dead_nodes_nolock(MasterTopology* master) {
             }
         }
     }
+    for (int t = 0; t < master->sub_topo_count; t++) free(has_ref[t]);
+    free(has_ref);
     return removed;
 }
 
