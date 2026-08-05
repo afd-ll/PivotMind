@@ -102,6 +102,24 @@ int semantic_grow_from_topology(MasterTopology* master, int topo_type) {
         for (int k = 0; k < actual; k++) pos_by_node[sample_ids[k]] = k;
     }
 
+    /* v0.5.7: 重复建簇修复——预扫描跨拓扑链接，标记"已有语义场"的
+     * 源节点。此前每轮采样滚动，已成簇成员下轮又当 seed 重新建场
+     * （实测 sem_你 49 次/sem_delightful 32 次 → 节点虚胖+检索稀释）。
+     * 建簇前检查：seed/成员若已归属某个语义场（有 cross-link 指向
+     * TOPO_SEMANTIC），则跳过。 */
+    unsigned char* has_sem_link = (unsigned char*)calloc((size_t)vnet->max_nodes, 1);
+    if (has_sem_link && master->cross_links && master->cross_link_count > 0) {
+        for (int li = 0; li < master->cross_link_count; li++) {
+            CrossTopologyLink* l = master->cross_links[li];
+            if (!l) continue;
+            if (l->to_topo_id == TOPO_SEMANTIC &&
+                l->from_topo_id == topo_type &&
+                l->from_node_id >= 0 && l->from_node_id < vnet->max_nodes) {
+                has_sem_link[l->from_node_id] = 1;
+            }
+        }
+    }
+
     int created = 0;
     for (int i = 0; i < actual && created < SG_MAX_NEW_NODES; i++) {
         if (assigned[i]) continue;
@@ -110,6 +128,8 @@ int semantic_grow_from_topology(MasterTopology* master, int topo_type) {
         if (!seed) continue;
         if (!seed->features) lazy_alloc_node_features(seed);
         if (!seed->features) continue;
+        /* 已有语义场的 seed 跳过（重复建簇修复） */
+        if (has_sem_link && has_sem_link[sample_ids[i]]) continue;
         float* sf = seed->features;
         float na = norms[i];
 
@@ -123,6 +143,8 @@ int semantic_grow_from_topology(MasterTopology* master, int topo_type) {
             if (!cand) continue;
             if (!cand->features) lazy_alloc_node_features(cand);
             if (!cand->features) continue;
+            /* 已是其他语义场成员的候选跳过（重复建簇修复） */
+            if (has_sem_link && has_sem_link[sample_ids[j]]) continue;
 
             float nb = norms[j];
             if (na <= 0.0f || nb <= 0.0f) continue;
@@ -183,6 +205,7 @@ int semantic_grow_from_topology(MasterTopology* master, int topo_type) {
     free(assigned);
     free(norms);
     free(pos_by_node);
+    free(has_sem_link);
     return created;
 }
 
