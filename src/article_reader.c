@@ -18,6 +18,7 @@
 #include "common.h"
 #include "chinese.h"
 #include "thalamus.h"
+#include "emergent_pos.h"
 #include "error.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -127,6 +128,9 @@ struct ArticleReader {
 
     // 丘脑信号总线（可选，NULL = 不发送反馈）
     Thalamus*   thalamus;
+
+    // v0.5.8: 涌现词类系统（POS 池）——喂料路径喂语法拓扑
+    EmergentPOS* emergent_pos;
 };
 
 // ==================== 哈希工具 ====================
@@ -754,6 +758,30 @@ int _article_flush_locked(ArticleReader* ar, SubTopology* topo) {
 
         }
 
+        // === v0.5.8: 新词 → POS 池（喂料路径喂语法拓扑）===
+        // 此前 POS 池只吃生成/对话路径（Broca/cognitive_controller），
+        // feed/learn 完全绕开 → 玄枢不会说话 → POS 池空 → 聚类永不触发
+        // （额外词类 08-04 至今为 0）。此处查询词性让未分类新词进池，
+        // 语料积累 → 池满 → 聚类涌现 → 语法拓扑获得原料。
+        if (new_words > 0 && ar->emergent_pos) {
+            HuarongTopologyNet* vnet = vocab->net;
+            int pos_fed = 0;
+            for (int wi = 0; wi < ar->word_count; wi++) {
+                WordEntry* we = &ar->words[wi];
+                if (!we->text[0]) continue;
+                if (huarong_net_find_concept(vnet, we->text) < 0) continue;
+                SoftClassResult soft;
+                memset(&soft, 0, sizeof(soft));
+                emergent_pos_tag_soft(ar->emergent_pos,
+                                      ar->master, we->text, &soft);
+                pos_fed++;
+            }
+            if (ar->cfg.verbose && pos_fed > 0) {
+                LOG_INFO("[文章阅读] POS 池喂养: %d 个新词查询词性", pos_fed);
+            }
+        }
+        // === POS 池结束 ===
+
         // === 新词 → 模板反馈：为新词建立与已有模板的跨拓扑连接 ===
         if (new_words > 0 && ar->master && ar->master->use_template_voting) {
             HuarongTopologyNet* vnet = vocab->net;
@@ -819,6 +847,10 @@ void article_set_progress_ptr(ArticleReader* ar,
 
 void article_reader_set_thalamus(ArticleReader* ar, Thalamus* th) {
     if (ar) ar->thalamus = th;
+}
+
+void article_reader_set_emergent_pos(ArticleReader* ar, EmergentPOS* ep) {
+    if (ar) ar->emergent_pos = ep;
 }
 
 void article_get_stats(ArticleReader* ar,

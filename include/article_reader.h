@@ -28,6 +28,8 @@
 
 /* Forward declaration for optional thalamus signal bus binding */
 typedef struct Thalamus Thalamus;
+/* v0.5.8: 涌现词类系统（文件级前向声明——参数列表内声明不可见） */
+struct EmergentPOS;
 
 // ==================== 配置 ====================
 
@@ -107,5 +109,7 @@ void article_get_stats(ArticleReader* ar,
  * 使调度系统知悉文章阅读的工作量
  */
 void article_reader_set_thalamus(ArticleReader* ar, Thalamus* th);
+/* v0.5.8: 绑定涌现词类系统——喂料路径把未分类新词送入 POS 池 */
+void article_reader_set_emergent_pos(ArticleReader* ar, struct EmergentPOS* ep);
 
 #endif // ARTICLE_READER_H

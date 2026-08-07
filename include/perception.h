@@ -26,6 +26,7 @@
 /* 前向声明 */
 struct ArticleReader;
 struct ReasoningNode;
+struct EmergentPOS;
 
 /* v0.5.8: 异步搜索队列容量——主循环只入队，工作线程串行执行网络搜索 */
 #define PERCEPT_QUEUE_CAP 16
@@ -181,6 +182,19 @@ int perception_consolidate_node(Perception* p, int node_id);
  * 获取统计信息
  */
 void perception_stats(Perception* p, long* searches, long* learned, long* new_conns);
+
+/**
+ * v0.5.8: 入队式搜索——立即返回，网络搜索由感知 worker 串行执行。
+ * 供主循环/自学线程调用，绝不阻塞调用方。
+ * @return 1=已入队, 0=队列满或参数无效
+ */
+int perception_enqueue_search(Perception* p, const char* concept);
+
+/**
+ * v0.5.8: 绑定涌现词类系统——喂料路径（article_reader）把未分类新词送入 POS 池
+ * @param ep 涌现词类系统指针（可 NULL）
+ */
+void perception_set_emergent_pos(Perception* p, struct EmergentPOS* ep);
 
 /**
  * 提交对话缺口查询列表（替代逐个调 perception_learn_concept）

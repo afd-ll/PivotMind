@@ -473,6 +473,15 @@ static int gw_system_init(GatewaySystem* gw) {
         if (loaded >= 0) fprintf(stderr, "[gateway]   加载拓扑状态: %d 节点\n", loaded);
     }
 
+    /* v0.5.8: 把涌现词类系统挂给感知皮层 → 文章阅读器。
+     * 打通 feed→POS 池管道：喂料路径把未分类新词送入 POS 池，
+     * 池满触发聚类 → 额外词类涌现 → 语法拓扑获得原料。 */
+    if (gw->perception && gw->prefrontal && gw->prefrontal->controller) {
+        perception_set_emergent_pos(gw->perception,
+                                    gw->prefrontal->controller->emergent_pos);
+        fprintf(stderr, "[gateway]   POS 池管道已挂载 → 感知皮层\n");
+    }
+
     int feat_loaded = load_features(gw->topology, "features.bin");
     if (feat_loaded > 0) fprintf(stderr, "[gateway]   加载特征向量: %d 节点\n", feat_loaded);
     else { int initted = init_random_features(gw->topology); fprintf(stderr, "[gateway]   初始化特征向量: %d 节点\n", initted); }
