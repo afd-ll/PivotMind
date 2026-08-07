@@ -53,6 +53,7 @@
 #define AR_MEM_SHORT_WINDOW      50000   // 短期清理窗口（记忆 tick 数）
 #define AR_MEM_TABLE_MAX         2000000 // 表上限（满则清理短期+不活跃）
 #define AR_MEM_INIT_CONSOLIDATED 0.05f   // 新条目起步巩固度（冷启动安全）
+#define AR_MEM_CLEAN_COOLDOWN    10000   // 表满清理冷却（记忆 tick）——防每次 find 都触发
 
 // ==================== 哈希表条目 ====================
 
@@ -269,9 +270,12 @@ static PairEntry* _ar_find_pair(ArticleReader* ar, const char* a, const char* b)
         _ar_expand_pair_hash(ar);
 
     /* v0.5.9: 表达上限（扩容被 2M 槽封顶）→ 清理短期不活跃对。
-     * pair_clean_tick 防每次 find 都触发全表扫描（低频：满才扫一次） */
+     * ⚠️ 冷却防抖：pair_clean_tick + COOLDOWN < mem_tick 才清——
+     * 早期实现 pair_clean_tick < mem_tick 恒真（mem_tick 每行 +1），
+     * 表满后每次 find 都触发 88MB calloc + 2M rehash（锁内！）
+     * → 学习线程全部卡死（08-07 14:xx 实锤，STUCK 53 分钟） */
     if (ar->pair_count >= AR_MEM_TABLE_MAX &&
-        ar->pair_clean_tick < ar->mem_tick) {
+        ar->pair_clean_tick + AR_MEM_CLEAN_COOLDOWN < ar->mem_tick) {
         _ar_cleanup_stale_pairs(ar);
         ar->pair_clean_tick = ar->mem_tick;
     }
