@@ -103,25 +103,30 @@ int path_freq_table_record(PathFrequencyTable* table,
         }
     }
 
-    /* 表满 — count 优先淘汰：驱逐 count 最小的条目（保留高频稳定模式）。
-       同 count 时选 last_seen 最旧的作为 tiebreaker。 */
-    int evict_idx     = -1;
-    int evict_count   = INT_MAX;
-    int evict_age     = -1;
+    /* v0.5.9: 巩固度淘汰——低频 且 长期不活跃 才驱逐。
+     * 旧逻辑 count 优先：刚学的新路径（count=1 但 last_seen 新鲜）
+     * 在表满时可能被立即淘汰（冷启动误杀——'你好'问题同款）。
+     * 新逻辑：不活跃（超过窗口没再见）优先淘汰，同活跃度下 count 低优先。 */
+    const int PATH_STALE_ROUNDS = 1000;  /* 不活跃窗口（round 数） */
+    int evict_idx   = -1;
+    int evict_score = INT_MAX;
 
     for (int probe = 0; probe < cap; probe++) {
         int cur = (idx + probe) % cap;
         PathTripletRecord* rec = &table->buckets[cur];
         int age = table->round - rec->last_seen;
-        if (rec->count < evict_count ||
-            (rec->count == evict_count && age > evict_age)) {
-            evict_count = rec->count;
-            evict_age   = age;
+        int stale = (age > PATH_STALE_ROUNDS) ? 1 : 0;
+        /* 不活跃优先（权重 100 万），同活跃度下 count 低优先 */
+        int score = stale * 1000000 + rec->count;
+        if (score < evict_score) {
+            evict_score = score;
             evict_idx   = cur;
         }
     }
 
-    if (evict_idx >= 0) {
+    /* 仅当存在「不活跃」条目时才淘汰——全部活跃（冷启动/表满且全新鲜）
+     * 时不驱逐任何条目，新路径暂时进不来（等旧路径变冷），不误杀刚学的 */
+    if (evict_idx >= 0 && evict_score < 1000000) {
         PathTripletRecord* rec = &table->buckets[evict_idx];
         rec->node_a    = a;
         rec->node_b    = b;
@@ -137,7 +142,7 @@ int path_freq_table_record(PathFrequencyTable* table,
     }
 
     pthread_mutex_unlock(&table->mutex);
-    return -1;  /* should not reach */
+    return 0;  /* 表满且全活跃——不淘汰，新路径暂缓（可接受） */
 }
 
 /* ================================================================

@@ -88,8 +88,8 @@ typedef struct EmergentPOS {
     int       classify_count;               /* 累计分类次数（用于学习率衰减） */
 
     /* 新词类涌现池 */
-    int       unclassified_pool_nodes[256]; /* 未分类节点 ID 池 */
-    float     unclassified_feats[256][PM_NODE_FEATURE_DIM];
+    int       unclassified_pool_nodes[64]; /* 未分类节点 ID 池 (v0.5.9: 256→64, 聚类快16倍) */
+    float     unclassified_feats[64][PM_NODE_FEATURE_DIM];
     int       unclassified_count;
 
     /* 涌现出的新词类（超出 POS_COUNT 的词类） */

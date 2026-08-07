@@ -43,20 +43,37 @@
 #define AR_MAX_WORDS       32
 #define AR_WORD_MAX_LEN    32   // 最长词（字符数）
 
+// ==================== v0.5.9 记忆化常量 ====================
+// 字符/字符对统计 = 记忆痕迹：权重(计数) + 巩固度 + 生命周期层级
+// （用户拍板：'你好'几天不露面不能删——遗忘≠删除，只降权）
+#define AR_MEM_CONSOLIDATE_RATE  0.02f   // 每次出现巩固增量（Hebbian 渐近）
+#define AR_MEM_PROMOTE_THRESHOLD 0.5f    // 巩固度 ≥ 此值 → 晋升长期（tier=1）
+#define AR_MEM_TIER_SHORT        0       // 短期（工作记忆）
+#define AR_MEM_TIER_LONG         1       // 长期（巩固后，永不删除）
+#define AR_MEM_SHORT_WINDOW      50000   // 短期清理窗口（记忆 tick 数）
+#define AR_MEM_TABLE_MAX         2000000 // 表上限（满则清理短期+不活跃）
+#define AR_MEM_INIT_CONSOLIDATED 0.05f   // 新条目起步巩固度（冷启动安全）
+
 // ==================== 哈希表条目 ====================
 
-/** 字符频率条目 */
+/** 字符频率条目 — v0.5.9 记忆化 */
 typedef struct {
     char   text[8];       // UTF-8 字符（含终止符）
-    int    count;         // 出现次数
+    int    count;         // 出现次数（权重）
+    float  consolidated;  // 巩固度 0~1
+    int    last_seen;     // 最近出现记忆 tick
+    int    tier;          // 短期/长期
     int    used;          // 占用标记
 } CharEntry;
 
-/** 字符对共现条目 */
+/** 字符对共现条目 — v0.5.9 记忆化 */
 typedef struct {
     char   a[8];          // 第一个字符
     char   b[8];          // 第二个字符
-    int    co_count;      // 共现次数
+    int    co_count;      // 共现次数（权重）
+    float  consolidated;  // 巩固度 0~1
+    int    last_seen;     // 最近出现记忆 tick
+    int    tier;          // 短期/长期
     int    used;
 } PairEntry;
 
@@ -131,6 +148,11 @@ struct ArticleReader {
 
     // v0.5.8: 涌现词类系统（POS 池）——喂料路径喂语法拓扑
     EmergentPOS* emergent_pos;
+
+    // v0.5.9: 记忆时钟——字符/字符对记忆化的时间源（每处理一行 +1）
+    int mem_tick;
+    // 上次表满清理时的记忆 tick（防每次 find 都触发全表扫描）
+    int pair_clean_tick;
 };
 
 // ==================== 哈希工具 ====================
@@ -142,21 +164,36 @@ static inline unsigned int _ar_hash(const char* s) {
     return h;
 }
 
-/** 在 char_table 中查找或插入字符 */
+/** v0.5.9: 记忆触摸——出现即巩固（Hebbian 渐近），过阈晋升长期 */
+static inline void _ar_mem_touch(float* consolidated, int* tier,
+                                 int* last_seen, int tick) {
+    *consolidated += AR_MEM_CONSOLIDATE_RATE * (1.0f - *consolidated);
+    if (*consolidated >= AR_MEM_PROMOTE_THRESHOLD) *tier = AR_MEM_TIER_LONG;
+    *last_seen = tick;
+}
+
+/** 在 char_table 中查找或插入字符（v0.5.9 记忆化） */
 static CharEntry* _ar_find_char(ArticleReader* ar, const char* ch) {
     unsigned int h = _ar_hash(ch) & AR_CHAR_HASH_MASK;
     for (int i = 0; i < AR_CHAR_HASH_SIZE; i++) {
         int idx = (h + i) & AR_CHAR_HASH_MASK;
         if (!ar->char_table[idx].used) {
-            // 空位 → 插入
+            // 空位 → 插入（记忆化：起步巩固度 + 出生时间）
             strncpy(ar->char_table[idx].text, ch, sizeof(ar->char_table[idx].text) - 1);
             ar->char_table[idx].text[sizeof(ar->char_table[idx].text) - 1] = 0;
             ar->char_table[idx].count = 0;
+            ar->char_table[idx].consolidated = AR_MEM_INIT_CONSOLIDATED;
+            ar->char_table[idx].last_seen = ar->mem_tick;
+            ar->char_table[idx].tier = AR_MEM_TIER_SHORT;
             ar->char_table[idx].used = 1;
             ar->char_count++;
             return &ar->char_table[idx];
         }
         if (strcmp(ar->char_table[idx].text, ch) == 0) {
+            // 命中 → 触摸记忆（巩固 + 更新活跃）
+            _ar_mem_touch(&ar->char_table[idx].consolidated,
+                          &ar->char_table[idx].tier,
+                          &ar->char_table[idx].last_seen, ar->mem_tick);
             return &ar->char_table[idx];
         }
     }
@@ -189,11 +226,55 @@ static int _ar_expand_pair_hash(ArticleReader* ar) {
     return 0;
 }
 
-/** 在 pair_table 中查找或插入字符对 */
+/** v0.5.9: 表满清理——只清「未巩固 + 长期不活跃」的短期对，长期对永不删。
+ * 用重建方式删除（开放寻址表直接置 used=0 会断裂探测链导致条目丢失）。
+ * 冷启动安全：新对 last_seen 都新鲜 → 一条不动。 */
+static void _ar_cleanup_stale_pairs(ArticleReader* ar) {
+    PairEntry* new_tab = (PairEntry*)calloc((size_t)ar->pair_hash_size,
+                                            sizeof(PairEntry));
+    if (!new_tab) return;
+    int mask = ar->pair_hash_size - 1;
+    int kept = 0;
+    for (int i = 0; i < ar->pair_hash_size; i++) {
+        PairEntry* pe = &ar->pair_table[i];
+        if (!pe->used) continue;
+        /* 淘汰条件：短期（未巩固）+ 长期不活跃（超过窗口没再见） */
+        if (pe->tier == AR_MEM_TIER_SHORT &&
+            ar->mem_tick - pe->last_seen > AR_MEM_SHORT_WINDOW) {
+            continue;
+        }
+        /* 保留（长期对 或 近期活跃的短期对）：rehash 到新表 */
+        char key[16];
+        snprintf(key, sizeof(key), "%s|%s", pe->a, pe->b);
+        unsigned int h = _ar_hash(key) & mask;
+        for (int p = 0; p < ar->pair_hash_size; p++) {
+            int idx = (h + p) & mask;
+            if (!new_tab[idx].used) { new_tab[idx] = *pe; kept++; break; }
+        }
+    }
+    int removed = ar->pair_count - kept;
+    free(ar->pair_table);
+    ar->pair_table = new_tab;
+    ar->pair_count = kept;
+    if (removed > 0) {
+        LOG_INFO("[文章阅读] 字符对记忆清理: 移除 %d 条短期不活跃对 (剩余 %d)",
+                 removed, kept);
+    }
+}
+
+/** 在 pair_table 中查找或插入字符对（v0.5.9 记忆化） */
 static PairEntry* _ar_find_pair(ArticleReader* ar, const char* a, const char* b) {
     /* 负载因子检查：超过75%触发扩容 */
     if ((float)ar->pair_count / ar->pair_hash_size > AR_PAIR_LOAD_MAX)
         _ar_expand_pair_hash(ar);
+
+    /* v0.5.9: 表达上限（扩容被 2M 槽封顶）→ 清理短期不活跃对。
+     * pair_clean_tick 防每次 find 都触发全表扫描（低频：满才扫一次） */
+    if (ar->pair_count >= AR_MEM_TABLE_MAX &&
+        ar->pair_clean_tick < ar->mem_tick) {
+        _ar_cleanup_stale_pairs(ar);
+        ar->pair_clean_tick = ar->mem_tick;
+    }
 
     char key[16];
     snprintf(key, sizeof(key), "%s|%s", a, b);
@@ -207,12 +288,18 @@ static PairEntry* _ar_find_pair(ArticleReader* ar, const char* a, const char* b)
             strncpy(ar->pair_table[idx].b, b, sizeof(ar->pair_table[idx].b) - 1);
             ar->pair_table[idx].b[sizeof(ar->pair_table[idx].b) - 1] = 0;
             ar->pair_table[idx].co_count = 0;
+            ar->pair_table[idx].consolidated = AR_MEM_INIT_CONSOLIDATED;
+            ar->pair_table[idx].last_seen = ar->mem_tick;
+            ar->pair_table[idx].tier = AR_MEM_TIER_SHORT;
             ar->pair_table[idx].used = 1;
             ar->pair_count++;
             return &ar->pair_table[idx];
         }
         if (strcmp(ar->pair_table[idx].a, a) == 0 &&
             strcmp(ar->pair_table[idx].b, b) == 0) {
+            _ar_mem_touch(&ar->pair_table[idx].consolidated,
+                          &ar->pair_table[idx].tier,
+                          &ar->pair_table[idx].last_seen, ar->mem_tick);
             return &ar->pair_table[idx];
         }
     }
@@ -514,6 +601,9 @@ int article_process_line(ArticleReader* ar, const char* line) {
     if (!ar || !line) return -1;
 
     pthread_mutex_lock(&ar->mutex);
+
+    /* v0.5.9: 记忆时钟 +1（字符/字符对记忆化的时间源） */
+    ar->mem_tick++;
 
     // 提取有效字符序列
     int n = _ar_extract_chars(ar, line);

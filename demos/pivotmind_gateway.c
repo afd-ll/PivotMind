@@ -138,6 +138,9 @@ typedef struct {
 } GatewaySystem;
 static void handle_qa(GatewaySystem* gw, int fd, const char* body);
 
+/* v0.5.9: 学习队列初始化（定义在 _learn_worker 之后） */
+static void learn_queue_init(void);
+
 static GatewaySystem* g_gw = NULL;
 
 // ==================== 信号处理 ====================
@@ -409,6 +412,9 @@ static int gw_system_init(GatewaySystem* gw) {
     if (!gw->perception) { fprintf(stderr, "[gateway] 感觉皮层创建失败\n"); return -1; }
     /* g_perception 已由 perception_create 自动设置 */
     fprintf(stderr, "[gateway]   感觉皮层就绪\n");
+
+    /* v0.5.9: 学习队列初始化（2 个 worker 消费 /learn 任务） */
+    learn_queue_init();
 
     // 海马体（记忆+巩固，感知联动通过丘脑信号总线）
     fprintf(stderr, "[gateway]   创建海马体...\n");
@@ -1006,43 +1012,80 @@ typedef struct {
     char   domain[64];  /* "medical", "legal", "" = default vocab */
 } LearnTask;
 
-/* _learn_worker — 异步学习线程 */
+/* v0.5.9: 学习队列——固定 worker 消费，防每请求一线程堆积（08-07 35线程实锤） */
+#define LEARN_QUEUE_CAP 256
+typedef struct {
+    LearnTask* tasks[LEARN_QUEUE_CAP];
+    int head, tail, count;
+    pthread_mutex_t mutex;
+    pthread_cond_t  cond;
+    int stop;
+} LearnQueue;
+static LearnQueue g_learn_q;
+static pthread_t g_learn_workers[2];
+
+/* _learn_worker — 学习 worker 线程：循环消费队列（×2） */
 static void* _learn_worker(void* arg) {
-    LearnTask* task = (LearnTask*)arg;
-    if (!task || !task->msg) { free(task); return NULL; }
-    GatewaySystem* gw = g_gw;
-    if (!gw || !gw->topology) { free(task->msg); free(task); return NULL; }
-    
-    /* 按域名选择目标拓扑 */
-    int target_topo = TOPO_VOCABULARY;
-    if (task->domain[0]) {
-        target_topo = TOPO_DOMAIN;
-        printf("[gateway] [领域] '%s' → 领域拓扑\n", task->domain);
+    (void)arg;
+    while (1) {
+        pthread_mutex_lock(&g_learn_q.mutex);
+        while (g_learn_q.count == 0 && !g_learn_q.stop)
+            pthread_cond_wait(&g_learn_q.cond, &g_learn_q.mutex);
+        if (g_learn_q.stop && g_learn_q.count == 0) {
+            pthread_mutex_unlock(&g_learn_q.mutex);
+            break;
+        }
+        LearnTask* task = g_learn_q.tasks[g_learn_q.head];
+        g_learn_q.head = (g_learn_q.head + 1) % LEARN_QUEUE_CAP;
+        g_learn_q.count--;
+        pthread_mutex_unlock(&g_learn_q.mutex);
+
+        if (!task || !task->msg) { free(task); continue; }
+        GatewaySystem* gw = g_gw;
+        if (gw && gw->topology) {
+            /* 按域名选择目标拓扑 */
+            int target_topo = TOPO_VOCABULARY;
+            if (task->domain[0]) {
+                target_topo = TOPO_DOMAIN;
+                printf("[gateway] [领域] '%s' → 领域拓扑\n", task->domain);
+            }
+            SubTopology* topo = NULL;
+            for (int t = 0; t < gw->topology->sub_topo_count; t++) {
+                if (gw->topology->sub_topologies[t] && (int)gw->topology->sub_topologies[t]->type == target_topo)
+                    { topo = gw->topology->sub_topologies[t]; break; }
+            }
+            if (topo && topo->net) {
+                int prev_id = -1;
+                EmergentPOS* ep = (gw->prefrontal && gw->prefrontal->controller)
+                                  ? gw->prefrontal->controller->emergent_pos : NULL;
+                _learn_tokens(topo, task->msg, &prev_id, ep);
+                auto_learn_concepts(gw->topology, task->msg, NULL);
+                if (gw->perception) perception_feed_learn_text(gw->perception, task->msg);
+                __sync_fetch_and_add(&gw->total_learning_cycles, 1);
+                /* 语法种子注入 */
+                SubTopology* tpl = NULL;
+                for (int t = 0; t < gw->topology->sub_topo_count; t++)
+                    if (gw->topology->sub_topologies[t] && gw->topology->sub_topologies[t]->type == TOPO_TEMPLATE)
+                        { tpl = gw->topology->sub_topologies[t]; break; }
+                if (tpl && tpl->net && tpl->net->node_count < 8) broca_seed_grammar(gw->topology);
+            }
+        }
+        free(task->msg);
+        free(task);
     }
-    
-    SubTopology* topo = NULL;
-    for (int t = 0; t < gw->topology->sub_topo_count; t++) {
-        if (gw->topology->sub_topologies[t] && (int)gw->topology->sub_topologies[t]->type == target_topo)
-            { topo = gw->topology->sub_topologies[t]; break; }
-    }
-    if (topo && topo->net) {
-        int prev_id = -1;
-        EmergentPOS* ep = (gw->prefrontal && gw->prefrontal->controller)
-                          ? gw->prefrontal->controller->emergent_pos : NULL;
-        _learn_tokens(topo, task->msg, &prev_id, ep);
-        auto_learn_concepts(gw->topology, task->msg, NULL);
-        if (gw->perception) perception_feed_learn_text(gw->perception, task->msg);
-        __sync_fetch_and_add(&gw->total_learning_cycles, 1);
-        /* 语法种子注入 */
-        SubTopology* tpl = NULL;
-        for (int t = 0; t < gw->topology->sub_topo_count; t++)
-            if (gw->topology->sub_topologies[t] && gw->topology->sub_topologies[t]->type == TOPO_TEMPLATE)
-                { tpl = gw->topology->sub_topologies[t]; break; }
-        if (tpl && tpl->net && tpl->net->node_count < 8) broca_seed_grammar(gw->topology);
-    }
-    free(task->msg);
-    free(task);
     return NULL;
+}
+
+/* v0.5.9: 初始化学习队列 + 启动 2 个 worker（gateway 启动时调用一次） */
+static void learn_queue_init(void) {
+    memset(&g_learn_q, 0, sizeof(g_learn_q));
+    pthread_mutex_init(&g_learn_q.mutex, NULL);
+    pthread_cond_init(&g_learn_q.cond, NULL);
+    g_learn_q.stop = 0;
+    for (int i = 0; i < 2; i++) {
+        pthread_create(&g_learn_workers[i], NULL, _learn_worker, NULL);
+    }
+    fprintf(stderr, "[gateway]   学习队列就绪 (2 workers, 容量 %d)\n", LEARN_QUEUE_CAP);
 }
 
 
@@ -1066,23 +1109,27 @@ static void handle_learn(GatewaySystem* gw, int fd, const char* body) {
         gw->learn_burst = 0;
     }
 
-    /* 异步学习：spawn detach thread, 立即返回 */
+    /* v0.5.9: 异步学习——入队（满丢最旧），固定 worker 消费。
+     * 不再每请求 spawn detached 线程（08-07 线程堆积雪崩实锤） */
     LearnTask* task = (LearnTask*)calloc(1, sizeof(LearnTask));
     if (!task) { http_json(fd, 500, "{\"error\":\"oom\"}"); return; }
     task->msg = strdup(msg);
     if (!task->msg) { free(task); http_json(fd, 500, "{\"error\":\"oom\"}"); return; }
     json_extract_string(body, "domain", task->domain, sizeof(task->domain));
 
-    pthread_t tid;
-    pthread_attr_t attr;
-    pthread_attr_init(&attr);
-    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
-    if (pthread_create(&tid, &attr, _learn_worker, task) != 0) {
-        free(task->msg); free(task);
-        http_json(fd, 500, "{\"error\":\"thread failed\"}");
-        return;
+    pthread_mutex_lock(&g_learn_q.mutex);
+    if (g_learn_q.count >= LEARN_QUEUE_CAP) {
+        /* 队列满：丢最旧（工作记忆丢弃策略——最近的学习请求优先） */
+        LearnTask* old = g_learn_q.tasks[g_learn_q.head];
+        g_learn_q.head = (g_learn_q.head + 1) % LEARN_QUEUE_CAP;
+        g_learn_q.count--;
+        if (old) { free(old->msg); free(old); }
     }
-    pthread_attr_destroy(&attr);
+    g_learn_q.tasks[g_learn_q.tail] = task;
+    g_learn_q.tail = (g_learn_q.tail + 1) % LEARN_QUEUE_CAP;
+    g_learn_q.count++;
+    pthread_cond_signal(&g_learn_q.cond);
+    pthread_mutex_unlock(&g_learn_q.mutex);
 
     http_json(fd, 202, "{\"result\":\"accepted\"}");
 }
