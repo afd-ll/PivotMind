@@ -79,6 +79,24 @@ static void web_fetch_unlock(void) {
 #endif
 }
 
+/* v0.5.8: 带超时的锁获取——某请求挂起长持锁时，其他线程超时放弃而非无限等待。
+ * 修复：08-07 脑干卡死——感知搜索同步 curl 持锁挂起，主循环等锁等到死。
+ * @return 0=拿到锁，非0=超时未拿到（调用方应放弃本次请求） */
+static int web_fetch_lock_timeout(int timeout_ms) {
+#ifdef _WIN32
+    fetch_lock_init();
+    EnterCriticalSection(&g_fetch_lock);
+    return 0;
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    ts.tv_sec += timeout_ms / 1000;
+    ts.tv_nsec += (timeout_ms % 1000) * 1000000L;
+    if (ts.tv_nsec >= 1000000000L) { ts.tv_sec++; ts.tv_nsec -= 1000000000L; }
+    return pthread_mutex_timedlock(&g_fetch_lock, &ts);
+#endif
+}
+
 /* ================================================================
  *  UA 轮换池 — 5 个真实浏览器 UA（无 PivotMind 字样）
  *  覆盖 Chrome/Edge/Firefox/Safari，降低指纹识别
@@ -428,7 +446,13 @@ static void robots_fetch(const char* domain) {
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &wbuf);
 
-    web_fetch_lock();
+    if (web_fetch_lock_timeout(8000) != 0) {
+        /* v0.5.8: 拿不到锁（另一请求疑似挂起）——放弃本次 robots 抓取，不无限等 */
+        curl_easy_cleanup(curl);
+        free(wbuf.data);
+        rc->fetched = 1;
+        return;
+    }
     CURLcode res = curl_easy_perform(curl);
     web_fetch_unlock();
     if (res == CURLE_OK && wbuf.len > 0) {
@@ -652,8 +676,13 @@ FetchResult* web_fetch(const char* url) {
         hd.content_type = NULL;
         hd.status_code = 0;
 
-    web_fetch_lock();
-    CURLcode res = curl_easy_perform(tls_curl);
+    CURLcode res;
+    if (web_fetch_lock_timeout(8000) != 0) {
+        /* v0.5.8: 拿不到锁（另一请求疑似挂起）——放弃本次，走失败路径 */
+        res = CURLE_OPERATION_TIMEDOUT;
+        break;
+    }
+    res = curl_easy_perform(tls_curl);
     web_fetch_unlock();
 
         /* 获取状态码 */
