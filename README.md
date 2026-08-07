@@ -7,7 +7,7 @@
 
 [English](README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [Русский](README.ru.md)
 
-[![Version](https://img.shields.io/badge/version-v0.5.7-blue.svg)](changelogs/)
+[![Version](https://img.shields.io/badge/version-v0.5.9-blue.svg)](changelogs/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green.svg)](LICENSE)
 [![Language](https://img.shields.io/badge/C-99%2B-orange.svg)](https://en.wikipedia.org/wiki/C99)
 [![Platform](https://img.shields.io/badge/ARM-RK3399%20%7C%20x86__64-lightgrey.svg)](#running-on)
@@ -29,7 +29,7 @@ PivotMind is a **brain-inspired cognitive engine** built on
 No external Transformer dependencies. No pretrained embedding vectors.
 Just nodes, edges, activation, and decay — powered by a relentless background clock.
 
-**Current Version: v0.5.7** — 14 fully-implemented brain regions, emergent POS system, parallel multi-learner, PFE reasoning orchestration, 512-dim feature vectors, POS grammar mapping, edge specificity weighting, multi-modal visual pipeline (VisualCortex + MediaReader), **word-layer semantic field (word consolidation + semantic topology clustering)**, **topic-aware generation (relevance scoring + bounded association)**, **PFE reasoning pipeline (subgoal decomposition + causal search + reasoning chain)**, **Bing RSS web crawler + PMI knowledge graph builder + /learn PMI pipeline**, zero compile warnings.
+**Current Version: v0.5.9** — 14 fully-implemented brain regions, emergent POS system, parallel multi-learner, PFE reasoning orchestration, 512-dim feature vectors, POS grammar mapping, edge specificity weighting, multi-modal visual pipeline, **word-layer semantic field**, **topic-aware generation**, **PFE reasoning pipeline**, **async perception search (main loop never blocks on network)**, **POS feed pipeline (emergent classes from corpus)**, **memory lifecycle for statistical tables (Hebbian consolidation, tiered short/long-term, never-delete demotion)**, **/learn worker queue (2 workers, 35→6 threads)** — 14 fully-implemented brain regions, emergent POS system, parallel multi-learner, PFE reasoning orchestration, 512-dim feature vectors, POS grammar mapping, edge specificity weighting, multi-modal visual pipeline (VisualCortex + MediaReader), **word-layer semantic field (word consolidation + semantic topology clustering)**, **topic-aware generation (relevance scoring + bounded association)**, **PFE reasoning pipeline (subgoal decomposition + causal search + reasoning chain)**, **Bing RSS web crawler + PMI knowledge graph builder + /learn PMI pipeline**, zero compile warnings.
 
 **Codebase: 88 source files (~49,600 lines C) + 91 headers (~12,800 lines) + tools/tests/demos (~13,000 lines) = ~75,500 total lines.**
 
@@ -310,9 +310,10 @@ pivotmind/
 | **v0.5.1** | Code reorganization — NN subsystem split (21 src, 15 headers), ccache+LTO build optimization, pure function unit tests |
 | **v0.5.5** | Bing RSS web crawler + PMI knowledge graph (52 articles, 4733 nodes, 7820 edges), diffusion UTF-8 character-window fix, edge builder tool |
 | **v0.5.6** | rwlock deadlock fix (write-lock nested read), gateway topology capacity, knowledge survival protection (load protect + floor activation) |
+| **v0.5.9** | **Memory lifecycle** (char-pair Hebbian consolidation, tiered short/long-term retention, never-delete demotion), **async perception search** (worker queue — main loop never blocks on network), **/learn worker queue** (threads 35→6), **POS feed pipeline** (emergent classes 0→5 from corpus) |
 | **v0.5.7** | **Word-layer semantic field** (word consolidation, word-word co-occurrence edges, semantic topology clustering, semantic-field query), **topic-aware generation** (relevance scoring, bounded association, topic-ordered assembly), **PFE reasoning pipeline** (subgoal decomposition, causal search, reasoning chain, 4x O(N²) fixes), knowledge survival overhaul (30-min load protection, is_cooled prune protection) |
 
-> Detailed changelogs: v0.3.0 → [changelogs/032-v0.3.0-reasoning-architecture.md](changelogs/032-v0.3.0-reasoning-architecture.md) ｜ v0.4.0 → [changelogs/034-v0.4.0-code-simplify-brain-boundary.md](changelogs/034-v0.4.0-code-simplify-brain-boundary.md) ｜ v0.4.3 → [changelogs/042-emergent-pos-anchor.md](changelogs/042-emergent-pos-anchor.md) ｜ v0.5.0 → [changelogs/055-multimodal-v0.5.0.md](changelogs/055-multimodal-v0.5.0.md) ｜ v0.5.5 → [changelogs/055-diffusion-char-window.md](changelogs/055-diffusion-char-window.md) ｜ v0.5.6 → [changelogs/061-lazy-memory-optimization.md](changelogs/061-lazy-memory-optimization.md) ｜ v0.5.7 → [changelogs/062-word-semantic-field-reasoning-pipeline.md](changelogs/062-word-semantic-field-reasoning-pipeline.md)
+> Detailed changelogs: v0.3.0 → [changelogs/032-v0.3.0-reasoning-architecture.md](changelogs/032-v0.3.0-reasoning-architecture.md) ｜ v0.4.0 → [changelogs/034-v0.4.0-code-simplify-brain-boundary.md](changelogs/034-v0.4.0-code-simplify-brain-boundary.md) ｜ v0.4.3 → [changelogs/042-emergent-pos-anchor.md](changelogs/042-emergent-pos-anchor.md) ｜ v0.5.0 → [changelogs/055-multimodal-v0.5.0.md](changelogs/055-multimodal-v0.5.0.md) ｜ v0.5.5 → [changelogs/055-diffusion-char-window.md](changelogs/055-diffusion-char-window.md) ｜ v0.5.6 → [changelogs/061-lazy-memory-optimization.md](changelogs/061-lazy-memory-optimization.md) ｜ v0.5.7 → [changelogs/062-word-semantic-field-reasoning-pipeline.md](changelogs/062-word-semantic-field-reasoning-pipeline.md) ｜ v0.5.8 → [changelogs/063-perception-async-pos-pipeline.md](changelogs/063-perception-async-pos-pipeline.md) ｜ v0.5.9 → [changelogs/064-charpair-memory-learning-queue.md](changelogs/064-charpair-memory-learning-queue.md)
 
 ---
 

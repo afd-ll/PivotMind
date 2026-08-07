@@ -7,7 +7,7 @@
 
 [English](README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [Русский](README.ru.md)
 
-[![Version](https://img.shields.io/badge/version-v0.5.7-blue.svg)](changelogs/)
+[![Version](https://img.shields.io/badge/version-v0.5.9-blue.svg)](changelogs/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green.svg)](LICENSE)
 [![Language](https://img.shields.io/badge/C-99%2B-orange.svg)](https://zh.wikipedia.org/wiki/C99)
 [![Platform](https://img.shields.io/badge/ARM-RK3399%20%7C%20x86__64-lightgrey.svg)](#运行平台)
@@ -29,7 +29,7 @@
 没有 Transformer 外部依赖，没有预训练 embedding 向量。
 节点、边、激活、衰减 —— 以及一个永不停歇的后台时钟驱动整个系统。
 
-**当前版本：v0.5.7** —— 14 脑区完整架构、涌现式词类系统、多学习器并行、PFE 推理编排、512 维特征向量、POS 语法映射、边特异性权重、**词层语义场（词巩固 + 语义拓扑聚类）**、**话题性生成（相关性评分 + 有界联想）**、**PFE 推理管线（子目标分解 + 因果搜索 + 推理链）**、多模态视觉管线 + /learn PMI 词共现管线（VisualCortex + MediaReader）、编译零警告。
+**当前版本：v0.5.9** —— 14 脑区完整架构、涌现式词类系统、多学习器并行、PFE 推理编排、512 维特征向量、POS 语法映射、边特异性权重、**词层语义场**、**话题性生成**、**PFE 推理管线**、**感知搜索异步化（主循环永不阻塞网络）**、**POS 池管道（额外词类从语料涌现 0→5）**、**统计表记忆化（Hebbian 巩固、短期/长期分层、降权不删）**、**/learn 队列化（2 worker，线程 35→6）** —— 14 脑区完整架构、涌现式词类系统、多学习器并行、PFE 推理编排、512 维特征向量、POS 语法映射、边特异性权重、**词层语义场（词巩固 + 语义拓扑聚类）**、**话题性生成（相关性评分 + 有界联想）**、**PFE 推理管线（子目标分解 + 因果搜索 + 推理链）**、多模态视觉管线 + /learn PMI 词共现管线（VisualCortex + MediaReader）、编译零警告。
 
 **代码规模：88 个源文件（~49,600 行 C） + 91 个头文件（~12,800 行） + 工具/测试/演示（~13,000 行）= 约 75,500 行。**
 
@@ -307,9 +307,10 @@ pivotmind/
 | **v0.4.13** | POS 语法映射、边特异性权重、编译警告清零 |
 | **v0.5.5** | **多模态管线** — 视觉皮层脑区、MediaReader 字幕管道、跨模态对齐、任务队列 |
 | **v0.5.6** | rwlock 死锁修复（写锁内嵌套读锁）、gateway 拓扑容量、知识存活保护（加载保护 + 保底激活） |
+| **v0.5.9** | **记忆化架构**（字符对 Hebbian 巩固、短期/长期分层、降权不删）、**感知搜索异步化**（worker 队列——主循环不碰网络）、**/learn 队列化**（线程 35→6）、**POS 池管道**（额外词类 0→5 从语料涌现） |
 | **v0.5.7** | **词层语义场**（词巩固、词-词共现边、语义拓扑聚类、语义场查询）、**话题性生成**（相关性评分、有界联想、话题序组装）、**PFE 推理管线**（子目标分解、因果搜索、推理链、四大 O(N²) 修复）、知识存活全面加固（30 分钟加载保护、is_cooled 修剪保护） |
 
-> 详细变更：v0.3.0 → [changelogs/032-v0.3.0-reasoning-architecture.md](changelogs/032-v0.3.0-reasoning-architecture.md) ｜ v0.4.0 → [changelogs/034-v0.4.0-code-simplify-brain-boundary.md](changelogs/034-v0.4.0-code-simplify-brain-boundary.md) ｜ v0.4.3 → [changelogs/042-emergent-pos-anchor.md](changelogs/042-emergent-pos-anchor.md) ｜ v0.5.5 → [changelogs/055-multimodal-v0.5.5.md](changelogs/055-multimodal-v0.5.5.md) ｜ v0.5.6 → [changelogs/061-lazy-memory-optimization.md](changelogs/061-lazy-memory-optimization.md) ｜ v0.5.7 → [changelogs/062-word-semantic-field-reasoning-pipeline.md](changelogs/062-word-semantic-field-reasoning-pipeline.md) (changelogs/055-multimodal-v0.5.5.md)
+> 详细变更：v0.3.0 → [changelogs/032-v0.3.0-reasoning-architecture.md](changelogs/032-v0.3.0-reasoning-architecture.md) ｜ v0.4.0 → [changelogs/034-v0.4.0-code-simplify-brain-boundary.md](changelogs/034-v0.4.0-code-simplify-brain-boundary.md) ｜ v0.4.3 → [changelogs/042-emergent-pos-anchor.md](changelogs/042-emergent-pos-anchor.md) ｜ v0.5.5 → [changelogs/055-multimodal-v0.5.5.md](changelogs/055-multimodal-v0.5.5.md) ｜ v0.5.6 → [changelogs/061-lazy-memory-optimization.md](changelogs/061-lazy-memory-optimization.md) ｜ v0.5.7 → [changelogs/062-word-semantic-field-reasoning-pipeline.md](changelogs/062-word-semantic-field-reasoning-pipeline.md) ｜ v0.5.8 → [changelogs/063-perception-async-pos-pipeline.md](changelogs/063-perception-async-pos-pipeline.md) ｜ v0.5.9 → [changelogs/064-charpair-memory-learning-queue.md](changelogs/064-charpair-memory-learning-queue.md) (changelogs/055-multimodal-v0.5.5.md)
 
 ---
 

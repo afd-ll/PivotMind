@@ -7,7 +7,7 @@
 
 [English](README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [Русский](README.ru.md)
 
-[![Version](https://img.shields.io/badge/version-v0.5.7-blue.svg)](changelogs/)
+[![Version](https://img.shields.io/badge/version-v0.5.9-blue.svg)](changelogs/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green.svg)](LICENSE)
 [![Language](https://img.shields.io/badge/C-99%2B-orange.svg)](https://en.wikipedia.org/wiki/C99)
 [![Platform](https://img.shields.io/badge/ARM-RK3399%20%7C%20x86__64-lightgrey.svg)](#running-on)
@@ -29,7 +29,7 @@ PivotMind는 [TraceWisdomNetwork](#tracewisdomnetwork) +
 Transformer 없음. 임베딩 벡터 없음. 역전파 없음.
 노드, 엣지, 활성화, 감쇠 — 끊임없이 돌아가는 백그라운드 클록에 의해 구동됩니다.
 
-**현재 버전: v0.5.7** — 14개 뇌 영역/서브시스템(전부 구현 완료), 창발적 품사 시스템, 병렬 다중 학습기, PFE 추론, 512차원 특징 벡터, **어휘 계층 의미장(어휘 강화 + 의미 토폴로지 클러스터링)**、**주제성 생성(관련성 점수 + 유계 연상)**、**PFE 추론 파이프라인(하위 목표 분해 + 인과 탐색 + 추론 체인)**.
+**현재 버전: v0.5.9** — 14개 뇌 영역(전부 구현), 창발적 품사 시스템, 병렬 다중 학습기, PFE 추론, 512차원 특징 벡터, **어휘 계층 의미장**, **주제성 생성**, **PFE 추론 파이프라인**, **비동기 지각 검색**, **통계표 메모리화(Hebbian 강화, 단기/장기 계층)** — 14개 뇌 영역/서브시스템(전부 구현 완료), 창발적 품사 시스템, 병렬 다중 학습기, PFE 추론, 512차원 특징 벡터, **어휘 계층 의미장(어휘 강화 + 의미 토폴로지 클러스터링)**、**주제성 생성(관련성 점수 + 유계 연상)**、**PFE 추론 파이프라인(하위 목표 분해 + 인과 탐색 + 추론 체인)**.
 
 **코드 규모: 85개 소스 파일(~48,600행 C) + 89개 헤더(~12,600행) + 도구/테스트/데모(~13,000행) = 약 74,000행.**
 
@@ -279,6 +279,7 @@ pivotmind/
 | **v0.4.3** | **Emergent POS** — seed anchors + 512-dim feature clustering, grammar emerges from data |
 | **v0.5.5** | Diffusion function word filter (~130 words), cross-layer index fix, double-free race fix |
 | **v0.5.6** | rwlock 데드락 수정(쓰기 잠금 내 중첩 읽기), gateway 토폴로지 용량, 지식 생존 보호(로드 보호 + 바닥 활성화) |
+| **v0.5.9** | **통계표 메모리화**(Hebbian 강화, 단기/장기 계층, 삭제 없는 강등), **비동기 지각 검색**(워커 큐), **/learn 큐화**(스레드 35→6), **POS 풀 파이프라인** |
 | **v0.5.7** | **어휘 계층 의미장**(어휘 강화, 어-어 공기 엣지, 의미 토폴로지 클러스터링, 의미장 질의), **주제성 생성**, **PFE 추론 파이프라인**, 지식 생존 전면 강화 |
 
 > Detailed changelogs: see [`changelogs/`](changelogs/) directory
