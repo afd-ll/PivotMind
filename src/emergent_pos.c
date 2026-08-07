@@ -285,7 +285,7 @@ POSTag emergent_pos_classify(EmergentPOS* ep, const float* features) {
         }
     } else {
         /* 未分类 → 加入涌现池 */
-        if (ep->unclassified_count < 256) {
+        if (ep->unclassified_count < 64) {
             memcpy(ep->unclassified_feats[ep->unclassified_count], features,
                    PM_NODE_FEATURE_DIM * sizeof(float));
             ep->unclassified_pool_nodes[ep->unclassified_count] = -1;
@@ -386,7 +386,7 @@ void emergent_pos_classify_soft(EmergentPOS* ep, const float* features,
         }
     } else {
         /* 未分类 → 加入涌现池 */
-        if (ep->unclassified_count < 256) {
+        if (ep->unclassified_count < 64) {
             memcpy(ep->unclassified_feats[ep->unclassified_count], features,
                    PM_NODE_FEATURE_DIM * sizeof(float));
             ep->unclassified_pool_nodes[ep->unclassified_count] = -1;

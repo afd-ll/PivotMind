@@ -85,8 +85,36 @@ static void mark_explored(SelfLearner* sl, int topo_id, int node_id) {
     if (sl->expl_count < sl->expl_capacity) {
         rec = &sl->explored[sl->expl_count++];
     } else {
-        rec = &sl->explored[sl->expl_next];
-        sl->expl_next = (sl->expl_next + 1) % sl->expl_capacity;
+        /* v0.5.9: 覆盖「悬垂优先 + 最久未探索」的记录——
+         * 保留活跃探索记录（类似巩固度淘汰），顺带回收节点
+         * 已冻结/删除的悬垂记录（占位不清理的问题）。 */
+        int victim = -1;
+        for (int i = 0; i < sl->expl_capacity; i++) {
+            SubTopology* sub = NULL;
+            for (int t = 0; t < sl->master->sub_topo_count; t++) {
+                if (sl->master->sub_topologies[t] &&
+                    (int)sl->master->sub_topologies[t]->type == sl->explored[i].topo_id)
+                    { sub = sl->master->sub_topologies[t]; break; }
+            }
+            int exists = 0;
+            if (sub && sub->net && sl->explored[i].node_id >= 0 &&
+                sl->explored[i].node_id < sub->net->node_count) {
+                ReasoningNode* n = sub->net->nodes[sl->explored[i].node_id];
+                exists = (n && n->concept) ? 1 : 0;
+            }
+            if (!exists) { victim = i; break; }  /* 悬垂优先回收 */
+        }
+        if (victim < 0) {
+            float oldest = sl->explored[0].last_explore;
+            victim = 0;
+            for (int i = 1; i < sl->expl_capacity; i++) {
+                if (sl->explored[i].last_explore < oldest) {
+                    oldest = sl->explored[i].last_explore;
+                    victim = i;
+                }
+            }
+        }
+        rec = &sl->explored[victim];
     }
     rec->topo_id = topo_id;
     rec->node_id = node_id;
