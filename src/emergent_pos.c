@@ -733,6 +733,13 @@ int emergent_pos_try_emerge(EmergentPOS* ep) {
         }
     }
 
+    /* v0.5.8: 聚类检查后清池（无论成功失败）——
+     * 散词彼此不相似，永远聚不成簇；保留会导致每 500 次分类调用
+     * 反复触发 O(n²) 聚类，锁内长持 → 学习线程堆积
+     * （08-07 慢喂料 36 线程排队实锤）。散词为低价值噪声，
+     * 清空后重新积累成本低。 */
+    ep->unclassified_count = 0;
+
     free(sim_matrix);
     return created;
 }

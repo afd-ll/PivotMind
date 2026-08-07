@@ -558,17 +558,21 @@ int article_process_line(ArticleReader* ar, const char* line) {
     return 0;
 }
 
-int _article_flush_locked(ArticleReader* ar, SubTopology* topo) {
-    if (!ar) return -1;
+int _article_flush_locked(ArticleReader* ar, SubTopology* topo,
+                          char* pos_out[64], int* pos_out_count) {
+    int _rc = -1;
+    if (pos_out_count) *pos_out_count = 0;
+    if (!ar) goto _flush_out;
 
     // 使用缓存词汇拓扑（避免每次遍历 master）
     SubTopology* vocab = topo ? topo : ar->vocab_topo;
-    if (!vocab || !vocab->net) return -1;
+    if (!vocab || !vocab->net) goto _flush_out;
 
     // 数据不足时不处理
     if (ar->total_chars < 10 || ar->seq_len < 2) {
         ar->seq_len = 0;
-        return 0;
+        _rc = 0;
+        goto _flush_out;
     }
 
     int old_word_count = ar->word_count;
@@ -578,7 +582,7 @@ int _article_flush_locked(ArticleReader* ar, SubTopology* topo) {
     // 预计算相邻对的合并评分
     // pair_scores[i] = score(seq[i], seq[i+1]), 0 = 阈值以下/无效
     float* pair_scores = (float*)malloc((ar->seq_len - 1) * sizeof(float));
-    if (!pair_scores) return -1;
+    if (!pair_scores) goto _flush_out;
 
     for (int i = 0; i < ar->seq_len - 1; i++) {
         pair_scores[i] = 0;
@@ -758,29 +762,23 @@ int _article_flush_locked(ArticleReader* ar, SubTopology* topo) {
 
         }
 
-        // === v0.5.8: 新词 → POS 池（喂料路径喂语法拓扑）===
+        // === v0.5.8: 新词 → POS 池（锁内只收集概念名，tag_soft 锁外执行）===
         // 此前 POS 池只吃生成/对话路径（Broca/cognitive_controller），
         // feed/learn 完全绕开 → 玄枢不会说话 → POS 池空 → 聚类永不触发
-        // （额外词类 08-04 至今为 0）。此处查询词性让未分类新词进池，
-        // 语料积累 → 池满 → 聚类涌现 → 语法拓扑获得原料。
-        if (new_words > 0 && ar->emergent_pos) {
+        // （额外词类 08-04 至今为 0）。tag_soft 含 O(n²) 聚类，若在锁内
+        // 执行会阻塞学习线程（08-07 32 线程堆积实锤：每 500 次调用
+        // 聚类 256² 矩阵 2-5 秒）→ 改锁内收集 / article_flush 锁外喂养。
+        if (new_words > 0 && ar->emergent_pos && pos_out && pos_out_count) {
             HuarongTopologyNet* vnet = vocab->net;
-            int pos_fed = 0;
-            for (int wi = 0; wi < ar->word_count; wi++) {
+            for (int wi = 0; wi < ar->word_count && *pos_out_count < 64; wi++) {
                 WordEntry* we = &ar->words[wi];
                 if (!we->text[0]) continue;
                 if (huarong_net_find_concept(vnet, we->text) < 0) continue;
-                SoftClassResult soft;
-                memset(&soft, 0, sizeof(soft));
-                emergent_pos_tag_soft(ar->emergent_pos,
-                                      ar->master, we->text, &soft);
-                pos_fed++;
-            }
-            if (ar->cfg.verbose && pos_fed > 0) {
-                LOG_INFO("[文章阅读] POS 池喂养: %d 个新词查询词性", pos_fed);
+                pos_out[*pos_out_count] = strdup(we->text);
+                if (pos_out[*pos_out_count]) (*pos_out_count)++;
             }
         }
-        // === POS 池结束 ===
+        // === POS 池收集结束 ===
 
         // === 新词 → 模板反馈：为新词建立与已有模板的跨拓扑连接 ===
         if (new_words > 0 && ar->master && ar->master->use_template_voting) {
@@ -826,14 +824,38 @@ int _article_flush_locked(ArticleReader* ar, SubTopology* topo) {
         // === 丘脑反馈结束 ===
     }
 
-    return new_words;
+    _rc = new_words;
+_flush_out:
+    /* v0.5.8: 统一出口——调用方（article_flush 834-836）持有 ar->mutex，
+     * 任何提前 return 都会跳过调用方的 unlock → ar->mutex 永久持有
+     * → 学习线程堆积死锁（08-07 274 线程雪崩实锤） */
+    return _rc;
 }
 
 int article_flush(ArticleReader* ar, SubTopology* topo) {
     if (!ar) return -1;
+    char* pos_words[64];
+    int   pos_n = 0;
     pthread_mutex_lock(&ar->mutex);
-    int result = _article_flush_locked(ar, topo);
+    int result = _article_flush_locked(ar, topo, pos_words, &pos_n);
     pthread_mutex_unlock(&ar->mutex);
+
+    /* v0.5.8: 锁外 POS 池喂养——emergent_pos_tag_soft 含 O(n²) 聚类
+     * （每 500 次调用聚类 256² 相似度矩阵 2-5 秒），若在 ar->mutex
+     * 锁内执行会阻塞学习线程 → 线程堆积（08-07 32 线程实锤）。
+     * 锁内只收集概念名（strdup），此处解锁后统一查询词性进池。 */
+    if (ar->emergent_pos) {
+        for (int i = 0; i < pos_n; i++) {
+            SoftClassResult soft;
+            memset(&soft, 0, sizeof(soft));
+            emergent_pos_tag_soft(ar->emergent_pos, ar->master,
+                                  pos_words[i], &soft);
+            free(pos_words[i]);
+        }
+        if (ar->cfg.verbose && pos_n > 0) {
+            LOG_INFO("[文章阅读] POS 池喂养: %d 个新词查询词性", pos_n);
+        }
+    }
     return result;
 }
 
