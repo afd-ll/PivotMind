@@ -184,6 +184,43 @@ static void _normalize_sentence_breaks(char* text) {
 
 /* ================================================================ */
 
+/* 前置声明（search_and_learn 定义在下方） */
+static int search_and_learn(Perception* p, const char* concept, PerceptionSource source);
+
+/* ================================================================
+ *  v0.5.8: 异步搜索工作线程
+ *  主循环（perception_tick）只把待搜概念入队后立即返回；
+ *  本线程串行执行网络搜索。网络慢/挂起只卡本线程，
+ *  绝不阻塞脑干主循环——修复 08-07 感知搜索拖死主循环的根因。
+ * ================================================================ */
+static void* _perception_worker(void* arg) {
+    Perception* p = (Perception*)arg;
+    if (!p) return NULL;
+    char concept[128];
+
+    while (1) {
+        pthread_mutex_lock(&p->queue_mutex);
+        while (p->queue_count == 0 && !p->worker_stop) {
+            pthread_cond_wait(&p->queue_cond, &p->queue_mutex);
+        }
+        if (p->worker_stop && p->queue_count == 0) {
+            pthread_mutex_unlock(&p->queue_mutex);
+            break;
+        }
+        strncpy(concept, p->queue_items[p->queue_head], sizeof(concept) - 1);
+        concept[sizeof(concept) - 1] = '\0';
+        p->queue_head = (p->queue_head + 1) % PERCEPT_QUEUE_CAP;
+        p->queue_count--;
+        pthread_mutex_unlock(&p->queue_mutex);
+
+        /* 网络搜索（慢操作，持 p->mutex 与对话入口互斥） */
+        pthread_mutex_lock(&p->mutex);
+        search_and_learn(p, concept, PERCEPT_CURIOSITY);
+        pthread_mutex_unlock(&p->mutex);
+    }
+    return NULL;
+}
+
 Perception* perception_create(MasterTopology* topology,
                                MemorySystem* memory,
                                ActiveLearner* learner,
@@ -225,14 +262,38 @@ Perception* perception_create(MasterTopology* topology,
     memcpy(p->engines, g_default_engines, sizeof(g_default_engines));
     p->day_reset_time = time(NULL);
 
-    printf("[感觉皮层] 就绪 (%d个搜索引擎, 最大%d个/周期, 超时%dms, 缓存%ds)\n",
+    /* v0.5.8: 初始化异步搜索队列 + 启动工作线程 */
+    pthread_mutex_init(&p->queue_mutex, NULL);
+    pthread_cond_init(&p->queue_cond, NULL);
+    p->queue_head = p->queue_tail = p->queue_count = 0;
+    p->worker_stop = 0;
+    p->worker_running = 0;
+    if (pthread_create(&p->worker_thread, NULL, _perception_worker, p) == 0) {
+        p->worker_running = 1;
+    } else {
+        fprintf(stderr, "[感觉皮层] 警告: 搜索工作线程创建失败，降级为同步搜索\n");
+    }
+
+    printf("[感觉皮层] 就绪 (%d个搜索引擎, 最大%d个/周期, 超时%dms, 缓存%ds, 异步队列=%s)\n",
            PM_ENGINE_COUNT, p->cfg.max_searches_per_cycle, p->cfg.search_timeout_ms,
-           p->cfg.cache_ttl_seconds);
+           p->cfg.cache_ttl_seconds, p->worker_running ? "开" : "关");
     return p;
 }
 
 void perception_destroy(Perception* p) {
     if (!p) return;
+
+    /* v0.5.8: 先停搜索工作线程（防 worker 访问已释放状态） */
+    if (p->worker_running) {
+        pthread_mutex_lock(&p->queue_mutex);
+        p->worker_stop = 1;
+        pthread_cond_broadcast(&p->queue_cond);
+        pthread_mutex_unlock(&p->queue_mutex);
+        pthread_join(p->worker_thread, NULL);
+        p->worker_running = 0;
+    }
+    pthread_mutex_destroy(&p->queue_mutex);
+    pthread_cond_destroy(&p->queue_cond);
 
     /* 尾部 flush：将未 flush 的搜索文本最后处理一次 */
     if (p->ar && p->article_accum_count > 0) {
@@ -715,18 +776,19 @@ int perception_tick(Perception* p, float throttle) {
     (void)throttle;  /* 纯随机模式不再需要 throttle 抽签 */
     if (!p) return 0;
 
-    pthread_mutex_lock(&p->mutex);
+    /* v0.5.8: 主循环不再持 p->mutex、不再同步搜索——
+     * 只选词入队立即返回，网络慢/挂起绝不阻塞脑干。 */
 
     p->tick_counter++;
 
     /* 按配置的周期（默认60秒）触发一次纯随机搜索 */
-    if (p->tick_counter < p->cfg.cycle_interval_ticks) { pthread_mutex_unlock(&p->mutex); return 0; }
+    if (p->tick_counter < p->cfg.cycle_interval_ticks) return 0;
     p->tick_counter = 0;
 
     /* v0.5.7: 分层爬取——50% 词库（概念拓扑实义词，丰富已有概念），
      * 50% 词汇拓扑（过滤后合法节点，扩充新数据）。垃圾词过滤防污染。 */
     SubTopology* vocab = master_get_sub_topology_by_type(p->topology, TOPO_VOCABULARY);
-    if (!vocab || !vocab->net || vocab->net->node_count == 0) { pthread_mutex_unlock(&p->mutex); return 0; }
+    if (!vocab || !vocab->net || vocab->net->node_count == 0) return 0;
     SubTopology* concept = master_get_sub_topology_by_type(p->topology, TOPO_CONCEPT);
 
     int max_searches = p->cfg.max_searches_per_cycle;
@@ -753,12 +815,20 @@ int perception_tick(Perception* p, float throttle) {
         }
         if (!node || !node->concept) continue;
 
-        if (search_and_learn(p, node->concept, PERCEPT_CURIOSITY) >= 0) {
+        /* v0.5.8: 入队（队列满则丢弃本次，绝不阻塞主循环） */
+        pthread_mutex_lock(&p->queue_mutex);
+        if (p->queue_count < PERCEPT_QUEUE_CAP) {
+            strncpy(p->queue_items[p->queue_tail], node->concept,
+                    sizeof(p->queue_items[0]) - 1);
+            p->queue_items[p->queue_tail][sizeof(p->queue_items[0]) - 1] = '\0';
+            p->queue_tail = (p->queue_tail + 1) % PERCEPT_QUEUE_CAP;
+            p->queue_count++;
+            pthread_cond_signal(&p->queue_cond);
             searched++;
         }
+        pthread_mutex_unlock(&p->queue_mutex);
     }
 
-    pthread_mutex_unlock(&p->mutex);
     return searched;
 }
 

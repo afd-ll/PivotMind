@@ -27,6 +27,9 @@
 struct ArticleReader;
 struct ReasoningNode;
 
+/* v0.5.8: 异步搜索队列容量——主循环只入队，工作线程串行执行网络搜索 */
+#define PERCEPT_QUEUE_CAP 16
+
 /** 搜索触发源 */
 typedef enum {
     PERCEPT_CURIOSITY   = 0,  /* 好奇心驱动 */
@@ -128,6 +131,19 @@ typedef struct Perception {
 
     /* 状态 */
     int   tick_counter;               /* tick 计数（由外部递增） */
+
+    /* v0.5.8: 异步搜索队列——主循环只入队不阻塞网络。
+     * 修复：perception_tick 原在主循环同步执行 search_and_learn（HTTP 请求），
+     * 网络抖动/锁竞争会把脑干主循环拖慢 10-25 倍甚至永久卡死（08-07 实测）。 */
+    pthread_mutex_t     queue_mutex;                          /* 队列锁 */
+    pthread_cond_t      queue_cond;                           /* 队列条件变量 */
+    char                queue_items[PERCEPT_QUEUE_CAP][128];  /* 待搜概念环形缓冲 */
+    int                 queue_head;                           /* 队头 */
+    int                 queue_tail;                           /* 队尾 */
+    int                 queue_count;                          /* 队列中条目数 */
+    int                 worker_stop;                          /* 工作线程停止标志 */
+    pthread_t           worker_thread;                        /* 搜索工作线程 */
+    int                 worker_running;                       /* 工作线程已启动 */
 } Perception;
 
 /**
