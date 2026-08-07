@@ -85,6 +85,10 @@ int node_cache_freeze(NodeCache* nc, HuarongTopologyNet* net, ReasoningNode* nod
  */
 int node_cache_thaw(NodeCache* nc, HuarongTopologyNet* net, ReasoningNode* node);
 int node_cache_thaw_all(NodeCache* nc, MasterTopology* master);
+/* v0.5.10: 存盘导出冻结边（master_save_state 调用，缺声明→gcc14 隐式声明报错） */
+int node_cache_export_frozen_edges(NodeCache* nc, MasterTopology* master,
+                                   HuarongTopologyNet* net, ReasoningNode* node,
+                                   FILE* fp);
 
 /**
  * 查询节点是否已冷却

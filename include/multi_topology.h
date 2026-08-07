@@ -519,6 +519,8 @@ int master_count_total_nodes(MasterTopology* master);
 
 /* 死节点清理：移除零边零激活的孤立节点 */
 int master_prune_dead_nodes(MasterTopology* master);
+/* v0.5.10: 无锁版死节点清理（brainstem_tick_freeze 调用，缺声明→gcc14 隐式声明报错） */
+int master_prune_dead_nodes_nolock(MasterTopology* master);
 
 // ========== 边重建 ==========
 

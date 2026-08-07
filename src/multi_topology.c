@@ -12,6 +12,7 @@
 #include "path_encoding.h"
 #include "dict_loader.h"
 #include "template_builder.h"
+#include "node_cache.h"  /* v0.5.10: node_cache_export_frozen_edges 声明（此前漏 include，gcc14 隐式声明报错） */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
