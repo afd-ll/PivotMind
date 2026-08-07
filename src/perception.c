@@ -772,6 +772,32 @@ static int is_valid_query(const char* c) {
     return 1;
 }
 
+/* 内部入队：把待搜概念放入异步队列（主循环/自学/对话共用） */
+static int _perception_enqueue(Perception* p, const char* concept) {
+    if (!p || !concept || !concept[0]) return 0;
+    pthread_mutex_lock(&p->queue_mutex);
+    int ok = 0;
+    if (p->queue_count < PERCEPT_QUEUE_CAP) {
+        strncpy(p->queue_items[p->queue_tail], concept,
+                sizeof(p->queue_items[0]) - 1);
+        p->queue_items[p->queue_tail][sizeof(p->queue_items[0]) - 1] = '\0';
+        p->queue_tail = (p->queue_tail + 1) % PERCEPT_QUEUE_CAP;
+        p->queue_count++;
+        pthread_cond_signal(&p->queue_cond);
+        ok = 1;
+    }
+    pthread_mutex_unlock(&p->queue_mutex);
+    return ok;
+}
+
+/* v0.5.8: 入队式搜索——立即返回，网络搜索由感知 worker 串行执行。
+ * 供主循环/自学线程调用，绝不阻塞调用方（修复 08-07 STUCK：
+ * 主循环 brainstem_loop → self_learner_cycle → search_and_learn
+ * 同步 curl，网络慢/挂起时主循环卡死） */
+int perception_enqueue_search(Perception* p, const char* concept) {
+    return _perception_enqueue(p, concept);
+}
+
 int perception_tick(Perception* p, float throttle) {
     (void)throttle;  /* 纯随机模式不再需要 throttle 抽签 */
     if (!p) return 0;
@@ -815,18 +841,10 @@ int perception_tick(Perception* p, float throttle) {
         }
         if (!node || !node->concept) continue;
 
-        /* v0.5.8: 入队（队列满则丢弃本次，绝不阻塞主循环） */
-        pthread_mutex_lock(&p->queue_mutex);
-        if (p->queue_count < PERCEPT_QUEUE_CAP) {
-            strncpy(p->queue_items[p->queue_tail], node->concept,
-                    sizeof(p->queue_items[0]) - 1);
-            p->queue_items[p->queue_tail][sizeof(p->queue_items[0]) - 1] = '\0';
-            p->queue_tail = (p->queue_tail + 1) % PERCEPT_QUEUE_CAP;
-            p->queue_count++;
-            pthread_cond_signal(&p->queue_cond);
+        /* 入队（队列满则丢弃本次，绝不阻塞主循环） */
+        if (_perception_enqueue(p, node->concept)) {
             searched++;
         }
-        pthread_mutex_unlock(&p->queue_mutex);
     }
 
     return searched;
@@ -1010,6 +1028,12 @@ void perception_stats(Perception* p, long* searches, long* learned, long* new_co
     if (learned)  *learned  = p->total_concepts_learned;
     if (new_conns) *new_conns = p->total_new_connections;
     pthread_mutex_unlock(&p->mutex);
+}
+
+/* v0.5.8: 绑定涌现词类系统 → article_reader（POS 池喂养管道） */
+void perception_set_emergent_pos(Perception* p, struct EmergentPOS* ep) {
+    if (!p) return;
+    if (p->ar) article_reader_set_emergent_pos(p->ar, ep);
 }
 
 /* ================================================================

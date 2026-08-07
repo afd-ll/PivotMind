@@ -1296,12 +1296,24 @@ int autonomic_compound_consolidate(MasterTopology* master) {
         if ((int)sub->type == TOPO_VOCABULARY) vocab = sub;
         else if ((int)sub->type == TOPO_CONCEPT) concept = sub;
     }
-    if (!vocab || !vocab->net || !concept || !concept->net) return 0;
-    if (vocab->net->node_count <= 0) return 0;
+    /* v0.5.8: 提前 return 必须解锁——此前 4 处提前返回未 unlock，
+     * 任一路径触发（malloc 失败/拓扑瞬态）→ master 写锁永久持有
+     * → 主循环 wrlock 饿死 STUCK（08-07 gdb 抓栈实锤） */
+    if (!vocab || !vocab->net || !concept || !concept->net) {
+        pthread_rwlock_unlock(&master->rwlock);
+        return 0;
+    }
+    if (vocab->net->node_count <= 0) {
+        pthread_rwlock_unlock(&master->rwlock);
+        return 0;
+    }
 
     int vn = vocab->net->node_count;
     float* avg_w = (float*)calloc((size_t)vn, sizeof(float));
-    if (!avg_w) return 0;
+    if (!avg_w) {
+        pthread_rwlock_unlock(&master->rwlock);
+        return 0;
+    }
 
     /* 1. 边权均值（Hebbian 边权 = 共现计数） */
     for (int i = 0; i < vn; i++) {
@@ -1314,7 +1326,11 @@ int autonomic_compound_consolidate(MasterTopology* master) {
 
     /* 2. 候选收集（高频方向定词序） */
     CCWordCand* cands = (CCWordCand*)malloc(sizeof(CCWordCand) * (size_t)(vn * 2));
-    if (!cands) { free(avg_w); return 0; }
+    if (!cands) {
+        free(avg_w);
+        pthread_rwlock_unlock(&master->rwlock);
+        return 0;
+    }
     int cand_count = 0;
 
     for (int i = 0; i < vn && cand_count < vn * 2; i++) {

@@ -400,6 +400,13 @@ int self_learner_cycle(SelfLearner* sl) {
     /* 持读锁保护 cross_adj 等共享结构不被 master_add_cross_link 并发修改 */
     pthread_rwlock_rdlock(&sl->master->rwlock);
 
+    /* v0.5.8: 锁内只收集待搜索概念，网络搜索移到解锁后执行——
+     * 持读锁跑 curl（perception_learn_concept）会让主循环 wrlock
+     * 饿死 STUCK（08-07 gdb 实锤：自学线程持读锁 usleep 等网络，
+     * 主循环 brainstem_loop 卡在 pthread_rwlock_wrlock） */
+    char* pend_queries[32];
+    int   pend_count = 0;
+
     sl->cycle_num++;
     int seeds_topo[MAX_SEEDS], seeds_node[MAX_SEEDS];
 
@@ -424,18 +431,17 @@ int self_learner_cycle(SelfLearner* sl) {
             mark_explored(sl, steps[i].topo_id, steps[i].node_id);
         }
 
-        /* 6. 孤立节点 → 通过 perception 统一管线搜索学习 */
+        /* 6. 孤立节点 → 锁内只收集概念名，解锁后统一搜索学习 */
         if (len <= 1) {
             SubTopology* sub = sl->master->sub_topologies[seeds_topo[s]];
             if (sub && sub->net && seeds_node[s] < sub->net->node_count) {
                 ReasoningNode* node = sub->net->nodes[seeds_node[s]];
                 if (node && node->concept && node->edge_count == 0) {
-                    /* 走 perception 统一管线（熔断/缓存/多源 fallback） */
                     extern Perception* g_perception;  /* 由主程序注入的全局感觉皮层 */
-                    if (g_perception) {
-                    if (!_is_meaningful_concept(node->concept)) continue;
-                        int result = perception_learn_concept(g_perception, node->concept);
-                        if (result > 0) total_mods++;
+                    if (g_perception && _is_meaningful_concept(node->concept) &&
+                        pend_count < 32) {
+                        pend_queries[pend_count] = strdup(node->concept);
+                        if (pend_queries[pend_count]) pend_count++;
                     }
                 }
             }
@@ -475,6 +481,19 @@ int self_learner_cycle(SelfLearner* sl) {
     }
 
     pthread_rwlock_unlock(&sl->master->rwlock);
+
+    /* v0.5.8: 锁外执行网络搜索——改走异步入队（感知 worker 串行执行），
+     * 调用方（主循环/自学线程）绝不阻塞网络 */
+    {
+        extern Perception* g_perception;
+        for (int q = 0; q < pend_count; q++) {
+            if (g_perception) {
+                int r = perception_enqueue_search(g_perception, pend_queries[q]);
+                if (r > 0) total_mods++;
+            }
+            free(pend_queries[q]);
+        }
+    }
     return total_mods;
 }
 
