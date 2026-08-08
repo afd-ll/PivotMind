@@ -216,16 +216,30 @@ int cingulate_diffusion_evaluate(MasterTopology* topo,
                                   GeneratedSequence* out_seq) {
     if (!topo || !input || !out_seq) return 0;
 
+    /* v0.5.10 fix: 对话扩散全程持读锁——diffusion_generate 锁外遍历
+     * nodes/edges 并写 emergent_class_ids（已删），词巩固线程并发
+     * realloc 数组 → 悬垂指针 SIGSEGV（08-08 三次 139 崩溃实锤，
+     * 栈: diffusion_generate → emergent_pos_tag）。
+     * 调用者（prefrontal/dmn/pfe）均无持锁，读锁不会嵌套死锁。 */
+    pthread_rwlock_rdlock(&topo->rwlock);
+
     memset(out_seq, 0, sizeof(*out_seq));
 
     DiffusionCtx dctx;
-    if (diffusion_init(&dctx, topo) != 0) return 0;
+    if (diffusion_init(&dctx, topo) != 0) {
+        pthread_rwlock_unlock(&topo->rwlock);
+        return 0;
+    }
     dctx.temperature = temperature;
     dctx.emergent_pos = emergent_pos;
 
     const char* words[DIFF_MAX_SEQUENCE];
     int n = diffusion_generate(&dctx, input, words, DIFF_MAX_SEQUENCE);
-    if (n < 2) { diffusion_cleanup(&dctx); return 0; }
+    if (n < 2) {
+        diffusion_cleanup(&dctx);
+        pthread_rwlock_unlock(&topo->rwlock);
+        return 0;
+    }
 
     for (int i = 0; i < n && i < MAX_GENERATED_WORDS; i++)
         out_seq->words[i] = words[i];
@@ -233,5 +247,6 @@ int cingulate_diffusion_evaluate(MasterTopology* topo,
     cingulate_evaluate(out_seq, topo, input, 5);
 
     diffusion_cleanup(&dctx);
+    pthread_rwlock_unlock(&topo->rwlock);
     return n;
 }

@@ -29,6 +29,10 @@ int dmn_cycle(MasterTopology* master, MemorySystem* memory,
     if (result > 0) {
         DiffusionCtx dctx;
         if (diffusion_init(&dctx, master) == 0) {
+            /* v0.5.10 fix: 扩散全程持读锁——diffusion_generate 锁外遍历
+             * nodes/edges，词巩固线程并发 realloc → 悬垂 SIGSEGV。
+             * 调用者 brainstem_tick_memory_dream 无持锁，读锁安全。 */
+            pthread_rwlock_rdlock(&master->rwlock);
             /* 取一个随机采样节点作为输入，扩散1步 */
             int ri = rand() % master->sub_topologies[0]->net->node_count;
             ReasoningNode* rn = master->sub_topologies[0]->net->nodes[ri];
@@ -39,6 +43,7 @@ int dmn_cycle(MasterTopology* master, MemorySystem* memory,
                 int n = diffusion_generate(&dctx, rn->concept, words, DIFF_MAX_SEQUENCE);
                 (void)n;  /* 扩散过程本身会强化边，结果用于激活 */
             }
+            pthread_rwlock_unlock(&master->rwlock);
         }
     }
 

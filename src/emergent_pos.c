@@ -439,35 +439,27 @@ POSTag emergent_pos_tag(EmergentPOS* ep, MasterTopology* master,
     int node_id = huarong_net_find_concept(vocab->net, word);
     if (node_id < 0) return POS_UNKNOWN;
 
+    /* v0.5.10 fix: node_id 空洞防御——词巩固/压缩线程可能并发 shrink
+     * nodes 数组（node_id 空洞→越界 SIGSEGV，08-08 同族崩溃）。
+     * 锁外读的唯一安全边界就是 node_count 本身。 */
+    if (node_id >= vocab->net->node_count) return POS_UNKNOWN;
+
     ReasoningNode* node = vocab->net->nodes[node_id];
     if (!node || !node->features) return POS_UNKNOWN;
 
     POSTag tag = emergent_pos_classify(ep, node->features);
 
-    /* 回写涌现词类到节点（避免重复分类） */
-    if (tag != POS_UNKNOWN) {
-        int already = 0;
-        for (int i = 0; i < node->emergent_class_count && i < 4; i++) {
-            if (node->emergent_class_ids[i] == (int)tag) { already = 1; break; }
-        }
-        if (!already && node->emergent_class_count < 4) {
-            int idx = node->emergent_class_count++;
-            node->emergent_class_ids[idx] = (int)tag;
-            /* 获取相似度: 根据 tag 来源选正确的中心 */
-            float sim = 0.0f;
-            if ((int)tag < POS_COUNT) {
-                sim = ep_cosine_sim(node->features, ep->anchors[tag].centroid,
-                                    PM_NODE_FEATURE_DIM);
-            } else {
-                int ei = (int)tag - POS_COUNT;
-                if (ei < 16 && ep->extra_classes[ei].is_active)
-                    sim = ep_cosine_sim(node->features, ep->extra_classes[ei].centroid,
-                                        PM_NODE_FEATURE_DIM);
-            }
-            node->emergent_class_confs[idx] = sim;
-        }
-    }
-
+    /* v0.5.10 fix: 移除回写词类到节点（emergent_class_ids/emergent_class_confs）。
+     *
+     * 原代码在锁外写共享节点字段 → 对话线程与词巩固线程并发时
+     * 悬垂指针 SIGSEGV（08-08 三次 139 崩溃实锤，栈在 diffusion_generate
+     * → emergent_pos_tag）。POS 标注是纯查询，回写是缓存优化——但:
+     *   1) 本函数调用者（diffusion/multi_topology/cognitive_controller）
+     *      全部只用返回值，无人依赖回写结果
+     *   2) 回写由喂料路径 emergent_pos_tag_soft（article_flush 持锁调用）
+     *      负责，数据持续供给模板生长与 diffusion 的 emergent_class_ids 读取
+     *   3) 查询路径零写 = 零悬垂风险，锁外安全
+     */
     return tag;
 }
 
