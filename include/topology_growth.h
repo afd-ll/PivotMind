@@ -216,6 +216,12 @@ bool check_growth_needed(MasterTopology* master, int topo_id);
 int auto_extend_topology(MasterTopology* master, int topo_id);
 
 /**
+ * 无锁版拓扑增长 — 调用者必须已持有 master->rwlock 写锁
+ * （active_learner 合并阶段等持锁上下文用，防自锁死锁）
+ */
+int auto_extend_topology_nolock(MasterTopology* master, int topo_id);
+
+/**
  * 执行自动拓扑收缩
  * @param master 主拓扑
  * @param topo_id 拓扑ID

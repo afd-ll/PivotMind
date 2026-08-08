@@ -197,7 +197,9 @@ void* learning_cycle(void* arg) {
                 SubTopology* sub = learner->master->sub_topologies[t];
                 if (!sub || !sub->net) continue;
                 if (check_growth_needed(learner->master, t)) {
-                    int new_count = auto_extend_topology(learner->master, t);
+                    /* v0.5.10: 合并阶段已持写锁（上方 167 行 wrlock），
+                     * 必须用 nolock 版防自锁死锁 */
+                    int new_count = auto_extend_topology_nolock(learner->master, t);
                     if (new_count > 0 && learner->verbose) {
                         printf("  [%s] 拓扑增长: %d 节点\n", sub->name, new_count);
                     }

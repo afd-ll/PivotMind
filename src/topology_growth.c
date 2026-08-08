@@ -422,6 +422,22 @@ bool check_growth_needed(MasterTopology* master, int topo_id) {
 int auto_extend_topology(MasterTopology* master, int topo_id) {
     if (!master) return -1;
 
+    /* v0.5.10 fix: realloc(net->nodes) 必须持 master 写锁——数组搬移
+     * 时任何并发读者（article_flush 的 nolock 模板查找、diffusion 等）
+     * 都会拿到悬垂数组基址 → SIGSEGV。08-08 13:05-13:16 四次崩溃
+     * 全在"拓扑0 扩容至 100400"之后，栈: master_find_template_for_pair_nolock
+     * ← article_flush ← _learn_worker。调用者 brainstem_tick_learning_scan
+     * 无持锁，写锁不嵌套。已持锁的调用者（active_learner 合并阶段）
+     * 必须用 auto_extend_topology_nolock 防自锁死锁。 */
+    pthread_rwlock_wrlock(&master->rwlock);
+    int ret = auto_extend_topology_nolock(master, topo_id);
+    pthread_rwlock_unlock(&master->rwlock);
+    return ret;
+}
+
+int auto_extend_topology_nolock(MasterTopology* master, int topo_id) {
+    if (!master) return -1;
+
     TopologyGrowthConfig* config = topology_growth_get_default_config();
     SubTopology* sub = master_get_sub_topology(master, topo_id);
 
@@ -463,17 +479,28 @@ int auto_extend_topology(MasterTopology* master, int topo_id) {
 
 int auto_shrink_topology(MasterTopology* master, int topo_id) {
     if (!master || master_load_protected(master)) return -1;  /* 加载保护期：不收缩（v0.6） */
+
+    /* v0.5.10 fix: 与 auto_extend_topology 同理——realloc 必须持写锁 */
+    pthread_rwlock_wrlock(&master->rwlock);
+
     TopologyGrowthConfig* config = topology_growth_get_default_config();
-    if (!config->auto_shrink_enabled) return -1;
+    if (!config->auto_shrink_enabled) {
+        pthread_rwlock_unlock(&master->rwlock);
+        return -1;
+    }
 
     SubTopology* sub = master_get_sub_topology(master, topo_id);
-    if (!sub || !sub->net) return -1;
+    if (!sub || !sub->net) {
+        pthread_rwlock_unlock(&master->rwlock);
+        return -1;
+    }
 
     HuarongTopologyNet* net = sub->net;
 
     // 检查使用率
     float usage = (float)net->node_count / net->max_nodes;
     if (usage > config->shrink_threshold) {
+        pthread_rwlock_unlock(&master->rwlock);
         return 0;  // 不需要收缩
     }
 
@@ -489,13 +516,17 @@ int auto_shrink_topology(MasterTopology* master, int topo_id) {
     }
 
     if (new_capacity >= net->max_nodes) {
+        pthread_rwlock_unlock(&master->rwlock);
         return 0;
     }
 
     // 扩容 (收缩后可能需要扩容来处理现有节点)
     ReasoningNode** new_nodes = (ReasoningNode**)realloc(
         net->nodes, new_capacity * sizeof(ReasoningNode*));
-    if (!new_nodes) return -1;
+    if (!new_nodes) {
+        pthread_rwlock_unlock(&master->rwlock);
+        return -1;
+    }
 
     net->nodes = new_nodes;
     net->max_nodes = new_capacity;
@@ -504,11 +535,16 @@ int auto_shrink_topology(MasterTopology* master, int topo_id) {
     g_global_stats.total_shrink_events++;
     g_global_stats.last_shrink = time(NULL);
 
+    pthread_rwlock_unlock(&master->rwlock);
     return new_capacity;
 }
 
 int topology_load_balancing(MasterTopology* master) {
     if (!master) return -1;
+
+    /* v0.5.10 fix: 函数内 realloc dst->net->nodes + 修改 node_count，
+     * 与 auto_extend/shrink 同族——必须持写锁（当前无调用者，防御性加锁） */
+    pthread_rwlock_wrlock(&master->rwlock);
 
     // 简单负载均衡：将节点从繁忙拓扑迁移到空闲拓扑
     int total_nodes = 0;
@@ -523,7 +559,10 @@ int topology_load_balancing(MasterTopology* master) {
         }
     }
 
-    if (active_sub_count <= 1) return 0;
+    if (active_sub_count <= 1) {
+        pthread_rwlock_unlock(&master->rwlock);
+        return 0;
+    }
 
     int avg_nodes = total_nodes / active_sub_count;
     int migrated = 0;
@@ -634,6 +673,7 @@ int topology_load_balancing(MasterTopology* master) {
         }
     }
 
+    pthread_rwlock_unlock(&master->rwlock);
     return migrated;
 }
 
