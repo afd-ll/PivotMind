@@ -12,6 +12,7 @@
 #include <math.h>
 #include <stdio.h>
 #include <stdint.h>
+#include <pthread.h>
 
 /* 前向声明 (classify 函数中调用, 定义在文件后面) */
 int emergent_pos_try_emerge(EmergentPOS* ep);
@@ -104,6 +105,8 @@ EmergentPOS* emergent_pos_create(const char* lang) {
     int is_en = (lang && lang[0] == 'e');
     seed_table = is_en ? POS_EN_SEEDS : POS_CN_SEEDS;
 
+    pthread_mutex_init(&ep->lock, NULL);
+
     /* 遍历 POS 标签（跳过 POS_UNKNOWN=0） */
     for (int tag = POS_NOUN; tag < POS_COUNT; tag++) {
         POSAnchor* anchor = &ep->anchors[tag];
@@ -138,6 +141,7 @@ void emergent_pos_destroy(EmergentPOS* ep) {
     if (ep->total_classifications > 0) {
         emergent_pos_save(ep, NULL);
     }
+    pthread_mutex_destroy(&ep->lock);
     free(ep);
 }
 
@@ -240,6 +244,11 @@ int emergent_pos_init_centroids(EmergentPOS* ep, MasterTopology* master) {
 POSTag emergent_pos_classify(EmergentPOS* ep, const float* features) {
     if (!ep || !features) return POS_UNKNOWN;
 
+    /* v0.5.10: 锁保护——本函数写 unclassified 池/extra_classes/计数器，
+     * tag_soft 锁外调用（article_flush 移出 ar->mutex），多 learn worker
+     * 并发写会堆损坏（08-08 15:28 double free 实锤） */
+    pthread_mutex_lock(&ep->lock);
+
     float best_sim = ep->sim_threshold;
     POSTag best_tag = POS_UNKNOWN;
     int best_is_extra = 0;
@@ -308,6 +317,7 @@ POSTag emergent_pos_classify(EmergentPOS* ep, const float* features) {
         emergent_pos_save(ep, NULL);
     }
 
+    pthread_mutex_unlock(&ep->lock);
     return best_tag;
 }
 
@@ -322,6 +332,12 @@ void emergent_pos_classify_soft(EmergentPOS* ep, const float* features,
         return;
     }
     result->count = 0;
+
+    /* v0.5.10: 锁保护——本函数写 extra_classes/涌现池/计数器，
+     * tag_soft 锁外调用，多 learn worker 并发写会堆损坏
+     * （08-08 15:28 double free 实锤）。注意：emergent_pos_tag_soft
+     * 调本函数后不再回写节点（v0.5.10 已删），锁只护 ep 内部状态。 */
+    pthread_mutex_lock(&ep->lock);
 
     /* 收集所有超过阈值的锚点 */
     typedef struct { POSTag tag; float sim; } Candidate;
@@ -404,6 +420,8 @@ void emergent_pos_classify_soft(EmergentPOS* ep, const float* features,
         ep->emerge_check_counter = 0;
         emergent_pos_try_emerge(ep);
     }
+
+    pthread_mutex_unlock(&ep->lock);
 }
 
 /* ================================================================
@@ -496,19 +514,22 @@ void emergent_pos_tag_soft(EmergentPOS* ep, MasterTopology* master,
     int node_id = huarong_net_find_concept(vocab->net, word);
     if (node_id < 0) return;
 
+    /* v0.5.10 fix: node_id 空洞防御——词巩固/扩容线程并发 shrink/realloc
+     * nodes 数组时锁外读会悬垂（08-08 15:28 double free + SIGSEGV 实锤，
+     * 栈: auto_learn_concepts → huarong_net_add_connection）。 */
+    if (node_id >= vocab->net->node_count) return;
+
     ReasoningNode* node = vocab->net->nodes[node_id];
     if (!node || !node->features) return;
 
     emergent_pos_classify_soft(ep, node->features, result);
 
-    /* 回写涌现词类到节点 */
-    if (result->count > 0 && node->emergent_class_count == 0) {
-        for (int i = 0; i < result->count && i < 4; i++) {
-            node->emergent_class_ids[i] = (int)result->tags[i];
-            node->emergent_class_confs[i] = result->confs[i];
-        }
-        node->emergent_class_count = result->count;
-    }
+    /* v0.5.10 fix: 移除锁外回写词类到节点。
+     * 原代码在 ar->mutex 锁外（article_flush 特意移出锁外避 O(n²) 聚类）
+     * 写共享节点 emergent_class_ids/count——与扩容 realloc 并发时
+     * 节点指针悬垂 → 堆损坏（double free）。POS 标注是查询，回写是
+     * 缓存优化；模板生长/diffusion 读的数据由喂料主路径持续供给，
+     * 此处零写 = 锁外安全。 */
 }
 
 /* ================================================================

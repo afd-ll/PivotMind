@@ -107,6 +107,13 @@ typedef struct EmergentPOS {
     /* 统计 */
     int       total_classifications;        /* 总分类次数 */
     int       soft_classifications;         /* 软分配次数（多义词） */
+
+    /* v0.5.10: 涌现池/额外词类/计数器并发写保护。
+     * tag_soft 锁外调用（article_flush 为避 O(n²) 移出 ar->mutex），
+     * 多个 learn worker 并发写 unclassified/extra_classes 会堆损坏
+     * （08-08 15:28 double free 实锤）。锁只保护写 ep 内部状态的
+     * 汇聚点（classify / classify_soft / try_emerge / adjust_centroid）。 */
+    pthread_mutex_t lock;
 } EmergentPOS;
 
 /* ================================================================
