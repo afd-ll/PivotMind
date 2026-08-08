@@ -140,23 +140,37 @@ int insert_node_dynamic(MasterTopology* master, int topo_id,
                        const char* concept, float* features, int feature_dim) {
     if (!master || !concept) return -1;
 
+    /* v0.5.10 fix: 整函数持 master 写锁——调用方（article_flush 持
+     * ar->mutex、template_builder）返回后立即访问 nodes[node_id]，
+     * 而 auto_extend 会 realloc 搬移数组。锁外插入 = 返回即悬垂
+     * （08-08 18:51 SIGSEGV 实锤: article_flush 扩容 236100 后崩）。
+     * 内部 auto_extend 用 nolock 版防自锁死锁。 */
+    pthread_rwlock_wrlock(&master->rwlock);
+
     SubTopology* sub = master_get_sub_topology(master, topo_id);
-    if (!sub || !sub->net) return -1;
+    if (!sub || !sub->net) {
+        pthread_rwlock_unlock(&master->rwlock);
+        return -1;
+    }
 
     // 检查容量（用实际容量，不是全局上限）
     if ((size_t)sub->net->node_count >= sub->net->max_nodes) {
-        // 尝试自动扩展
+        // 尝试自动扩展（已持写锁，用 nolock 版）
         if (check_growth_needed(master, topo_id)) {
-            auto_extend_topology(master, topo_id);
+            auto_extend_topology_nolock(master, topo_id);
         }
         if ((size_t)sub->net->node_count >= sub->net->max_nodes) {
+            pthread_rwlock_unlock(&master->rwlock);
             return -1;
         }
     }
 
     // 插入节点
     ReasoningNode* new_node = huarong_net_add_node(sub->net, concept, features, feature_dim);
-    if (!new_node) return -1;
+    if (!new_node) {
+        pthread_rwlock_unlock(&master->rwlock);
+        return -1;
+    }
 
     // 更新哈希表
     if (sub->node_hash) {
@@ -170,6 +184,7 @@ int insert_node_dynamic(MasterTopology* master, int topo_id,
         g_global_stats.peak_node_count = g_global_stats.current_node_count;
     }
 
+    pthread_rwlock_unlock(&master->rwlock);
     return new_node->node_id;
 }
 
