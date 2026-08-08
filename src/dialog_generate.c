@@ -503,6 +503,10 @@ typedef struct { CoocEntry table[CP_HASH_SIZE]; } PairCoocTable;
 static PairCoocTable* g_pair_cooc = NULL;
 static int* g_single_count = NULL;
 static int  g_single_capacity = 0;
+/* v0.5.10: cp_tracker 全局静态被多线程并发读写（auto_learn_concepts 从
+ * learn worker×2/感知 worker/对话线程调用，全部锁外）——realloc 与读写
+ * 并发 = double free（08-08 崩溃 #4 同源）。专用互斥锁保护。 */
+static pthread_mutex_t g_cp_tracker_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static inline int cp_pair_hash(int a, int b) {
     if (a > b) { int t = a; a = b; b = t; }
@@ -511,6 +515,7 @@ static inline int cp_pair_hash(int a, int b) {
 }
 
 static void cp_tracker_ensure(int max_nodes) {
+    pthread_mutex_lock(&g_cp_tracker_lock);
     if (!g_pair_cooc) g_pair_cooc = (PairCoocTable*)calloc(1, sizeof(PairCoocTable));
     if (g_single_capacity < max_nodes) {
         int new_cap = max_nodes + 2048;
@@ -522,12 +527,24 @@ static void cp_tracker_ensure(int max_nodes) {
             g_single_capacity = new_cap;
         }
     }
+    pthread_mutex_unlock(&g_cp_tracker_lock);
 }
 
 static void cp_tracker_record(int id_a, int id_b) {
-    if (!g_pair_cooc || id_a < 0 || id_b < 0 || id_a == id_b) return;
+    pthread_mutex_lock(&g_cp_tracker_lock);
+    if (!g_pair_cooc || id_a < 0 || id_b < 0 || id_a == id_b) { pthread_mutex_unlock(&g_cp_tracker_lock); return; }
+    /* v0.5.10: 持锁状态下内联扩容（不调 cp_tracker_ensure 防自锁死锁） */
     int max_id = id_a > id_b ? id_a : id_b;
-    if (max_id >= g_single_capacity) cp_tracker_ensure(max_id + 2048);
+    if (max_id >= g_single_capacity) {
+        int new_cap = max_id + 2048;
+        int* p = (int*)realloc(g_single_count, (size_t)new_cap * sizeof(int));
+        if (p) {
+            memset(p + g_single_capacity, 0,
+                   (size_t)(new_cap - g_single_capacity) * sizeof(int));
+            g_single_count = p;
+            g_single_capacity = new_cap;
+        }
+    }
     if (g_single_count) {
         if (id_a < g_single_capacity) g_single_count[id_a]++;
         if (id_b < g_single_capacity) g_single_count[id_b]++;
@@ -539,10 +556,13 @@ static void cp_tracker_record(int id_a, int id_b) {
         int idx = (h + p) & CP_HASH_MASK;
         CoocEntry* e = &g_pair_cooc->table[idx];
         if (e->cooc == 0) {
-            e->node_a = min_id; e->node_b = max_id_; e->cooc = 1; return;
+            e->node_a = min_id; e->node_b = max_id_; e->cooc = 1;
+            pthread_mutex_unlock(&g_cp_tracker_lock); return;
         }
-        if (e->node_a == min_id && e->node_b == max_id_) { e->cooc++; return; }
+        if (e->node_a == min_id && e->node_b == max_id_) { e->cooc++;
+            pthread_mutex_unlock(&g_cp_tracker_lock); return; }
     }
+    pthread_mutex_unlock(&g_cp_tracker_lock);
 }
 
 static int cp_tracker_get_cooc(int id_a, int id_b) {
@@ -621,12 +641,21 @@ void auto_learn_concepts(MasterTopology* master, const char* text, void* str_poo
 
     SubTopology* vocab = master_get_sub_topology_by_type(master, TOPO_VOCABULARY);
     if (!vocab || !vocab->net) return;
+
+    /* v0.5.10 fix: 整个函数持 master 写锁——它写 vocab->net->nodes 的
+     * activation/features/edges 并调 huarong_net_add_connection（内部
+     * 再拿 net->mutex 读锁）。4 个线程并发调用（learn worker×2/感知/
+     * 对话）全程锁外 = 与扩容 realloc 并发悬垂（08-08 崩溃 #4 实锤）。
+     * 锁序: master(写) → net(读)，add_node 只拿 net(写) 不碰 master，
+     * 无交叉死锁。 */
+    pthread_rwlock_wrlock(&master->rwlock);
+
     cp_tracker_ensure(vocab->net->max_nodes);
 
     /* UTF-8 分词（中文按单字切） */
     char* tokens[128];
     int token_count = utf8_tokenize(text, tokens, 128);
-    if (token_count <= 0) return;
+    if (token_count <= 0) { pthread_rwlock_unlock(&master->rwlock); return; }
 
     /* 提取中文单字（跳过标点/停用词），获取或创建节点ID */
     int cjk_pos[128], cjk_ids[128], cjk_count = 0;
@@ -642,7 +671,7 @@ void auto_learn_concepts(MasterTopology* master, const char* text, void* str_poo
             cjk_count++;
         }
     }
-    if (cjk_count <= 0) { for (int i = 0; i < token_count; i++) free(tokens[i]); return; }
+    if (cjk_count <= 0) { pthread_rwlock_unlock(&master->rwlock); for (int i = 0; i < token_count; i++) free(tokens[i]); return; }
 
     /* 收集所有参与节点（单字 + 将创建的组合词）用于后续建边 */
     int node_ids[128], node_count = 0;
@@ -733,6 +762,8 @@ void auto_learn_concepts(MasterTopology* master, const char* text, void* str_poo
     }
 
     for (int i = 0; i < token_count; i++) free(tokens[i]);
+
+    pthread_rwlock_unlock(&master->rwlock);
 }
 
 

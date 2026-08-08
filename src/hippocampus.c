@@ -54,9 +54,13 @@ int hippocampus_consolidate(Hippocampus* hc) {
     consolidated_conns = 1;  /* 基础记忆巩固算 1 */
 
     /* QA 重放：把最近对话注回拓扑建连接，统计实际连接数 */
+    /* v0.5.10 fix: 遍历 vocab->net->nodes 加 master 读锁——脑干线程
+     * 此遍历与 learn worker/主动学习线程的扩容 realloc 并发，node_count/
+     * nodes[] 锁外读会悬垂（08-08 审计 #4 高危，与 diffusion 崩溃同族）。 */
     if (hc->topology && hc->log_count > 0) {
         SubTopology* vocab = master_get_sub_topology_by_type(hc->topology, TOPO_VOCABULARY);
         if (vocab && vocab->net) {
+            pthread_rwlock_rdlock(&hc->topology->rwlock);
             for (int l = 0; l < hc->log_count; l++) {
                 char* qa = hc->dialog_log[l];
                 char* sep = strchr(qa, '|');
@@ -87,6 +91,7 @@ int hippocampus_consolidate(Hippocampus* hc) {
                 *sep = '|';
             }
         }
+        pthread_rwlock_unlock(&hc->topology->rwlock);
     }
 
     /* 感觉皮层联动：通过丘脑获取感知皮层实例，选低置信度概念联网查证 */

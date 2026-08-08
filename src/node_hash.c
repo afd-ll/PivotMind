@@ -5,6 +5,8 @@
 #include <string.h>
 #include <stdio.h>
 
+static ReasoningNode* node_hash_find_nolock(NodeHashTable* hash, const char* concept);
+
 /**
  * DJB2 字符串哈希函数
  * 效果好且计算快速
@@ -44,6 +46,8 @@ NodeHashTable* node_hash_create(size_t bucket_count) {
     
     hash->bucket_count = bucket_count;
     hash->node_count = 0;
+
+    pthread_mutex_init(&hash->lock, NULL);
     
     return hash;
 }
@@ -73,20 +77,28 @@ void node_hash_free(NodeHashTable* hash) {
     }
     
     free(hash->buckets);
+
+    pthread_mutex_destroy(&hash->lock);
     free(hash);
 }
 
 /**
  * 添加节点到哈希表
  */
+void node_hash_reserve_nolock(NodeHashTable* hash, size_t node_count);
 int node_hash_add(NodeHashTable* hash, ReasoningNode* node) {
     if (!hash || !node || !node->concept) {
         return -1;
     }
+
+    /* v0.5.10: 加锁保护 rehash（add 触发 reserve 重分配 buckets，
+     * 双线程并发 rehash = double free）。内部用 nolock 版防自锁。 */
+    pthread_mutex_lock(&hash->lock);
     
     // 检查是否已存在
-    if (node_hash_find(hash, node->concept) != NULL) {
+    if (node_hash_find_nolock(hash, node->concept) != NULL) {
         // 节点已存在，不重复添加
+        pthread_mutex_unlock(&hash->lock);
         return 0;
     }
     
@@ -96,6 +108,7 @@ int node_hash_add(NodeHashTable* hash, ReasoningNode* node) {
     // 创建新的哈希条目
     NodeHashEntry* new_entry = (NodeHashEntry*)malloc(sizeof(NodeHashEntry));
     if (!new_entry) {
+        pthread_mutex_unlock(&hash->lock);
         return -1;
     }
     
@@ -106,16 +119,17 @@ int node_hash_add(NodeHashTable* hash, ReasoningNode* node) {
     
     /* 自动 rehash: 负载因子超过 0.75 时扩容到 2x */
     if (hash->node_count > hash->bucket_count * 3 / 4) {
-        node_hash_reserve(hash, hash->node_count * 2);
+        node_hash_reserve_nolock(hash, hash->node_count * 2);
     }
     
+    pthread_mutex_unlock(&hash->lock);
     return 0;
 }
 
 /**
  * 从哈希表中查找节点
  */
-ReasoningNode* node_hash_find(NodeHashTable* hash, const char* concept) {
+static ReasoningNode* node_hash_find_nolock(NodeHashTable* hash, const char* concept) {
     if (!hash || !concept) {
         return NULL;
     }
@@ -136,6 +150,16 @@ ReasoningNode* node_hash_find(NodeHashTable* hash, const char* concept) {
     return NULL;
 }
 
+ReasoningNode* node_hash_find(NodeHashTable* hash, const char* concept) {
+    if (!hash || !concept) return NULL;
+    /* v0.5.10: NodeHashTable 并发 rehash 保护——find 遍历期间 buckets 被
+     * reserve realloc 释放 = UAF（08-08 审计 #3 高危） */
+    pthread_mutex_lock(&hash->lock);
+    ReasoningNode* node = node_hash_find_nolock(hash, concept);
+    pthread_mutex_unlock(&hash->lock);
+    return node;
+}
+
 /**
  * 查找节点并自动解冻（按需使用）
  */
@@ -154,6 +178,9 @@ int node_hash_remove(NodeHashTable* hash, const char* concept) {
     if (!hash || !concept) {
         return -1;
     }
+
+    /* v0.5.10: 加锁（删除与 rehash 并发 → buckets 链表损坏） */
+    pthread_mutex_lock(&hash->lock);
     
     unsigned int idx = hash_string(concept, hash->bucket_count);
     NodeHashEntry* entry = hash->buckets[idx];
@@ -171,6 +198,7 @@ int node_hash_remove(NodeHashTable* hash, const char* concept) {
                 
                 free(entry);
                 hash->node_count--;
+                pthread_mutex_unlock(&hash->lock);
                 return 0;
             }
         }
@@ -178,6 +206,7 @@ int node_hash_remove(NodeHashTable* hash, const char* concept) {
         entry = entry->next;
     }
     
+    pthread_mutex_unlock(&hash->lock);
     return -1;  // 未找到
 }
 
@@ -186,6 +215,8 @@ int node_hash_remove(NodeHashTable* hash, const char* concept) {
  */
 void node_hash_clear(NodeHashTable* hash) {
     if (!hash) return;
+
+    pthread_mutex_lock(&hash->lock);
     
     for (size_t i = 0; i < hash->bucket_count; i++) {
         NodeHashEntry* entry = hash->buckets[i];
@@ -198,6 +229,8 @@ void node_hash_clear(NodeHashTable* hash) {
     }
     
     hash->node_count = 0;
+
+    pthread_mutex_unlock(&hash->lock);
 }
 
 /**
@@ -271,7 +304,7 @@ int node_hash_add_all_from_net(NodeHashTable* hash, HuarongTopologyNet* net) {
 /**
  * 预留节点容量（提前分配内存，避免多次扩容）
  */
-void node_hash_reserve(NodeHashTable* hash, size_t node_count) {
+void node_hash_reserve_nolock(NodeHashTable* hash, size_t node_count) {
     if (!hash || node_count == 0) return;
 
     // 计算合适的桶数量（负载因子约0.75）
@@ -313,6 +346,14 @@ void node_hash_reserve(NodeHashTable* hash, size_t node_count) {
     free(hash->buckets);
     hash->buckets = new_buckets_arr;
     hash->bucket_count = new_buckets;
+}
+
+void node_hash_reserve(NodeHashTable* hash, size_t node_count) {
+    if (!hash || node_count == 0) return;
+    /* v0.5.10: 加锁版（外部调用者用） */
+    pthread_mutex_lock(&hash->lock);
+    node_hash_reserve_nolock(hash, node_count);
+    pthread_mutex_unlock(&hash->lock);
 }
 
 /**

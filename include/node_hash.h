@@ -25,6 +25,11 @@ typedef struct NodeHashTable {
     size_t node_count;            // 节点总数
     struct NodeCache* cache;      // 节点冷热缓存（用于自动解冻）
     struct HuarongTopologyNet* net; // 所属拓扑网络（解冻时重建边引用用）
+
+    /* v0.5.10: 并发 rehash 保护——add 触发 reserve 重分配 buckets 数组，
+     * 双线程并发 rehash = double free（08-08 审计 #3 高危）。
+     * 公开 API（add/find/remove/clear/reserve）全部持锁。 */
+    pthread_mutex_t lock;
 } NodeHashTable;
 
 /**

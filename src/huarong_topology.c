@@ -520,8 +520,19 @@ int huarong_net_add_connection(HuarongTopologyNet* net,
                               int from_node_id,
                               int to_node_id,
                               float weight) {
-    if (!net || from_node_id < 0 || from_node_id >= net->node_count ||
+    if (!net) return -1;
+
+    /* v0.5.10 fix: net->mutex 读锁包住整个函数——nodes 数组可能被
+     * auto_extend/auto_shrink（master 写锁）或 add_node（net 写锁）
+     * 并发 realloc 搬移，锁外读 node_count/nodes[] 会悬垂 SIGSEGV
+     * （08-08 崩溃 #2/#4: auto_learn_concepts → add_connection）。
+     * 锁序: net->mutex → node_locks（add_node 只拿 net->mutex 不碰
+     * node_locks，无交叉死锁）。 */
+    pthread_rwlock_rdlock(&net->mutex);
+
+    if (from_node_id < 0 || from_node_id >= net->node_count ||
         to_node_id < 0 || to_node_id >= net->node_count) {
+        pthread_rwlock_unlock(&net->mutex);
         return -1;
     }
 
@@ -538,6 +549,7 @@ int huarong_net_add_connection(HuarongTopologyNet* net,
     if (idx >= 0) {
         from_node->edges[idx].weight = clamp(weight, 0.0f, 1.0f);
         pthread_mutex_unlock(&net->node_locks[li]);
+    pthread_rwlock_unlock(&net->mutex);
         return 0;
     }
 
@@ -546,11 +558,13 @@ int huarong_net_add_connection(HuarongTopologyNet* net,
         /* 硬上限：防止单节点连接爆炸导致 OOM（来自 constants.h） */
         if (from_node->edge_capacity >= PM_AUTONOMIC_MAX_CONN) {
             pthread_mutex_unlock(&net->node_locks[li]);
+    pthread_rwlock_unlock(&net->mutex);
             return -1;
         }
         /* 防止整数溢出 */
         if (from_node->edge_capacity > INT_MAX / 2) {
             pthread_mutex_unlock(&net->node_locks[li]);
+    pthread_rwlock_unlock(&net->mutex);
             return -1;
         }
         /* 惰性边分配：edge_capacity==0 时从默认容量起步 */
@@ -564,6 +578,7 @@ int huarong_net_add_connection(HuarongTopologyNet* net,
 
         if (!new_edges) {
             pthread_mutex_unlock(&net->node_locks[li]);
+    pthread_rwlock_unlock(&net->mutex);
             return -1;
         }
 
@@ -615,6 +630,7 @@ int huarong_net_add_connection(HuarongTopologyNet* net,
     __atomic_fetch_add(&from_node->edge_count, 1, __ATOMIC_RELEASE);
 
     pthread_mutex_unlock(&net->node_locks[li]);
+    pthread_rwlock_unlock(&net->mutex);
     return 0;
 }
 
