@@ -458,12 +458,15 @@ int node_cache_export_frozen_edges(NodeCache* nc, MasterTopology* master,
         memcpy(&w, p, 4);          p += 4;
         memcpy(&mb, p, 4);         p += 4;
         memcpy(&cf, p, 4);         p += 4;
-        /* 找目标节点 concept（全图按 node_id 查） */
+        /* v0.5.10 fix: 目标查找限定源拓扑（net）——此前全图按 node_id
+         * 乱找，其他拓扑同 index 节点会被误当目标（边写错/写漏）。
+         * 目标缺失时补写 tlen=0 + 3f 占位，保证文件流 conn_count 与
+         * 实际记录数一致——否则加载 Pass1 错位 → "读取失败（数据
+         * 不完整）" → 部分加载 0 边 → 级联塌缩（08-08 16:34→18:51
+         * →08-09 08:32 加载 247万→42.8万→791 链接，实测）。 */
         const char* tgt_concept = NULL;
-        for (int t = 0; t < master->sub_topo_count && !tgt_concept; t++) {
-            SubTopology* st = master->sub_topologies[t];
-            if (!st || !st->net || target_id < 0 || target_id >= st->net->node_count) continue;
-            ReasoningNode* tn = st->net->nodes[target_id];
+        if (target_id >= 0 && target_id < net->node_count) {
+            ReasoningNode* tn = net->nodes[target_id];
             if (tn && tn->concept) tgt_concept = tn->concept;
         }
         if (tgt_concept) {
@@ -474,6 +477,14 @@ int node_cache_export_frozen_edges(NodeCache* nc, MasterTopology* master,
             fwrite(&mb, sizeof(float), 1, fp);
             fwrite(&cf, sizeof(float), 1, fp);
             written++;
+        } else {
+            /* 占位：目标缺失（已删除/悬垂）——tlen=0 + 3f，流不断 */
+            int zero_tlen = 0;
+            float zero = 0.0f;
+            fwrite(&zero_tlen, sizeof(int), 1, fp);
+            fwrite(&zero, sizeof(float), 1, fp);
+            fwrite(&zero, sizeof(float), 1, fp);
+            fwrite(&zero, sizeof(float), 1, fp);
         }
     }
     free(buf);
