@@ -288,11 +288,16 @@ static void brainstem_tick_subcortical(Brainstem* bs, const CircadianParams* cp)
             thalamus_get_utility(th, THAL_UTIL_COGNITIVE_CTRL);
         health_monitor_tick(bs->health_monitor, bs->master, cc);
 
-        /* 同步自动解冻开关到 NodeCache：内存紧张时禁止解冻，防止越解越糟 */
+        /* 同步自动解冻开关到 NodeCache：RED 内存危机才禁解冻。
+         * v0.5.10 fix: 原逻辑 (hl == HM_GREEN) 导致 frozen_nodes 累计
+         * 超 500 后永久 YELLOW → auto_thaw_ok 永远 0 → 按需解冻永远
+         * 不生效 → 对话退化成"好的。"。YELLOW 只是预警（frozen_nodes
+         * 是只增累计值，超阈值后回不去 GREEN），解冻几个对话节点
+         * 亚毫秒级，不会触发内存危机；RED（85%+RSS双确认）才真危险。 */
         NodeCache* nc = (NodeCache*)thalamus_get_utility(th, THAL_UTIL_NODE_CACHE);
         if (nc) {
             HealthLevel hl = health_get_level(bs->health_monitor);
-            nc->auto_thaw_ok = (hl == HM_GREEN) ? 1 : 0;
+            nc->auto_thaw_ok = (hl != HM_RED) ? 1 : 0;
         }
     }
 
