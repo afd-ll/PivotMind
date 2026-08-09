@@ -1175,6 +1175,15 @@ void dialog_system_destroy(DialogSystem* sys) {
         bptt_learner_destroy(sys->bptt);
     }
     if (sys->auto_state) {
+        /* v0.5.10 fix: 先停异步刷盘线程再 free——flush_thread_worker
+         * 跑 feature_learn_graph_smooth（OpenMP 并行），直接 free(state)
+         * 而线程未停 → OpenMP 线程访问已释放内存 → shutdown 时 SIGSEGV
+         * （09:03:22 实测: dialog_system_destroy→model_destroy，栈含
+         * _omp_fn.2）。autonomic_stop_async_flush 内部 join 线程。 */
+        AutonomicState* as = (AutonomicState*)sys->auto_state;
+        if (as->initialized) {
+            autonomic_stop_async_flush(as);
+        }
         free(sys->auto_state);
     }
     free(sys);
