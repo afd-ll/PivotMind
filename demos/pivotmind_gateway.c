@@ -32,6 +32,7 @@
 #include <pthread.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <dirent.h>   /* v0.5.10: 加载回退 scandir 备份目录 */
 #include "pivotmind_version.h"
 #include <arpa/inet.h>
 #include <sys/stat.h>
@@ -468,6 +469,45 @@ static int gw_system_init(GatewaySystem* gw) {
     fprintf(stderr, "[gateway]   加载持久化状态...\n");
     if (access("pivotmind_state.dat", F_OK) == 0) {
         int loaded = master_load_state(gw->topology, "pivotmind_state.dat");
+
+        /* v0.5.10 fix: 加载失败（数据不完整）时回退 SD 卡备份——
+         * systemd SIGKILL 杀在存盘写一半 → 正式文件损坏（08-08 20:21:44
+         * 实测 62,105 链接全丢）。备份目录滚动保留最近文件。 */
+        if (loaded < 0) {
+            fprintf(stderr, "[gateway]   ⚠ 主状态加载失败，尝试回退 SD 卡备份...\n");
+            const char* backup_dir = "/mnt/sdcard/pivotmind_backup";
+            char backup_path[1024];
+            struct dirent** entries = NULL;
+            int n = scandir(backup_dir, &entries, NULL, alphasort);
+            char newest[1024] = {0};
+            if (n > 0) {
+                for (int i = 0; i < n; i++) {
+                    if (!entries[i]) continue;
+                    const char* name = entries[i]->d_name;
+                    if (strstr(name, "pivotmind_state.") && strstr(name, ".bak") &&
+                        strcmp(name, ".") != 0 && strcmp(name, "..") != 0) {
+                        snprintf(backup_path, sizeof(backup_path), "%s/%s", backup_dir, name);
+                        /* scandir alphasort = 按名字排序，.bak 带时间戳 → 最后一个最大 */
+                        if (access(backup_path, R_OK) == 0) {
+                            snprintf(newest, sizeof(newest), "%s", backup_path);
+                        }
+                    }
+                    free(entries[i]);
+                }
+                free(entries);
+            }
+            if (newest[0]) {
+                fprintf(stderr, "[gateway]   回退到备份: %s\n", newest);
+                loaded = master_load_state(gw->topology, newest);
+                if (loaded > 0) {
+                    /* 回退成功后立即原子存盘回主路径，后续正常滚动 */
+                    master_save_state(gw->topology, "pivotmind_state.dat");
+                }
+            } else {
+                fprintf(stderr, "[gateway]   ⚠ 无可用备份，以空状态启动（知识可能已丢失）\n");
+            }
+        }
+
         /* v0.5.7: 状态加载后强制初始化 POS 锚点中心——懒初始化只在
          * emergent_pos_tag 调用时触发，启动后无对话则永不触发 →
          * 锚点 0 激活 → POS 从未工作（实测"0 硬编码锚点"）。

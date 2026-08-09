@@ -3528,9 +3528,16 @@ int master_count_total_nodes(MasterTopology* master) {
 int master_save_state(MasterTopology* master, const char* file_path) {
     if (!master || !file_path) return -1;
     
-    FILE* fp = fopen(file_path, "wb");
+    /* v0.5.10 fix: 原子存盘——写临时文件 + rename。
+     * 此前 fopen(file_path,"wb") 直接写正式文件：systemd TimeoutStopSec
+     * 超时 SIGKILL（08-08 20:21:44 实测）杀在写一半 → 正式文件损坏
+     * → 重启加载失败"数据不完整" → 62,105 链接全丢（08-09 今早只剩 791）。
+     * 写 .tmp 被杀只毁 tmp，rename 是原子的，正式文件永远完整。 */
+    char tmp_path[1024];
+    snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", file_path);
+    FILE* fp = fopen(tmp_path, "wb");
     if (!fp) {
-        LOG_ERROR("[状态持久化] 无法创建文件: %s", file_path);
+        LOG_ERROR("[状态持久化] 无法创建临时文件: %s", tmp_path);
         return -1;
     }
 
@@ -3694,6 +3701,13 @@ int master_save_state(MasterTopology* master, const char* file_path) {
     
     fclose(fp);
     pthread_rwlock_unlock(&master->rwlock);
+
+    /* v0.5.10: 原子替换——tmp 写完后 rename 覆盖正式文件 */
+    if (rename(tmp_path, file_path) != 0) {
+        LOG_ERROR("[状态持久化] 原子替换失败: %s → %s", tmp_path, file_path);
+        return -1;
+    }
+
     LOG_INFO("[状态持久化] 已保存到 %s (节点=%d, 链接=%d)", 
            file_path, saved_nodes, saved_links);
     
