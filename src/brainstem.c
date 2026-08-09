@@ -7,6 +7,7 @@
  */
 
 #include "brainstem.h"
+#include <malloc.h>   /* v0.5.11: malloc_trim——C 堆 free 后不还给内核，周期 trim 让 RSS 回落 */
 #include "health_monitor.h"
 #include "huarong_topology.h"
 #include "dmn.h"
@@ -264,6 +265,12 @@ static void brainstem_tick_monitoring(Brainstem* bs) {
     LOG_INFO("[堆监控] tick=%d 节点=%d 连接=%d RSS=%.1fMB VSZ=%.1fMB",
         bs->tick_count, total_nodes, total_conns,
         rss_kb / 1024.0f, vsz_kb / 1024.0f);
+    /* v0.5.11: 周期 malloc_trim——C 堆 free 后不还给内核（RSS 只涨不降），
+     * 每 300 tick（约5分钟）把堆尾空闲内存还给 OS，形成涨-回落呼吸节奏。
+     * 真增长（节点/边/词）不受影响，只回收临时峰值驻留。 */
+    if (bs->tick_count % 300 == 0) {
+        malloc_trim(0);
+    }
 }
 
 /* 皮层下子系统：小脑 + 内感受 + 网状结构 + 丘脑调度 */
