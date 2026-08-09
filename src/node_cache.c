@@ -315,6 +315,14 @@ int node_cache_thaw(NodeCache* nc, HuarongTopologyNet* net, ReasoningNode* node)
 
     if (nread < NC_NODE_HDR_SZ) { free(buf); return -1; }
 
+    /* v0.5.10 fix: 重建段持 node_locks——与 freeze（node_cache.c:259）
+     * 对称。thaw 写 node->features/edges/conn_hash 期间，brainstem freeze
+     * 或学习线程（autonomic_learner 持 node_locks 加边）并发作用于同一
+     * 节点会丢学习成果/状态横跳。锁序: nc->lock → node_locks，freeze
+     * 只持 node_locks 不碰 nc->lock，无环。 */
+    int li = node->node_id & (PM_NODE_LOCK_COUNT - 1);
+    pthread_mutex_lock(&net->node_locks[li]);
+
     /* 解析数据块 */
     uint8_t* p = buf;
     int concept_len, feat_dim, conn_count;
@@ -341,6 +349,7 @@ int node_cache_thaw(NodeCache* nc, HuarongTopologyNet* net, ReasoningNode* node)
         node->edges = (Edge*)calloc(cap, sizeof(Edge));
             
         if (!node->edges) {
+            pthread_mutex_unlock(&net->node_locks[li]);
             free(buf);
             return -1;
         }
@@ -378,6 +387,7 @@ int node_cache_thaw(NodeCache* nc, HuarongTopologyNet* net, ReasoningNode* node)
     }
 
     free(buf);
+    pthread_mutex_unlock(&net->node_locks[li]);
     node->is_cooled = 0;
     __sync_fetch_and_add(&nc->total_thaws, 1);
     return 0;

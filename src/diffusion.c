@@ -9,6 +9,7 @@
 #include "diffusion.h"
 #include "emergent_pos.h"
 #include "cognitive_controller.h"
+#include "node_cache.h"   /* v0.5.10: 按需解冻 node_cache_thaw */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -979,6 +980,18 @@ int diffusion_generate(DiffusionCtx* ctx,
                 /* 词节点 concept 进优先输出队列（输入直接关联的实义词） */
                 if (cnid < ctx->concept->net->node_count) {
                     ReasoningNode* wnode = ctx->concept->net->nodes[cnid];
+
+                    /* v0.5.10 fix: 按需解冻——冻结节点 edges=NULL，
+                     * 语义场/扩散走边全失效 → 对话退化成"好的。"。
+                     * 命中冷节点时从 node_cache 解冻（读 brain_state.dat
+                     * 重建边），解冻后立即可用。auto_thaw_ok 闸门由
+                     * brainstem 按 health 设置（YELLOW/RED 自动禁解冻）。 */
+                    if (wnode && wnode->is_cooled && ctx->master->node_cache &&
+                        ((NodeCache*)ctx->master->node_cache)->auto_thaw_ok) {
+                        node_cache_thaw((NodeCache*)ctx->master->node_cache,
+                                        ctx->concept->net, wnode);
+                    }
+
                     if (wnode && wnode->concept && wnode->concept[0] &&
                         word_prio_count < 16) {
                         int dup2 = 0;
@@ -1079,6 +1092,16 @@ int diffusion_generate(DiffusionCtx* ctx,
 
             int nid = huarong_net_find_concept(ctx->vocab->net, sub);
             if (nid >= 0) {
+                /* v0.5.10 fix: 按需解冻（同词锚定）——字/词节点冻结时
+                 * edges=NULL，扩散走边失效。命中冷节点从 cache 解冻。 */
+                if (nid < ctx->vocab->net->node_count) {
+                    ReasoningNode* vn = ctx->vocab->net->nodes[nid];
+                    if (vn && vn->is_cooled && ctx->master->node_cache &&
+                        ((NodeCache*)ctx->master->node_cache)->auto_thaw_ok) {
+                        node_cache_thaw((NodeCache*)ctx->master->node_cache,
+                                        ctx->vocab->net, vn);
+                    }
+                }
                 int dup = 0;
                 for (int d = 0; d < active_count; d++)
                     if (active_ids[d] == nid) { dup = 1; break; }
