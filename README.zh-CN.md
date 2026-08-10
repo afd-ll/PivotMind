@@ -1,20 +1,18 @@
 <div align="center">
 
-# 玄枢 PivotMind · 溯智网络认知引擎
+# 玄枢 PivotMind
 
-### A Brain-Inspired Semantic Association Engine
-**纯 C · 零 AI 框架依赖 · 跑在 ARM 嵌入式板**
+### 纯 C 编写的仿脑认知引擎
 
-[English](README.md) · [简体中文](README.zh-CN.md) · [日本語](README.ja.md) · [한국어](README.ko.md) · [Русский](README.ru.md)
+**零 AI 框架依赖 · 不需要 GPU · ARM 板上常驻运行**
+
+[English](README.md) · [简体中文](README.zh-CN.md)
 
 [![Version](https://img.shields.io/badge/version-v0.5.9-blue.svg)](changelogs/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green.svg)](LICENSE)
-[![Language](https://img.shields.io/badge/C-99%2B-orange.svg)](https://zh.wikipedia.org/wiki/C99)
-[![Platform](https://img.shields.io/badge/ARM-RK3399%20%7C%20x86__64-lightgrey.svg)](#运行平台)
+[![Language](https://img.shields.io/badge/C-99%2B-orange.svg)](https://en.wikipedia.org/wiki/C99)
+[![Platform](https://img.shields.io/badge/ARM-RK3399%20%7C%20x86__64-lightgrey.svg)](#快速开始)
 [![Dependencies](https://img.shields.io/badge/dependencies-zero-success.svg)](#快速开始)
-
-> 智能不是矩阵乘法的堆叠，
-> 而是激活在溯智网络中蔓延的涟漪。
 
 </div>
 
@@ -22,337 +20,184 @@
 
 ## 这是什么
 
-玄枢是一套**仿脑认知引擎**，基于
-[溯智网络](#溯智网络) +
-[赫布学习](#核心机制) +
-[多层扩散推理](#多层扩散引擎)。
-没有 Transformer 外部依赖，没有预训练 embedding 向量。
-节点、边、激活、衰减 —— 以及一个永不停歇的后台时钟驱动整个系统。
+玄枢（PivotMind）是一个纯 C 编写的认知引擎。不用 Transformer、不用预训练词向量、不依赖任何 AI 框架。概念是节点，共现建边，激活在多层网络中扩散，竞争选出输出。它通过 Hebbian 统计从语料中持续学习，设计目标是在低资源 ARM 板上无人值守地长期运行（实测 RK3399，4GB 内存）。
 
-**当前版本：v0.5.9** —— 14 脑区完整架构、涌现式词类系统、多学习器并行、PFE 推理编排、512 维特征向量、POS 语法映射、边特异性权重、**词层语义场**、**话题性生成**、**PFE 推理管线**、**感知搜索异步化（主循环永不阻塞网络）**、**POS 池管道（额外词类从语料涌现 0→5）**、**统计表记忆化（Hebbian 巩固、短期/长期分层、降权不删）**、**/learn 队列化（2 worker，线程 35→6）** —— 14 脑区完整架构、涌现式词类系统、多学习器并行、PFE 推理编排、512 维特征向量、POS 语法映射、边特异性权重、**词层语义场（词巩固 + 语义拓扑聚类）**、**话题性生成（相关性评分 + 有界联想）**、**PFE 推理管线（子目标分解 + 因果搜索 + 推理链）**、多模态视觉管线 + /learn PMI 词共现管线（VisualCortex + MediaReader）、编译零警告。
+**当前版本：v0.5.9** —— 约 75,500 行 C 代码（88 个源文件 + 91 个头文件 + 工具/测试/示例），零编译警告。
 
-**代码规模：88 个源文件（~49,600 行 C） + 91 个头文件（~12,800 行） + 工具/测试/演示（~13,000 行）= 约 75,500 行。**
+## 架构
 
-### 溯智网络
+### 14 个脑区
 
-每个概念是一个节点，共现即建边。边携带**权重 × 置信度 × 动机倾向**三维属性。
-12 个子拓扑（词汇/语义/情绪/语法/上下文/领域/语用/文化/概念/主拓扑/模板/**视觉**）
-各为一张独立的溯智网络，通过跨拓扑连接用邻接表实现 O(1) 索引。
-激活沿多层同时扩散，竞争胜出者构成输出。
+玄枢把哺乳动物皮层功能分区建模为 14 个已实现的脑区，通过丘脑（Thalamus）信号总线通信，无桩代码。
 
-### 为什么这样做
+<p align="center"><img src="diagrams/brain-regions.png" alt="Brain Regions Architecture" width="780"/></p>
 
-| 传统 LLM               | 玄枢                                              |
-|------------------------|---------------------------------------------------|
-| Token 预测，无状态     | 节点激活，有连续内部状态                          |
-| 梯度离线批量训练       | 赫布在线实时学习 + Skip-gram 预训练                |
-| 单一 Embedding 空间    | 12 个子拓扑独立学习 + 512 维特征向量              |
-| 神经网络黑盒           | 节点-边显式路径，完全可追溯                       |
-| 需要 GPU + 大量显存    | 仅 pthread + OpenMP，跑在 ARM 嵌入式板            |
-| 推理与学习分离         | 对话即学习，学习即对话                            |
-| 无生理感知             | 内感受自检，三级健康响应                          |
-| 离线训练完就冻结       | 7×24 小时持续后台学习                             |
+| 脑区            | 文件                       | 行数 | 功能                                                            |
+|-----------------|----------------------------|------|-----------------------------------------------------------------|
+| **前额叶**       | `prefrontal.c`             | 132  | 对话生成，扩散 → ACC 自适应门控                                  |
+| **前额叶执行**   | `prefrontal_executive.c`   | 1,502| 6 模式推理、任务分解、冲突检测                                    |
+| **海马体**       | `hippocampus.c`            | 135  | 记忆巩固、QA 回放、感知耦合                                      |
+| **DMN 默认网络** | `dmn.c`                    | 46   | 梦境联想、空闲探索                                               |
+| **杏仁核**       | `amygdala.c`               | 97   | 情绪效价采样、探索/利用平衡                                      |
+| **感知皮层**     | `perception.c`             | 838  | 网络搜索（搜狗+必应双源）、文章阅读管道                          |
+| **布罗卡区**     | `broca.c`                  | 56   | 模板自动构建与衰减调度                                           |
+| **小脑**         | `cerebellum.c`             | 80   | BPTT 微调、CPU/内存资源保护                                      |
+| **下丘脑**       | `hypothalamus.c`           | 149  | 4 维驱力调节（好奇/获取/社交/舒适）                              |
+| **丘脑**         | `thalamus.c`               | 540  | 信号总线、资源门控、脑区间路由、工具槽位                        |
+| **脑干**         | `brainstem.c`              | 613  | 昼夜节律心跳、激活衰减、自发激活                                 |
+| **扣带回 ACC**   | `cingulate.c`              | 223  | 4 维序列评估（语义+模板+情绪+长度）                              |
+| **想法竞技场**   | `idea_arena.c`             | 722  | 多候选 5 维竞争、侧抑制、多巴胺                                  |
+| **网状结构**     | `reticular.c`              | 133  | 唤醒/警觉水平调节                                                 |
+| **视觉皮层**     | `visual_cortex.c`          | 550  | 帧提取 + SRT 字幕 + 跨模态对齐                                   |
 
----
+### 12 层拓扑
 
-## 脑区架构
+每个概念存在于 12 个子拓扑之一（11 子 + 1 主），各自是独立的推理网络：
 
-玄枢按哺乳动物大脑皮层的功能分区建模，14 个脑区/子系统各司其职，通过丘脑信号总线通信。
-**全部 14 个脑区均已完成实现，无占位代码。**
+`词汇 / 语义 / 情绪 / 语法 / 上下文 / 领域 / 语用 / 文化 / 概念 / 模板 / 视觉 / 主拓扑`
 
-<p align="center"><img src="diagrams/brain-regions.png" alt="脑区架构" width="780"/></p>
+跨拓扑链接使用 O(1) 邻接索引。激活跨层同时扩散，竞争选出胜者作为输出。
 
-| 脑区             | 文件                       | 行数 | 职责                                                         |
-|------------------|----------------------------|------|--------------------------------------------------------------|
-| **前额叶**       | `prefrontal.c`             | 132  | 对话生成，diffusion → ACC 自适应门控                         |
-| **前额叶执行器** | `prefrontal_executive.c`   | 1,502 | 6 模式推理编排：任务分解、子目标调度、冲突检测、综合输出     |
-| **海马体**       | `hippocampus.c`            | 135  | 记忆巩固、QA 重放、感知联动                                  |
-| **DMN**          | `dmn.c`                    | 46   | 默认模式网络：梦境联想、闲暇探索                             |
-| **杏仁核**       | `amygdala.c`               | 97   | 情绪效价采样、探索/利用平衡                                  |
-| **感知皮层**     | `perception.c`             | 838  | 联网搜索（搜狗+Bing+双备份）、article_reader 语义理解管线    |
-| **布罗卡区**     | `broca.c`                  | 56   | 模板自动构建与衰减调度                                       |
-| **小脑**         | `cerebellum.c`             | 80   | BPTT 微调、CPU/内存资源保护                                  |
-| **下丘脑**       | `hypothalamus.c`           | 149  | 四维需求驱动（好奇/获取/社交/舒适）、昼夜耦合                  |
-| **丘脑**         | `thalamus.c`               | 540  | 信号总线、资源门控、脑区间通信路由、工具槽位分配              |
-| **脑干**         | `brainstem.c`              | 613  | 节律心跳、激活衰减、自发激活、存盘调度、堆监控                |
-| **扣带回 (ACC)** | `cingulate.c`              | 223  | 四维序列评估（语义+模板+情绪+长度）、自适应门控              |
-| **想法竞技场**   | `idea_arena.c`             | 722  | 多候选五维竞争选择、侧抑制、多巴胺调节、赢家反馈              |
-| **网状激活系统** | `reticular.c`              | 133  | 觉醒/警觉水平调节                                                |
-| **视觉皮层** 🆕  | `visual_cortex.c`          | 550  | 帧提取 + SRT 字幕 + 时间窗对齐 + 跨模态边建立               |
+### 与传统 LLM 的设计差异
 
----
+| 传统 LLM | 玄枢 |
+|----------|------|
+| Token 预测，无状态 | 节点激活，持续内部状态 |
+| 梯度离线批量训练 | Hebbian 在线学习 + Skip-gram 预训练 |
+| 单一嵌入空间 | 12 个独立子拓扑 + 512 维特征 |
 
 ## 核心机制
 
+### Hebbian 共现学习
+
+一切结构从语料统计中涌现。一起出现的词/概念建边，重复共现加固。不手写词表、不手写语义、不手写模板——一切必须涌现。
+
+- **词层架构**：单字留在字拓扑，词晋升到概念拓扑并携带共现边权
+- **双通道涌现**：相对阈值（≥1.5×）与绝对阈值（≥0.85）筛选新词候选
+- **词巩固**（运行时能力）：晋升期间持写锁，防止并发访问 SIGSEGV
+
 ### 多层扩散引擎
 
-输入经滑动窗口分词后，在多层网络同步扩散：
+唯一的输出通道。激活跨所有拓扑扩散并衰减，Top-K 候选在想法竞技场竞争（5 维评分：语义+模板+情绪+长度+多巴胺）。没有数据库查表，没有硬编码回复。
 
-- **词汇层** —— 直接字面匹配，快速召回
-- **语义层** —— 12 子拓扑跨层联想，触达相关概念
-- **模板层** —— 识别句式模式，指导连接词插入
-- **情绪层** —— valence × arousal 加权，影响候选优先级
+### 涌现词性系统（POS）
 
-**v0.4.8 改进**：虚词过滤——扩散引擎内置 `is_function_word()` 检查（~130 个中英文虚词），在三层过滤（活跃集更新、加权评分、输出）中拦截高连接度虚词，防止 "the be not to have are..." 或 "的了是在……" 这类虚词串污染输出。侧抑制机制保证内容词输出多样性。
+词性锚点从语料通过喂料管道涌现（`article_reader_set_emergent_pos`）。每 500 次喂料聚类（池 ≥10、阈值 0.50、上限 16）。模板模式从 POS 序列构建——模板从语料生长，不是手写语法。
 
-### 推理编排 (PFE)
+### 涌现虚字
 
-前额叶执行器自动判断问题复杂度，匹配 6 种推理模式：
+虚字（之/的/了 等）通过三闸门涌现（单字节点 + 度阈值 / 熵 + 构词率）。小语料即涌现 25 个虚字（12 核心 + 10 专名 + 3 其他）。
 
-| 模式       | 触发词                | 策略                              |
-|------------|-----------------------|-----------------------------------|
-| DIRECT     | 默认                  | 单次扩散联想                      |
-| DECOMPOSE  | 为什么/原因           | 定义 → 因果 → 综合                |
-| COMPARE    | 比较/区别/不同        | 属性提取 → 对比                   |
-| HOWTO      | 怎么/如何             | 前置条件 → 步骤序列               |
-| ABDUCE     | 如果/假设             | 基线 → 连锁反应                   |
-| ANALOGY    | 类比/类似             | 结构映射                          |
+### 记忆与稳定性
 
-子目标递归分解（深度可配），冲突检测 + IdeaArena 五维竞争（目标匹配度 + 一致性 + 新颖度 + 情绪效价 + 可组合性）选出最佳路径，输出可解释推理链。策略权重支持 EMA 自学习和持久化。
+- 原子存盘（tmp + rename），180s 优雅关闭窗口
+- cgroup 内存墙（1800MB）+ 周期 `malloc_trim(0)` —— RSS 涨-回落呼吸，而非单调增长
+- 崩溃看门狗 + 重启后加载验证
 
-### 涌现式词类系统 (Emergent POS) **NEW v0.4.3**
+## 当前状态（v0.5.9，2026-08 实测）
 
-抛弃硬编码词性字典。人类只提供每词类 3-5 个"种子锚点"词（中英各 ~50 个），系统用种子词的 512 维 Hebbian 特征向量初始化锚点中心。运行时：
-
-1. 新词通过余弦相似度自动归入最接近的词类（阈值 0.50）
-2. 归类成功后以 EMA（学习率 0.001）微调锚点中心
-3. 未分类词超过 10 个 → 贪婪聚类（余弦相似度 > 0.65，簇 ≥ 5 成员）→ **涌现新词类**
-
-三层路由保证平滑过渡：涌现锚点（优先） → 跨拓扑 syntax 连接（辅助） → 硬编码字典（冷启动兜底）。锚点中心持久化到 `emergent_pos.bin`，重启不丢失。
-
-### 内感受自检
-
-持续监测 RSS 内存、连接增速、推理延迟，三级响应：
-
-| 级别      | 条件   | 动作                                |
-|-----------|--------|-------------------------------------|
-| 🟢 GREEN  | 正常   | 正常运行                            |
-| 🟡 YELLOW | 预警   | 日志告警 + 提高学习门槛             |
-| 🔴 RED    | 紧急   | 存档 + 批量修剪弱边                 |
-
----
-
-## 多模态管线 **NEW v0.5.5**
-
-视觉皮层脑区通过两条数据管线将视频/音频内容转化为拓扑网络知识：
-
-<p align="center"><img src="diagrams/multimodal-pipeline.png" alt="多模态管线" width="700"/></p>
-
-任务队列模式：网关入队 → 脑干 tick（丘脑门控）→ 每 tick 出队1个文件 → 帧+字幕+对齐+建边。
-
-**为什么用早教片？** 天然的"问→答"模式、语言简洁重复、音画严格同步——多模态语义锚定的理想素材。
-
----
-
-## 学习系统
-
-玄枢拥有多套并行学习机制，覆盖从词嵌入预训练到在线微调的全周期。
-
-### 预训练系统 (Pretrain)
-
-基于 `pretrain.c`（1,624 行）：支持 **Skip-gram 与 CBOW** 两种词嵌入预训练模式。
-
-- 动态窗口大小（最大 10）、负采样（默认 5）、采样率控制
-- 动量加速（momentum=0.9）、梯度裁剪（阈值 5.0）、短语检测（PMI）
-- 学习率调度：从 0.025 线性衰减至 0.0001
-- 支持检查点保存/恢复，长时间训练不丢进度
-- `feature_pretrain.c` + `feature_learn.c`：特征向量训练与导入
-
-### 学习器矩阵
-
-| 学习器 | 文件 | 方式 | 说明 |
-|--------|------|------|------|
-| **自主学习者** | `autonomic_learner.c` | 赫布在线学习 | 共现即强化，边置信度涨 0.05，16 分片并发更新 |
-| **主动学习者** | `active_learner.c` | 7×24 后台学习 | 自动获取新知识，分析概念关系，扩展拓扑网络 |
-| **自我学习者** | `self_learner.c` | 好奇驱动 | 好奇心采样 → 深度游走 → 知识审查 → 自纠错 → 新奇度更新 |
-| **BPTT 学习者** | `bptt_learner.c` | 时序反向传播 | RNN + Linear 层，Adam 优化器（lr=0.001），在线时序学习 |
-
-### 灾难性遗忘防护
-
-`catastrophic_forgetting.c`（1,385 行，头文件 577 行）：基于 **EWC（弹性权重巩固）**，用 Fisher 信息矩阵标记参数重要性，新学习时选择性保护已有知识不被覆盖。
-
----
-
-## 神经网络子系统
-
-虽然玄枢的核心是拓扑溯智网络，但它也内置了一套完整的轻量神经网络引擎：
-
-| 模块 | 文件 | 说明 |
-|------|------|------|
-| **张量运算** | `tensor.c` (889行) | 多维张量创建/销毁/broadcast/clone/requires_grad/view |
-| **矩阵运算** | `matrix_ops.c` | 矩阵乘/转置/加/缩放 |
-| **梯度运算** | `gradient_ops.c` | 反向传播梯度计算 |
-| **层级层** | `layer.c` | 8 种层类型：LINEAR/RELU/SIGMOID/TANH/SOFTMAX/DROPOUT/EMBEDDING/SIMPLE_RNN |
-| **LSTM** | `layer_lstm.c` (713行) | 完整 LSTM：W/R 矩阵、bias、双向支持、层归一化 |
-| **GRU** | `layer_gru.c` (621行) | 完整 GRU：更新门/重置门、双向支持、层归一化 |
-| **RNN** | `layer_rnn.c` + `layer_rnn_backward.c` | Simple RNN 前向/反向传播 + Embedding 层（Xavier 初始化） |
-| **模型** | `model.c` + `model_io.c` | 多层堆叠、前向传播、MSE 损失、模型序列化 |
-| **生成模型** | `generative_model.c` | 词汇表（PAD/SOS/EOS/UNK）+ 文本生成管线 |
-| **训练器** | `trainer.c` | Mini-batch 训练、学习率调度、统计信息 |
-| **优化器** | `optimizer.c` | SGD / Adam（β1=0.9, β2=0.999, ε=1e-8）/ RMSprop |
-| **量化** | `quantization.c` | FP16 / INT8 / INT4 / INT2 精度缩减 |
-| **剪枝** | `pruning.c` | MAGNITUDE / RANDOM / GRADIENT / STRUCTURED 四种策略 |
-| **注意力机制** | `attention.c` | Bahdanau / Luong / Self-Attention / Multi-Head Attention |
-
----
+| 指标 | 数值 |
+|------|------|
+| 节点 | 38 万+（跨拓扑，持续生长中）|
+| 常驻内存 | RK3399 上 623MB（4GB 板，24/7 运行）|
+| 全量状态加载 | 13 万+ 节点 <5s |
+| 运行方式 | systemd 常驻，持续爬虫 + 语料喂入 |
+| POS 锚点 | 8 硬编码 + 涌现额外词类 |
 
 ## 快速开始
 
-### 编译
+### 构建
 
 ```bash
-# 需要 GCC + pthread + OpenMP（需 libcurl + openssl，其余零依赖）
-make all
+# 需要 GCC + pthread + OpenMP（联网功能需 libcurl + openssl，否则零依赖）
+make -j$(nproc) gateway
 
 # ARM 交叉编译
-make CC=aarch64-linux-gnu-gcc all
+make CROSS_COMPILE=aarch64-linux-gnu- gateway
 
-# 调试编译（含 ASAN 地址/UB 检测）
-make asan
+# 调试构建（ASAN 地址/UB 检测）
+make DEBUG=1 gateway
 
-# 全部单元测试
+# 运行全部单元测试
 make test
 ```
 
-### 启动
+### 运行
 
 ```bash
-# 交互式网关（推荐）
-./build/bin/pivotmind_gateway
+# 交互式网关（推荐）—— HTTP API，端口 8080
+./build/bin/pivotmind_gateway 8080
 
-# 命令行交互版
-./build/bin/digital_life
+# CLI 交互模式
+./build/bin/pivotmind_cli
 ```
-
-网关默认监听 `:8080`，HTML 仪表盘（含自刷新 JS）在 `/` 路径。
 
 ### API 示例
 
 ```bash
 # 提问
-curl -X POST http://localhost:8080/chat \
-  -H "Content-Type: application/json" \
-  -d '{"query":"什么是意识？"}'
+curl -X POST http://localhost:8080/chat -H "Content-Type: application/json" \
+  -d '{"msg":"什么是政治？"}'
 
-# 喂料学习
-curl -X POST http://localhost:8080/learn \
-  -H "Content-Type: application/json" \
-  -d '{"text":"意识是大脑神经网络产生的主观体验。"}'
+# 喂学习材料
+curl -X POST http://localhost:8080/learn -H "Content-Type: application/json" \
+  -d '{"msg":"你的学习文本"}'        #（有限速；异步队列，2 个 worker）
 
-# 查看状态（节点数、运行时间、时钟 tick、脑区信息）
+# 查看状态（节点、运行时长、时钟 tick、脑区信息）
 curl http://localhost:8080/status
 
 # 健康检查
 curl http://localhost:8080/health
-
-# 投喂视频，多模态学习 (v0.5)
-curl -X POST http://localhost:8080/media/feed \
-  -H "Content-Type: application/json" \
-  -d '{"path":"/data/cartoons/babybus_01.mp4","mode":"visual"}'
-
-# 查询多模态管道状态
-curl http://localhost:8080/media/status
 ```
 
-### 构建目标
+### 喂语料
 
-| 命令 | 说明 |
-|------|------|
-| `make all` | 构建全部目标 |
-| `make gateway` | 构建 HTTP 网关 |
-| `make digital-life` | 构建命令行交互版 |
-| `make seed-builder` | 构建种子拓扑工具 |
-| `make debug-seed` | 构建调试用种子工具 |
-| `make batch-learn` | 批量训练工具 |
-| `make corpus-train` | 语料训练工具 |
-| `make template-build` | 模板构建工具 |
-| `make test-dialog` | 对话测试工具 |
-| `make clean` | 清理构建产物 |
-| `make test` | 运行全部单元测试 |
-
----
+语料通过 `/learn` API 喂入（可多脚本并行）。喂料是主要学习路径——引擎从你给的任何文本构建共现统计。
 
 ## 项目结构
 
 ```
-pivotmind/
-├── src/               # 88 个核心源文件（~49,600 行 C）
-├── include/           # 91 个头文件（~12,800 行）
-├── demos/             # 网关与交互入口
-├── tools/             # 57 个工具（训练/调试/数据处理/语料下载）
-├── tests/             # 单元测试（19 项）+ 集成测试 + 回归测试套件
-├── scripts/           # 自动化脚本（喂料、下载知识库等）
-├── changelogs/        # 58 个版本变更记录（000-057）
-├── docs/              # 架构文档与图片
-├── data/              # 运行时数据（hermes 知识库 25MB 等）
-└── libs/              # 第三方库
+src/            引擎源码（约 49,600 行）
+include/        公共头文件（约 12,800 行）
+demos/          网关与 CLI 入口
+tools/          工具（状态导出、合并、转换）
+tests/          单元测试
+changelogs/     版本更新日志
+diagrams/       架构图
 ```
 
----
+## 版本历史
 
-## 版本历程
+| 版本       | 亮点                                                                               |
+|------------|------------------------------------------------------------------------------------|
+| v0.1.x     | 基础散步推理、竞争队列、状态持久化                                                  |
+| v0.2.x     | 多层扩散、海马体/DMN/感知皮层、内感受监控                                           |
+| **v0.3.0** | 前额叶执行（6 模式推理）、想法竞技场 5D、策略权重自学习                             |
+| v0.4.x     | POS 词性系统、模板生长、对话系统                                                    |
+| **v0.5.0** | 视觉管道、词层语义场、PFE 推理                                                      |
+| v0.5.9     | 虚字涌现、POS 喂料管道、崩溃防护、内存呼吸                                          |
 
-| 版本 | 亮点 |
-|------|------|
-| v0.1.x | 基础走边推理，竞争队列，状态持久化 |
-| v0.2.x | 多层扩散引擎、海马体/DMN/感知皮层、内感受自检、认知调度中心 |
-| **v0.3.0** | 前额叶执行器（6 模式推理）、IdeaArena 五维竞争、策略权重自学习 |
-| **v0.4.0** | 代码简化、脑区边界修复、Broca 升级、下丘脑/丘脑/脑干新脑区 |
-| **v0.4.1** | 爬虫引擎重构（libcurl）、Bing 搜索 provider、定时新闻、海外合规 |
-| **v0.4.2** | realloc 悬空指针全面修复（跨 15+ 处）、三轮内存安全审计 |
-| **v0.4.3** | **涌现式词类系统** — 种子锚点 + 512 维特征聚类，语法从数据中涌现 |
-| **v0.4.8** | 扩散引擎虚词过滤（~130 中英文词）、跨层索引修复、double-free 竞态修复 |
-| **v0.4.11** | 双语语法引擎 (动词配价 + 英文 POS + 扩散激活优化) |
-| **v0.4.12** | 对话质量全线攻坚 (在线词汇学习 + 多轮上下文 + 输出长度控制) |
-| **v0.4.13** | POS 语法映射、边特异性权重、编译警告清零 |
-| **v0.5.5** | **多模态管线** — 视觉皮层脑区、MediaReader 字幕管道、跨模态对齐、任务队列 |
-| **v0.5.6** | rwlock 死锁修复（写锁内嵌套读锁）、gateway 拓扑容量、知识存活保护（加载保护 + 保底激活） |
-| **v0.5.9** | **记忆化架构**（字符对 Hebbian 巩固、短期/长期分层、降权不删）、**感知搜索异步化**（worker 队列——主循环不碰网络）、**/learn 队列化**（线程 35→6）、**POS 池管道**（额外词类 0→5 从语料涌现） |
-| **v0.5.7** | **词层语义场**（词巩固、词-词共现边、语义拓扑聚类、语义场查询）、**话题性生成**（相关性评分、有界联想、话题序组装）、**PFE 推理管线**（子目标分解、因果搜索、推理链、四大 O(N²) 修复）、知识存活全面加固（30 分钟加载保护、is_cooled 修剪保护） |
+完整日志见 [changelogs/](changelogs/)
 
-> 详细变更：v0.3.0 → [changelogs/032-v0.3.0-reasoning-architecture.md](changelogs/032-v0.3.0-reasoning-architecture.md) ｜ v0.4.0 → [changelogs/034-v0.4.0-code-simplify-brain-boundary.md](changelogs/034-v0.4.0-code-simplify-brain-boundary.md) ｜ v0.4.3 → [changelogs/042-emergent-pos-anchor.md](changelogs/042-emergent-pos-anchor.md) ｜ v0.5.5 → [changelogs/055-multimodal-v0.5.5.md](changelogs/055-multimodal-v0.5.5.md) ｜ v0.5.6 → [changelogs/061-lazy-memory-optimization.md](changelogs/061-lazy-memory-optimization.md) ｜ v0.5.7 → [changelogs/062-word-semantic-field-reasoning-pipeline.md](changelogs/062-word-semantic-field-reasoning-pipeline.md) ｜ v0.5.8 → [changelogs/063-perception-async-pos-pipeline.md](changelogs/063-perception-async-pos-pipeline.md) ｜ v0.5.9 → [changelogs/064-charpair-memory-learning-queue.md](changelogs/064-charpair-memory-learning-queue.md) (changelogs/055-multimodal-v0.5.5.md)
+## 已知限制
 
----
+对当前状态的诚实评估：
 
-## 已知局限
+- **词层拼接**：回复是激活传播的结果，不是语法保证的句子。目前输出仍处于"词关联"阶段（例如问*政治*可能答出共现词*国民*）
+- **上位概念未成形**：还没有真正的概念抽象——语法拓扑仍在积累 POS 锚点
+- **语料偏差**：当前语料严重偏向政治/历史文本（选集类），主导了共现统计；现代口语语料（目标比例约 政治:生活 = 1:3）仍待补充
+- **玩具期定位**：这是长期研究项目，处于玩具期，不是产品
 
-- **生成流畅度** —— 联想路径输出的句子不如 LLM 自然（仍在迭代）
-- **无 GPU 加速** —— 纯 CPU + pthread + OpenMP
-- **状态文件二进制** —— 不跨架构（x86_64 和 ARM 不互通；文本格式方案规划中）
-- **单机运行** —— 未支持分布式多节点拓扑
-- **多模态 v0.5.5** —— 视觉管线就绪；CLIP 编码器 + Whisper ASR 待集成（Phase 2-3）
+## 路线图
 
----
+- **短期**：规模化补充现代口语语料；继续积累 POS 锚点；验证语法拓扑过临界后概念涌现
+- **中期**：自我意识实验（自我节点 + 动作观察回路）；Minecraft 具身学习实验（虚拟手：动作→结果因果统计）
+- **长期**：小设备上的离线/具身智能——"小板子跑得通，哪都能跑"
 
-## 长期目标
+## 贡献
 
-- [ ] FPGA 部署（终极目标：硬件级神经形态计算）
-- [ ] 分布式多节点拓扑（跨设备激活传递）
-- [x] ~~视觉/听觉多模态输入接口~~ → **v0.5.5 已实现**: 视觉皮层 + MediaReader
-- [ ] JSON/MessagePack 文本格式持久化（跨架构互通）
+个人研究项目。欢迎 Issue 和 Pull Request，但重大设计方向由作者决定。
 
----
+## License
 
-## 参与贡献
-
-欢迎提 Issue 和 Pull Request。重大改动请先开 Issue 讨论你想要改变的内容。
-
----
-
-## 许可证
-
-[Apache License 2.0](LICENSE)
-
----
-
-<a name="运行平台"></a>
-*当前运行在 **EAIDK-610**（RK3399 ARM Cortex-A72，3.8GB RAM）。*
-*目标：打造可在嵌入式硬件上自主运行的分布式认知引擎。*
-
-|<div align="center">
-|
-|维护者：[陈道祥 (afd-ll)](https://github.com/afd-ll)
-|
-|[⭐ Star 本仓库](https://github.com/afd-ll/PivotMind) · [报告 Bug](https://github.com/afd-ll/PivotMind/issues) · [阅读架构文档](ARCHITECTURE.md)
-|
-|</div>
+[Apache 2.0](LICENSE)
