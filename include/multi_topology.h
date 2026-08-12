@@ -512,7 +512,7 @@ int master_save_state(MasterTopology* master, const char* file_path);
 int master_load_state(MasterTopology* master, const char* file_path);
 
 /* 空启动存盘保护阈值：总节点数低于此时跳过存盘，防止覆盖有效数据 */
-#define SAVE_MIN_TOTAL_NODES 50
+#define SAVE_MIN_TOTAL_NODES 1000
 
 /* 总节点数（跨所有子拓扑） */
 int master_count_total_nodes(MasterTopology* master);

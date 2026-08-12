@@ -3392,13 +3392,21 @@ int master_prune_dead_nodes_nolock(MasterTopology* master) {
         }
     }
     long _total_nodes = master_count_total_nodes(master);
-    if (_total_nodes > 0 && _total_dead > _total_nodes / 2) {
-        fprintf(stderr, "[prune] 中止: 死节点候选 %ld/%ld 超 50%%，判定疑似误判 (v0.5.8 护栏)\n",
+    /* v0.5.12: 每轮都打候选日志（此前只有中止才可见，临界点不可观测）*/
+    fprintf(stderr, "[prune] 候选 %ld/%ld (%.1f%%)",
+            _total_dead, _total_nodes,
+            _total_nodes > 0 ? 100.0 * (double)_total_dead / (double)_total_nodes : 0.0);
+    /* v0.5.12: 双闸门——比例(50%) + 绝对量(5万)。08-12 事故：候选 ~9.97万恒定、
+     * 总节点涨破 19.98 万后比例跌破 50% 放行，一把删光 9.98 万孤儿。
+     * 绝对量 >5 万即危险信号（正常积累到不了 5 万）。*/
+    if (_total_nodes > 0 && (_total_dead > _total_nodes / 2 || _total_dead > 50000)) {
+        fprintf(stderr, " → 中止: 候选 %ld/%ld (超50%%或绝对量>5万)，判定疑似误判 (v0.5.12 双闸门)\n",
                 _total_dead, _total_nodes);
         for (int t = 0; t < master->sub_topo_count; t++) free(has_ref[t]);
         free(has_ref);
         return 0;
     }
+    fprintf(stderr, " → 放行\n");
 
     for (int t = 0; t < master->sub_topo_count; t++) {
         SubTopology* sub = master->sub_topologies[t];
@@ -3406,9 +3414,12 @@ int master_prune_dead_nodes_nolock(MasterTopology* master) {
         int nc = sub->net->node_count;
         if (nc == 0) continue;
 
-        /* 收集死节点 ID（在释放前收集，确保指针有效） */
+        /* 收集死节点 ID（在释放前收集，确保指针有效）
+         * v0.5.12: 限流——每轮最多删总节点 2%（防误判代价 -50% → -1%）；
+         * 并用 has_ref[t][id]=2 标记死节点——悬垂边/释放查重 O(1)（原线性扫 O(d)）*/
         int* dead_ids = (int*)calloc((size_t)nc, sizeof(int));
         int dead_count = 0;
+        int max_remove = _total_nodes / 50 + 1;   /* 2% 上限 */
         for (int n = 0; n < nc; n++) {
             ReasoningNode* node = sub->net->nodes[n];
             if (!node) continue;
@@ -3419,7 +3430,11 @@ int master_prune_dead_nodes_nolock(MasterTopology* master) {
                 if (has_ref[t] && node->node_id >= 0 &&
                     (size_t)node->node_id < sub->net->max_nodes &&
                     has_ref[t][node->node_id]) continue;
+                if (dead_count >= max_remove) break;   /* 限流：到 2% 即停，剩余留下轮 */
                 dead_ids[dead_count++] = node->node_id;
+                if (has_ref[t] && node->node_id >= 0 &&
+                    (size_t)node->node_id < sub->net->max_nodes)
+                    has_ref[t][node->node_id] = 2;      /* 死节点标记 */
             }
         }
         if (dead_count == 0) { free(dead_ids); continue; }
@@ -3432,10 +3447,12 @@ int master_prune_dead_nodes_nolock(MasterTopology* master) {
             for (int e = 0; e < node->edge_count; e++) {
                 ReasoningNode* tgt = node->edges[e].target;
                 if (!tgt) { /* 跳过已置空的边槽位 */ continue; }
+                /* v0.5.12: has_ref 死标记查重 O(1)（原线性扫 dead_ids O(d)，
+                 * 三层循环 O(n×e×d) 在 RK3399 上可达数分钟持写锁——STUCK 元凶）*/
                 int is_dead = 0;
-                for (int d = 0; d < dead_count; d++) {
-                    if (tgt->node_id == dead_ids[d]) { is_dead = 1; break; }
-                }
+                if (has_ref[t] && tgt->node_id >= 0 &&
+                    (size_t)tgt->node_id < sub->net->max_nodes)
+                    is_dead = (has_ref[t][tgt->node_id] == 2);
                 if (is_dead) {
                     /* 悬垂边：丢入退役链表，不让 save 碰到 */
                     memset(&node->edges[e], 0, sizeof(Edge));
@@ -3452,10 +3469,11 @@ int master_prune_dead_nodes_nolock(MasterTopology* master) {
         for (int n = nc - 1; n >= 0; n--) {
             ReasoningNode* node = sub->net->nodes[n];
             if (!node) continue;
+            /* v0.5.12: has_ref 死标记查重（同悬垂边清理）*/
             int is_dead = 0;
-            for (int d = 0; d < dead_count; d++) {
-                if (node->node_id == dead_ids[d]) { is_dead = 1; break; }
-            }
+            if (has_ref[t] && node->node_id >= 0 &&
+                (size_t)node->node_id < sub->net->max_nodes)
+                is_dead = (has_ref[t][node->node_id] == 2);
             if (is_dead) {
                 if (node->concept) free(node->concept);
                 if (node->features) free(node->features);
@@ -3525,8 +3543,25 @@ int master_count_total_nodes(MasterTopology* master) {
 
 #define STATE_FORMAT_VERSION 5
 
+/* v0.5.12: 存盘防呆——以最后成功存盘/加载节点数为基准，本次 < 基准×60% 视为坏状态，
+ * 拒绝覆盖主文件，重定向到 .suspect 并报警（08-12 事故：197k→100k 坏状态直接覆盖好文件；
+ * 08-10 事故同款：54 节点覆盖 387,889）。基准不因坏状态更新——主文件永远保留最好状态。*/
+static int g_last_saved_nodes = 0;
+void master_save_set_baseline(int nodes) { g_last_saved_nodes = nodes; }
+
 int master_save_state(MasterTopology* master, const char* file_path) {
     if (!master || !file_path) return -1;
+    char suspect_path[1100];   /* v0.5.12 防呆重定向目标（函数级作用域，防悬垂指针）*/
+
+    /* v0.5.12 防呆：坏状态不进主文件 */
+    int cur_nodes = master_count_total_nodes(master);
+    if (g_last_saved_nodes > 0 && cur_nodes < g_last_saved_nodes * 3 / 5) {
+        snprintf(suspect_path, sizeof(suspect_path), "%s.suspect", file_path);
+        fprintf(stderr, "[状态持久化] ⚠️ 防呆触发: 本次 %d 节点 < 基准 %d×60%%，"
+                "拒绝覆盖 %s，坏状态重定向到 %s\n",
+                cur_nodes, g_last_saved_nodes, file_path, suspect_path);
+        file_path = suspect_path;   /* 主文件保持最后好状态，坏状态留证据 */
+    }
     
     /* v0.5.10 fix: 原子存盘——写临时文件 + rename。
      * 此前 fopen(file_path,"wb") 直接写正式文件：systemd TimeoutStopSec
@@ -3710,6 +3745,7 @@ int master_save_state(MasterTopology* master, const char* file_path) {
 
     LOG_INFO("[状态持久化] 已保存到 %s (节点=%d, 链接=%d)", 
            file_path, saved_nodes, saved_links);
+    g_last_saved_nodes = saved_nodes;   /* v0.5.12: 更新防呆基准 */
     
     return saved_nodes;
 }
@@ -4145,6 +4181,7 @@ int master_load_state(MasterTopology* master, const char* file_path) {
             loaded_nodes, loaded_links, (long)(t1 - t0));
     LOG_INFO("[状态持久化] 已从 %s 加载 (节点=%d, 链接=%d)",
            file_path, loaded_nodes, loaded_links);
+    master_save_set_baseline(loaded_nodes);   /* v0.5.12: 加载即设防呆基准 */
 
     /* v0.6 加载保护期：60 tick 内跳过孤立节点清理，
      * 给新喂知识存活窗口（边恢复/自主学习尚未完成） */
