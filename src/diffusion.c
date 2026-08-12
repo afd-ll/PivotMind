@@ -807,7 +807,6 @@ int diffusion_spread(SubTopology* layer,
         if (nid < 0 || nid >= layer->net->node_count) continue;
         ReasoningNode* node = layer->net->nodes[nid];
         if (!node) continue;
-
         /* 枢纽词跳过: >2000 边的超级连通节点 (如"你"8000边、"是"8000边) 扩散噪声太大 */
         if (node->edge_count > 2000) continue;
 
@@ -989,7 +988,7 @@ int diffusion_generate(DiffusionCtx* ctx,
                     if (wnode && wnode->is_cooled && ctx->master->node_cache &&
                         ((NodeCache*)ctx->master->node_cache)->auto_thaw_ok) {
                         node_cache_thaw((NodeCache*)ctx->master->node_cache,
-                                        ctx->concept->net, wnode);
+                                        ctx->concept->net, wnode, 0);
                     }
 
                     if (wnode && wnode->concept && wnode->concept[0] &&
@@ -1099,7 +1098,7 @@ int diffusion_generate(DiffusionCtx* ctx,
                     if (vn && vn->is_cooled && ctx->master->node_cache &&
                         ((NodeCache*)ctx->master->node_cache)->auto_thaw_ok) {
                         node_cache_thaw((NodeCache*)ctx->master->node_cache,
-                                        ctx->vocab->net, vn);
+                                        ctx->vocab->net, vn, 0);
                     }
                 }
                 int dup = 0;
@@ -1144,6 +1143,13 @@ int diffusion_generate(DiffusionCtx* ctx,
     for (int a = 0; a < active_count; a++) {
         ReasoningNode* src = ctx->vocab->net->nodes[active_ids[a]];
         if (!src) continue;
+        /* v0.5.13 fix: 冷节点先解冻——否则 edge_count=0 无邻居可走（
+         * 之前只有词锚定/字匹配解冻，一跳扩散中间层全断） */
+        if (src->is_cooled && ctx->master->node_cache &&
+            ((NodeCache*)ctx->master->node_cache)->auto_thaw_ok) {
+            node_cache_thaw((NodeCache*)ctx->master->node_cache,
+                            ctx->vocab->net, src, 0);
+        }
         for (int e = 0; e < src->edge_count && spread1_count < SPREAD_MAX_EXTRA; e++) {
             ReasoningNode* nb = src->edges[e].target;
             if (!nb || nb->node_id == src->node_id) continue;
@@ -1170,6 +1176,12 @@ int diffusion_generate(DiffusionCtx* ctx,
     for (int s = 0; s < spread1_count && spread1_count + spread2_count < SPREAD_MAX_EXTRA; s++) {
         ReasoningNode* src = ctx->vocab->net->nodes[spread1_ids[s]];
         if (!src) continue;
+        /* v0.5.13 fix: 两跳同样先解冻 */
+        if (src->is_cooled && ctx->master->node_cache &&
+            ((NodeCache*)ctx->master->node_cache)->auto_thaw_ok) {
+            node_cache_thaw((NodeCache*)ctx->master->node_cache,
+                            ctx->vocab->net, src, 0);
+        }
         for (int e = 0; e < src->edge_count; e++) {
             ReasoningNode* nb = src->edges[e].target;
             if (!nb || nb->node_id == src->node_id) continue;
@@ -1293,6 +1305,19 @@ int diffusion_generate(DiffusionCtx* ctx,
 
     for (int d = 0; d < ctx->depth && cur_count > 0; d++) {
         cur_decay *= ctx->decay;
+
+        /* v0.5.13 fix: 每轮扩散前解冻当前活跃的冷节点——中间层冻结节点
+         * 无边，扩散在此断链（此前只有词锚定/字匹配两处解冻） */
+        for (int _i = 0; _i < cur_count; _i++) {
+            int _nid = cur_ids[_i];
+            if (_nid < 0 || _nid >= ctx->vocab->net->node_count) continue;
+            ReasoningNode* _n = ctx->vocab->net->nodes[_nid];
+            if (_n && _n->is_cooled && ctx->master->node_cache &&
+                ((NodeCache*)ctx->master->node_cache)->auto_thaw_ok) {
+                node_cache_thaw((NodeCache*)ctx->master->node_cache,
+                                ctx->vocab->net, _n, 0);
+            }
+        }
 
         /* 词汇层自身扩散 */
         diffusion_spread(ctx->vocab, cur_ids, cur_count,

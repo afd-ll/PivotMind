@@ -26,7 +26,7 @@ HealthMonitor* health_monitor_create(void) {
     hm->rss_growth_red    = 500.0f;  /* v0.5.7: 不再用于 RED 判定（增速采样不可靠，已两次误判）——保留字段兼容 */
     hm->conn_growth_yellow = 500;
     hm->conn_growth_red    = 2000;
-    hm->frozen_yellow      = 500;
+    hm->frozen_yellow      = 5000;   /* v0.5.13: 500 在 12 万节点下必然 YELLOW→冻结加速恶性循环 */
     hm->frozen_red         = 10000; /* v0.6: 正常学习也会累计冻结计数，2000 太易触发 RED 锁存 */
 
     hm->level  = HM_GREEN;

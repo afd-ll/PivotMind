@@ -553,8 +553,11 @@ static int gw_system_init(GatewaySystem* gw) {
     gw->topology->use_template_voting = 1;
 
     fprintf(stderr, "[gateway]   创建节点缓存...\n");
+    /* v0.5.13 fix: node_cap 按实际节点数+30%——此前 max_nodes+10000 在节点
+     * 超容量时 cap < 实际节点 → bitmap/offsets 数组越界 + 每次启动"新建"
+     * 截断冻结库（08-12 实测：cap=110000 < 120444 节点，thaw 全走"从未保存过"分支） */
     gw->brain_cache = node_cache_create("brain_state.dat",
-                                         gw->topology->sub_topologies[0]->net->max_nodes + 10000);
+                                         master_count_total_nodes(gw->topology) * 13 / 10 + 10000);
     if (!gw->brain_cache) {
         fprintf(stderr, "[gateway] 大脑缓存创建失败\n");
         return -1;

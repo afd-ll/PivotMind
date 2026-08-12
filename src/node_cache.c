@@ -251,6 +251,8 @@ int node_cache_save_node(NodeCache* nc, HuarongTopologyNet* net, ReasoningNode* 
 
 int node_cache_freeze(NodeCache* nc, HuarongTopologyNet* net, ReasoningNode* node) {
     if (!nc || !node || node->is_cooled) return -1;
+    /* v0.5.13 fix: node_id 越界保护（cap < 实际节点时写越界） */
+    if (node->node_id < 0 || node->node_id >= nc->node_count) return -1;
 
     /* 1. 保存到文件 */
     if (node_cache_save_node(nc, net, node) < 0) return -1;
@@ -288,13 +290,19 @@ int node_cache_freeze(NodeCache* nc, HuarongTopologyNet* net, ReasoningNode* nod
     return 0;
 }
 
-int node_cache_thaw(NodeCache* nc, HuarongTopologyNet* net, ReasoningNode* node) {
+/* v0.5.13: restore_features=0 时跳过特征向量恢复——对话路径只需要边，
+ * 省内存、加快解冻（热-冷呼吸：对话后 activation 衰减自然再冻） */
+int node_cache_thaw(NodeCache* nc, HuarongTopologyNet* net, ReasoningNode* node,
+                    int restore_features) {
     if (!nc || !node || !node->is_cooled) return -1;
     if (!node->concept) return -1;
+    /* v0.5.13 fix: node_id 越界保护（cap < 实际节点时 bitmap_test 越界读） */
+    if (node->node_id < 0 || node->node_id >= nc->node_count) return -1;
     if (!bitmap_test(nc->bitmap, node->node_id)) {
-        /* 节点从未保存过（可能是系统初始节点），标记为热即可 */
-        node->is_cooled = 0;
-        return 0;
+        /* v0.5.13 fix: 假解冻——"从未保存过"不再清 is_cooled（热但 0 边
+         * 比冻着更糟：冻着对话会尝试 thaw，0 边彻底无路）。返回 -1 保留
+         * 冻结标记，等 cache 重建/有数据后重试。 */
+        return -1;
     }
 
     pthread_mutex_lock(&nc->lock);
@@ -333,8 +341,8 @@ int node_cache_thaw(NodeCache* nc, HuarongTopologyNet* net, ReasoningNode* node)
     /* concept（已在内存，跳过比对 — 文件中的和 struct 中的应该一致） */
     p += concept_len + 1;
 
-    /* features（如果 features 为空，分配并加载） */
-    if (feat_dim > 0 && !node->features) {
+    /* features（v0.5.13: restore_features=0 时跳过——对话路径只走边） */
+    if (restore_features && feat_dim > 0 && !node->features) {
         node->features = (float*)calloc(feat_dim, sizeof(float));
         if (node->features) {
             memcpy(node->features, p, feat_dim * sizeof(float));
@@ -345,6 +353,7 @@ int node_cache_thaw(NodeCache* nc, HuarongTopologyNet* net, ReasoningNode* node)
 
     /* 重建 connections 数组 */
     if (conn_count > 0) {
+        if (node->edges) free(node->edges);   /* v0.5.13 fix: 防泄漏——学习线程可能已分配 */
         int cap = conn_count + 4;  /* 留一点扩容空间 */
         node->edges = (Edge*)calloc(cap, sizeof(Edge));
             
@@ -407,7 +416,7 @@ int node_cache_thaw_all(NodeCache* nc, MasterTopology* master) {
         for (int n = 0; n < sub->net->node_count; n++) {
             ReasoningNode* node = sub->net->nodes[n];
             if (!node || !node->is_cooled) continue;
-            if (node_cache_thaw(nc, sub->net, node) == 0) thawed++;
+            if (node_cache_thaw(nc, sub->net, node, 1) == 0) thawed++;
         }
     }
     return thawed;

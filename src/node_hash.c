@@ -166,7 +166,7 @@ ReasoningNode* node_hash_find(NodeHashTable* hash, const char* concept) {
 ReasoningNode* node_hash_find_or_thaw(NodeHashTable* hash, const char* concept) {
     ReasoningNode* node = node_hash_find(hash, concept);
     if (node && node->is_cooled && hash->cache && hash->cache->auto_thaw_ok) {
-        node_cache_thaw(hash->cache, hash->net, node);
+        node_cache_thaw(hash->cache, hash->net, node, 1);
     }
     return node;
 }

@@ -3486,6 +3486,11 @@ int master_prune_dead_nodes_nolock(MasterTopology* master) {
         for (int r = 0; r < nc; r++) {
             if (sub->net->nodes[r]) {
                 if (r != write) sub->net->nodes[write] = sub->net->nodes[r];
+                /* v0.5.13 fix: 压缩后重编号 node_id = 数组索引（全库约定，
+                 * huarong_topology.c:258）。此前不重编号 → 存盘 tgt_safe 校验
+                 * nodes[tgt->node_id]==tgt 失败 → 边写占位静默丢弃（08-12
+                 * 实测：prune 后存盘 107k 链接加载只剩 19,646，丢 82%） */
+                sub->net->nodes[write]->node_id = write;
                 write++;
             }
         }

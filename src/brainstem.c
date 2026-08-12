@@ -547,7 +547,9 @@ static void brainstem_tick_freeze(Brainstem* bs, const CircadianParams* cp) {
             int idx = local_rand(&bs->_rng_seed) % sub->net->node_count;
             ReasoningNode* node = sub->net->nodes[idx];
             if (!node || node->is_cooled) continue;
-            if (node->edge_count > 0 && node->activation < 0.005f) {
+            /* v0.5.13 fix: 冻结线 0.005→0.001——喂料节点保底激活 0.1，
+             * 0.005 太严，衰减后必被冻（08-12 冻结风暴根因之一） */
+            if (node->edge_count > 0 && node->activation < 0.001f) {
                 node_cache_freeze(nc, sub->net, node);
                 frozen++;
             }
