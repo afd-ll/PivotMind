@@ -474,8 +474,13 @@ static void brainstem_tick_learning_scan(Brainstem* bs, const CircadianParams* c
      * 限量防爆炸，词从共现统计自己长出来 */
     if (bs->tick_count % bs->consolidate_every_n_ticks == 0) {
         int words = autonomic_compound_consolidate(bs->master);
+        /* v0.5.15: 跨模态绑定（TWN 递归拓扑）——与词巩固同周期，
+         * 词节点挂载跨模态强边引用（文本/情绪/语境），成为"整体单元" */
+        int bound = autonomic_binding_consolidate(bs->master);
         if (words > 0 && bs->verbose)
             LOG_INFO("[词巩固] 涌现 %d 个词节点（字→概念拓扑）", words);
+        if (bound > 0 && bs->verbose)
+            LOG_INFO("[绑定] %d 个词节点挂跨模态绑定（递归拓扑整体单元）", bound);
     }
 
     /* 定期拓扑扩容检查 + 模板构建 */

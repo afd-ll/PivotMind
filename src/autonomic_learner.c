@@ -1224,6 +1224,7 @@ int main() {
 #define CC_THRESHOLD_DEF  1.5f   /* 默认相对强度阈值：w(A,B) > avg(A)*N（可调，2.0 太严，高频字组合如"三国"涌现不出） */
 #define CC_MAX_WORDS       2000   /* 每周期涌现上限（20 本书 200 个远不够） */
 #define CC_STRENGTH_CAP    0.9f   /* cross-link 权重上限 */
+#define BIND_WEIGHT_THRESHOLD 0.5f  /* v0.5.15: 跨模态强边阈值（co-activation 建边默认 0.5） */
 
 /* 全局可调阈值（后续调参用）：词巩固相对强度阈值 */
 float g_compound_threshold = CC_THRESHOLD_DEF;
@@ -1423,6 +1424,63 @@ int autonomic_compound_consolidate(MasterTopology* master) {
  * 领域种子（跨拓扑建边，不复制节点——防镜像爆炸）。
  * 领域锚点 = 领域标签的中文代表词（概念拓扑里的词节点）。
  * 归纳结果：焦虑→PSYCHOLOGY、发烧→MEDICAL（真正的上位归纳） */
+/* v0.5.15: TWN 递归拓扑第 1 步——跨模态绑定
+ * 概念拓扑的词节点检测跨模态强边（weight>BIND_WEIGHT_THRESHOLD，对面是
+ * 非词层/非概念模态），把跨模态邻居挂进 binding_refs（≤8）。绑定节点 =
+ * 递归拓扑的"整体单元"（TWN：塞翁失马 = 词义+故事+感悟的融合体）。
+ * 派生结构：从 cross_links 重建，不持久化（cross_links 持久化即足够，
+ * 重启后自动重建——避免存盘格式版本变更 + 一致性双写灾难）。 */
+int autonomic_binding_consolidate(MasterTopology* master) {
+    if (!master) return 0;
+
+    /* 全程写锁（同 compound——遍历 cross_links + 写节点字段防并发） */
+    pthread_rwlock_wrlock(&master->rwlock);
+
+    SubTopology* concept = NULL;
+    for (int t = 0; t < master->sub_topo_count; t++) {
+        SubTopology* sub = master->sub_topologies[t];
+        if (sub && (int)sub->type == TOPO_CONCEPT) { concept = sub; break; }
+    }
+    if (!concept || !concept->net) {
+        pthread_rwlock_unlock(&master->rwlock);
+        return 0;
+    }
+
+    int bound_total = 0;
+    int own_topo = (int)concept->type;
+    for (int i = 0; i < concept->net->node_count; i++) {
+        ReasoningNode* cnode = concept->net->nodes[i];
+        if (!cnode) continue;
+        cnode->binding_count = 0;   /* 重建（派生结构） */
+        for (int c = 0; c < master->cross_link_count && cnode->binding_count < 8; c++) {
+            CrossTopologyLink* l = master->cross_links[c];
+            if (!l || l->weight < BIND_WEIGHT_THRESHOLD) continue;
+            int f_topo = l->from_topo_id, f_node = l->from_node_id;
+            int t_topo = l->to_topo_id, t_node = l->to_node_id;
+            int is_from = (f_topo == own_topo && f_node == cnode->node_id);
+            int is_to   = (t_topo == own_topo && t_node == cnode->node_id);
+            if (!is_from && !is_to) continue;
+            int o_topo = is_from ? t_topo : f_topo;
+            int o_node = is_from ? t_node : f_node;
+            /* 只绑跨模态（跳过概念拓扑自身、跳过词层——词层跨边是
+             * compound 晋升的组成字回指，不是跨模态绑定） */
+            if (o_topo == own_topo || o_topo == TOPO_VOCABULARY) continue;
+            int dup = 0;
+            for (int b = 0; b < cnode->binding_count; b++)
+                if (cnode->binding_ref_topo[b] == o_topo &&
+                    cnode->binding_ref_node[b] == o_node) { dup = 1; break; }
+            if (dup) continue;
+            cnode->binding_ref_topo[cnode->binding_count] = o_topo;
+            cnode->binding_ref_node[cnode->binding_count] = o_node;
+            cnode->binding_count++;
+        }
+        if (cnode->binding_count > 0) bound_total++;
+    }
+
+    pthread_rwlock_unlock(&master->rwlock);
+    return bound_total;
+}
+
 void autonomic_domain_induction(MasterTopology* master) {
     if (!master) return;
 

@@ -180,6 +180,8 @@ void autonomic_decay_all(MasterTopology* master);
  * 调用方不应持有 master->rwlock。
  */
 int autonomic_compound_consolidate(MasterTopology* master);
+/* v0.5.15: 跨模态绑定（TWN 递归拓扑）——词节点挂跨模态强边引用 */
+int autonomic_binding_consolidate(MasterTopology* master);
 
 /**
  * 获取拓扑中总边数和平均置信度

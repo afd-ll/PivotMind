@@ -113,6 +113,15 @@ typedef struct ReasoningNode {
     int is_reversible;         // 是否支持可逆操作
     int is_visited;            // 搜索过程中是否已访问
     volatile int is_cooled;    // 大脑模式: 连接数据已冻入文件 (0=热 1=冷)
+
+    // v0.5.15: 绑定引用（TWN 递归拓扑/跨模态绑定）
+    // 词节点通过跨模态强边绑定其它模态节点（文本故事/情绪感悟/文化语境…），
+    // 成为递归拓扑的"整体单元"——激活时顺引用展开子图（pattern completion）。
+    // 派生结构：从 cross_links 自动重建（不持久化），固定数组[8]不 realloc
+    // （规避本库并发 realloc 悬垂血案）。
+    int binding_ref_topo[8];
+    int binding_ref_node[8];
+    int binding_count;
 } ReasoningNode;
 
 /**
