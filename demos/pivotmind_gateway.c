@@ -555,9 +555,11 @@ static int gw_system_init(GatewaySystem* gw) {
     fprintf(stderr, "[gateway]   创建节点缓存...\n");
     /* v0.5.13 fix: node_cap 按实际节点数+30%——此前 max_nodes+10000 在节点
      * 超容量时 cap < 实际节点 → bitmap/offsets 数组越界 + 每次启动"新建"
-     * 截断冻结库（08-12 实测：cap=110000 < 120444 节点，thaw 全走"从未保存过"分支） */
-    gw->brain_cache = node_cache_create("brain_state.dat",
-                                         master_count_total_nodes(gw->topology) * 13 / 10 + 10000);
+     * 截断冻结库（08-12 实测：cap=110000 < 120444 节点，thaw 全走"从未保存过"分支）
+     * v0.5.17 fix: cap 改固定 200000——动态 cap（节点数×1.3）随节点增长每次漂移
+     * → file_nodes != node_cap → wb+ 截断重建冻结库 → 冻结边导出 0 → 存盘丢
+     * 冻结边（08-13 实测：23万边 → 6万边）。固定 cap 保证启动间不重建。 */
+    gw->brain_cache = node_cache_create("brain_state.dat", 200000);
     if (!gw->brain_cache) {
         fprintf(stderr, "[gateway] 大脑缓存创建失败\n");
         return -1;
