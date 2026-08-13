@@ -364,35 +364,9 @@ static int diffusion_assemble_grammar(
     int used[DIFF_MAX_SEQUENCE] = {0};
 
     /* ── Step 1: 找谓语核心 ── */
-    int verb_idx = -1, verb_val = -1;
-    const VerbValency* en_vv = NULL;
-
-    /* 选择配价表 */
-    const VerbValency* valency_table = is_english ? ENGLISH_VERB_VALENCY
-                                                    : CHINESE_VERB_VALENCY;
-
-    for (int w = 0; w < word_count; w++) {
-        if (!word_buf[w] || word_pos[w] != POS_VERB) continue;
-
-        /* 查配价表 */
-        for (int v = 0; valency_table[v].verb; v++) {
-            const char* vname = valency_table[v].verb;
-            /* 英文不区分大小写 */
-            int match = is_english
-                ? (strcasecmp(word_buf[w], vname) == 0)
-                : (strcmp(word_buf[w], vname) == 0);
-            if (!match) continue;
-
-            const VerbValency* vv = &valency_table[v];
-            verb_idx = w;
-            verb_val = v;
-            if (is_english) en_vv = vv;
-            break;
-        }
-        if (verb_idx >= 0) break;  /* 找到配价项 */
-    }
-
-    /* 如果没找到配价表中的动词，选任意动词 */
+    /* v0.5.16: 删除硬编码配价表（TWN 红线清洗——生成骨架由模板拓扑负责，
+     * 动词论元需求全部从语料推断 diffusion_infer_valency，不再手写预置） */
+    int verb_idx = -1;
     if (verb_idx < 0) {
         for (int w = 0; w < word_count; w++) {
             if (!word_buf[w] || word_pos[w] != POS_VERB) continue;
@@ -406,17 +380,8 @@ static int diffusion_assemble_grammar(
         for (int w = 0; w < word_count; w++) {
             if (!word_buf[w]) continue;
             if (word_pos[w] != POS_ADJ) continue;
-            /* 检查是否是配价表中的描述性形容词 */
-            for (int v = 0; valency_table[v].verb; v++) {
-                int match = is_english
-                    ? (strcasecmp(word_buf[w], valency_table[v].verb) == 0)
-                    : (strcmp(word_buf[w], valency_table[v].verb) == 0);
-                if (match && valency_table[v].is_descriptive) {
-                    verb_idx = w; verb_val = v;
-                    if (is_english) en_vv = &valency_table[v];
-                    break;
-                }
-            }
+            /* v0.5.16: 不再查配价表——ADJ 直接作谓语（模板/推断兜底） */
+            verb_idx = w;
             if (verb_idx >= 0) break;
         }
     }
@@ -432,15 +397,10 @@ static int diffusion_assemble_grammar(
 
     if (verb_idx < 0) return 0;
 
-    /* 配价来源优先级: 硬编码表 > 拓扑边推断 > NULL(默认行为) */
+    /* v0.5.16: 配价全部从语料推断（删除硬编码表后唯一来源） */
     const VerbValency* vv = NULL;
     static VerbValency inferred_vv;  /* 静态避免栈地址失效 */
-    if (verb_val >= 0 && !is_english)
-        vv = &CHINESE_VERB_VALENCY[verb_val];
-    else if (en_vv)
-        vv = en_vv;
-    else if (ctx && verb_idx >= 0 && word_buf[verb_idx]) {
-        /* 硬编码未命中 → 从拓扑边推断配价 */
+    if (ctx && verb_idx >= 0 && word_buf[verb_idx]) {
         inferred_vv = diffusion_infer_valency(word_buf[verb_idx], ctx);
         if (inferred_vv.needs_object || inferred_vv.is_copula ||
             inferred_vv.is_you || inferred_vv.is_descriptive)
