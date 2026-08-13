@@ -542,7 +542,11 @@ int huarong_net_add_connection(HuarongTopologyNet* net,
     ReasoningNode* from_node = net->nodes[from_node_id];
     ReasoningNode* to_node = net->nodes[to_node_id];
 
-    if (!from_node || !to_node) { pthread_mutex_unlock(&net->node_locks[li]); return -1; }
+    if (!from_node || !to_node) {
+        pthread_mutex_unlock(&net->node_locks[li]);
+        pthread_rwlock_unlock(&net->mutex);   /* v0.5.14 fix: 漏解锁→读锁泄漏写者永久饿死 */
+        return -1;
+    }
 
     // 检查连接是否已存在（O(1) 哈希查找）
     int idx = node_conn_find(from_node, to_node);

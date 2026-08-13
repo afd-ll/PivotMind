@@ -359,20 +359,22 @@ static int audit_path(SelfLearner* sl, WalkStep* steps, int len) {
             /* === 语义缺失检测 === */
             /* 跨拓扑：特征相似但无连接 → 创建跨拓扑连接 */
             if (steps[a].topo_id != steps[c].topo_id) {
-                if (!cross_link_exists(sl->master, steps[a].topo_id, na->node_id,
-                                       steps[c].topo_id, nc->node_id)) {
-                    float sim = 0.0f;
-                    if (na->features && nc->features &&
-                        na->feature_dim > 0 && na->feature_dim == nc->feature_dim) {
-                        sim = cosine_similarity(na->features, nc->features, na->feature_dim);
-                    }
-                    if (sim > sl->cfg.similarity_threshold) {
-                        float init_w = sl->cfg.transitive_boost + sim * 0.15f;
-                        if (init_w > 0.6f) init_w = 0.6f;
-                        master_add_cross_link(sl->master,
-                            steps[a].topo_id, na->node_id,
-                            steps[c].topo_id, nc->node_id,
-                            init_w, "self-learn");
+                /* v0.5.14 fix: 写锁贯穿下不能调带锁版 cross_link_exists（EDEADLK），
+                 * 删除外层判重——master_add_cross_link_nolock 内部自带判重
+                 * （已存在返回 -1），语义等价且省一次 512 维余弦白算 */
+                float sim = 0.0f;
+                if (na->features && nc->features &&
+                    na->feature_dim > 0 && na->feature_dim == nc->feature_dim) {
+                    sim = cosine_similarity(na->features, nc->features, na->feature_dim);
+                }
+                if (sim > sl->cfg.similarity_threshold) {
+                    float init_w = sl->cfg.transitive_boost + sim * 0.15f;
+                    if (init_w > 0.6f) init_w = 0.6f;
+                    int ret = master_add_cross_link_nolock(sl->master,
+                                steps[a].topo_id, na->node_id,
+                                steps[c].topo_id, nc->node_id,
+                                init_w, "self-learn");
+                    if (ret >= 0) {   /* 仅真新建才计数（已存在返回 -1） */
                         sl->total_created++;
                         mods++;
                         LOG_INFO("[自学] 语义关联 %s(%d) ↔ %s(%d) sim=%.2f",
@@ -425,8 +427,11 @@ static int audit_path(SelfLearner* sl, WalkStep* steps, int len) {
 int self_learner_cycle(SelfLearner* sl) {
     if (!sl || !sl->master) return 0;
 
-    /* 持读锁保护 cross_adj 等共享结构不被 master_add_cross_link 并发修改 */
-    pthread_rwlock_rdlock(&sl->master->rwlock);
+    /* v0.5.14 fix: 读锁→写锁（08-12/08-13 两次"锁无主死锁"真凶：
+     * 持读锁贯穿 cycle → audit_path 内 master_add_cross_link 求写锁
+     * → glibc rwlock 同线程升级自死锁。self_learner 是低频后台任务，
+     * 写锁贯穿可接受；锁内全部改用 nolock 变体（写锁下不能调带锁版）。 */
+    pthread_rwlock_wrlock(&sl->master->rwlock);
 
     /* v0.5.8: 锁内只收集待搜索概念，网络搜索移到解锁后执行——
      * 持读锁跑 curl（perception_learn_concept）会让主循环 wrlock
