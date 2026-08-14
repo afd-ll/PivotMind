@@ -3580,6 +3580,10 @@ int master_save_state(MasterTopology* master, const char* file_path) {
         LOG_ERROR("[状态持久化] 无法创建临时文件: %s", tmp_path);
         return -1;
     }
+    /* v0.5.18 opt: 存盘大缓冲——4MB 全缓冲，逐节点/逐边的小 fwrite
+     * 先落用户态缓冲，系统调用从每 4KB 一次降到每 4MB 一次
+     * （330MB 存盘 ~7万次 write → ~80 次）。文件格式/字节布局不变。 */
+    setvbuf(fp, NULL, _IOFBF, 4 * 1024 * 1024);
 
     /* v0.5.7: 存盘全程持读锁——防对话/自学习线程并发 realloc
      * 节点/边数组导致悬垂崩溃（实测：存盘中崩溃 → 状态文件写坏
