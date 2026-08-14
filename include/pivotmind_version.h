@@ -19,10 +19,10 @@
 extern "C" {
 #endif
 
-#define PIVOTMIND_VERSION       "0.5.9"
+#define PIVOTMIND_VERSION       "0.5.20"
 #define PIVOTMIND_MAJOR         0
 #define PIVOTMIND_MINOR         5
-#define PIVOTMIND_PATCH         9
+#define PIVOTMIND_PATCH         20
 
 /* 版本字符串（编译时间戳自动追加） */
 #define PIVOTMIND_VERSION_FULL  PIVOTMIND_VERSION " (" __DATE__ " " __TIME__ ")"
