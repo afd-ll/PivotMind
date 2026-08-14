@@ -28,22 +28,6 @@ TemplateBuildConfig template_config_default(void) {
 }
 
 /* ================================================================
- *  辅助: 余弦相似度
- * ================================================================ */
-
-float template_cosine_sim(const float* a, const float* b, int dim) {
-    if (!a || !b || dim <= 0) return 0.0f;
-    float dot = 0.0f, na = 0.0f, nb = 0.0f;
-    for (int i = 0; i < dim; i++) {
-        dot += a[i] * b[i];
-        na  += a[i] * a[i];
-        nb  += b[i] * b[i];
-    }
-    float denom = sqrtf(na) * sqrtf(nb);
-    return (denom > 1e-10f) ? (dot / denom) : 0.0f;
-}
-
-/* ================================================================
  *  辅助: 并查集 (Union-Find)
  * ================================================================ */
 
@@ -395,7 +379,7 @@ TemplateCluster* template_cluster_groups(
             if (!feats[i]) continue;
             for (int j = i + 1; j < sz; j++) {
                 if (!feats[j]) continue;
-                float sim = template_cosine_sim(feats[i], feats[j], NODE_FEATURE_DIM);
+                float sim = cosine_similarity(feats[i], feats[j], NODE_FEATURE_DIM);
                 if (sim > cfg->similarity_threshold) {
                     uf_union(uf, i, j);
                 }
@@ -699,7 +683,7 @@ int template_build_concepts(MasterTopology* master, int max_concepts) {
 
     for (int i = 0; i < valid; i++) {
         for (int j = i + 1; j < valid; j++) {
-            float sim = template_cosine_sim(feats[i], feats[j], NODE_FEATURE_DIM);
+            float sim = cosine_similarity(feats[i], feats[j], NODE_FEATURE_DIM);
             if (sim > CONCEPT_SIMILARITY_THRESHOLD) {
                 uf_union(uf, i, j);
             }
@@ -1136,7 +1120,7 @@ static void diag_compute_group_stats(DiagPosGroup* grp,
     double sum = 0.0;
     for (int i = 0; i < valid; i++) {
         for (int j = i + 1; j < valid; j++) {
-            float s = template_cosine_sim(feats[i], feats[j], NODE_FEATURE_DIM);
+            float s = cosine_similarity(feats[i], feats[j], NODE_FEATURE_DIM);
             sims[si++] = s;
             sum += s;
             if (s < grp->sim_min) grp->sim_min = s;
@@ -1221,7 +1205,7 @@ static void diag_compute_inter_group(DiagPosGroup* groups, int gc,
                     ReasoningNode* nj = tpl_nodes[tj];
                     if (!nj || !nj->features) continue;
 
-                    float s = template_cosine_sim(ni->features, nj->features, NODE_FEATURE_DIM);
+                    float s = cosine_similarity(ni->features, nj->features, NODE_FEATURE_DIM);
                     if (s > best_inter) best_inter = s;
                 }
             }
@@ -1240,7 +1224,7 @@ static void diag_compute_inter_group(DiagPosGroup* groups, int gc,
                     ReasoningNode* ni = tpl_nodes[ti];
                     if (!ni || !ni->features) continue;
 
-                    float s = template_cosine_sim(nj->features, ni->features, NODE_FEATURE_DIM);
+                    float s = cosine_similarity(nj->features, ni->features, NODE_FEATURE_DIM);
                     if (s > best_rev) best_rev = s;
                 }
             }

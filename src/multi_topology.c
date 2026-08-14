@@ -1665,7 +1665,7 @@ int master_find_template_for_pair_nolock(MasterTopology* master,
                 ReasoningNode* tn = tpl->net->nodes[i];
                 if (!tn || !tn->features || tn->tpl_pos_len < 2) continue;
 
-                float sim = template_cosine_sim(pair_feat, tn->features, NODE_FEATURE_DIM);
+                float sim = cosine_similarity(pair_feat, tn->features, NODE_FEATURE_DIM);
                 if (sim > best_sim) {
                     best_sim = sim;
                     best_tpl = tn->node_id;

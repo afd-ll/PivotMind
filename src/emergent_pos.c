@@ -18,22 +18,6 @@
 int emergent_pos_try_emerge(EmergentPOS* ep);
 
 /* ================================================================
- *  内部辅助: 余弦相似度
- * ================================================================ */
-
-static float ep_cosine_sim(const float* a, const float* b, int dim) {
-    if (!a || !b || dim <= 0) return 0.0f;
-    float dot = 0.0f, na = 0.0f, nb = 0.0f;
-    for (int i = 0; i < dim; i++) {
-        dot += a[i] * b[i];
-        na  += a[i] * a[i];
-        nb  += b[i] * b[i];
-    }
-    float denom = sqrtf(na) * sqrtf(nb);
-    return (denom > 1e-10f) ? (dot / denom) : 0.0f;
-}
-
-/* ================================================================
  *  内部辅助: POS 标签名
  * ================================================================ */
 
@@ -258,7 +242,7 @@ POSTag emergent_pos_classify(EmergentPOS* ep, const float* features) {
         POSAnchor* anchor = &ep->anchors[tag];
         if (!anchor->is_active) continue;
 
-        float sim = ep_cosine_sim(features, anchor->centroid, PM_NODE_FEATURE_DIM);
+        float sim = cosine_similarity(features, anchor->centroid, PM_NODE_FEATURE_DIM);
         if (sim > best_sim) {
             best_sim = sim;
             best_tag = (POSTag)tag;
@@ -269,7 +253,7 @@ POSTag emergent_pos_classify(EmergentPOS* ep, const float* features) {
     /* 检查涌现出的额外词类 */
     for (int ei = 0; ei < ep->extra_class_count; ei++) {
         if (!ep->extra_classes[ei].is_active) continue;
-        float sim = ep_cosine_sim(features, ep->extra_classes[ei].centroid, PM_NODE_FEATURE_DIM);
+        float sim = cosine_similarity(features, ep->extra_classes[ei].centroid, PM_NODE_FEATURE_DIM);
         if (sim > best_sim) {
             best_sim = sim;
             best_tag = (POSTag)(ep->extra_classes[ei].class_id);
@@ -349,7 +333,7 @@ void emergent_pos_classify_soft(EmergentPOS* ep, const float* features,
         POSAnchor* anchor = &ep->anchors[tag];
         if (!anchor->is_active) continue;
 
-        float sim = ep_cosine_sim(features, anchor->centroid, PM_NODE_FEATURE_DIM);
+        float sim = cosine_similarity(features, anchor->centroid, PM_NODE_FEATURE_DIM);
         if (sim > ep->sim_threshold && nc < SOFT_CAND_MAX) {
             cands[nc].tag = (POSTag)tag;
             cands[nc].sim = sim;
@@ -360,7 +344,7 @@ void emergent_pos_classify_soft(EmergentPOS* ep, const float* features,
     /* 检查涌现出的额外词类 */
     for (int ei = 0; ei < ep->extra_class_count && nc < SOFT_CAND_MAX; ei++) {
         if (!ep->extra_classes[ei].is_active) continue;
-        float sim = ep_cosine_sim(features, ep->extra_classes[ei].centroid, PM_NODE_FEATURE_DIM);
+        float sim = cosine_similarity(features, ep->extra_classes[ei].centroid, PM_NODE_FEATURE_DIM);
         if (sim > ep->sim_threshold) {
             cands[nc].tag = (POSTag)(ep->extra_classes[ei].class_id);
             cands[nc].sim = sim;
@@ -586,7 +570,7 @@ int emergent_pos_try_emerge(EmergentPOS* ep) {
     for (int i = 0; i < n; i++) {
         sim_matrix[i * n + i] = 1.0f;
         for (int j = i + 1; j < n; j++) {
-            float s = ep_cosine_sim(ep->unclassified_feats[i],
+            float s = cosine_similarity(ep->unclassified_feats[i],
                                     ep->unclassified_feats[j],
                                     PM_NODE_FEATURE_DIM);
             sim_matrix[i * n + j] = s;

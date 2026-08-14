@@ -215,15 +215,6 @@ int pretrain_get_embedding(PretrainState* state, const char* word, float* vec);
 int pretrain_get_embedding_by_id(PretrainState* state, int word_id, float* vec);
 
 /**
- * 计算两个向量的余弦相似度
- * @param vec1 向量1
- * @param vec2 向量2
- * @param dim 维度
- * @return 余弦相似度
- */
-float pretrain_cosine_similarity(const float* vec1, const float* vec2, int dim);
-
-/**
  * 计算两个向量的欧氏距离
  * @param vec1 向量1
  * @param vec2 向量2

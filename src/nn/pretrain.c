@@ -776,20 +776,6 @@ int pretrain_get_embedding_by_id(PretrainState* state, int word_id, float* vec) 
     return 0;
 }
 
-float pretrain_cosine_similarity(const float* vec1, const float* vec2, int dim) {
-    if (!vec1 || !vec2 || dim <= 0) return 0.0f;
-
-    float dot = 0.0f, norm1 = 0.0f, norm2 = 0.0f;
-    for (int i = 0; i < dim; i++) {
-        dot += vec1[i] * vec2[i];
-        norm1 += vec1[i] * vec1[i];
-        norm2 += vec2[i] * vec2[i];
-    }
-    norm1 = sqrtf(norm1 + 1e-7f);
-    norm2 = sqrtf(norm2 + 1e-7f);
-    return dot / (norm1 * norm2 + 1e-7f);
-}
-
 float pretrain_euclidean_distance(const float* vec1, const float* vec2, int dim) {
     if (!vec1 || !vec2 || dim <= 0) return 0.0f;
 
@@ -1595,7 +1581,7 @@ float pretrain_evaluate_quality(PretrainState* state, const char** test_texts,
 
             float* v1 = embed_data + ids[i] * dim;
             float* v2 = embed_data + ids[i + 1] * dim;
-            coherence += pretrain_cosine_similarity(v1, v2, dim);
+            coherence += cosine_similarity(v1, v2, dim);
             pair_count++;
         }
 
@@ -1619,7 +1605,7 @@ float pretrain_evaluate_quality(PretrainState* state, const char** test_texts,
         float* vi = embed_data + i * dim;
         for (int j = i + 1; j < sample_count; j++) {
             float* vj = embed_data + j * dim;
-            float sim = pretrain_cosine_similarity(vi, vj, dim);
+            float sim = cosine_similarity(vi, vj, dim);
             uniformity += sim * sim;  // 低值表示更好的均匀性
         }
     }
