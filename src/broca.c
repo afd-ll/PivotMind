@@ -131,8 +131,28 @@ char* broca_wrap_response(MasterTopology* master, EmergentPOS* ep,
         int n = word_count < BWR_MAX_POS ? word_count : BWR_MAX_POS;
         for (int i = 0; i < n; i++) {
             pos_tags[i] = emergent_pos_tag(ep, master, words[i]);
+            /* v0.5.19: 分布签名累积——左右邻POS + 位置标志（语法类涌现的数据源） */
+            if (master && words[i]) {
+                SubTopology* vsub = master_get_sub_topology_by_type(master, TOPO_VOCABULARY);
+                if (vsub && vsub->net && words[i][0]) {
+                    int vnid = huarong_net_find_concept(vsub->net, words[i]);
+                    if (vnid >= 0 && vnid < vsub->net->node_count && vsub->net->nodes[vnid]) {
+                        int lpos = (i > 0) ? (int)pos_tags[i-1] : -1;
+                        int rpos = (i < n-1) ? (int)pos_tags[i+1] : -1;
+                        int pflags = 0;
+                        if (i == 0) pflags |= 1;                    /* 句首 */
+                        if (i == n-1) pflags |= 2;                  /* 句尾 */
+                        if (lpos == (int)POS_VERB) pflags |= 4;     /* 动词后 */
+                        if (rpos == (int)POS_VERB) pflags |= 8;     /* 动词前 */
+                        emergent_pos_update_dist_sig(
+                            vsub->net->nodes[vnid], lpos, rpos, pflags);
+                    }
+                }
+            }
         }
         can_template = 1;
+        /* v0.5.19: 分布聚类诊断（内部每100次限流）——验证分布签名>语义聚类 */
+        emergent_pos_diag_dist_clusters(ep, master);
     }
 
     /* Step 2: 获取模板拓扑 */

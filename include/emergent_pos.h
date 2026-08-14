@@ -223,6 +223,10 @@ int emergent_pos_anchor_count(EmergentPOS* ep);
  * @return 新发现的词类数量（0=无新类）
  */
 int emergent_pos_try_emerge(EmergentPOS* ep);
+/* v0.5.19: 分布签名累积（左右邻POS + 位置标志）——语法词类的涌现尺子 */
+void emergent_pos_update_dist_sig(ReasoningNode* node, int left_pos, int right_pos, int pos_flags);
+/* v0.5.19: 分布聚类诊断——打印分布签名聚类 vs 语义聚类对比（验证方向） */
+void emergent_pos_diag_dist_clusters(EmergentPOS* ep, MasterTopology* master);
 
 /**
  * 获取词类的可读名称

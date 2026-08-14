@@ -7,6 +7,7 @@
 #include "multi_topology.h"
 #include "huarong_topology.h"
 #include "common.h"
+#include "error.h"          /* v0.5.19: LOG_INFO（DistSig诊断用） */
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
@@ -877,4 +878,92 @@ const char* emergent_pos_class_name(EmergentPOS* ep, int class_id) {
     if (ei < ep->extra_class_count && ep->extra_classes[ei].is_active)
         return ep->extra_classes[ei].label_hint;
     return "?";
+}
+
+/* ================================================================
+ * v0.5.19: 分布签名（语法词类的正确尺子——pro 评审 08-14）
+ * 语义特征学不出分布类（可替换性）；语法类的本质是"上下文分布相同"。
+ * dist_sig[26] = 左邻POS分布[0..10] + 右邻POS分布[11..21] + 位置先验[22..25]
+ * ================================================================ */
+
+void emergent_pos_update_dist_sig(ReasoningNode* node, int left_pos,
+                                  int right_pos, int pos_flags) {
+    if (!node) return;
+    float lr = 0.05f;  /* EMA 学习率——在线累积（不事后批量） */
+    if (left_pos >= 0 && left_pos < POS_COUNT)
+        node->dist_sig[left_pos] += lr * (1.0f - node->dist_sig[left_pos]);
+    if (right_pos >= 0 && right_pos < POS_COUNT)
+        node->dist_sig[11 + right_pos] += lr * (1.0f - node->dist_sig[11 + right_pos]);
+    for (int i = 0; i < 4; i++)
+        if (pos_flags & (1 << i))
+            node->dist_sig[22 + i] += lr * (1.0f - node->dist_sig[22 + i]);
+    node->dist_sig_count++;
+}
+
+void emergent_pos_diag_dist_clusters(EmergentPOS* ep, MasterTopology* master) {
+    if (!ep || !master) return;
+    static int diag_cnt = 0;
+    if (++diag_cnt % 100 != 0) return;   /* 每100次调用打一次诊断 */
+    SubTopology* vsub = master_get_sub_topology_by_type(master, TOPO_VOCABULARY);
+    if (!vsub || !vsub->net) return;
+    HuarongTopologyNet* vnet = vsub->net;
+
+    /* 对每个锚点类：种子词的 dist_sig 均值作分布中心 → 找最相似 top3（非种子） */
+    for (int a = 0; a < ep->anchor_count; a++) {
+        POSAnchor* anchor = &ep->anchors[a];
+        if (!anchor || anchor->seed_count == 0) continue;
+        float ctr[26] = {0};
+        int found = 0;
+        for (int i = 0; i < vnet->node_count; i++) {
+            ReasoningNode* nd = vnet->nodes[i];
+            if (!nd || !nd->concept || nd->dist_sig_count < 20) continue;
+            for (int s = 0; s < anchor->seed_count; s++) {
+                if (anchor->seeds[s] && strcmp_null(nd->concept, anchor->seeds[s]) == 0) {
+                    for (int d = 0; d < 26; d++) ctr[d] += nd->dist_sig[d];
+                    found++;
+                    break;
+                }
+            }
+        }
+        if (found < 1) continue;
+        for (int d = 0; d < 26; d++) ctr[d] /= (float)found;
+
+        char top_names[3][64] = {{0},{0},{0}};
+        float top_sim[3] = {0.0f, 0.0f, 0.0f};
+        for (int i = 0; i < vnet->node_count; i++) {
+            ReasoningNode* nd = vnet->nodes[i];
+            if (!nd || !nd->concept || nd->dist_sig_count < 20) continue;
+            int is_seed = 0;
+            for (int s = 0; s < anchor->seed_count; s++)
+                if (anchor->seeds[s] && strcmp_null(nd->concept, anchor->seeds[s]) == 0) {
+                    is_seed = 1; break;
+                }
+            if (is_seed) continue;
+            float dot = 0.0f, na = 0.0f, nb = 0.0f;
+            for (int d = 0; d < 26; d++) {
+                dot += ctr[d] * nd->dist_sig[d];
+                na += ctr[d] * ctr[d];
+                nb += nd->dist_sig[d] * nd->dist_sig[d];
+            }
+            float sim = (na > 0.0f && nb > 0.0f) ?
+                dot / (sqrtf(na) * sqrtf(nb)) : 0.0f;
+            for (int k = 0; k < 3; k++) {
+                if (sim > top_sim[k]) {
+                    for (int j = 2; j > k; j--) {
+                        top_sim[j] = top_sim[j-1];
+                        strncpy(top_names[j], top_names[j-1], 63);
+                    }
+                    top_sim[k] = sim;
+                    strncpy(top_names[k], nd->concept, 63);
+                    top_names[k][63] = '\0';
+                    break;
+                }
+            }
+        }
+        LOG_INFO("[DistSig诊断] 类[%s]: 分布最近={%s(%.2f),%s(%.2f),%s(%.2f)}",
+                 anchor->label_cn,
+                 top_names[0], top_sim[0],
+                 top_names[1], top_sim[1],
+                 top_names[2], top_sim[2]);
+    }
 }
