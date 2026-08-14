@@ -1225,6 +1225,12 @@ int main() {
 #define CC_MAX_WORDS       2000   /* 每周期涌现上限（20 本书 200 个远不够） */
 #define CC_STRENGTH_CAP    0.9f   /* cross-link 权重上限 */
 #define BIND_WEIGHT_THRESHOLD 0.5f  /* v0.5.15: 跨模态强边阈值（co-activation 建边默认 0.5） */
+/* v0.5.18 opt(任务6): 绑定质量门——对方节点冷门判定阈值。
+ * 参考词巩固 CC_MIN_EDGES=5 的防稀疏噪声惯例：从未被选中(selection_count<3)
+ * 且激活极低(<0.05)的节点视为冷门垃圾，不参与绑定放大。
+ * 双低(AND)才拦：保护刚激活/刚加载的真实知识节点。 */
+#define BIND_MIN_SELECTION   3
+#define BIND_MIN_ACTIVATION  0.05f
 
 /* 全局可调阈值（后续调参用）：词巩固相对强度阈值 */
 float g_compound_threshold = CC_THRESHOLD_DEF;
@@ -1430,10 +1436,40 @@ int autonomic_compound_consolidate(MasterTopology* master) {
  * 递归拓扑的"整体单元"（TWN：塞翁失马 = 词义+故事+感悟的融合体）。
  * 派生结构：从 cross_links 重建，不持久化（cross_links 持久化即足够，
  * 重启后自动重建——避免存盘格式版本变更 + 一致性双写灾难）。 */
+/* v0.5.18 opt(任务6): 绑定质量门——对方节点是否为噪声/垃圾。
+ * 爬虫垃圾词（sem_xxx 匿名节点、纯数字/符号、超长串）被结构化晋升
+ * 放大污染；冷门节点(双低)不参与绑定。返回 1=噪声应跳过绑定。 */
+static int binding_other_is_noise(MasterTopology* master, int o_topo, int o_node) {
+    SubTopology* osub = master_get_sub_topology(master, o_topo);
+    if (!osub || !osub->net) return 1;
+    if (o_node < 0 || o_node >= osub->net->node_count) return 1;
+    ReasoningNode* on = osub->net->nodes[o_node];
+    if (!on) return 1;
+    if (on->concept) {
+        size_t nlen = strlen(on->concept);
+        if (nlen == 0 || nlen > 32) return 1;               /* 空名/超长串 */
+        if (strncmp(on->concept, "sem_", 4) == 0) return 1; /* semantic_growth 匿名节点 */
+        /* 纯数字/符号：无任何 CJK(>=0x80) 也无任何 ASCII 字母 → 无意义 */
+        int has_letter = 0, has_cjk = 0;
+        for (size_t i = 0; on->concept[i]; i++) {
+            unsigned char ch = (unsigned char)on->concept[i];
+            if ((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z')) has_letter = 1;
+            else if (ch >= 0x80) has_cjk = 1;
+        }
+        if (!has_letter && !has_cjk) return 1;
+    }
+    /* 冷门垃圾：从未被选中且激活极低（AND——保护新知识节点） */
+    if (on->selection_count < BIND_MIN_SELECTION &&
+        on->activation < BIND_MIN_ACTIVATION) return 1;
+    return 0;
+}
+
 /* v0.5.18 opt(任务3): 尝试把一条跨拓扑边绑到 cnode。
  * 保持原绑定语义不变：只绑非词层/非概念模态、weight≥BIND_WEIGHT_THRESHOLD、
- * (o_topo,o_node) 去重；≤8 上限由调用方循环条件控制。 */
-static void autonomic_binding_try_link(ReasoningNode* cnode,
+ * (o_topo,o_node) 去重；≤8 上限由调用方循环条件控制。
+ * v0.5.18 opt(任务6): 绑前过质量门——对面节点为爬虫垃圾/冷门则跳过。 */
+static void autonomic_binding_try_link(MasterTopology* master,
+                                       ReasoningNode* cnode,
                                        CrossTopologyLink* l,
                                        int own_topo, int self_id) {
     if (!l || l->weight < BIND_WEIGHT_THRESHOLD) return;
@@ -1447,6 +1483,8 @@ static void autonomic_binding_try_link(ReasoningNode* cnode,
     /* 只绑跨模态（跳过概念拓扑自身、跳过词层——词层跨边是
      * compound 晋升的组成字回指，不是跨模态绑定） */
     if (o_topo == own_topo || o_topo == TOPO_VOCABULARY) return;
+    /* 绑定质量门（任务6） */
+    if (binding_other_is_noise(master, o_topo, o_node)) return;
     int dup = 0;
     for (int b = 0; b < cnode->binding_count; b++)
         if (cnode->binding_ref_topo[b] == o_topo &&
@@ -1515,7 +1553,7 @@ int autonomic_binding_consolidate(MasterTopology* master) {
             while (e && cnode->binding_count < 8) {
                 CrossTopologyLink* l = (e->link_index < master->cross_link_count)
                                        ? master->cross_links[e->link_index] : NULL;
-                autonomic_binding_try_link(cnode, l, own_topo, self_id);
+                autonomic_binding_try_link(master, cnode, l, own_topo, self_id);
                 e = e->next;
             }
         }
@@ -1526,7 +1564,7 @@ int autonomic_binding_consolidate(MasterTopology* master) {
             while (e && cnode->binding_count < 8) {
                 CrossTopologyLink* l = (e->link_index < master->cross_link_count)
                                        ? master->cross_links[e->link_index] : NULL;
-                autonomic_binding_try_link(cnode, l, own_topo, self_id);
+                autonomic_binding_try_link(master, cnode, l, own_topo, self_id);
                 e = e->next;
             }
         }
