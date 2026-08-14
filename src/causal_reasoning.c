@@ -316,8 +316,7 @@ CausalGraph* causal_graph_create(int node_count, int edge_capacity) {
     graph->avg_causal_strength = 0.0f;
     graph->last_updated = time(NULL);
 
-    // 初始化内存池（邻接表用 int[32]，边用 CausalEdge）
-    graph->adj_pool = object_pool_create(sizeof(int) * 32, 256);  // 32个int为一个块
+    // 初始化边内存池（P2 dsh返工: adj_pool 死代码已移除——从未 acquire）
     graph->edge_pool = object_pool_create(sizeof(CausalEdge), 128);
 
     return graph;
@@ -350,8 +349,7 @@ void causal_graph_destroy(CausalGraph* graph) {
     free(graph->node_mapping);
     if (graph->topological_order) free(graph->topological_order);
 
-    // 释放内存池
-    if (graph->adj_pool) object_pool_destroy((ObjectPool*)graph->adj_pool);
+    // 释放边内存池（adj_pool 已移除）
     if (graph->edge_pool) object_pool_destroy((ObjectPool*)graph->edge_pool);
 
     free(graph);
