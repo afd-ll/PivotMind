@@ -125,6 +125,29 @@ char* dialog_generate(DialogReasoning* reasoning, const char* input,
         qsort(reasoning->associations, reasoning->assoc_count,
               sizeof(DialogAssociation), assoc_cmp_desc);
 
+        /* Step 0 插桩（08-14 TWN第2步）：统计绑定节点参与生成的比例——
+         * 证明"结构可参与决策"（绑定节点是否进入 associations/起点） */
+        {
+            static int dbg_bound_seen = 0, dbg_bound_total = 0;
+            SubTopology* csub = NULL;
+            if (dsys && dsys->master)
+                csub = master_get_sub_topology_by_type(dsys->master, TOPO_CONCEPT);
+            for (int ai = 0; ai < reasoning->assoc_count; ai++) {
+                DialogAssociation* a = &reasoning->associations[ai];
+                if ((int)a->topo_type != (int)TOPO_CONCEPT) continue;
+                if (csub && csub->net && a->node_id >= 0 &&
+                    a->node_id < csub->net->node_count) {
+                    ReasoningNode* cn = csub->net->nodes[a->node_id];
+                    if (cn && cn->binding_count > 0) { dbg_bound_seen++; break; }
+                }
+            }
+            dbg_bound_total++;
+            if (dbg_bound_total % 20 == 0)
+                LOG_INFO("[Step0插桩] 绑定节点进入associations: %d/%d (%.0f%%)",
+                         dbg_bound_seen, dbg_bound_total,
+                         100.0 * (float)dbg_bound_seen / (float)dbg_bound_total);
+        }
+
         // 获取意图权重（用于走边和竞争队列的拓扑级调制）
         // 增强版：取前3个关联的拓扑权重加权平均，放大分辨力
         float intent_weight = 0.7f;  // 基准：确保有足够调制空间
