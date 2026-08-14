@@ -3586,8 +3586,12 @@ int master_save_state(MasterTopology* master, const char* file_path) {
      * 4KB 缓冲 → 数万次 write()（70s 元凶之一）。4MB 全缓冲后 flush
      * 次数降到 ~82 次，接近纯写盘速度。必须 fopen 后、首次 I/O 前
      * 调用；fwrite 序列不变 → 存盘字节布局完全不变（旧文件可加载）。
-     * 循环内无逐项 fflush（已确认），fclose 末尾一次 flush 即可。 */
-    setvbuf(fp, NULL, _IOFBF, 4 * 1024 * 1024);
+     * 循环内无逐项 fflush（已确认），fclose 末尾一次 flush 即可。
+     * P1(dsh返工): 检查返回值——setvbuf 失败时静默回退默认缓冲
+     * （不崩溃，仅失去加速），打日志便于定位。 */
+    if (setvbuf(fp, NULL, _IOFBF, 4 * 1024 * 1024) != 0) {
+        LOG_WARNING("[状态持久化] setvbuf 4MB 缓冲设置失败, 回退默认缓冲");
+    }
 
     /* v0.5.7: 存盘全程持读锁——防对话/自学习线程并发 realloc
      * 节点/边数组导致悬垂崩溃（实测：存盘中崩溃 → 状态文件写坏
