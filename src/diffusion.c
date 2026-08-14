@@ -1203,13 +1203,17 @@ int diffusion_generate(DiffusionCtx* ctx,
         ReasoningNode* node = ctx->vocab->net->nodes[nid];
         if (!node || node->edge_count == 0) continue;
 
-        /* 统计该节点与输入激活集/扩散集的共享邻居数（任一命中即 1） */
+        /* 统计该节点与输入激活集/扩散集的共享邻居数。
+         * fix(P0-1 dsh返工): seen 分支恢复"累计计数"语义——此前误写成
+         * 第一个命中即 break 的 0/1 标志, 把 shared 从计数降级成布尔,
+         * boost=0.5+shared/edge_count 大幅变化(10边5共享: 1.0→0.6),
+         * 改变扩散激活排序影响对话输出。与 else 分支一致: 每个命中 +1。 */
         int shared = 0;
         for (int e = 0; e < node->edge_count; e++) {
             int tgt = node->edges[e].target ? node->edges[e].target->node_id : -1;
             if (tgt < 0) continue;
             if (seen) {
-                if (tgt < diffusion_ncount && seen[tgt]) { shared = 1; break; }
+                if (tgt < diffusion_ncount && seen[tgt]) shared++;
                 continue;
             }
             for (int a = 0; a < active_count; a++)
