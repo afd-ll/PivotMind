@@ -1430,6 +1430,33 @@ int autonomic_compound_consolidate(MasterTopology* master) {
  * 递归拓扑的"整体单元"（TWN：塞翁失马 = 词义+故事+感悟的融合体）。
  * 派生结构：从 cross_links 重建，不持久化（cross_links 持久化即足够，
  * 重启后自动重建——避免存盘格式版本变更 + 一致性双写灾难）。 */
+/* v0.5.18 opt(任务3): 尝试把一条跨拓扑边绑到 cnode。
+ * 保持原绑定语义不变：只绑非词层/非概念模态、weight≥BIND_WEIGHT_THRESHOLD、
+ * (o_topo,o_node) 去重；≤8 上限由调用方循环条件控制。 */
+static void autonomic_binding_try_link(ReasoningNode* cnode,
+                                       CrossTopologyLink* l,
+                                       int own_topo, int self_id) {
+    if (!l || l->weight < BIND_WEIGHT_THRESHOLD) return;
+    int f_topo = l->from_topo_id, f_node = l->from_node_id;
+    int t_topo = l->to_topo_id, t_node = l->to_node_id;
+    int is_from = (f_topo == own_topo && f_node == self_id);
+    int is_to   = (t_topo == own_topo && t_node == self_id);
+    if (!is_from && !is_to) return;
+    int o_topo = is_from ? t_topo : f_topo;
+    int o_node = is_from ? t_node : f_node;
+    /* 只绑跨模态（跳过概念拓扑自身、跳过词层——词层跨边是
+     * compound 晋升的组成字回指，不是跨模态绑定） */
+    if (o_topo == own_topo || o_topo == TOPO_VOCABULARY) return;
+    int dup = 0;
+    for (int b = 0; b < cnode->binding_count; b++)
+        if (cnode->binding_ref_topo[b] == o_topo &&
+            cnode->binding_ref_node[b] == o_node) { dup = 1; break; }
+    if (dup) return;
+    cnode->binding_ref_topo[cnode->binding_count] = o_topo;
+    cnode->binding_ref_node[cnode->binding_count] = o_node;
+    cnode->binding_count++;
+}
+
 int autonomic_binding_consolidate(MasterTopology* master) {
     if (!master) return 0;
 
@@ -1448,33 +1475,75 @@ int autonomic_binding_consolidate(MasterTopology* master) {
 
     int bound_total = 0;
     int own_topo = (int)concept->type;
-    for (int i = 0; i < concept->net->node_count; i++) {
+    int concept_count = concept->net->node_count;
+
+    /* opt(任务3): O(N×M) 全扫 cross_links → cross_adj O(出度)。
+     * 原内层 for(c<cross_link_count) 对每个概念节点全扫 23 万跨边
+     * (12万×23万≈2.7e10) → 分钟级卡顿。cross_adj 是 from 方向索引
+     * (topo*MAX_NODES_PER_TOPO+node → 出边链表, 参考 topology_walk_cross),
+     * 而绑定语义需要双向, 故另建临时 to 方向反向索引(只含指向概念拓扑的边,
+     * 桶=concept_count, O(M) 构建 O(入度) 查询)。语义不变: 仍只绑非词层/
+     * 非概念模态、weight≥BIND_WEIGHT_THRESHOLD、去重、≤8。 */
+    CrossTopoAdjEntry** rev_adj = NULL;
+    if (concept_count > 0 && master->cross_link_count > 0) {
+        rev_adj = (CrossTopoAdjEntry**)calloc((size_t)concept_count,
+                                              sizeof(CrossTopoAdjEntry*));
+        if (rev_adj) {
+            for (int c = 0; c < master->cross_link_count; c++) {
+                CrossTopologyLink* l = master->cross_links[c];
+                if (!l || l->to_topo_id != own_topo) continue;
+                if (l->to_node_id < 0 || l->to_node_id >= concept_count) continue;
+                CrossTopoAdjEntry* e =
+                    (CrossTopoAdjEntry*)malloc(sizeof(CrossTopoAdjEntry));
+                if (!e) continue;   /* 内存紧张时该边不参与反向绑定(容错) */
+                e->link_index = c;
+                e->next = rev_adj[l->to_node_id];
+                rev_adj[l->to_node_id] = e;
+            }
+        }
+    }
+
+    for (int i = 0; i < concept_count; i++) {
         ReasoningNode* cnode = concept->net->nodes[i];
         if (!cnode) continue;
         cnode->binding_count = 0;   /* 重建（派生结构） */
-        for (int c = 0; c < master->cross_link_count && cnode->binding_count < 8; c++) {
-            CrossTopologyLink* l = master->cross_links[c];
-            if (!l || l->weight < BIND_WEIGHT_THRESHOLD) continue;
-            int f_topo = l->from_topo_id, f_node = l->from_node_id;
-            int t_topo = l->to_topo_id, t_node = l->to_node_id;
-            int is_from = (f_topo == own_topo && f_node == cnode->node_id);
-            int is_to   = (t_topo == own_topo && t_node == cnode->node_id);
-            if (!is_from && !is_to) continue;
-            int o_topo = is_from ? t_topo : f_topo;
-            int o_node = is_from ? t_node : f_node;
-            /* 只绑跨模态（跳过概念拓扑自身、跳过词层——词层跨边是
-             * compound 晋升的组成字回指，不是跨模态绑定） */
-            if (o_topo == own_topo || o_topo == TOPO_VOCABULARY) continue;
-            int dup = 0;
-            for (int b = 0; b < cnode->binding_count; b++)
-                if (cnode->binding_ref_topo[b] == o_topo &&
-                    cnode->binding_ref_node[b] == o_node) { dup = 1; break; }
-            if (dup) continue;
-            cnode->binding_ref_topo[cnode->binding_count] = o_topo;
-            cnode->binding_ref_node[cnode->binding_count] = o_node;
-            cnode->binding_count++;
+        int self_id = cnode->node_id;
+        /* from 方向: cross_adj 出边链表 O(出度) */
+        int fidx = own_topo * MAX_NODES_PER_TOPO + self_id;
+        if (fidx < master->cross_adj_count && master->cross_adj[fidx]) {
+            CrossTopoAdjEntry* e = master->cross_adj[fidx];
+            while (e && cnode->binding_count < 8) {
+                CrossTopologyLink* l = (e->link_index < master->cross_link_count)
+                                       ? master->cross_links[e->link_index] : NULL;
+                autonomic_binding_try_link(cnode, l, own_topo, self_id);
+                e = e->next;
+            }
+        }
+        /* to 方向: 临时反向索引 O(入度) */
+        if (rev_adj && cnode->binding_count < 8 &&
+            self_id >= 0 && self_id < concept_count) {
+            CrossTopoAdjEntry* e = rev_adj[self_id];
+            while (e && cnode->binding_count < 8) {
+                CrossTopologyLink* l = (e->link_index < master->cross_link_count)
+                                       ? master->cross_links[e->link_index] : NULL;
+                autonomic_binding_try_link(cnode, l, own_topo, self_id);
+                e = e->next;
+            }
         }
         if (cnode->binding_count > 0) bound_total++;
+    }
+
+    /* 释放临时反向索引 */
+    if (rev_adj) {
+        for (int i = 0; i < concept_count; i++) {
+            CrossTopoAdjEntry* e = rev_adj[i];
+            while (e) {
+                CrossTopoAdjEntry* nx = e->next;
+                free(e);
+                e = nx;
+            }
+        }
+        free(rev_adj);
     }
 
     pthread_rwlock_unlock(&master->rwlock);
