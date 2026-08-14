@@ -433,8 +433,12 @@ int remove_causal_edge(CausalGraph* graph, int cause_id, int effect_id) {
     int edge_idx = find_edge_index(graph, cause_id, effect_id);
     if (edge_idx < 0) return -1;
 
-    /* 边由 edge_pool 内存池分配（add_causal_edge:object_pool_acquire），
-       不可直接 free；object_pool_destroy 统一释放。仅置空标记删除。 */
+    /* 边由 edge_pool 内存池分配（add_causal_edge:object_pool_acquire）。
+     * fix(P0-2 dsh返工): 删除时必须归还池——object_pool_destroy 只释放
+     * 空闲列表对象, 已 acquire 未归还的对象不会自动回收; 原"仅置空标记
+     * 删除"会让被删边对象指针丢失→永不归还→泄漏(PC 算法批量删边放大)。 */
+    if (graph->edge_pool && graph->edges[edge_idx])
+        object_pool_release((ObjectPool*)graph->edge_pool, graph->edges[edge_idx]);
     graph->edges[edge_idx] = NULL;
 
     // 调整边数组
