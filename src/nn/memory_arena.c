@@ -389,17 +389,19 @@ void* object_pool_acquire(ObjectPool* pool) {
 
     pool->free_list = new_list;
 
-    // 分配新对象
+    // 分配新对象（v0.5.18 fix: 统计实际增长数 grown——
+    // 原实现 total_capacity 先更新导致 free_count=0，取块时
+    // free_list[--free_count] 越界；部分 malloc 失败也不覆盖容量）
+    int grown = 0;
     for (int i = pool->total_capacity; i < new_capacity; i++) {
         pool->free_list[i] = malloc(pool->object_size);
-        if (pool->free_list[i] == NULL) {
-            pool->total_capacity = i;
-            break;
-        }
+        if (pool->free_list[i] == NULL) break;
+        grown++;
     }
+    if (grown == 0) return NULL;
 
-    pool->total_capacity = new_capacity;
-    pool->free_count = new_capacity - pool->total_capacity;
+    pool->free_count += grown;
+    pool->total_capacity += grown;
     pool->used_count++;
 
     // 取最后一个

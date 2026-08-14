@@ -5,6 +5,7 @@
 #include "node_hash.h"
 #include "multi_topology.h"
 #include "concept_abstraction.h"
+#include "memory_arena.h"   /* v0.5.18: ObjectPool 统一分配器替代自写 MemPool */
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -290,90 +291,8 @@ static bool has_cycle_dfs(CausalGraph* graph, int node, int* visited, int* rec_s
 }
 
 // ==================== 内存池优化 ====================
-
-// 通用内存块
-typedef struct MemBlock {
-    void* data;
-    struct MemBlock* next;
-} MemBlock;
-
-// 内存池结构
-typedef struct {
-    size_t block_size;      // 每个块的大小
-    int blocks_per_chunk;   // 每个 chunk 的块数
-    MemBlock* free_list;   // 空闲块链表
-    MemBlock* used_chunks; // 已分配的 chunk 链表
-    int free_count;        // 空闲块数量
-} MemPool;
-
-// 创建内存池
-static MemPool* pool_create(size_t block_size, int blocks_per_chunk) {
-    MemPool* pool = (MemPool*)malloc(sizeof(MemPool));
-    pool->block_size = block_size;
-    pool->blocks_per_chunk = blocks_per_chunk;
-    pool->free_list = NULL;
-    pool->used_chunks = NULL;
-    pool->free_count = 0;
-    return pool;
-}
-
-// 从内存池分配
-static void* pool_alloc(MemPool* pool) {
-    if (!pool) return NULL;
-    
-    if (pool->free_list) {
-        // 从空闲链表取
-        void* result = pool->free_list;
-        pool->free_list = pool->free_list->next;
-        pool->free_count--;
-        return result;
-    }
-    
-    // 需要分配新的 chunk
-    MemBlock* chunk = (MemBlock*)malloc(sizeof(MemBlock));
-    chunk->data = malloc(pool->block_size * pool->blocks_per_chunk);
-    chunk->next = pool->used_chunks;
-    pool->used_chunks = chunk;
-    
-    // 将新 chunk 的所有块加入空闲链表（跳过第一个，返回给用户）
-    char* data = (char*)chunk->data;
-    pool->free_list = (MemBlock*)(data + pool->block_size);
-    MemBlock* current = pool->free_list;
-    
-    for (int i = 1; i < pool->blocks_per_chunk - 1; i++) {
-        current->next = (MemBlock*)(data + (i + 1) * pool->block_size);
-        current = current->next;
-    }
-    current->next = NULL;
-    pool->free_count = pool->blocks_per_chunk - 1;
-    
-    return chunk->data;  // 返回第一个块
-}
-
-// 释放回内存池（简单起见，我们只重置空闲链表，不实际释放）
-
-// 销毁内存池
-static void pool_destroy(MemPool* pool) {
-    if (!pool) return;
-    
-    MemBlock* current = pool->used_chunks;
-    while (current) {
-        MemBlock* next = current->next;
-        free(current->data);
-        free(current);
-        current = next;
-    }
-    
-    // 清理 free_list（虽然它们指向 used_chunks 内的内存）
-    current = pool->free_list;
-    while (current) {
-        MemBlock* next = current->next;
-        // free(current); // 不要 free，这些是内部指针
-        current = next;
-    }
-    
-    free(pool);
-}
+// v0.5.18: 自写 MemPool 收敛到 nn/memory_arena.h 的 ObjectPool——
+// adj_pool/edge_pool 改用 object_pool_create/acquire/destroy（统一分配器）
 
 // ==================== 因果图管理 ==========
 
@@ -400,9 +319,9 @@ CausalGraph* causal_graph_create(int node_count, int edge_capacity) {
     graph->avg_causal_strength = 0.0f;
     graph->last_updated = time(NULL);
 
-    // 初始化内存池（邻接表用 int[32]，边用 CausalEdge）
-    graph->adj_pool = pool_create(sizeof(int) * 32, 256);  // 32个int为一个块
-    graph->edge_pool = pool_create(sizeof(CausalEdge), 128);
+    // 初始化对象池（邻接表用 int[32]，边用 CausalEdge）
+    graph->adj_pool = object_pool_create(sizeof(int) * 32, 256);  // 32个int为一个块
+    graph->edge_pool = object_pool_create(sizeof(CausalEdge), 128);
 
     return graph;
 }
@@ -410,7 +329,7 @@ CausalGraph* causal_graph_create(int node_count, int edge_capacity) {
 void causal_graph_destroy(CausalGraph* graph) {
     if (!graph) return;
 
-    // 边来自 edge_pool 内存池，不能单独 free，pool_destroy 统一释放
+    // 边来自 edge_pool 对象池，不能单独 free，object_pool_destroy 统一释放
     free(graph->edges);
 
     for (int i = 0; i < graph->node_count; i++) {
@@ -424,9 +343,9 @@ void causal_graph_destroy(CausalGraph* graph) {
     free(graph->node_mapping);
     if (graph->topological_order) free(graph->topological_order);
 
-    // 释放内存池
-    if (graph->adj_pool) pool_destroy((MemPool*)graph->adj_pool);
-    if (graph->edge_pool) pool_destroy((MemPool*)graph->edge_pool);
+    // 释放对象池
+    if (graph->adj_pool) object_pool_destroy((ObjectPool*)graph->adj_pool);
+    if (graph->edge_pool) object_pool_destroy((ObjectPool*)graph->edge_pool);
 
     free(graph);
 }
@@ -462,7 +381,7 @@ int add_causal_edge_no_check(CausalGraph* graph, int cause_id, int effect_id,
         graph->edges = new_edges;
     }
 
-    CausalEdge* edge = (CausalEdge*)pool_alloc((MemPool*)graph->edge_pool);
+    CausalEdge* edge = (CausalEdge*)object_pool_acquire((ObjectPool*)graph->edge_pool);
     if (!edge) return -1;
 
     edge->edge_id = graph->edge_count;
@@ -507,8 +426,8 @@ int remove_causal_edge(CausalGraph* graph, int cause_id, int effect_id) {
     int edge_idx = find_edge_index(graph, cause_id, effect_id);
     if (edge_idx < 0) return -1;
 
-    /* 边由 edge_pool 内存池分配（add_causal_edge:pool_alloc），
-       不可直接 free；pool_destroy 统一释放。仅置空标记删除。 */
+    /* 边由 edge_pool 对象池分配（add_causal_edge:object_pool_acquire），
+       不可直接 free；object_pool_destroy 统一释放。仅置空标记删除。 */
     graph->edges[edge_idx] = NULL;
 
     // 调整边数组
@@ -2971,7 +2890,7 @@ CausalGraph* causal_graph_load_from_file(const char* filepath) {
             }
             
             // 添加边
-            CausalEdge* edge = (CausalEdge*)pool_alloc((MemPool*)graph->edge_pool);
+            CausalEdge* edge = (CausalEdge*)object_pool_acquire((ObjectPool*)graph->edge_pool);
             if (edge) {
                 edge->cause_node_id = cause_id;
                 edge->effect_node_id = effect_id;
@@ -3078,7 +2997,7 @@ CausalGraph* causal_graph_load_from_db(const char* db_path, int node_count) {
     
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
         while (sqlite3_step(stmt) == SQLITE_ROW) {
-            CausalEdge* edge = (CausalEdge*)pool_alloc((MemPool*)graph->edge_pool);
+            CausalEdge* edge = (CausalEdge*)object_pool_acquire((ObjectPool*)graph->edge_pool);
             if (edge) {
                 edge->cause_node_id = sqlite3_column_int(stmt, 0);
                 edge->effect_node_id = sqlite3_column_int(stmt, 1);
