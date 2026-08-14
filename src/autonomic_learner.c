@@ -1430,6 +1430,29 @@ int autonomic_compound_consolidate(MasterTopology* master) {
  * 递归拓扑的"整体单元"（TWN：塞翁失马 = 词义+故事+感悟的融合体）。
  * 派生结构：从 cross_links 重建，不持久化（cross_links 持久化即足够，
  * 重启后自动重建——避免存盘格式版本变更 + 一致性双写灾难）。 */
+/* 绑定判定核心：一条概念节点相关的跨边 → 尝试挂进 binding_refs。
+ * 语义与 v0.5.15 原始实现完全一致（weight 阈值/跨模态过滤/去重/≤8）。 */
+static void bind_apply_link(MasterTopology* master, int own_topo,
+                            ReasoningNode* cnode, CrossTopologyLink* l) {
+    if (!l || l->weight < BIND_WEIGHT_THRESHOLD) return;
+    int f_topo = l->from_topo_id, f_node = l->from_node_id;
+    int t_topo = l->to_topo_id, t_node = l->to_node_id;
+    int is_from = (f_topo == own_topo && f_node == cnode->node_id);
+    int is_to   = (t_topo == own_topo && t_node == cnode->node_id);
+    if (!is_from && !is_to) return;
+    int o_topo = is_from ? t_topo : f_topo;
+    int o_node = is_from ? t_node : f_node;
+    /* 只绑跨模态（跳过概念拓扑自身、跳过词层——词层跨边是
+     * compound 晋升的组成字回指，不是跨模态绑定） */
+    if (o_topo == own_topo || o_topo == TOPO_VOCABULARY) return;
+    for (int b = 0; b < cnode->binding_count; b++)
+        if (cnode->binding_ref_topo[b] == o_topo &&
+            cnode->binding_ref_node[b] == o_node) return;
+    cnode->binding_ref_topo[cnode->binding_count] = o_topo;
+    cnode->binding_ref_node[cnode->binding_count] = o_node;
+    cnode->binding_count++;
+}
+
 int autonomic_binding_consolidate(MasterTopology* master) {
     if (!master) return 0;
 
@@ -1446,35 +1469,63 @@ int autonomic_binding_consolidate(MasterTopology* master) {
         return 0;
     }
 
-    int bound_total = 0;
+    /* v0.5.18 opt: 绑定重建 O(N×M)→O(出度)——
+     * 概念节点跨边是双向的（模板→概念等入边也要绑），cross_adj 只
+     * 索引 from 方向，故一次性构建概念节点的双向索引（from+to 都入），
+     * 替代内层对 cross_links 全量扫描（12万节点×23万边→分钟级卡顿）。
+     * 只改遍历方式，绑定判定逻辑（bind_apply_link）与原实现逐行等价。 */
     int own_topo = (int)concept->type;
-    for (int i = 0; i < concept->net->node_count; i++) {
+    int cnode_count = concept->net->node_count;
+    CrossTopoAdjEntry** conc_adj = (CrossTopoAdjEntry**)calloc(
+        (size_t)(cnode_count > 0 ? cnode_count : 1), sizeof(CrossTopoAdjEntry*));
+    if (conc_adj) {
+        for (int c = 0; c < master->cross_link_count; c++) {
+            CrossTopologyLink* l = master->cross_links[c];
+            if (!l) continue;
+            int cidx = -1;
+            if (l->from_topo_id == own_topo)    cidx = l->from_node_id;
+            else if (l->to_topo_id == own_topo) cidx = l->to_node_id;
+            if (cidx < 0 || cidx >= cnode_count) continue;
+            CrossTopoAdjEntry* e = (CrossTopoAdjEntry*)malloc(sizeof(CrossTopoAdjEntry));
+            if (!e) continue;
+            e->link_index = c;
+            e->next = conc_adj[cidx];
+            conc_adj[cidx] = e;
+        }
+    }
+
+    int bound_total = 0;
+    for (int i = 0; i < cnode_count; i++) {
         ReasoningNode* cnode = concept->net->nodes[i];
         if (!cnode) continue;
         cnode->binding_count = 0;   /* 重建（派生结构） */
-        for (int c = 0; c < master->cross_link_count && cnode->binding_count < 8; c++) {
-            CrossTopologyLink* l = master->cross_links[c];
-            if (!l || l->weight < BIND_WEIGHT_THRESHOLD) continue;
-            int f_topo = l->from_topo_id, f_node = l->from_node_id;
-            int t_topo = l->to_topo_id, t_node = l->to_node_id;
-            int is_from = (f_topo == own_topo && f_node == cnode->node_id);
-            int is_to   = (t_topo == own_topo && t_node == cnode->node_id);
-            if (!is_from && !is_to) continue;
-            int o_topo = is_from ? t_topo : f_topo;
-            int o_node = is_from ? t_node : f_node;
-            /* 只绑跨模态（跳过概念拓扑自身、跳过词层——词层跨边是
-             * compound 晋升的组成字回指，不是跨模态绑定） */
-            if (o_topo == own_topo || o_topo == TOPO_VOCABULARY) continue;
-            int dup = 0;
-            for (int b = 0; b < cnode->binding_count; b++)
-                if (cnode->binding_ref_topo[b] == o_topo &&
-                    cnode->binding_ref_node[b] == o_node) { dup = 1; break; }
-            if (dup) continue;
-            cnode->binding_ref_topo[cnode->binding_count] = o_topo;
-            cnode->binding_ref_node[cnode->binding_count] = o_node;
-            cnode->binding_count++;
+        if (conc_adj) {
+            for (CrossTopoAdjEntry* ent = conc_adj[i];
+                 ent && cnode->binding_count < 8; ent = ent->next) {
+                if (ent->link_index < master->cross_link_count)
+                    bind_apply_link(master, own_topo, cnode,
+                                    master->cross_links[ent->link_index]);
+            }
+        } else {
+            /* 索引分配失败：回退原全量扫描，行为保持一致 */
+            for (int c = 0; c < master->cross_link_count &&
+                            cnode->binding_count < 8; c++)
+                bind_apply_link(master, own_topo, cnode, master->cross_links[c]);
         }
         if (cnode->binding_count > 0) bound_total++;
+    }
+
+    /* 释放临时索引 */
+    if (conc_adj) {
+        for (int i = 0; i < cnode_count; i++) {
+            CrossTopoAdjEntry* ent = conc_adj[i];
+            while (ent) {
+                CrossTopoAdjEntry* nx = ent->next;
+                free(ent);
+                ent = nx;
+            }
+        }
+        free(conc_adj);
     }
 
     pthread_rwlock_unlock(&master->rwlock);
