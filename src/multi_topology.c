@@ -3546,7 +3546,11 @@ int master_count_total_nodes(MasterTopology* master) {
     return total;
 }
 
-#define STATE_FORMAT_VERSION 5
+#define STATE_FORMAT_VERSION 6
+/* v0.5.20: 6 = 在每节点记录尾部追加 dist_sig[26]+dist_sig_count（虚词分类器
+ * 位置画像，跨重启累积）。加载端向前兼容 v2..v5（旧文件无 dist_sig 段 → 归零）。
+ * ⚠️ 一旦用 6 存盘，回退到旧二进制会因 fmt_ver=6 不被识别而误判——回退前需
+ * 先备份或接受 dist_sig 段丢失（不影响节点/边/频率表主体）。 */
 
 /* v0.5.12: 存盘防呆——以最后成功存盘/加载节点数为基准，本次 < 基准×60% 视为坏状态，
  * 拒绝覆盖主文件，重定向到 .suspect 并报警（08-12 事故：197k→100k 坏状态直接覆盖好文件；
@@ -3691,6 +3695,10 @@ int master_save_state(MasterTopology* master, const char* file_path) {
             }
             }
             
+            // [v6] dist_sig 持久化（虚词分类器位置画像，跨重启累积）
+            fwrite(node->dist_sig, sizeof(float), 26, fp);
+            fwrite(&node->dist_sig_count, sizeof(int), 1, fp);
+            
             saved_nodes++;
         }
     }
@@ -3808,8 +3816,8 @@ int master_load_state(MasterTopology* master, const char* file_path) {
     // 读文件头: 格式版本
     int fmt_ver = 1;
     READ(&fmt_ver, sizeof(int));
-    // fmt_ver ∈ {2,3,4,5} = 带版本头的格式化文件
-    if (fmt_ver != 2 && fmt_ver != 3 && fmt_ver != 4 && fmt_ver != 5) {
+    // fmt_ver ∈ {2,3,4,5,6} = 带版本头的格式化文件
+    if (fmt_ver != 2 && fmt_ver != 3 && fmt_ver != 4 && fmt_ver != 5 && fmt_ver != 6) {
         p = buf;       // 回退到文件头
         fmt_ver = 1;
     }
@@ -3916,6 +3924,8 @@ int master_load_state(MasterTopology* master, const char* file_path) {
             if (fmt_ver == 1) continue;
             // v2: 跳过连接数据 (每连接: int+3float = 16 bytes)
             if (conn_count > 0) SKIP(conn_count * (int)(sizeof(int) + 3 * sizeof(float)));
+            // [v6] 跳过 dist_sig 段（每节点记录尾部）
+            if (fmt_ver >= 6) SKIP(26 * (int)sizeof(float) + (int)sizeof(int));
             continue;
         }
 
@@ -3963,6 +3973,18 @@ int master_load_state(MasterTopology* master, const char* file_path) {
         } else if (fmt_ver >= 2) {
             // [v2] 跳过连接数据
             if (conn_count > 0) SKIP(conn_count * (int)(sizeof(int) + 3 * sizeof(float)));
+        }
+
+        // [v6] dist_sig 段（每节点记录尾部）：虚词分类器位置画像跨重启累积
+        if (fmt_ver >= 6) {
+            float dsig[26];
+            int dsig_count;
+            READ(dsig, 26 * sizeof(float));
+            READ(&dsig_count, sizeof(int));
+            if (node) {
+                memcpy(node->dist_sig, dsig, sizeof(node->dist_sig));
+                node->dist_sig_count = dsig_count;
+            }
         }
 
         loaded_nodes++;
@@ -4094,6 +4116,11 @@ int master_load_state(MasterTopology* master, const char* file_path) {
                     if (p + 3 * (int)sizeof(float) > end) break;
                     SKIP(3 * (int)sizeof(float));
                 }
+            }
+
+            // [v6] 跳过 dist_sig 段（Pass 2 只恢复边，dist_sig 已在 Pass 1 应用）
+            if (fmt_ver >= 6) {
+                SKIP(26 * (int)sizeof(float) + (int)sizeof(int));
             }
         }
 

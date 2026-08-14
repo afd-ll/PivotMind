@@ -25,6 +25,7 @@
 #include "broca.h"
 #include "hypothalamus.h"
 #include "emergent_pos.h"
+#include "funcword.h"
 #include "visual_cortex.h"    /* v0.5 视觉皮层 — 多模态感知 */
 #include "semantic_growth.h"  /* 语义拓扑自动生长 */
 #include "error.h"
@@ -618,6 +619,14 @@ static void* brainstem_loop(void* arg) {
         }
 
         brainstem_tick_freeze(bs, &cp);
+
+        /* v0.5.20: 虚词分类器阶段0——影子模式周期扫描（锁外，零行为变化）。
+         * 每 30 tick 跑一次。注意：PM_CLOCK_TICK_INTERVAL_MS=1000 + circadian
+         * 调制 1.0-1.4 → 实际 tick≈1-1.4s，30 tick ≈ 30-42 秒（不是 8 分钟）。
+         * 独立于对话触发（对话路径并发计数不可靠），由脑干单线程周期保证。 */
+        if (bs->tick_count % 30 == 0) {
+            funcword_master_scan(bs->master);
+        }
 
         /* 定期存盘：每 60 tick (≈17min) 持久化，防重启丢数据 */
         /* 空启动保护：总节点数 < SAVE_MIN_TOTAL_NODES (50) 时跳过，防止覆盖有效存盘 */

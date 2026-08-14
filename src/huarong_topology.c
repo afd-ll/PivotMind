@@ -87,6 +87,12 @@ ReasoningNode* create_reasoning_node(int node_id, const char* concept,
         }
     }
     
+    // v0.5.19/0.5.20 fix: dist_sig[26] + dist_sig_count 必须清零！
+    // create_reasoning_node 用 malloc（非 calloc），此前未初始化 →
+    // EMA 累积读垃圾值、funcword 分类器读到 1675794228 类垃圾
+    memset(node->dist_sig, 0, sizeof(node->dist_sig));
+    node->dist_sig_count = 0;
+    
     // 惰性边分配：不预分配，第一条边加入时按需分配
     node->edges = NULL;
     node->edge_capacity = 0;

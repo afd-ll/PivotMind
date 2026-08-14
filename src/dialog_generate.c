@@ -11,6 +11,7 @@
 #include "cognitive_params.h"
 #include "cognitive_controller.h"
 #include "diffusion.h"
+#include "funcword.h"
 #include "utf8_tokenizer.h"
 #include "string_pool.h"
 #include "common.h"
@@ -682,12 +683,21 @@ void auto_learn_concepts(MasterTopology* master, const char* text, void* str_poo
 
     /* 提取中文单字（跳过标点/停用词），获取或创建节点ID */
     int cjk_pos[128], cjk_ids[128], cjk_count = 0;
+    /* v0.5.20: 虚词分类器阶段0——对话路径前置位置累积。
+     * 在 is_stop_word 过滤之前累积位置画像（标签无关），
+     * 虚词（我/你/他/是/在）的位置信号在对话里同样要累积——
+     * 否则「我」句首率高的关键信号永远丢失（08-14 实测仅 5 边）。 */
     for (int i = 0; i < token_count && cjk_count < 128; i++) {
         if (!tokens[i] || strlen(tokens[i]) != 3) continue;
         unsigned char c0 = (unsigned char)tokens[i][0];
         if ((c0 & 0x80) == 0) continue;
+        int nid = huarong_net_find_concept(vocab->net, tokens[i]);
+        if (nid >= 0) {
+            funcword_record_position(vocab->net->nodes[nid],
+                                     (i == 0), (i == token_count - 1));
+        }
         if (contains_punctuation(tokens[i]) || is_stop_word(tokens[i])) continue;
-        int nid = get_or_create_concept(vocab, tokens[i]);
+        nid = get_or_create_concept(vocab, tokens[i]);
         if (nid >= 0) {
             cjk_pos[cjk_count] = i;
             cjk_ids[cjk_count] = nid;
@@ -787,6 +797,11 @@ void auto_learn_concepts(MasterTopology* master, const char* text, void* str_poo
     for (int i = 0; i < token_count; i++) free(tokens[i]);
 
     pthread_rwlock_unlock(&master->rwlock);
+
+    /* v0.5.20: 虚词分类器阶段0——对话路径只累积位置画像（前面循环内已完成）。
+     * 周期影子扫描只由 brainstem 单线程触发。此处原有一个"每 20 次对话
+     * 触发 funcword_master_scan"块，被 4 线程并发 ++ 存在数据竞争且与
+     * brainstem 周期扫描重复，已删除（见 funcword_impl_review 问题E）。 */
 }
 
 
