@@ -61,14 +61,6 @@ typedef struct {
  *  公共工具函数
  * ================================================================ */
 
-/**
- * 余弦相似度
- * @param a  向量 a
- * @param b  向量 b
- * @param dim 维度
- * @return 余弦相似度 [-1, 1]
- */
-float template_cosine_sim(const float* a, const float* b, int dim);
 
 /* ================================================================
  *  API
