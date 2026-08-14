@@ -3581,6 +3581,14 @@ int master_save_state(MasterTopology* master, const char* file_path) {
         return -1;
     }
 
+    /* opt(任务4): 大缓冲消除逐节点小 fwrite 触发的海量 syscall。
+     * 330MB 状态 ≈ 12 万节点 × 每节点几十次小 fwrite，stdio 默认
+     * 4KB 缓冲 → 数万次 write()（70s 元凶之一）。4MB 全缓冲后 flush
+     * 次数降到 ~82 次，接近纯写盘速度。必须 fopen 后、首次 I/O 前
+     * 调用；fwrite 序列不变 → 存盘字节布局完全不变（旧文件可加载）。
+     * 循环内无逐项 fflush（已确认），fclose 末尾一次 flush 即可。 */
+    setvbuf(fp, NULL, _IOFBF, 4 * 1024 * 1024);
+
     /* v0.5.7: 存盘全程持读锁——防对话/自学习线程并发 realloc
      * 节点/边数组导致悬垂崩溃（实测：存盘中崩溃 → 状态文件写坏
      * → 加载只剩 1 节点 → 知识全丢）。读锁允许并发读，阻塞写 */
