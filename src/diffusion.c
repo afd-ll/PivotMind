@@ -1099,6 +1099,18 @@ int diffusion_generate(DiffusionCtx* ctx,
     int spread1_ids[SPREAD_MAX_EXTRA];
     int spread1_count = 0;
 
+    /* v0.5.18 opt: bitmap 去重——一跳/两跳邻居查重从 O(n) 线性扫描
+     * 改 O(1) 查表 (node_id == 数组索引)。seen[] 生命周期覆盖整个
+     * spread 过程，一轮扩散只分配/释放一次。 */
+    int vnode_count = ctx->vocab->net->node_count;
+    unsigned char* seen = (unsigned char*)calloc(
+        (size_t)(vnode_count > 0 ? vnode_count : 1), 1);
+    if (!seen) return 0;
+    for (int a = 0; a < active_count; a++) {
+        int aid = active_ids[a];
+        if (aid >= 0 && aid < vnode_count) seen[aid] = 1;
+    }
+
     /* 一跳：直接匹配节点的邻居 */
     for (int a = 0; a < active_count; a++) {
         ReasoningNode* src = ctx->vocab->net->nodes[active_ids[a]];
@@ -1112,13 +1124,10 @@ int diffusion_generate(DiffusionCtx* ctx,
         }
         for (int e = 0; e < src->edge_count && spread1_count < SPREAD_MAX_EXTRA; e++) {
             ReasoningNode* nb = src->edges[e].target;
-            if (!nb || nb->node_id == src->node_id) continue;
-            int dup = 0;
-            for (int d = 0; d < active_count; d++)
-                if (active_ids[d] == nb->node_id) { dup = 1; break; }
-            for (int d = 0; d < spread1_count; d++)
-                if (spread1_ids[d] == nb->node_id) { dup = 1; break; }
-            if (!dup) {
+            if (!nb || nb->node_id == src->node_id ||
+                nb->node_id >= vnode_count) continue;
+            if (!seen[nb->node_id]) {
+                seen[nb->node_id] = 1;
                 float lang_mult = 1.0f;
                 if (lang_dom != 0 && NODE_IS_CJK(nb)) {
                     lang_mult = (lang_dom > 0) ? LANG_BOOST_SAME : LANG_BOOST_CROSS;
@@ -1144,15 +1153,10 @@ int diffusion_generate(DiffusionCtx* ctx,
         }
         for (int e = 0; e < src->edge_count; e++) {
             ReasoningNode* nb = src->edges[e].target;
-            if (!nb || nb->node_id == src->node_id) continue;
-            int dup = 0;
-            for (int d = 0; d < active_count; d++)
-                if (active_ids[d] == nb->node_id) { dup = 1; break; }
-            for (int d = 0; d < spread1_count; d++)
-                if (spread1_ids[d] == nb->node_id) { dup = 1; break; }
-            for (int d = 0; d < spread2_count; d++)
-                if (spread1_ids[spread1_count + d] == nb->node_id) { dup = 1; break; }
-            if (!dup) {
+            if (!nb || nb->node_id == src->node_id ||
+                nb->node_id >= vnode_count) continue;
+            if (!seen[nb->node_id]) {
+                seen[nb->node_id] = 1;
                 float lm2 = 1.0f;
                 if (lang_dom != 0 && NODE_IS_CJK(nb))
                     lm2 = (lang_dom > 0) ? LANG_BOOST_SAME : LANG_BOOST_CROSS;
@@ -1179,12 +1183,8 @@ int diffusion_generate(DiffusionCtx* ctx,
         int shared = 0;
         for (int e = 0; e < node->edge_count; e++) {
             int tgt = node->edges[e].target ? node->edges[e].target->node_id : -1;
-            if (tgt < 0) continue;
-            for (int a = 0; a < active_count; a++)
-                if (active_ids[a] == tgt) { shared++; break; }
-            if (shared > 0) continue; /* 只统计一次 */
-            for (int s = 0; s < total_spread && s < SPREAD_MAX_EXTRA; s++)
-                if (spread1_ids[s] == tgt) { shared++; break; }
+            if (tgt < 0 || tgt >= vnode_count) continue;
+            if (seen[tgt]) shared++;  /* bitmap O(1) 查重 */
         }
         /* Jaccard ≈ shared / node->edge_count，映射到 [0.5, 1.5] 乘数 */
         float jac = (node->edge_count > 0) ? (float)shared / (float)node->edge_count : 0.0f;
@@ -1217,14 +1217,14 @@ int diffusion_generate(DiffusionCtx* ctx,
     if (!ctx->_vocab_scores || ctx->_vocab_cap < vn) {
         free(ctx->_vocab_scores);
         ctx->_vocab_scores = (float*)calloc(vn, sizeof(float));
-        if (!ctx->_vocab_scores) return -1;
+        if (!ctx->_vocab_scores) { free(seen); return -1; }
         ctx->_vocab_cap = vn;
     }
     /* 语义层 */
     if (sn > 0 && (!ctx->_sem_scores || ctx->_sem_cap < sn)) {
         free(ctx->_sem_scores);
         ctx->_sem_scores = (float*)calloc(sn, sizeof(float));
-        if (!ctx->_sem_scores) return -1;
+        if (!ctx->_sem_scores) { free(seen); return -1; }
         ctx->_sem_cap = sn;
     } else if (sn == 0) {
         ctx->_sem_scores = NULL;  /* 无语义层时清零 */
@@ -1233,7 +1233,7 @@ int diffusion_generate(DiffusionCtx* ctx,
     if (tn > 0 && (!ctx->_tpl_scores || ctx->_tpl_cap < tn)) {
         free(ctx->_tpl_scores);
         ctx->_tpl_scores = (float*)calloc(tn, sizeof(float));
-        if (!ctx->_tpl_scores) return -1;
+        if (!ctx->_tpl_scores) { free(seen); return -1; }
         ctx->_tpl_cap = tn;
     } else if (tn == 0) {
         ctx->_tpl_scores = NULL;
@@ -1242,7 +1242,7 @@ int diffusion_generate(DiffusionCtx* ctx,
     if (en > 0 && (!ctx->_emo_scores || ctx->_emo_cap < en)) {
         free(ctx->_emo_scores);
         ctx->_emo_scores = (float*)calloc(en, sizeof(float));
-        if (!ctx->_emo_scores) return -1;
+        if (!ctx->_emo_scores) { free(seen); return -1; }
         ctx->_emo_cap = en;
     } else if (en == 0) {
         ctx->_emo_scores = NULL;
@@ -1681,5 +1681,6 @@ int diffusion_generate(DiffusionCtx* ctx,
 
     /* ── 静态数组不释放 (ctx生命周期管理) ── */
 
+    free(seen);
     return out;
 }
