@@ -328,7 +328,16 @@ int master_add_cross_link_nolock(MasterTopology* master,
                                  float weight,
                                  const char* relation) {
     if (!master || !relation) return -1;
-    
+
+    // H1 修复: 校验 from_topo/from_node 范围，防负索引堆越界与 GB 级 realloc OOM。
+    // 邻接表索引 = from_topo_id * MAX_NODES_PER_TOPO + from_node_id。
+    // 损坏状态文件/异常调用传入越界 from_node_id 会: ①溢出 int → 负 adj_idx → 负索引 OOB；
+    // ②产生 realloc(new_size = adj_idx+1000) GB 级分配 → OOM。
+    if (from_topo_id < 0 || from_node_id < 0 ||
+        from_node_id >= MAX_NODES_PER_TOPO) {
+        return -1;
+    }
+
     int result = -1;
 
     // TOCTOU 防护：wrlock 下检查是否已存在（调用方可能在无锁时做了检查）
@@ -343,7 +352,7 @@ int master_add_cross_link_nolock(MasterTopology* master,
                 l->to_topo_id == to_topo_id &&
                 l->to_node_id == to_node_id) {
                 result = l->link_id;
-                return -1;
+                return result;   /* M4 修复: 原 return -1 丢弃已求得 link_id，误判"添加失败"导致重复建边 */
             }
         }
     }
@@ -439,7 +448,9 @@ int master_add_cross_link(MasterTopology* master,
 static int cross_link_exists_nolock(MasterTopology* master,
                                     int from_topo, int from_node,
                                     int to_topo, int to_node) {
-    if (!master || from_topo < 0 || to_topo < 0) return 0;
+    // H1 修复: from_node 越界会导致 idx = from_topo*1e6 + from_node 溢出 int → 负索引 OOB
+    if (!master || from_topo < 0 || to_topo < 0 ||
+        from_node < 0 || from_node >= MAX_NODES_PER_TOPO) return 0;
 
     int exists = 0;
     int idx = from_topo * MAX_NODES_PER_TOPO + from_node;
@@ -4162,6 +4173,20 @@ int master_load_state(MasterTopology* master, const char* file_path) {
         if (from_topo < 0 || from_topo >= max_topo ||
             to_topo < 0 || to_topo >= max_topo) {
             break;
+        }
+
+        /* H1 修复: 校验 from_node/to_node 落在 [0, node_count) 区间。
+         * 损坏状态文件里节点 id 越界会触发负索引 OOB / GB 级 realloc OOM，
+         * 越界即跳过该条记录 (不终止加载)。 */
+        {
+            SubTopology* from_sub = master->sub_topologies[from_topo];
+            SubTopology* to_sub   = master->sub_topologies[to_topo];
+            if (!from_sub || !from_sub->net || !to_sub || !to_sub->net)
+                break;
+            if (from_node < 0 || from_node >= from_sub->net->node_count ||
+                to_node < 0 || to_node >= to_sub->net->node_count) {
+                continue;
+            }
         }
 
         int link_result = master_add_cross_link(master, from_topo, from_node,

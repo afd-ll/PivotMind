@@ -123,4 +123,21 @@ void media_reader_set_thalamus(MediaReader* mr, Thalamus* th);
  */
 int media_diagnose_tracks(MediaReader* mr, const char* filepath);
 
+/**
+ * 媒体路径安全校验 (C1 安全修复: 灭 SSRF / 路径穿越)
+ *
+ * 在把 filepath 交给 ffprobe/ffmpeg 之前调用，做三层校验：
+ *   1. realpath(): 解析符号链接 + 规范化 + 校验文件确实存在
+ *   2. S_ISREG(): 必须是常规文件（拒绝目录/设备/管道）
+ *   3. 媒体目录白名单: 解析后的真实路径必须位于允许目录内
+ *      （默认 "/mnt/sdcard/media:/mnt/sdcard"，可用环境变量
+ *      PIVOTMIND_MEDIA_DIRS 覆盖，冒号分隔多目录）
+ *
+ * @param filepath      待校验的原始路径（来自网络请求等不可信输入）
+ * @param resolved_out  输出规范化后的绝对路径（可传 NULL 忽略）
+ * @param resolved_cap  resolved_out 缓冲区大小
+ * @return 0=通过, -1=拒绝
+ */
+int media_validate_media_path(const char* filepath, char* resolved_out, size_t resolved_cap);
+
 #endif /* MEDIA_READER_H */

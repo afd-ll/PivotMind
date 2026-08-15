@@ -79,6 +79,7 @@ static int _learn_tokens(SubTopology* vocab, const char* text, int* p_prev_id, E
 #define GW_MAX_RESPONSE    (128 * 1024)  // 128KB 响应上限
 #define GW_READ_TIMEOUT_S  10
 #define GW_BACKLOG         16
+#define GW_TOKEN_LEN       64            // C1: API token 十六进制长度 (32 字节随机数)
 
 // ==================== 系统状态 ====================
 
@@ -133,6 +134,9 @@ typedef struct {
     char  workdir[512];
     ConfigContext* config;       /* 运行时配置 */
 
+    /* C1 修复: API token (媒体喂料端点鉴权)，启动时随机生成并打印到日志 */
+    char  api_token[GW_TOKEN_LEN + 1];
+
     /* 多轮对话上下文 */
     char  last_answer[1024];     /* 上一轮回复（注入扩散引擎保持连贯） */
     int   dialog_context_ready;  /* 是否有可用上下文 */
@@ -143,6 +147,31 @@ static void handle_qa(GatewaySystem* gw, int fd, const char* body);
 static void learn_queue_init(void);
 
 static GatewaySystem* g_gw = NULL;
+
+// ==================== API token 鉴权 (C1 修复) ====================
+
+/* 生成随机 API token: 从 /dev/urandom 读 32 字节 → 64 个十六进制字符。
+ * 零依赖，失败时回退 rand() (时间+pid 播种)。 */
+static void gw_generate_token(char* buf, size_t cap) {
+    unsigned char raw[32];
+    size_t got = 0;
+    FILE* fp = fopen("/dev/urandom", "rb");
+    if (fp) {
+        got = fread(raw, 1, sizeof(raw), fp);
+        fclose(fp);
+    }
+    if (got < sizeof(raw)) {
+        srand((unsigned)time(NULL) ^ ((unsigned)getpid() << 16));
+        for (size_t i = got; i < sizeof(raw); i++)
+            raw[i] = (unsigned char)(rand() & 0xFF);
+    }
+    size_t o = 0;
+    for (size_t i = 0; i < sizeof(raw) && o + 2 < cap; i++) {
+        snprintf(buf + o, 3, "%02x", raw[i]);
+        o += 2;
+    }
+    buf[o] = '\0';
+}
 
 // ==================== 信号处理 ====================
 
@@ -1523,6 +1552,7 @@ static void handle_health(GatewaySystem* gw, int fd) {
 typedef struct {
     char method[8];
     char path[256];
+    char token[128];     /* C1: X-Pivot-Token 请求头（媒体端点鉴权） */
     char body[GW_MAX_REQUEST];
     int  body_len;
 } HttpRequest;
@@ -1598,6 +1628,17 @@ static int parse_request(int fd, HttpRequest* req) {
         return -1;  /* body 溢出 */
     }
 
+    /* C1: 提取 X-Pivot-Token 请求头（只在 header 段找，防 body 伪造） */
+    char* tok = strcasestr(buf, "X-Pivot-Token:");
+    if (tok && tok < buf + header_end) {
+        tok += 14;  /* 跳过 "X-Pivot-Token:" */
+        while (*tok == ' ' || *tok == '\t') tok++;
+        int ti = 0;
+        while (*tok && *tok != '\r' && *tok != '\n' && ti < (int)sizeof(req->token) - 1)
+            req->token[ti++] = *tok++;
+        req->token[ti] = '\0';
+    }
+
     return 0;
 }
 
@@ -1621,6 +1662,16 @@ static void handle_connection(GatewaySystem* gw, int client_fd) {
     // CORS preflight
     if (strcmp(req.method, "OPTIONS") == 0) {
         http_send(client_fd, 200, "text/plain", "");
+        close(client_fd);
+        return;
+    }
+
+    /* C1: 媒体端点鉴权 — /media/ 下所有端点必须携带有效 X-Pivot-Token。
+     * 只锁媒体端点（RCE 入口），/learn /chat 等内部端点保持兼容
+     * （喂料脚本不打断）。token 为空则拒绝（安全默认）。 */
+    if (strncmp(req.path, "/media/", 7) == 0 &&
+        (gw->api_token[0] == '\0' || strcmp(req.token, gw->api_token) != 0)) {
+        http_json(client_fd, 401, "{\"error\":\"unauthorized: missing or invalid X-Pivot-Token\"}");
         close(client_fd);
         return;
     }
@@ -1864,6 +1915,11 @@ int main(int argc, char* argv[]) {
     g_gw = &gw;
     gw.port = port;
     strncpy(gw.workdir, workdir, sizeof(gw.workdir) - 1);
+
+    /* C1: 生成 API token 并打印到日志（媒体端点鉴权） */
+    gw_generate_token(gw.api_token, sizeof(gw.api_token));
+    printf("[gateway] API token: %s\n", gw.api_token);
+    printf("[gateway] 媒体端点 /media/* 需要请求头 X-Pivot-Token: <上面token> 才能访问\n");
 
     /* load runtime config (optional; defaults if file missing) */
     gw.config = config_load(NULL);

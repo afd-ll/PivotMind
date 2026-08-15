@@ -14,6 +14,7 @@
 #include <ctype.h>
 #include <errno.h>
 #include <sys/stat.h>
+#include <limits.h>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -26,6 +27,8 @@
 #else
 #include <dirent.h>
 #include <unistd.h>
+#include <sys/wait.h>
+#include <fcntl.h>
 #endif
 
 /* ==================== 内部结构 ==================== */
@@ -110,6 +113,160 @@ static const char* media_get_ffprobe_path(MediaReader* mr) {
     return derived;
 }
 
+/* ==================== 子进程执行 (C1 安全修复: 去 shell 解释层) ====================
+ *
+ * 用 fork + execvp 替代 popen/system，参数数组直接传值，杜绝 shell 命令注入。
+ * 两个关键点:
+ *   - 用 execvp 而非 execv: probe/ffmpeg 可能是裸名 "ffprobe" (靠 PATH 查找)。
+ *   - popen 替换必须先 drain 管道再 waitpid，否则 64KB 管道写满会父子互相死锁。
+ */
+
+#ifndef _WIN32
+
+/* 执行 prog 并捕获 stdout 到 out_buf (最多保留 out_cap-1 字节，其余读空丢弃防死锁)。
+ * 返回子进程退出码；-1 = fork/pipe/wait 失败，127 = execvp 失败。 */
+static int run_capture(const char* prog, char* const argv[],
+                       char* out_buf, size_t out_cap, size_t* out_len) {
+    int pipefd[2];
+    if (out_len) *out_len = 0;
+    if (pipe(pipefd) != 0) return -1;
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        close(pipefd[0]); close(pipefd[1]);
+        return -1;
+    }
+    if (pid == 0) {
+        /* 子进程: stdout → 管道, stderr → /dev/null */
+        close(pipefd[0]);
+        dup2(pipefd[1], STDOUT_FILENO);
+        close(pipefd[1]);
+        int nullfd = open("/dev/null", O_WRONLY);
+        if (nullfd >= 0) { dup2(nullfd, STDERR_FILENO); close(nullfd); }
+        execvp(prog, argv);
+        _exit(127);
+    }
+
+    /* 父进程: 先 drain 管道到 EOF，再 waitpid (防 64KB 管道满死锁) */
+    close(pipefd[1]);
+    size_t total = 0;
+    char sink[4096];
+    ssize_t n;
+    while ((n = read(pipefd[0], sink, sizeof(sink))) > 0) {
+        if (out_buf && out_cap > 1) {
+            size_t room = out_cap - 1 - total;
+            if (room > 0) {
+                size_t copy = ((size_t)n < room) ? (size_t)n : room;
+                memcpy(out_buf + total, sink, copy);
+                total += copy;
+            }
+        }
+    }
+    close(pipefd[0]);
+    if (out_buf && out_cap > 0) {
+        out_buf[(total < out_cap) ? total : (out_cap - 1)] = '\0';
+    }
+    if (out_len) *out_len = total;
+
+    int status = 0;
+    if (waitpid(pid, &status, 0) < 0) return -1;
+    if (WIFEXITED(status)) return WEXITSTATUS(status);
+    return -1;
+}
+
+/* 执行 prog，丢弃 stdout/stderr (替代 system)，返回退出码；-1=fork/wait 失败, 127=exec 失败 */
+static int run_silent(const char* prog, char* const argv[]) {
+    pid_t pid = fork();
+    if (pid < 0) return -1;
+    if (pid == 0) {
+        int nullfd = open("/dev/null", O_WRONLY);
+        if (nullfd >= 0) {
+            dup2(nullfd, STDOUT_FILENO);
+            dup2(nullfd, STDERR_FILENO);
+            close(nullfd);
+        }
+        execvp(prog, argv);
+        _exit(127);
+    }
+    int status = 0;
+    if (waitpid(pid, &status, 0) < 0) return -1;
+    if (WIFEXITED(status)) return WEXITSTATUS(status);
+    return -1;
+}
+
+#endif /* !_WIN32 */
+
+/* ==================== 媒体路径安全校验 (C1 安全修复: 灭 SSRF) ==================== */
+
+/* 默认媒体目录白名单（环境变量 PIVOTMIND_MEDIA_DIRS 可覆盖，冒号分隔） */
+static const char* media_default_dirs = "/mnt/sdcard/media:/mnt/sdcard";
+
+/* 判断 path 是否位于 dir 目录内 (dir 本身或 dir/ 前缀)，防 "/mnt/sdcard2" 误匹配 */
+static int path_within_dir(const char* path, const char* dir) {
+    size_t dlen = strlen(dir);
+    if (dlen == 0) return 0;
+    if (strncmp(path, dir, dlen) != 0) return 0;
+    if (path[dlen] == '\0') return 1;   /* 精确等于 dir */
+    if (path[dlen] == '/')  return 1;   /* dir/ 前缀 */
+    return 0;
+}
+
+int media_validate_media_path(const char* filepath, char* resolved_out, size_t resolved_cap) {
+#ifdef _WIN32
+    /* Windows 分支: 非目标平台，仅做基础存在性检查 (realpath 为 POSIX) */
+    struct stat st;
+    if (!filepath || !*filepath || stat(filepath, &st) != 0 || !S_ISREG(st.st_mode))
+        return -1;
+    if (resolved_out && resolved_cap > 0) {
+        strncpy(resolved_out, filepath, resolved_cap - 1);
+        resolved_out[resolved_cap - 1] = '\0';
+    }
+    return 0;
+#else
+    if (!filepath || !*filepath) return -1;
+
+    /* 1. realpath: 解析符号链接 + 规范化 + 校验存在性 */
+    char resolved[PATH_MAX];
+    if (!realpath(filepath, resolved)) {
+        fprintf(stderr, "[media] 路径校验失败 (不存在/无法解析): %s (%s)\n",
+                filepath, strerror(errno));
+        return -1;
+    }
+
+    /* 2. 必须是常规文件 (拒绝目录/设备/管道) */
+    struct stat st;
+    if (stat(resolved, &st) != 0 || !S_ISREG(st.st_mode)) {
+        fprintf(stderr, "[media] 路径校验失败 (非常规文件): %s\n", filepath);
+        return -1;
+    }
+
+    /* 3. 媒体目录白名单: 解析后的真实路径必须位于允许目录内 (灭 SSRF) */
+    const char* dirs = getenv("PIVOTMIND_MEDIA_DIRS");
+    if (!dirs || !*dirs) dirs = media_default_dirs;
+
+    char dirs_copy[PATH_MAX];
+    strncpy(dirs_copy, dirs, sizeof(dirs_copy) - 1);
+    dirs_copy[sizeof(dirs_copy) - 1] = '\0';
+
+    int allowed = 0;
+    char* saveptr = NULL;
+    for (char* tok = strtok_r(dirs_copy, ":", &saveptr);
+         tok; tok = strtok_r(NULL, ":", &saveptr)) {
+        if (path_within_dir(resolved, tok)) { allowed = 1; break; }
+    }
+    if (!allowed) {
+        fprintf(stderr, "[media] 路径校验失败 (不在媒体目录白名单内): %s\n", filepath);
+        return -1;
+    }
+
+    if (resolved_out && resolved_cap > 0) {
+        strncpy(resolved_out, resolved, resolved_cap - 1);
+        resolved_out[resolved_cap - 1] = '\0';
+    }
+    return 0;
+#endif
+}
+
 /* ==================== ffmpeg 字幕提取 ==================== */
 
 /**
@@ -119,16 +276,23 @@ static const char* media_get_ffprobe_path(MediaReader* mr) {
  */
 static int media_probe_subtitle(MediaReader* mr, const char* filepath) {
     const char* probe = media_get_ffprobe_path(mr);
-    char cmd[1024];
 
+    /* C1 修复: 路径安全校验 (灭 SSRF) + 用规范化后的真实路径执行 */
+    char resolved[PATH_MAX];
+    if (media_validate_media_path(filepath, resolved, sizeof(resolved)) != 0)
+        return -1;
+
+    if (mr->verbose)
+        printf("[media] 探测字幕: %s %s\n", probe, resolved);
+
+#ifdef _WIN32
+    /* Windows 分支: 非目标平台，保留旧 shell 实现 (execvp 为 POSIX) */
+    char cmd[1024];
     snprintf(cmd, sizeof(cmd),
              "\"%s\" -v error -select_streams s -show_entries "
              "stream=index:stream=codec_name:stream_tags=language "
              "-of csv=p=0 \"%s\"",
-             probe, filepath);
-
-    if (mr->verbose)
-        printf("[media] 探测字幕: %s\n", cmd);
+             probe, resolved);
 
     FILE* fp = popen(cmd, "r");
     if (!fp) {
@@ -141,6 +305,18 @@ static int media_probe_subtitle(MediaReader* mr, const char* filepath) {
     size_t total = fread(buf, 1, sizeof(buf) - 1, fp);
     buf[total] = '\0';
     int ret = pclose(fp);
+#else
+    /* Linux 分支: fork + execvp 传参，去 shell 解释层，杜绝命令注入 */
+    char* argv[] = {
+        (char*)probe, "-v", "error", "-select_streams", "s",
+        "-show_entries", "stream=index:stream=codec_name:stream_tags=language",
+        "-of", "csv=p=0", (char*)resolved, NULL
+    };
+
+    char buf[4096];
+    size_t total = 0;
+    int ret = run_capture(probe, argv, buf, sizeof(buf), &total);
+#endif
 
     if (ret != 0) {
         fprintf(stderr, "[media] ffprobe 返回错误码 %d (路径=%s)\n"
@@ -167,9 +343,16 @@ static int media_probe_subtitle(MediaReader* mr, const char* filepath) {
 
     /* 无输出 → 无字幕轨道。回退检查: 是否 ffprobe 本身不可用 */
     {
+#ifdef _WIN32
         char test_cmd[512];
         snprintf(test_cmd, sizeof(test_cmd), "\"%s\" -version > NUL 2>&1", probe);
         int has_probe = (system(test_cmd) == 0);
+#else
+        /* C1 修复: 原 "> NUL 2>&1" 是 Windows-ism，Linux 下会生成字面 NUL 文件。
+         * 改为 execvp 直接看退出码，stdout/stderr 已在 run_silent 内重定向到 /dev/null。 */
+        char* version_argv[] = { (char*)probe, "-version", NULL };
+        int has_probe = (run_silent(probe, version_argv) == 0);
+#endif
         if (!has_probe) {
             fprintf(stderr, "[media] %s 不可用！请安装 ffmpeg/ffprobe 并将其加入 PATH\n", probe);
             fprintf(stderr, "[media] 下载: https://ffmpeg.org/download.html\n");
@@ -192,7 +375,6 @@ static int media_probe_subtitle(MediaReader* mr, const char* filepath) {
  */
 static int media_extract_subtitle(MediaReader* mr, const char* filepath,
                                   char** out_text, size_t* out_len) {
-    char cmd[1536];
     char tmpfile[512];
 
     /* 生成临时文件名 */
@@ -202,21 +384,54 @@ static int media_extract_subtitle(MediaReader* mr, const char* filepath,
     snprintf(tmpfile, sizeof(tmpfile), "/tmp/pm_media_subs_%d.srt", (int)getpid());
 #endif
 
-    /* ffmpeg: 提取字幕轨道到临时 SRT (使用 codec copy, 保持原始编码) */
+    /* C1 修复: 路径安全校验 (灭 SSRF) + 用规范化后的真实路径执行 */
+    char resolved[PATH_MAX];
+    if (media_validate_media_path(filepath, resolved, sizeof(resolved)) != 0)
+        return -1;
+
+    char track_arg[32];
+
+#ifdef _WIN32
+    /* Windows 分支: 非目标平台，保留旧 shell 实现 */
+    char cmd[1536];
     if (mr->subtitle_track >= 0) {
         snprintf(cmd, sizeof(cmd),
                  "\"%s\" -y -v error -i \"%s\" -map 0:s:%d -c:s srt \"%s\"",
-                 mr->ffmpeg_path, filepath, mr->subtitle_track, tmpfile);
+                 mr->ffmpeg_path, resolved, mr->subtitle_track, tmpfile);
     } else {
         snprintf(cmd, sizeof(cmd),
                  "\"%s\" -y -v error -i \"%s\" -map 0:s:0? -c:s srt \"%s\"",
-                 mr->ffmpeg_path, filepath, tmpfile);
+                 mr->ffmpeg_path, resolved, tmpfile);
     }
 
     if (mr->verbose)
         printf("[media] 提取字幕: %s\n", cmd);
 
     int ret = system(cmd);
+#else
+    /* Linux 分支: fork + execvp 传参，去 shell 解释层 */
+    char* argv[16];
+    int argc = 0;
+    argv[argc++] = (char*)mr->ffmpeg_path;
+    argv[argc++] = "-y";
+    argv[argc++] = "-v"; argv[argc++] = "error";
+    argv[argc++] = "-i"; argv[argc++] = (char*)resolved;
+    if (mr->subtitle_track >= 0) {
+        snprintf(track_arg, sizeof(track_arg), "0:s:%d", mr->subtitle_track);
+        argv[argc++] = "-map"; argv[argc++] = track_arg;
+    } else {
+        argv[argc++] = "-map"; argv[argc++] = "0:s:0?";
+    }
+    argv[argc++] = "-c:s"; argv[argc++] = "srt";
+    argv[argc++] = (char*)tmpfile;
+    argv[argc] = NULL;
+
+    if (mr->verbose)
+        printf("[media] 提取字幕: %s -i %s -> %s\n", mr->ffmpeg_path, resolved, tmpfile);
+
+    int ret = run_silent(mr->ffmpeg_path, argv);
+#endif
+
     if (ret != 0) {
         fprintf(stderr, "[media] ffmpeg 字幕提取失败 (exit=%d)\n", ret);
         remove(tmpfile);
@@ -404,17 +619,23 @@ int media_diagnose_tracks(MediaReader* mr, const char* filepath) {
     if (!mr || !filepath) return -1;
 
     const char* probe = media_get_ffprobe_path(mr);
-    char cmd[1024];
 
-    /* 先用 ffprobe 列出所有轨道 */
+    /* C1 修复: 路径安全校验 (灭 SSRF) + 用规范化后的真实路径执行 */
+    char resolved[PATH_MAX];
+    if (media_validate_media_path(filepath, resolved, sizeof(resolved)) != 0)
+        return -1;
+
+    printf("=== 诊断: %s ===\n", resolved);
+    printf("ffprobe 路径: %s\n", probe);
+
+#ifdef _WIN32
+    /* Windows 分支: 非目标平台，保留旧 shell 实现 */
+    char cmd[1024];
     snprintf(cmd, sizeof(cmd),
              "\"%s\" -v error -show_entries "
              "stream=index,codec_type,codec_name:stream_tags=language "
              "-of default=noprint_wrappers=1 \"%s\"",
-             probe, filepath);
-
-    printf("=== 诊断: %s ===\n", filepath);
-    printf("ffprobe 路径: %s\n", probe);
+             probe, resolved);
 
     FILE* fp = popen(cmd, "r");
     if (!fp) {
@@ -436,6 +657,43 @@ int media_diagnose_tracks(MediaReader* mr, const char* filepath) {
         }
     }
     pclose(fp);
+#else
+    /* Linux 分支: fork + execvp 传参，去 shell 解释层 */
+    char* argv[] = {
+        (char*)probe, "-v", "error", "-show_entries",
+        "stream=index,codec_type,codec_name:stream_tags=language",
+        "-of", "default=noprint_wrappers=1", (char*)resolved, NULL
+    };
+
+    char outbuf[16384];
+    size_t out_len = 0;
+    int ret = run_capture(probe, argv, outbuf, sizeof(outbuf), &out_len);
+    if (ret == -1) {
+        fprintf(stderr, "[诊断] 无法执行 ffprobe (%s): %s\n", probe, strerror(errno));
+        return -1;
+    }
+
+    int track_count = 0;
+    printf("轨道列表:\n");
+    const char* p = outbuf;
+    const char* buf_end = outbuf + out_len;
+    while (p < buf_end) {
+        const char* nl = p;
+        while (nl < buf_end && *nl != '\n') nl++;
+        size_t len = (size_t)(nl - p);
+        /* 去掉换行 */
+        while (len > 0 && (p[len-1] == '\r' || p[len-1] == '\n')) len--;
+        if (len > 0) {
+            char line[512];
+            if (len >= sizeof(line)) len = sizeof(line) - 1;
+            memcpy(line, p, len);
+            line[len] = '\0';
+            printf("  %s\n", line);
+            track_count++;
+        }
+        p = nl + 1;
+    }
+#endif
 
     if (track_count == 0) {
         printf("  (无轨道信息 — 视频文件可能损坏或 ffprobe 不可用)\n");
