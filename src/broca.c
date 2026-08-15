@@ -103,7 +103,20 @@ static const char* broca_hardcoded_connector(POSTag prev, POSTag next) {
 }
 
 #define BWR_BUF_INIT  2048
-#define BWR_MAX_POS   64
+
+/* 动态缓冲扩容：确保 buf 至少还能容纳 need 字节 + 1 字节 NUL。
+ * 不足时按 2 倍倍增 realloc。返回 0 成功，-1 分配失败。
+ * （修 M2：空格插入/NUL 无边界检查导致的 1~2 字节堆溢出） */
+static int bwr_reserve(char** buf, size_t* cap, int out_pos, size_t need) {
+    if ((size_t)out_pos + need + 1 <= *cap) return 0;
+    size_t ncap = *cap ? *cap : BWR_BUF_INIT;
+    while ((size_t)out_pos + need + 1 > ncap) ncap *= 2;
+    char* nb = (char*)realloc(*buf, ncap);
+    if (!nb) return -1;
+    *buf = nb;
+    *cap = ncap;
+    return 0;
+}
 
 char* broca_wrap_response(MasterTopology* master, EmergentPOS* ep,
                           const char** words, int word_count) {
@@ -125,10 +138,15 @@ char* broca_wrap_response(MasterTopology* master, EmergentPOS* ep,
     }
 
     /* Step 1: POS 标注 */
-    POSTag pos_tags[BWR_MAX_POS];
+    /* v0.5.20+ fix(M1): pos_tags 动态分配——原 BWR_MAX_POS(64) 栈数组在
+     * word_count>64 时，下方模板匹配循环读 pos_tags[i+k] 会越界读。 */
+    POSTag* pos_tags = NULL;
     int can_template = 0;
     if (ep) {
-        int n = word_count < BWR_MAX_POS ? word_count : BWR_MAX_POS;
+        pos_tags = (POSTag*)calloc((size_t)(word_count > 0 ? word_count : 1),
+                                   sizeof(POSTag));
+        if (!pos_tags) return NULL;
+        int n = word_count;
         for (int i = 0; i < n; i++) {
             pos_tags[i] = emergent_pos_tag(ep, master, words[i]);
             /* v0.5.19: 分布签名累积——左右邻POS + 位置标志（语法类涌现的数据源） */
@@ -161,9 +179,11 @@ char* broca_wrap_response(MasterTopology* master, EmergentPOS* ep,
         tpl_topo = master_get_sub_topology_by_type(master, TOPO_TEMPLATE);
 
     /* Step 3: 滑动窗口匹配 + 拼接 */
+    /* v0.5.20+ fix(M2): 动态缓冲——每次写入前 bwr_reserve 预留 need+1(NUL)，
+     * 空格插入与 NUL 均有边界保证，消除原 1~2 字节堆溢出。 */
     size_t buf_cap = BWR_BUF_INIT;
     char* buf = (char*)malloc(buf_cap);
-    if (!buf) return NULL;
+    if (!buf) { free(pos_tags); return NULL; }
     int out_pos = 0;
     buf[0] = '\0';
 
@@ -205,17 +225,19 @@ char* broca_wrap_response(MasterTopology* master, EmergentPOS* ep,
                 /* 英文词间自动插空格 */
                 if (out_pos > 0 && (unsigned char)words[i+k][0] < 0x80) {
                     unsigned char last = (unsigned char)buf[out_pos - 1];
-                    if (last >= 0x20 && last < 0x80)
+                    if (last >= 0x20 && last < 0x80) {
+                        if (bwr_reserve(&buf, &buf_cap, out_pos, 1)) goto oom;
                         buf[out_pos++] = ' ';
+                    }
                 }
                 size_t slen = strlen(words[i + k]);
-                if (slen >= (size_t)(buf_cap - out_pos)) goto done;
+                if (bwr_reserve(&buf, &buf_cap, out_pos, slen)) goto oom;
                 memcpy(buf + out_pos, words[i + k], slen);
                 out_pos += (int)slen;
 
                 if (k < best_len - 1 && tn->tpl_connectors[k][0] != '\0') {
                     slen = strlen(tn->tpl_connectors[k]);
-                    if (slen >= (size_t)(buf_cap - out_pos)) goto done;
+                    if (bwr_reserve(&buf, &buf_cap, out_pos, slen)) goto oom;
                     memcpy(buf + out_pos, tn->tpl_connectors[k], slen);
                     out_pos += (int)slen;
                 }
@@ -226,11 +248,13 @@ char* broca_wrap_response(MasterTopology* master, EmergentPOS* ep,
             /* 英文词间自动插空格 */
             if (out_pos > 0 && (unsigned char)words[i][0] < 0x80) {
                 unsigned char last = (unsigned char)buf[out_pos - 1];
-                if (last >= 0x20 && last < 0x80)
+                if (last >= 0x20 && last < 0x80) {
+                    if (bwr_reserve(&buf, &buf_cap, out_pos, 1)) goto oom;
                     buf[out_pos++] = ' ';
+                }
             }
             size_t slen = strlen(words[i]);
-            if (slen >= (size_t)(buf_cap - out_pos)) goto done;
+            if (bwr_reserve(&buf, &buf_cap, out_pos, slen)) goto oom;
             memcpy(buf + out_pos, words[i], slen);
             out_pos += (int)slen;
 
@@ -240,7 +264,7 @@ char* broca_wrap_response(MasterTopology* master, EmergentPOS* ep,
                     pos_tags[i], pos_tags[i + 1]);
                 if (conn && conn[0]) {
                     slen = strlen(conn);
-                    if (slen >= (size_t)(buf_cap - out_pos)) goto done;
+                    if (bwr_reserve(&buf, &buf_cap, out_pos, slen)) goto oom;
                     memcpy(buf + out_pos, conn, slen);
                     out_pos += (int)slen;
                 }
@@ -249,9 +273,15 @@ char* broca_wrap_response(MasterTopology* master, EmergentPOS* ep,
         }
     }
 
-done:
+    if (out_pos >= (int)buf_cap) out_pos = (int)buf_cap - 1;  /* 防御：不应发生 */
     buf[out_pos] = '\0';
+    free(pos_tags);
     return buf;
+
+oom:
+    free(buf);
+    free(pos_tags);
+    return NULL;
 }
 
 /* ================================================================
