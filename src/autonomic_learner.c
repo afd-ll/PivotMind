@@ -568,12 +568,13 @@ void autonomic_seed_topologies(MasterTopology* master) {
     }
 }
 
-void autonomic_learn_from_dialog(MasterTopology* master,
+void autonomic_learn_from_dialog_trusted(MasterTopology* master,
                                  const char* user_input,
                                  const char* ai_response,
                                  AutonomicState* state,
                                  void* causal_graph,
-                                 MemorySystem* memory) {
+                                 MemorySystem* memory,
+                                 int response_is_trusted) {
     if (!master || !user_input || !ai_response) return;
     if (strlen(user_input) == 0 || strlen(ai_response) == 0) return;
 
@@ -680,8 +681,17 @@ void autonomic_learn_from_dialog(MasterTopology* master,
     for (int i = 0; i < input_count; i++) {
         input_nodes[i] = huarong_net_find_or_create_node(vocab->net, input_chars[i], NULL, 0, vocab->node_hash);
     }
-    for (int i = 0; i < response_count; i++) {
-        response_nodes[i] = huarong_net_find_or_create_node(vocab->net, response_chars[i], NULL, 0, vocab->node_hash);
+    /* v2.1 阶段0-C：response 半边不可信时不建节点（只读，不污染词表）。
+     * response_nodes 置 NULL 后，下游所有 `if (!response_nodes[..]) continue`
+     * 自动跳过 response 侧的建边/涨权（核心2/3 + 语法 POS 连接）。 */
+    if (response_is_trusted) {
+        for (int i = 0; i < response_count; i++) {
+            response_nodes[i] = huarong_net_find_or_create_node(vocab->net, response_chars[i], NULL, 0, vocab->node_hash);
+        }
+    } else {
+        for (int i = 0; i < response_count; i++) {
+            response_nodes[i] = NULL;
+        }
     }
 
     // ===== 词典词 → 语法拓扑 POS 连接 =====
@@ -841,11 +851,18 @@ void autonomic_learn_from_dialog(MasterTopology* master,
                     cc ? pos_tag_emergent(cc, name) : pos_tag_chinese(name));
                 tgt_input[i] = huarong_net_find_or_create_node(tgt->net, name, NULL, 0, tgt->node_hash);
             }
-            for (int i = 0; i < response_count; i++) {
-                const char* name = response_chars[i];
-                if (is_syntax) name = pos_tag_name(
-                    cc ? pos_tag_emergent(cc, name) : pos_tag_chinese(name));
-                tgt_response[i] = huarong_net_find_or_create_node(tgt->net, name, NULL, 0, tgt->node_hash);
+            /* v2.1 阶段0-C：response 半边不可信时不建节点/不建边（核心4） */
+            if (response_is_trusted) {
+                for (int i = 0; i < response_count; i++) {
+                    const char* name = response_chars[i];
+                    if (is_syntax) name = pos_tag_name(
+                        cc ? pos_tag_emergent(cc, name) : pos_tag_chinese(name));
+                    tgt_response[i] = huarong_net_find_or_create_node(tgt->net, name, NULL, 0, tgt->node_hash);
+                }
+            } else {
+                for (int i = 0; i < response_count; i++) {
+                    tgt_response[i] = NULL;
+                }
             }
 
             // 在目标拓扑内部建边（字序编码 + 输入↔回复）
@@ -899,15 +916,18 @@ void autonomic_learn_from_dialog(MasterTopology* master,
                     concepts[concnt++] = input_chars[i];
                 }
             }
-            for (int i = 0; i < response_count && concnt < PM_CONCEPT_MAX; i++) {
-                unsigned int codepoint = 0;
-                const unsigned char* p = (const unsigned char*)response_chars[i];
-                if (*p < 0x80) codepoint = *p;
-                else if ((*p & 0xE0) == 0xC0) codepoint = ((*p & 0x1F) << 6) | (p[1] & 0x3F);
-                else if ((*p & 0xF0) == 0xE0) codepoint = ((*p & 0x0F) << 12) | ((p[1] & 0x3F) << 6) | (p[2] & 0x3F);
-                if (codepoint < 65536 && !used[codepoint]) {
-                    used[codepoint] = 1;
-                    concepts[concnt++] = response_chars[i];
+            /* v2.1 阶段0-C：response 半边不可信时，跨拓扑链接只用 input 侧概念 */
+            if (response_is_trusted) {
+                for (int i = 0; i < response_count && concnt < PM_CONCEPT_MAX; i++) {
+                    unsigned int codepoint = 0;
+                    const unsigned char* p = (const unsigned char*)response_chars[i];
+                    if (*p < 0x80) codepoint = *p;
+                    else if ((*p & 0xE0) == 0xC0) codepoint = ((*p & 0x1F) << 6) | (p[1] & 0x3F);
+                    else if ((*p & 0xF0) == 0xE0) codepoint = ((*p & 0x0F) << 12) | ((p[1] & 0x3F) << 6) | (p[2] & 0x3F);
+                    if (codepoint < 65536 && !used[codepoint]) {
+                        used[codepoint] = 1;
+                        concepts[concnt++] = response_chars[i];
+                    }
                 }
             }
             free(used);
@@ -926,6 +946,19 @@ skip_cross_topo:
     if (state && state->initialized) {
         autonomic_request_flush(state, master);
     }
+}
+
+/* 旧签名兼容封装：默认 response 半边可信（旧行为）。
+ * 对话路径应改调 autonomic_learn_from_dialog_trusted(..., 0) 去毒；
+ * 外部喂料路径（perception/web 语料）可继续用本函数（=trusted=1）。 */
+void autonomic_learn_from_dialog(MasterTopology* master,
+                                 const char* user_input,
+                                 const char* ai_response,
+                                 AutonomicState* state,
+                                 void* causal_graph,
+                                 MemorySystem* memory) {
+    autonomic_learn_from_dialog_trusted(master, user_input, ai_response,
+                                        state, causal_graph, memory, 1);
 }
 
 void autonomic_decay_all(MasterTopology* master) {

@@ -38,6 +38,8 @@
 /* Forward declaration for optional thalamus signal bus binding */
 typedef struct Thalamus Thalamus;
 typedef struct VisualCortex VisualCortex;
+/* v2.1 阶段0-A：喂料路径 dist_sig 累积需要 EmergentPOS 指针（可选注入） */
+typedef struct EmergentPOS EmergentPOS;
 
 // 语料格式
 typedef enum {
@@ -106,6 +108,9 @@ typedef struct {
 
     // 视觉皮层脑区（可选，CORPUS_MEDIA 格式必需）(v0.5)
     VisualCortex* visual_cortex;
+
+    // 涌现词类系统（可选，v2.1 阶段0-A：喂料路径累积 dist_sig[0..21] 用）
+    EmergentPOS* emergent_pos;
 } TrainMode;
 
 // ==================== API ====================
@@ -160,6 +165,14 @@ void train_mode_set_thalamus(TrainMode* tm, Thalamus* th);
  * 绑定后 train_feed_media 将批量入队视频文件到 VisualCortex 任务队列
  */
 void train_mode_set_visual_cortex(TrainMode* tm, VisualCortex* vc);
+
+/**
+ * 绑定涌现词类系统（可选，v2.1 阶段0-A）
+ * 绑定后 train_feed_token_sequence 在喂料路径对每个 token 用
+ * emergent_pos_seed_tag（种子词可信标签）累积 dist_sig[0..21]。
+ * NULL = 跳过 dist_sig 累积（与旧行为一致，仅 funcword_record_position）。
+ */
+void train_mode_set_emergent_pos(TrainMode* tm, EmergentPOS* ep);
 
 /** 从命令行参数解析训练配置 */
 TrainConfig train_config_from_args(int argc, char* argv[]);

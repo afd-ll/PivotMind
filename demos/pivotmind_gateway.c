@@ -723,6 +723,13 @@ static int gw_system_init(GatewaySystem* gw) {
         __sync_synchronize();  /* ARM 弱内存序: 确保 train_mode 对所有线程可见 */
         if (gw->train_mode) {
             train_mode_set_thalamus(gw->train_mode, gw->thalamus);
+            /* v2.1 阶段0-A：注入 EmergentPOS 到训练模式，喂料路径累积 dist_sig[0..21]
+             * （种子词可信标签）。不注入则喂料仅做 funcword_record_position（旧行为）。 */
+            if (gw->prefrontal && gw->prefrontal->controller &&
+                gw->prefrontal->controller->emergent_pos) {
+                train_mode_set_emergent_pos(gw->train_mode,
+                                            gw->prefrontal->controller->emergent_pos);
+            }
             /* v0.5: 媒体格式训练需要 VisualCortex */
             if (gw->visual_cortex)
                 train_mode_set_visual_cortex(gw->train_mode, gw->visual_cortex);

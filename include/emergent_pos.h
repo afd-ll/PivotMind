@@ -24,8 +24,10 @@
  *  常量
  * ================================================================ */
 
-/** 每个词类种子词数上限（中英文各一个表） */
-#define POS_ANCHOR_MAX_SEEDS    5
+/** 每个词类种子词数上限（中英文各一个表）
+ *  v2.1 阶段0-A：5 → 32 —— 名词需 10~20 个单字种子（喂料路径按单字切分，
+ *  多字种子永不命中，名词是配价宾语最关键类却只有"人"1 个单字种子）。 */
+#define POS_ANCHOR_MAX_SEEDS    32
 
 /** 涌现词类最大数（预留扩展，当前只用 10 个硬编码锚点） */
 #define MAX_EMERGENT_CLASSES    32
@@ -183,6 +185,15 @@ void emergent_pos_classify_soft(EmergentPOS* ep, const float* features,
  */
 POSTag emergent_pos_tag(EmergentPOS* ep, struct MasterTopology* master,
                         const char* word);
+
+/**
+ * 种子词可信标签（只走第一层，绕开 512 维语义分类器）。
+ *
+ * v2.1 阶段0-A：喂料路径 dist_sig 累积只用此函数的标签——它是人标先验
+ * （ep->anchors[tag].seeds[] 线性命中），不是 emergent_pos_classify 学出来的
+ * "错尺子"标签。命中返回 POS，否则 POS_UNKNOWN。绝不碰第二层。
+ */
+POSTag emergent_pos_seed_tag(EmergentPOS* ep, const char* word);
 
 /**
  * 按词名软标注词性（双层路由，多义词支持）
