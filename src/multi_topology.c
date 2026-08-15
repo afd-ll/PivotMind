@@ -3557,11 +3557,22 @@ int master_count_total_nodes(MasterTopology* master) {
     return total;
 }
 
-#define STATE_FORMAT_VERSION 6
+#define STATE_FORMAT_VERSION 7
 /* v0.5.20: 6 = 在每节点记录尾部追加 dist_sig[26]+dist_sig_count（虚词分类器
  * 位置画像，跨重启累积）。加载端向前兼容 v2..v5（旧文件无 dist_sig 段 → 归零）。
- * ⚠️ 一旦用 6 存盘，回退到旧二进制会因 fmt_ver=6 不被识别而误判——回退前需
- * 先备份或接受 dist_sig 段丢失（不影响节点/边/频率表主体）。 */
+ * v0.5.21: 7 = 加载端迁移清洗——fmt_ver==6 状态加载时归零 dist_sig[0..21]
+ * （旧实现"只增不减"攒出的饱和 one-vector 脏数据：decay-all 对低频词/自造词
+ * 不成立、永不被喂），保留 [22..25] 位置先验与 dist_sig_count；字节布局与 v6
+ * 完全一致（仅版本号 + 加载端归零），下次存盘自动写 7。
+ * v0.5.21 同版本追加：7 还包含"边权全归零"迁移——fmt_ver==6 状态加载时（同一次
+ * 重启，与 dist_sig 归零一起生效）遍历所有拓扑所有边把 Edge.weight 置 0（结构保留，
+ * 不删边不重建索引；垃圾边权重 0 后等于不存在，外部喂料只抬正确边）。边权归零
+ * 不写新版本号（复用 7），幂等靠 fmt_ver==6 只触发一次；v7 状态想单独再归零边权
+ * 用 PIVOTMIND_RESET_EDGE_WEIGHTS=1 显式触发（不依赖 fmt_ver）。
+ * ⚠️ 一旦用 7 存盘，回退到旧二进制（只认 2..6）会因 fmt_ver=7 不被识别而误判——
+ * 回退前需先备份或接受 dist_sig 段丢失（不影响节点/边/频率表主体）。
+ * 迁移回退开关：PIVOTMIND_SKIP_DIST_SIG_MIGRATE=1 → 加载 v6 时跳过 dist_sig 归零；
+ * PIVOTMIND_SKIP_EDGE_WEIGHT_RESET=1 → 加载 v6 时跳过边权归零（对比实验/回退用）。 */
 
 /* v0.5.12: 存盘防呆——以最后成功存盘/加载节点数为基准，本次 < 基准×60% 视为坏状态，
  * 拒绝覆盖主文件，重定向到 .suspect 并报警（08-12 事故：197k→100k 坏状态直接覆盖好文件；
@@ -4265,6 +4276,67 @@ int master_save_state(MasterTopology* master, const char* file_path) {
     return saved_nodes;
 }
 
+/* v0.5.21 回退开关：PIVOTMIND_SKIP_DIST_SIG_MIGRATE=1 → 加载 v6 状态时不归零
+ * dist_sig[0..21]（保留旧"只增不减"脏数据，紧急回退/对比实验用）。默认 0 = 执行迁移。 */
+static int g_skip_dist_sig_migrate = -1;
+static int master_dist_sig_migrate_skipped(void) {
+    if (g_skip_dist_sig_migrate < 0) {
+        const char* e = getenv("PIVOTMIND_SKIP_DIST_SIG_MIGRATE");
+        g_skip_dist_sig_migrate = (e && strcmp(e, "1") == 0) ? 1 : 0;
+    }
+    return g_skip_dist_sig_migrate;
+}
+
+/* v0.5.21 边权全归零（重新训练，edge-pollution-assessment 结论：自举污染+域错配，
+ * 0-D 会假不达标 → 用户拍板"边权全归零，重新训练"）。
+ * 触发条件（满足其一即执行）：
+ *   a) fmt_ver == 6（v6→v7 迁移，与 dist_sig 归零同一次重启生效，默认归零）
+ *      且未设 PIVOTMIND_SKIP_EDGE_WEIGHT_RESET=1（回退/对比实验用）
+ *   b) PIVOTMIND_RESET_EDGE_WEIGHTS=1（显式触发，不依赖 fmt_ver —— 已迁到 v7
+ *      的状态想单独再归零边权时用；v7 文件 fmt_ver==7 不会走 a 分支）
+ * 归零范围：所有子拓扑所有节点的所有边 Edge.weight（结构保留，不删边不重建索引；
+ * motivational_bias/confidence 保留不动 —— 推理组合值 = weight×bias，weight=0 即等于
+ * 不存在，外部喂料只抬正确边）。幂等：v6 归零后存盘写 7，下次加载不触发（除非显式 env）。 */
+static int g_skip_edge_weight_reset = -1;
+static int master_edge_weight_reset_skipped(void) {
+    if (g_skip_edge_weight_reset < 0) {
+        const char* e = getenv("PIVOTMIND_SKIP_EDGE_WEIGHT_RESET");
+        g_skip_edge_weight_reset = (e && strcmp(e, "1") == 0) ? 1 : 0;
+    }
+    return g_skip_edge_weight_reset;
+}
+static int g_force_edge_weight_reset = -1;
+static int master_edge_weight_reset_forced(void) {
+    if (g_force_edge_weight_reset < 0) {
+        const char* e = getenv("PIVOTMIND_RESET_EDGE_WEIGHTS");
+        g_force_edge_weight_reset = (e && strcmp(e, "1") == 0) ? 1 : 0;
+    }
+    return g_force_edge_weight_reset;
+}
+
+/* v0.5.21: 遍历所有拓扑所有节点所有边，weight 置 0（结构保留，不删边不重建索引）。
+ * 返回归零的边数。纯内存循环，38 万边量级秒级完成。 */
+static long master_reset_all_edge_weights(MasterTopology* master) {
+    if (!master) return 0;
+    long zeroed = 0;
+    for (int t = 0; t < master->sub_topo_count; t++) {
+        SubTopology* sub = master->sub_topologies[t];
+        if (!sub || !sub->net) continue;
+        HuarongTopologyNet* net = sub->net;
+        for (int n = 0; n < net->node_count; n++) {
+            ReasoningNode* node = net->nodes[n];
+            if (!node || !node->edges || node->edge_count <= 0) continue;
+            for (int e = 0; e < node->edge_count; e++) {
+                if (node->edges[e].target) {
+                    node->edges[e].weight = 0.0f;
+                    zeroed++;
+                }
+            }
+        }
+    }
+    return zeroed;
+}
+
 int master_load_state(MasterTopology* master, const char* file_path) {
     if (!master || !file_path) return -1;
 
@@ -4306,8 +4378,9 @@ int master_load_state(MasterTopology* master, const char* file_path) {
     // 读文件头: 格式版本
     int fmt_ver = 1;
     READ(&fmt_ver, sizeof(int));
-    // fmt_ver ∈ {2,3,4,5,6} = 带版本头的格式化文件
-    if (fmt_ver != 2 && fmt_ver != 3 && fmt_ver != 4 && fmt_ver != 5 && fmt_ver != 6) {
+    // fmt_ver ∈ {2,3,4,5,6,7} = 带版本头的格式化文件
+    if (fmt_ver != 2 && fmt_ver != 3 && fmt_ver != 4 && fmt_ver != 5 &&
+        fmt_ver != 6 && fmt_ver != 7) {
         p = buf;       // 回退到文件头
         fmt_ver = 1;
     }
@@ -4471,6 +4544,15 @@ int master_load_state(MasterTopology* master, const char* file_path) {
             int dsig_count;
             READ(dsig, 26 * sizeof(float));
             READ(&dsig_count, sizeof(int));
+            /* [v7] 迁移清洗：v6 的 dist_sig[0..21]（左右邻 POS 分布）是旧实现
+             * "只增不减"攒出的饱和 one-vector 脏数据（decay-all 对低频词/自造词
+             * 不成立、永不被喂），load 时归零；[22..25] 位置先验 + dist_sig_count
+             * 合法保留（位置轴靠 dist_sig_count>=10 才可信）。幂等：v7 文件
+             * fmt_ver==7 不走此分支；回退开关：PIVOTMIND_SKIP_DIST_SIG_MIGRATE=1
+             * 跳过归零（保留旧脏数据，仅紧急回退/对比实验用）。 */
+            if (fmt_ver == 6 && !master_dist_sig_migrate_skipped()) {
+                memset(dsig, 0, 22 * sizeof(float));
+            }
             if (node) {
                 memcpy(node->dist_sig, dsig, sizeof(node->dist_sig));
                 node->dist_sig_count = dsig_count;
@@ -4722,6 +4804,18 @@ int master_load_state(MasterTopology* master, const char* file_path) {
 
     #undef READ
     #undef SKIP
+
+    /* v0.5.21: 边权全归零（重新训练）——加载完成后立即执行（所有边已在 Pass 2 恢复），
+     * 避免存量边权参与加载后的任何计算。触发：fmt_ver==6（v6→v7 迁移，同 dist_sig
+     * 归零一次重启生效）且未设跳过开关，或 PIVOTMIND_RESET_EDGE_WEIGHTS=1 显式触发
+     * （不依赖 fmt_ver，v7 状态可单独再归零）。 */
+    if (master_edge_weight_reset_forced() ||
+        (fmt_ver == 6 && !master_edge_weight_reset_skipped())) {
+        long zeroed = master_reset_all_edge_weights(master);
+        fprintf(stderr, "[状态加载] 边权归零完成: %ld 条边 weight=0 (结构保留, fmt_ver=%d)\n",
+                zeroed, fmt_ver);
+        LOG_INFO("[状态持久化] 边权全归零: %ld 条边 (fmt_ver=%d)", zeroed, fmt_ver);
+    }
 
     free(buf);
     time_t t1 = time(NULL);
