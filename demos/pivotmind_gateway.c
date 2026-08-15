@@ -72,6 +72,12 @@
 // 前向声明
 static int _learn_tokens(SubTopology* vocab, const char* text, int* p_prev_id, EmergentPOS* ep);
 
+/* B4 (v0.5.20): learn 并发队列化——学习任务前向声明 + 入队/等待助手。
+ * 定义在下方 LearnTask/LearnQueue 段。 */
+typedef struct LearnTask LearnTask;
+static LearnTask* learn_queue_push(const char* msg, const char* domain, int flush);
+static void learn_task_wait(LearnTask* task);
+
 // ==================== 配置 ====================
 
 #define GW_DEFAULT_PORT    8080
@@ -80,6 +86,13 @@ static int _learn_tokens(SubTopology* vocab, const char* text, int* p_prev_id, E
 #define GW_READ_TIMEOUT_S  10
 #define GW_BACKLOG         16
 #define GW_TOKEN_LEN       64            // C1: API token 十六进制长度 (32 字节随机数)
+
+/* B4 (v0.5.20): learn 并发队列化开关。
+ * LEARN_ASYNC_CHAT: 1 = handle_chat 两处同步 _learn_tokens 改入队（输入 flush / 回复 fire-and-forget）；
+ *                   0 = 回退原同步调用（#else 分支原样保留）。
+ * LEARN_WORKER_COUNT: 学习 worker 数（2→1，单消费者消除 _learn_tokens 三路并发写）。 */
+#define LEARN_ASYNC_CHAT     1
+#define LEARN_WORKER_COUNT   1
 
 // ==================== 系统状态 ====================
 
@@ -843,7 +856,8 @@ static void handle_chat(GatewaySystem* gw, int fd, const char* body) {
     if (gw->qa_memory) { const char* qa = qa_memory_query(gw->qa_memory, msg); if (qa) { response = strdup(qa); } }
 
     /* v0.4.3: 对话中自动学习 — 将输入 token 注册到词汇拓扑
-     * 这是端到端对话质量最大的瓶颈：不学习新词则扩散引擎 active_count=0 */
+     * 这是端到端对话质量最大的瓶颈：不学习新词则扩散引擎 active_count=0
+     * v0.5.20 B4: 改走学习队列（单 worker 消费）+ flush 等待，保当轮新词可用。 */
     {
         SubTopology* vocab = NULL;
         for (int t = 0; t < gw->topology->sub_topo_count; t++) {
@@ -852,12 +866,17 @@ static void handle_chat(GatewaySystem* gw, int fd, const char* body) {
                 { vocab = gw->topology->sub_topologies[t]; break; }
         }
         if (vocab && vocab->net) {
+#if LEARN_ASYNC_CHAT
+            LearnTask* t = learn_queue_push(msg, "", 1);   /* 入队 + flush 等待 */
+            if (t) learn_task_wait(t);
+#else
             EmergentPOS* ep = (gw->prefrontal && gw->prefrontal->controller)
                               ? gw->prefrontal->controller->emergent_pos : NULL;
             int prev_id = -1;
             int learned = _learn_tokens(vocab, msg, &prev_id, ep);
             if (learned > 0)
                 printf("[gateway] 对话中学习: +%d 个新词\n", learned);
+#endif
         }
     }
 
@@ -962,7 +981,8 @@ static void handle_chat(GatewaySystem* gw, int fd, const char* body) {
             gw->dialog_context_ready = 1;
         }
 
-        /* v0.4.3: AI回复也纳入词汇拓扑 — 双向在线学习 */
+        /* v0.4.3: AI回复也纳入词汇拓扑 — 双向在线学习
+         * v0.5.20 B4: fire-and-forget 入队（无当轮依赖）。 */
         {
             SubTopology* vocab = NULL;
             for (int t = 0; t < gw->topology->sub_topo_count; t++) {
@@ -971,12 +991,16 @@ static void handle_chat(GatewaySystem* gw, int fd, const char* body) {
                     { vocab = gw->topology->sub_topologies[t]; break; }
             }
             if (vocab && vocab->net && response) {
+#if LEARN_ASYNC_CHAT
+                learn_queue_push(response, "", 0);   /* fire-and-forget，忽略返回值 */
+#else
                 EmergentPOS* ep = (gw->prefrontal && gw->prefrontal->controller)
                                   ? gw->prefrontal->controller->emergent_pos : NULL;
                 int prev_id = -1;
                 int learned = _learn_tokens(vocab, response, &prev_id, ep);
                 if (learned > 0)
                     printf("[gateway] 回复中学习: +%d 个新词\n", learned);
+#endif
             }
         }
 
@@ -1080,10 +1104,16 @@ static int _learn_tokens(SubTopology* vocab, const char* text,
     return added;
 }
 
-/* _learn_task — 异步学习参数 */
-typedef struct {
+/* _learn_task — 异步学习参数
+ * v0.5.20 B4: 加 flush/done/done_mutex/done_cond 完成信号——flush 型任务由调用方
+ * wait 并负责释放（worker 只发 done 信号不 free），fire-and-forget 型由 worker free。 */
+typedef struct LearnTask {
     char*  msg;
     char   domain[64];  /* "medical", "legal", "" = default vocab */
+    int    flush;       /* 1 = 调用方 wait 并释放；0 = worker 处理后释放 */
+    int    done;        /* 1 = worker 已处理完 _learn_tokens */
+    pthread_mutex_t done_mutex;
+    pthread_cond_t  done_cond;
 } LearnTask;
 
 /* v0.5.9: 学习队列——固定 worker 消费，防每请求一线程堆积（08-07 35线程实锤） */
@@ -1096,9 +1126,76 @@ typedef struct {
     int stop;
 } LearnQueue;
 static LearnQueue g_learn_q;
-static pthread_t g_learn_workers[2];
+static pthread_t g_learn_workers[LEARN_WORKER_COUNT];
 
-/* _learn_worker — 学习 worker 线程：循环消费队列（×2） */
+/* B4 (v0.5.20): 标记任务完成并唤醒等待者（flush 型调用方在此继续）。 */
+static void learn_task_complete(LearnTask* task) {
+    if (!task) return;
+    pthread_mutex_lock(&task->done_mutex);
+    task->done = 1;
+    pthread_cond_broadcast(&task->done_cond);
+    pthread_mutex_unlock(&task->done_mutex);
+}
+
+/* B4 (v0.5.20): 丢弃任务（队列满丢最旧）——flush 型唤醒等待者由其释放，
+ * 非 flush 型直接释放。 */
+static void learn_task_abandon(LearnTask* task) {
+    if (!task) return;
+    if (task->flush) {
+        learn_task_complete(task);   /* 唤醒等待者，由等待者 free */
+    } else {
+        free(task->msg);
+        free(task);
+    }
+}
+
+/* B4 (v0.5.20): 可复用入队助手——原 handle_learn 内联入队逻辑抽出，供 handle_chat 复用。
+ * flush=1 时返回 task 供调用方 wait；OOM 返回 NULL。队列满丢最旧。 */
+static LearnTask* learn_queue_push(const char* msg, const char* domain, int flush) {
+    LearnTask* task = (LearnTask*)calloc(1, sizeof(LearnTask));
+    if (!task) return NULL;
+    task->msg = strdup(msg);
+    if (!task->msg) { free(task); return NULL; }
+    if (domain)
+        snprintf(task->domain, sizeof(task->domain), "%s", domain);
+    task->flush = flush;
+    task->done = 0;
+    pthread_mutex_init(&task->done_mutex, NULL);
+    pthread_cond_init(&task->done_cond, NULL);
+
+    pthread_mutex_lock(&g_learn_q.mutex);
+    if (g_learn_q.count >= LEARN_QUEUE_CAP) {
+        /* 队列满：丢最旧（工作记忆丢弃策略——最近的学习请求优先） */
+        LearnTask* old = g_learn_q.tasks[g_learn_q.head];
+        g_learn_q.head = (g_learn_q.head + 1) % LEARN_QUEUE_CAP;
+        g_learn_q.count--;
+        learn_task_abandon(old);   /* flush 型唤醒等待者；非 flush 型 free */
+    }
+    g_learn_q.tasks[g_learn_q.tail] = task;
+    g_learn_q.tail = (g_learn_q.tail + 1) % LEARN_QUEUE_CAP;
+    g_learn_q.count++;
+    pthread_cond_signal(&g_learn_q.cond);
+    pthread_mutex_unlock(&g_learn_q.mutex);
+
+    return task;
+}
+
+/* B4 (v0.5.20): flush 等待——等 worker 处理完 _learn_tokens（done==1）后释放 task。
+ * 本线程独占 task 生命周期：worker 对 flush 型任务只发 done 不 free。 */
+static void learn_task_wait(LearnTask* task) {
+    if (!task) return;
+    pthread_mutex_lock(&task->done_mutex);
+    while (!task->done)
+        pthread_cond_wait(&task->done_cond, &task->done_mutex);
+    pthread_mutex_unlock(&task->done_mutex);
+    /* task 已完成：本线程负责释放 */
+    free(task->msg);
+    pthread_mutex_destroy(&task->done_mutex);
+    pthread_cond_destroy(&task->done_cond);
+    free(task);
+}
+
+/* _learn_worker — 学习 worker 线程：循环消费队列（单 worker，B4 后 _learn_tokens 单消费者） */
 static void* _learn_worker(void* arg) {
     (void)arg;
     while (1) {
@@ -1114,7 +1211,13 @@ static void* _learn_worker(void* arg) {
         g_learn_q.count--;
         pthread_mutex_unlock(&g_learn_q.mutex);
 
-        if (!task || !task->msg) { free(task); continue; }
+        if (!task) continue;
+        if (!task->msg) {   /* 理论不可达：push 保证 msg 非 NULL，防御性处理 */
+            if (task->flush) learn_task_complete(task);
+            else free(task);
+            continue;
+        }
+        int is_flush = task->flush;   /* 提前读取：发 done 后 task 可能已被等待者释放 */
         GatewaySystem* gw = g_gw;
         if (gw && gw->topology) {
             /* 按域名选择目标拓扑 */
@@ -1144,22 +1247,29 @@ static void* _learn_worker(void* arg) {
                 if (tpl && tpl->net && tpl->net->node_count < 8) broca_seed_grammar(gw->topology);
             }
         }
-        free(task->msg);
-        free(task);
+        /* B4: _learn_tokens 等全部处理完再发 done（flush 型等待者据此唤醒并释放）。
+         * 发完 done 后 worker 不得再触碰 task。 */
+        if (is_flush) {
+            learn_task_complete(task);
+        } else {
+            free(task->msg);
+            free(task);
+        }
     }
     return NULL;
 }
 
-/* v0.5.9: 初始化学习队列 + 启动 2 个 worker（gateway 启动时调用一次） */
+/* v0.5.9: 初始化学习队列 + 启动 worker（gateway 启动时调用一次）
+ * v0.5.20 B4: worker 数由 LEARN_WORKER_COUNT 决定（2→1，单消费者消除并发写）。 */
 static void learn_queue_init(void) {
     memset(&g_learn_q, 0, sizeof(g_learn_q));
     pthread_mutex_init(&g_learn_q.mutex, NULL);
     pthread_cond_init(&g_learn_q.cond, NULL);
     g_learn_q.stop = 0;
-    for (int i = 0; i < 2; i++) {
+    for (int i = 0; i < LEARN_WORKER_COUNT; i++) {
         pthread_create(&g_learn_workers[i], NULL, _learn_worker, NULL);
     }
-    fprintf(stderr, "[gateway]   学习队列就绪 (2 workers, 容量 %d)\n", LEARN_QUEUE_CAP);
+    fprintf(stderr, "[gateway]   学习队列就绪 (%d worker, 容量 %d)\n", LEARN_WORKER_COUNT, LEARN_QUEUE_CAP);
 }
 
 
@@ -1184,26 +1294,12 @@ static void handle_learn(GatewaySystem* gw, int fd, const char* body) {
     }
 
     /* v0.5.9: 异步学习——入队（满丢最旧），固定 worker 消费。
-     * 不再每请求 spawn detached 线程（08-07 线程堆积雪崩实锤） */
-    LearnTask* task = (LearnTask*)calloc(1, sizeof(LearnTask));
+     * 不再每请求 spawn detached 线程（08-07 线程堆积雪崩实锤）。
+     * v0.5.20 B4: 入队逻辑抽出为 learn_queue_push（handle_chat 复用）。 */
+    char domain[64] = {0};
+    json_extract_string(body, "domain", domain, sizeof(domain));
+    LearnTask* task = learn_queue_push(msg, domain, 0);   /* fire-and-forget */
     if (!task) { http_json(fd, 500, "{\"error\":\"oom\"}"); return; }
-    task->msg = strdup(msg);
-    if (!task->msg) { free(task); http_json(fd, 500, "{\"error\":\"oom\"}"); return; }
-    json_extract_string(body, "domain", task->domain, sizeof(task->domain));
-
-    pthread_mutex_lock(&g_learn_q.mutex);
-    if (g_learn_q.count >= LEARN_QUEUE_CAP) {
-        /* 队列满：丢最旧（工作记忆丢弃策略——最近的学习请求优先） */
-        LearnTask* old = g_learn_q.tasks[g_learn_q.head];
-        g_learn_q.head = (g_learn_q.head + 1) % LEARN_QUEUE_CAP;
-        g_learn_q.count--;
-        if (old) { free(old->msg); free(old); }
-    }
-    g_learn_q.tasks[g_learn_q.tail] = task;
-    g_learn_q.tail = (g_learn_q.tail + 1) % LEARN_QUEUE_CAP;
-    g_learn_q.count++;
-    pthread_cond_signal(&g_learn_q.cond);
-    pthread_mutex_unlock(&g_learn_q.mutex);
 
     http_json(fd, 202, "{\"result\":\"accepted\"}");
 }
