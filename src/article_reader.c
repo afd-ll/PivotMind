@@ -202,6 +202,7 @@ static CharEntry* _ar_find_char(ArticleReader* ar, const char* ch) {
 }
 
 #define AR_PAIR_LOAD_MAX  0.75f  /* 负载因子>75%时触发扩容 */
+#define AR_PAIR_CLEAN_LOAD 0.85f /* 负载因子>85%时触发表满清理（P1: 防线性探测退化） */
 
 /** 字符对哈希表扩容 — 双倍容量 + rehash */
 static int _ar_expand_pair_hash(ArticleReader* ar) {
@@ -269,12 +270,16 @@ static PairEntry* _ar_find_pair(ArticleReader* ar, const char* a, const char* b)
     if ((float)ar->pair_count / ar->pair_hash_size > AR_PAIR_LOAD_MAX)
         _ar_expand_pair_hash(ar);
 
-    /* v0.5.9: 表达上限（扩容被 2M 槽封顶）→ 清理短期不活跃对。
-     * ⚠️ 冷却防抖：pair_clean_tick + COOLDOWN < mem_tick 才清——
+    /* P1（08-16 修复）：清理触发从「绝对表满 AR_MEM_TABLE_MAX(2M)」改为
+     * 「负载因子 > AR_PAIR_CLEAN_LOAD(85%)」。原判据要等 pair_count 撞 2M
+     * 封顶才清，此时负载已 ~95%，线性探测退化到每次查找数百次 strcmp
+     * （08-15 19:44 / 01:22 两次 STUCK 抓栈实锤）。改为 85% 提前清理，
+     * 避免探测链退化成 O(n) 扫描。
+     * ⚠️ 冷却防抖保留：pair_clean_tick + COOLDOWN < mem_tick 才清——
      * 早期实现 pair_clean_tick < mem_tick 恒真（mem_tick 每行 +1），
      * 表满后每次 find 都触发 88MB calloc + 2M rehash（锁内！）
      * → 学习线程全部卡死（08-07 14:xx 实锤，STUCK 53 分钟） */
-    if (ar->pair_count >= AR_MEM_TABLE_MAX &&
+    if ((float)ar->pair_count / ar->pair_hash_size > AR_PAIR_CLEAN_LOAD &&
         ar->pair_clean_tick + AR_MEM_CLEAN_COOLDOWN < ar->mem_tick) {
         _ar_cleanup_stale_pairs(ar);
         ar->pair_clean_tick = ar->mem_tick;
@@ -767,16 +772,25 @@ int _article_flush_locked(ArticleReader* ar, SubTopology* topo,
 
     free(pair_scores);
 
-    // ============ 一轮三字扩展（首字哈希索引 O(n)） ============
-    // 构建首字→词索引列表（存索引而非指针，防御下方 _ar_find_or_add_word 内部 realloc）
+    // ============ 一轮三字扩展（首字符哈希索引 O(n)） ============
+    // 构建首字符→词索引列表（存索引而非指针，防御下方 _ar_find_or_add_word 内部 realloc）
+    // P2（08-16 修复）：索引 key 从「首字节」升级为「UTF-8 前 2 字节」。
+    //   中文是 3 字节编码，首字节几乎全落在 0xE4~0xE9 六个桶 → 全部单字词
+    //   挤在这 6 个桶里，内层仍要遍历大量无关词（真根因 O(n²) 迭代）。
+    //   取前 2 字节后有效桶 ≈ 6×64 ≈ 384，内层遍历量降约 64 倍。
+    //   同时只收录单字词（char_len==1）：多字词作 w2 经 PairEntry.b[8]
+    //   截断永不命中，是纯污染源（见 P0），收录无意义。
     typedef struct { int* list; int count; int cap; } CharWordList;
-    CharWordList first_char_map[256];  // 仅索引首个字节
-    memset(first_char_map, 0, sizeof(first_char_map));
+    // 堆分配 [256][256]（≈1MB，避免线程栈吃紧；栈上限 8MB）
+    CharWordList (*first_char_map)[256] =
+        (CharWordList(*)[256])calloc(256 * 256, sizeof(CharWordList));
+    if (!first_char_map) goto _flush_out;  /* 分配失败 → 本轮放弃三字扩展 */
     for (int wi = 0; wi < ar->word_count; wi++) {
         WordEntry* w = &ar->words[wi];
-        if (w->char_len < 1) continue;
-        unsigned char first_byte = (unsigned char)w->text[0];
-        CharWordList* cwl = &first_char_map[first_byte];
+        if (w->char_len != 1) continue;  /* P2: 只收单字词 */
+        unsigned char b0 = (unsigned char)w->text[0];
+        unsigned char b1 = (unsigned char)w->text[1];  /* 单字词：ASCII 时 text[1]==0 */
+        CharWordList* cwl = &first_char_map[b0][b1];
         if (cwl->count >= cwl->cap) {
             int new_cap = cwl->cap ? cwl->cap * 2 : 8;
             int* tmp = (int*)realloc(cwl->list, new_cap * sizeof(int));
@@ -806,14 +820,19 @@ int _article_flush_locked(ArticleReader* ar, SubTopology* topo,
         }
         if (!last_c[0]) continue;
 
-        // 用首字哈希快速查找
-        unsigned char first_byte = (unsigned char)last_c[0];
-        CharWordList* cwl = &first_char_map[first_byte];
+        // 用首字符（UTF-8 前 2 字节）哈希快速查找
+        unsigned char b0 = (unsigned char)last_c[0];
+        unsigned char b1 = (unsigned char)last_c[1];  /* 单字 last_c：ASCII 时 text[1]==0 */
+        CharWordList* cwl = &first_char_map[b0][b1];
         for (int wi2 = 0; wi2 < cwl->count; wi2++) {
             int widx2 = cwl->list[wi2];
             if (wi == widx2) continue;  /* 用索引去重，防御 realloc */
             WordEntry* w2 = &ar->words[widx2];  /* 每次从最新 ar->words 取，防御 realloc */
             if (w2->char_len < 1) continue;
+            /* P0（08-16 修复）：只处理单字词。多字词作 b 经 PairEntry.b[8]
+             * （仅 7 字节）strncpy 截断 → 下次 strcmp 整词 vs 截断串永不相等
+             * → 每次 flush 重复插入 char|word 垃圾条目 → pair_count 无界增长。 */
+            if (w2->char_len != 1) continue;
 
             // 检查 pair_table 中该字对是否高频
             PairEntry* pe = _ar_find_pair(ar, last_c, w2->text);
@@ -836,10 +855,13 @@ int _article_flush_locked(ArticleReader* ar, SubTopology* topo,
         }
     }
 
-    // 释放首字索引
+    // 释放首字符索引（每桶动态 list + 2D 数组本体）
     for (int i = 0; i < 256; i++) {
-        free(first_char_map[i].list);
+        for (int j = 0; j < 256; j++) {
+            free(first_char_map[i][j].list);
+        }
     }
+    free(first_char_map);
 
     // 清空序列缓冲区（下一轮重新累积）
     ar->seq_len = 0;
