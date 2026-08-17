@@ -499,3 +499,70 @@ int node_cache_export_frozen_edges(NodeCache* nc, MasterTopology* master,
     free(buf);
     return written;
 }
+
+/* v0.5.20 B3: 锁外快照式导出冻结边——与 node_cache_export_frozen_edges 字节等价，
+ * 唯一区别：目标 concept 解析改用快照 concept_by_id 查表（绝不碰 live net->nodes，
+ * 锁外安全）。由 master_save_state 快照序列化阶段二调用（此时已释放全部拓扑锁）。 */
+int node_cache_export_frozen_edges_snap(NodeCache* nc, int node_id,
+                                        char* const* concept_by_id, int concept_count,
+                                        FILE* fp) {
+    if (!nc || node_id < 0 || !fp) return -1;
+    if (!bitmap_test(nc->bitmap, node_id)) return -1;
+
+    pthread_mutex_lock(&nc->lock);
+    int64_t offset = nc->offsets[node_id];
+    int size = nc->sizes[node_id];
+    if (offset <= 0 || size <= 0) { pthread_mutex_unlock(&nc->lock); return -1; }
+    uint8_t* buf = (uint8_t*)malloc((size_t)size);
+    if (!buf) { pthread_mutex_unlock(&nc->lock); return -1; }
+    fseeko(nc->fp, offset, SEEK_SET);
+    int nread = (int)fread(buf, 1, (size_t)size, nc->fp);
+    pthread_mutex_unlock(&nc->lock);
+    if (nread < 12) { free(buf); return -1; }
+
+    uint8_t* p = buf;
+    int concept_len, feat_dim, conn_count;
+    memcpy(&concept_len, p, 4); p += 4;
+    memcpy(&feat_dim, p, 4);    p += 4;
+    memcpy(&conn_count, p, 4);  p += 4;
+    if (concept_len < 0 || concept_len > 4096 || conn_count < 0 || conn_count > 65536) {
+        free(buf); return -1;
+    }
+    p += concept_len + 1;
+    p += (size_t)feat_dim * sizeof(float);
+
+    /* 主状态格式：conn_count(4) + 边(tgt_len+concept+3f) */
+    fwrite(&conn_count, sizeof(int), 1, fp);
+    int written = 0;
+    for (int i = 0; i < conn_count; i++) {
+        int target_id; float w, mb, cf;
+        memcpy(&target_id, p, 4);  p += 4;
+        memcpy(&w, p, 4);          p += 4;
+        memcpy(&mb, p, 4);         p += 4;
+        memcpy(&cf, p, 4);         p += 4;
+        /* 锁外解析：目标 concept 从快照 concept_by_id 查表（索引=node_id），绝不碰 live net */
+        const char* tgt_concept = NULL;
+        if (concept_by_id && target_id >= 0 && target_id < concept_count) {
+            tgt_concept = concept_by_id[target_id];
+        }
+        if (tgt_concept) {
+            int tlen = (int)strlen(tgt_concept) + 1;
+            fwrite(&tlen, sizeof(int), 1, fp);
+            fwrite(tgt_concept, 1, (size_t)tlen, fp);
+            fwrite(&w, sizeof(float), 1, fp);
+            fwrite(&mb, sizeof(float), 1, fp);
+            fwrite(&cf, sizeof(float), 1, fp);
+            written++;
+        } else {
+            /* 占位：目标缺失（已删除/悬垂）——tlen=0 + 3f，流不断 */
+            int zero_tlen = 0;
+            float zero = 0.0f;
+            fwrite(&zero_tlen, sizeof(int), 1, fp);
+            fwrite(&zero, sizeof(float), 1, fp);
+            fwrite(&zero, sizeof(float), 1, fp);
+            fwrite(&zero, sizeof(float), 1, fp);
+        }
+    }
+    free(buf);
+    return written;
+}

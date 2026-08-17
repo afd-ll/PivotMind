@@ -453,6 +453,11 @@ int auto_extend_topology(MasterTopology* master, int topo_id) {
 int auto_extend_topology_nolock(MasterTopology* master, int topo_id) {
     if (!master) return -1;
 
+    /* R6 隐患 flag (v0.5.20): 本路径 realloc net->nodes 仅持 master->rwlock 写锁（wrapper :447）；
+     * 另一条 realloc 路径 huarong_net_add_node/find_or_create_node（huarong_topology.c）
+     * 仅持 net->mutex 写锁——两把锁互不排斥，并发 double-realloc 隐患。读侧一致快照必须
+     * 同时持 master 读锁 + net 读锁（见 multi_topology.h 锁序块）。 */
+
     TopologyGrowthConfig* config = topology_growth_get_default_config();
     SubTopology* sub = master_get_sub_topology(master, topo_id);
 

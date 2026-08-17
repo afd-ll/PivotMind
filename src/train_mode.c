@@ -7,6 +7,7 @@
 
 #include "train_mode.h"
 #include "huarong_topology.h"
+#include "funcword.h"
 #include "feature_io.h"
 #include "article_reader.h"
 #include "visual_cortex.h"    /* v0.5 CORPUS_MEDIA */
@@ -500,6 +501,11 @@ static int train_feed_token_sequence(TrainMode* tm, SubTopology* vocab,
             int lk = nid & (PM_NODE_LOCK_COUNT - 1);
             pthread_mutex_lock(&vocab->net->node_locks[lk]);
             vocab->net->nodes[nid]->activation += 0.1f;
+            /* v0.5.20: 虚词分类器阶段0——喂料路径累积位置画像（标签无关）
+             * 必须在任何 stopword 过滤之前：虚词的位置信号同样要累积。
+             * 句首=i==0，句尾=i==token_count-1（token 级位置） */
+            funcword_record_position(vocab->net->nodes[nid],
+                                     (i == 0), (i == token_count - 1));
             pthread_mutex_unlock(&vocab->net->node_locks[lk]);
             if (first_id < 0) first_id = nid;
             if (prev_id >= 0 && prev_id != nid) {

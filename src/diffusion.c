@@ -14,6 +14,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <stdint.h>   /* opt: uint8_t seen[] bitmap 去重 */
+
+/* 话题序/降级路径的回复词数上限（v0.5.20+ fix(C3)）：
+ * 主路径 max_reply_words 与降级路径 out_fallback 截断共用同一常量，
+ * 便于 A/B 实验——改这一处即同步两路径，避免只改一边污染 A/B 结论。 */
+#define MAX_REPLY_WORDS 4   /* A/B 实验 08-15 结论: 6词只放大词层拼接垃圾, 质量不升, 回退4 */
 
 /* ================================================================
  *  虚词/停用词检查
@@ -814,6 +820,23 @@ static int _cross_by_name(SubTopology* src, int* src_ids, int src_count,
  *  侧抑制
  * ================================================================ */
 
+/* UTF-8 感知：字符串前 nchars 个字符占用的字节数。
+ * 字符串不足 nchars 个字符时返回 0（无法构成 nchars 字前缀）。 */
+static int utf8_prefix_bytes(const char* s, int nchars) {
+    if (!s || nchars <= 0) return 0;
+    const unsigned char* p = (const unsigned char*)s;
+    int chars = 0;
+    while (*p && chars < nchars) {
+        unsigned char c = *p;
+        if      (c < 0x80)       p += 1;
+        else if ((c & 0xE0) == 0xC0) p += 2;
+        else if ((c & 0xF0) == 0xE0) p += 3;
+        else                     p += 4;
+        chars++;
+    }
+    return (chars == nchars) ? (int)(p - (const unsigned char*)s) : 0;
+}
+
 void diffusion_side_inhibit(DiffusionCandidate* cands, int count,
                              const char** selected, int sel_count) {
     if (!cands || !selected) return;
@@ -827,7 +850,13 @@ void diffusion_side_inhibit(DiffusionCandidate* cands, int count,
                 cands[i].total_score *= 0.1f;  /* 完全重复，大抑 */
                 break;
             }
-            if (strncmp(cands[i].word, selected[s], 2) == 0) {
+            /* v0.5.20+ fix(C1): 原 strncmp(...,2) 比的是 2 字节不是 2 字——
+             * CJK 一字 3 字节，"一(U+4E00)"/"丁(U+4E01)"共享前 2 字节 E4B8
+             * 会误判同前缀。改按 UTF-8 前 2 个完整字符比较（中文=6 字节）。 */
+            int wl = utf8_prefix_bytes(cands[i].word, 2);
+            int sl = utf8_prefix_bytes(selected[s], 2);
+            if (wl > 0 && wl == sl &&
+                strncmp(cands[i].word, selected[s], (size_t)wl) == 0) {
                 cands[i].total_score *= 0.5f;  /* 同前缀，小抑 */
             }
         }
@@ -884,6 +913,61 @@ static void _sel_top_k(DiffusionCandidate* arr, int n, int k) {
 /* ================================================================
  *  多层扩散主函数
  * ================================================================ */
+
+/* UTF-8 感知：两个词是否共享任一字符（含等长边界重叠，如"方鸿"/"鸿渐"
+ * 共享"鸿"）。用于词锚定去重，防"方鸿"+"鸿渐"拼接成"方鸿鸿渐"裂词。 */
+static int words_share_char(const char* a, const char* b) {
+    if (!a || !b) return 0;
+    const unsigned char* pa = (const unsigned char*)a;
+    while (*pa) {
+        unsigned char ca = *pa;
+        int alen;
+        if      (ca < 0x80)       alen = 1;
+        else if ((ca & 0xE0) == 0xC0) alen = 2;
+        else if ((ca & 0xF0) == 0xE0) alen = 3;
+        else                      alen = 4;
+        const unsigned char* pb = (const unsigned char*)b;
+        while (*pb) {
+            unsigned char cb = *pb;
+            int blen;
+            if      (cb < 0x80)       blen = 1;
+            else if ((cb & 0xE0) == 0xC0) blen = 2;
+            else if ((cb & 0xF0) == 0xE0) blen = 3;
+            else                      blen = 4;
+            if (alen == blen && memcmp(pa, pb, (size_t)alen) == 0)
+                return 1;
+            pb += blen;
+        }
+        pa += alen;
+    }
+    return 0;
+}
+
+/* 词锚定重叠去重（v0.5.20+ fix(C2)）：向 word_prio 插入新词前，与已收录词
+ * 做字符级检查，落点 :960/:980/:1011 三处共用。规则：
+ *  - 完全重复 → 跳过
+ *  - 已收录更长词包含新词(strstr) → 跳过新词（"方鸿渐"已收录则跳过"方鸿"）
+ *  - 新词更长且包含旧词(strstr) → 替换旧词（后到"方鸿渐"替换先到"方鸿"）
+ *  - 双方共享字符(等长边界重叠，如"方鸿"/"鸿渐") → 跳过新词
+ * 返回 1=已插入/替换，0=跳过。 */
+static int word_prio_add(const char** word_prio, int* count, const char* w,
+                         int cap) {
+    if (!w || !w[0]) return 0;
+    for (int k = 0; k < *count; k++) {
+        const char* ex = word_prio[k];
+        if (!ex) continue;
+        if (strcmp(ex, w) == 0) return 0;          /* 完全重复 */
+        if (strstr(ex, w)) return 0;               /* 旧更长覆盖新 → 跳过新 */
+        if (strstr(w, ex)) {                       /* 新更长覆盖旧 → 替换旧 */
+            word_prio[k] = w;
+            return 1;
+        }
+        if (words_share_char(ex, w)) return 0;     /* 等长/边界字符重叠 → 跳过新 */
+    }
+    if (*count >= cap) return 0;
+    word_prio[(*count)++] = w;
+    return 1;
+}
 
 int diffusion_generate(DiffusionCtx* ctx,
                         const char* input,
@@ -953,10 +1037,9 @@ int diffusion_generate(DiffusionCtx* ctx,
 
                     if (wnode && wnode->concept && wnode->concept[0] &&
                         word_prio_count < 16) {
-                        int dup2 = 0;
-                        for (int k2 = 0; k2 < word_prio_count; k2++)
-                            if (strcmp(word_prio[k2], wnode->concept) == 0) { dup2 = 1; break; }
-                        if (!dup2) word_prio[word_prio_count++] = wnode->concept;
+                        /* v0.5.20+ fix(C2): 字符级重叠去重（修"方鸿"+"鸿渐"裂词） */
+                        word_prio_add(word_prio, &word_prio_count,
+                                      wnode->concept, 16);
                         fprintf(stderr, "[词锚定DBG] win=%d 命中词节点: %s\n",
                                 win_chars, wnode->concept);
                     }
@@ -972,13 +1055,10 @@ int diffusion_generate(DiffusionCtx* ctx,
                             float w = wnode->edges[we].weight;
                             if (w < 0.3f) continue;      /* 弱边不构成语义场 */
                             if (is_function_word(wnb->concept)) continue;
-                            int dup3 = 0;
-                            for (int k3 = 0; k3 < word_prio_count; k3++)
-                                if (strcmp(word_prio[k3], wnb->concept) == 0) { dup3 = 1; break; }
-                            if (!dup3) {
-                                word_prio[word_prio_count++] = wnb->concept;
-                                if (word_prio_count >= 16) break;
-                            }
+                            /* v0.5.20+ fix(C2): 字符级重叠去重 */
+                            word_prio_add(word_prio, &word_prio_count,
+                                          wnb->concept, 16);
+                            if (word_prio_count >= 16) break;
                         }
                     }
 
@@ -1003,13 +1083,10 @@ int diffusion_generate(DiffusionCtx* ctx,
                                 ReasoningNode* mw = ctx->concept->net->nodes[l2->to_node_id];
                                 if (!mw || !mw->concept || !mw->concept[0]) continue;
                                 if (is_function_word(mw->concept)) continue;
-                                int dup4 = 0;
-                                for (int k4 = 0; k4 < word_prio_count; k4++)
-                                    if (strcmp(word_prio[k4], mw->concept) == 0) { dup4 = 1; break; }
-                                if (!dup4) {
-                                    word_prio[word_prio_count++] = mw->concept;
-                                    if (word_prio_count >= 16) break;
-                                }
+                                /* v0.5.20+ fix(C2): 字符级重叠去重 */
+                                word_prio_add(word_prio, &word_prio_count,
+                                              mw->concept, 16);
+                                if (word_prio_count >= 16) break;
                             }
                             break;   /* 只查第一个语义概念 */
                         }
@@ -1099,16 +1176,17 @@ int diffusion_generate(DiffusionCtx* ctx,
     int spread1_ids[SPREAD_MAX_EXTRA];
     int spread1_count = 0;
 
-    /* v0.5.18 opt: bitmap 去重——一跳/两跳邻居查重从 O(n) 线性扫描
-     * 改 O(1) 查表 (node_id == 数组索引)。seen[] 生命周期覆盖整个
-     * spread 过程，一轮扩散只分配/释放一次。 */
-    int vnode_count = ctx->vocab->net->node_count;
-    unsigned char* seen = (unsigned char*)calloc(
-        (size_t)(vnode_count > 0 ? vnode_count : 1), 1);
-    if (!seen) return 0;
-    for (int a = 0; a < active_count; a++) {
-        int aid = active_ids[a];
-        if (aid >= 0 && aid < vnode_count) seen[aid] = 1;
+    /* opt(任务2): 邻居去重 O(n²) 线性扫 → bitmap O(1)。
+     * seen[] 生命周期覆盖整个 spread(一跳+两跳+Jaccard)，一轮只分配一次；
+     * 本库约定 node_id == 数组索引，seen[nid] 即"nid 已激活/已扩散"标记。
+     * calloc 失败(极端)回退原线性扫逻辑，行为不变。 */
+    int diffusion_ncount = ctx->vocab->net->node_count;
+    uint8_t* seen = (uint8_t*)calloc((size_t)diffusion_ncount, 1);
+    if (seen) {
+        for (int a = 0; a < active_count; a++) {
+            int aid = active_ids[a];
+            if (aid >= 0 && aid < diffusion_ncount) seen[aid] = 1;
+        }
     }
 
     /* 一跳：直接匹配节点的邻居 */
@@ -1124,10 +1202,20 @@ int diffusion_generate(DiffusionCtx* ctx,
         }
         for (int e = 0; e < src->edge_count && spread1_count < SPREAD_MAX_EXTRA; e++) {
             ReasoningNode* nb = src->edges[e].target;
-            if (!nb || nb->node_id == src->node_id ||
-                nb->node_id >= vnode_count) continue;
-            if (!seen[nb->node_id]) {
-                seen[nb->node_id] = 1;
+            if (!nb || nb->node_id == src->node_id) continue;
+            int nid = nb->node_id;
+            if (seen && (nid < 0 || nid >= diffusion_ncount)) continue;
+            int dup = 0;
+            if (seen) {
+                dup = seen[nid];
+                if (!dup) seen[nid] = 1;
+            } else {
+                for (int d = 0; d < active_count; d++)
+                    if (active_ids[d] == nid) { dup = 1; break; }
+                for (int d = 0; d < spread1_count; d++)
+                    if (spread1_ids[d] == nid) { dup = 1; break; }
+            }
+            if (!dup) {
                 float lang_mult = 1.0f;
                 if (lang_dom != 0 && NODE_IS_CJK(nb)) {
                     lang_mult = (lang_dom > 0) ? LANG_BOOST_SAME : LANG_BOOST_CROSS;
@@ -1135,7 +1223,7 @@ int diffusion_generate(DiffusionCtx* ctx,
                     lang_mult = (lang_dom < 0) ? LANG_BOOST_SAME : LANG_BOOST_CROSS;
                 }
                 nb->activation += SPREAD_1HOP * src->edges[e].weight * lang_mult;
-                spread1_ids[spread1_count++] = nb->node_id;
+                spread1_ids[spread1_count++] = nid;
             }
         }
     }
@@ -1153,17 +1241,29 @@ int diffusion_generate(DiffusionCtx* ctx,
         }
         for (int e = 0; e < src->edge_count; e++) {
             ReasoningNode* nb = src->edges[e].target;
-            if (!nb || nb->node_id == src->node_id ||
-                nb->node_id >= vnode_count) continue;
-            if (!seen[nb->node_id]) {
-                seen[nb->node_id] = 1;
+            if (!nb || nb->node_id == src->node_id) continue;
+            int nid = nb->node_id;
+            if (seen && (nid < 0 || nid >= diffusion_ncount)) continue;
+            int dup = 0;
+            if (seen) {
+                dup = seen[nid];
+                if (!dup) seen[nid] = 1;
+            } else {
+                for (int d = 0; d < active_count; d++)
+                    if (active_ids[d] == nid) { dup = 1; break; }
+                for (int d = 0; d < spread1_count; d++)
+                    if (spread1_ids[d] == nid) { dup = 1; break; }
+                for (int d = 0; d < spread2_count; d++)
+                    if (spread1_ids[spread1_count + d] == nid) { dup = 1; break; }
+            }
+            if (!dup) {
                 float lm2 = 1.0f;
                 if (lang_dom != 0 && NODE_IS_CJK(nb))
                     lm2 = (lang_dom > 0) ? LANG_BOOST_SAME : LANG_BOOST_CROSS;
                 else if (lang_dom != 0)
                     lm2 = (lang_dom < 0) ? LANG_BOOST_SAME : LANG_BOOST_CROSS;
                 nb->activation += SPREAD_2HOP * src->edges[e].weight * lm2;
-                spread1_ids[spread1_count + spread2_count] = nb->node_id;
+                spread1_ids[spread1_count + spread2_count] = nid;
                 spread2_count++;
             }
         }
@@ -1179,18 +1279,31 @@ int diffusion_generate(DiffusionCtx* ctx,
         ReasoningNode* node = ctx->vocab->net->nodes[nid];
         if (!node || node->edge_count == 0) continue;
 
-        /* 统计该节点与输入激活集的共享邻居数 */
+        /* 统计该节点与输入激活集/扩散集的共享邻居数。
+         * fix(P0-1 dsh返工): seen 分支恢复"累计计数"语义——此前误写成
+         * 第一个命中即 break 的 0/1 标志, 把 shared 从计数降级成布尔,
+         * boost=0.5+shared/edge_count 大幅变化(10边5共享: 1.0→0.6),
+         * 改变扩散激活排序影响对话输出。与 else 分支一致: 每个命中 +1。 */
         int shared = 0;
         for (int e = 0; e < node->edge_count; e++) {
             int tgt = node->edges[e].target ? node->edges[e].target->node_id : -1;
-            if (tgt < 0 || tgt >= vnode_count) continue;
-            if (seen[tgt]) shared++;  /* bitmap O(1) 查重 */
+            if (tgt < 0) continue;
+            if (seen) {
+                if (tgt < diffusion_ncount && seen[tgt]) shared++;
+                continue;
+            }
+            for (int a = 0; a < active_count; a++)
+                if (active_ids[a] == tgt) { shared++; break; }
+            if (shared > 0) continue; /* 只统计一次 */
+            for (int s = 0; s < total_spread && s < SPREAD_MAX_EXTRA; s++)
+                if (spread1_ids[s] == tgt) { shared++; break; }
         }
         /* Jaccard ≈ shared / node->edge_count，映射到 [0.5, 1.5] 乘数 */
         float jac = (node->edge_count > 0) ? (float)shared / (float)node->edge_count : 0.0f;
         float boost = 0.5f + jac;  /* jac=0→0.5x, jac=1.0→1.5x */
         node->activation *= boost;
     }
+    free(seen);  /* opt(任务2): bitmap 生命周期结束，释放 */
 
     /* 调试: 打印输入激活的词和其邻居 */
     {
@@ -1217,14 +1330,14 @@ int diffusion_generate(DiffusionCtx* ctx,
     if (!ctx->_vocab_scores || ctx->_vocab_cap < vn) {
         free(ctx->_vocab_scores);
         ctx->_vocab_scores = (float*)calloc(vn, sizeof(float));
-        if (!ctx->_vocab_scores) { free(seen); return -1; }
+        if (!ctx->_vocab_scores) return -1;
         ctx->_vocab_cap = vn;
     }
     /* 语义层 */
     if (sn > 0 && (!ctx->_sem_scores || ctx->_sem_cap < sn)) {
         free(ctx->_sem_scores);
         ctx->_sem_scores = (float*)calloc(sn, sizeof(float));
-        if (!ctx->_sem_scores) { free(seen); return -1; }
+        if (!ctx->_sem_scores) return -1;
         ctx->_sem_cap = sn;
     } else if (sn == 0) {
         ctx->_sem_scores = NULL;  /* 无语义层时清零 */
@@ -1233,7 +1346,7 @@ int diffusion_generate(DiffusionCtx* ctx,
     if (tn > 0 && (!ctx->_tpl_scores || ctx->_tpl_cap < tn)) {
         free(ctx->_tpl_scores);
         ctx->_tpl_scores = (float*)calloc(tn, sizeof(float));
-        if (!ctx->_tpl_scores) { free(seen); return -1; }
+        if (!ctx->_tpl_scores) return -1;
         ctx->_tpl_cap = tn;
     } else if (tn == 0) {
         ctx->_tpl_scores = NULL;
@@ -1242,7 +1355,7 @@ int diffusion_generate(DiffusionCtx* ctx,
     if (en > 0 && (!ctx->_emo_scores || ctx->_emo_cap < en)) {
         free(ctx->_emo_scores);
         ctx->_emo_scores = (float*)calloc(en, sizeof(float));
-        if (!ctx->_emo_scores) { free(seen); return -1; }
+        if (!ctx->_emo_scores) return -1;
         ctx->_emo_cap = en;
     } else if (en == 0) {
         ctx->_emo_scores = NULL;
@@ -1616,7 +1729,7 @@ int diffusion_generate(DiffusionCtx* ctx,
          * 口语习惯——等词性标注成熟后再启用语法组装。 */
         out = 0;
         {
-            const int max_reply_words = 4;   /* 口语短句：≤4 实词 */
+            const int max_reply_words = MAX_REPLY_WORDS;   /* 口语短句：≤4 实词 */
             for (int w = 0; w < word_count && out < max_reply_words; w++) {
                 if (!word_buf[w]) continue;
                 output_words[out++] = word_buf[w];
@@ -1645,7 +1758,7 @@ int diffusion_generate(DiffusionCtx* ctx,
             if (final[i].used) continue;
             if (!final[i].word || strlen(final[i].word) < 2) continue;
             /* 口语短句截断（v0.6） */
-            if (out_fallback >= 4) break;
+            if (out_fallback >= MAX_REPLY_WORDS) break;
             if (final[i].word[0] == '@' || final[i].word[0] == '?' ||
                 (final[i].word[0] == 'H' && final[i].word[1] == 'e')) continue;
             if (strncmp(final[i].word, "sem_", 4) == 0) continue;   /* semantic_growth 匿名节点 */
@@ -1681,6 +1794,5 @@ int diffusion_generate(DiffusionCtx* ctx,
 
     /* ── 静态数组不释放 (ctx生命周期管理) ── */
 
-    free(seen);
     return out;
 }

@@ -122,6 +122,13 @@ typedef struct ReasoningNode {
     int binding_ref_topo[8];
     int binding_ref_node[8];
     int binding_count;
+
+    // v0.5.19: 分布签名（语法词类的正确尺子——pro 评审 08-14）
+    // 语义特征（512维词向量）学不出分布类（可替换性）；语法类的本质是
+    // "上下文分布相同"。dist_sig[26] = 左邻POS分布[0..10] + 右邻POS分布
+    // [11..21] + 位置先验[22..25]（句首/句尾/动词后/动词前）。EMA 在线累积。
+    float dist_sig[26];
+    int dist_sig_count;          // 累积样本数（<20 不参与聚类——防多义词污染）
 } ReasoningNode;
 
 /**

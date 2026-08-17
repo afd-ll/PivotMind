@@ -5,7 +5,7 @@
 #include "node_hash.h"
 #include "multi_topology.h"
 #include "concept_abstraction.h"
-#include "memory_arena.h"   /* v0.5.18: ObjectPool 统一分配器替代自写 MemPool */
+#include "memory_arena.h"   /* opt(任务5): 内存池收敛——自写 MemPool → ObjectPool */
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -290,9 +290,6 @@ static bool has_cycle_dfs(CausalGraph* graph, int node, int* visited, int* rec_s
     return false;
 }
 
-// ==================== 内存池优化 ====================
-// v0.5.18: 自写 MemPool 收敛到 nn/memory_arena.h 的 ObjectPool——
-// adj_pool/edge_pool 改用 object_pool_create/acquire/destroy（统一分配器）
 
 // ==================== 因果图管理 ==========
 
@@ -319,8 +316,7 @@ CausalGraph* causal_graph_create(int node_count, int edge_capacity) {
     graph->avg_causal_strength = 0.0f;
     graph->last_updated = time(NULL);
 
-    // 初始化对象池（邻接表用 int[32]，边用 CausalEdge）
-    graph->adj_pool = object_pool_create(sizeof(int) * 32, 256);  // 32个int为一个块
+    // 初始化边内存池（P2 dsh返工: adj_pool 死代码已移除——从未 acquire）
     graph->edge_pool = object_pool_create(sizeof(CausalEdge), 128);
 
     return graph;
@@ -329,7 +325,17 @@ CausalGraph* causal_graph_create(int node_count, int edge_capacity) {
 void causal_graph_destroy(CausalGraph* graph) {
     if (!graph) return;
 
-    // 边来自 edge_pool 对象池，不能单独 free，object_pool_destroy 统一释放
+    /* 边来自 edge_pool 内存池：先归还池再销毁。
+     * ObjectPool 的 destroy 只释放空闲列表对象，已 acquire 未归还的
+     * 对象需先 object_pool_release（等价于原 pool_destroy 统一释放）。 */
+    if (graph->edge_pool) {
+        for (int i = 0; i < graph->edge_count; i++) {
+            if (graph->edges[i]) {
+                object_pool_release((ObjectPool*)graph->edge_pool, graph->edges[i]);
+                graph->edges[i] = NULL;
+            }
+        }
+    }
     free(graph->edges);
 
     for (int i = 0; i < graph->node_count; i++) {
@@ -343,8 +349,7 @@ void causal_graph_destroy(CausalGraph* graph) {
     free(graph->node_mapping);
     if (graph->topological_order) free(graph->topological_order);
 
-    // 释放对象池
-    if (graph->adj_pool) object_pool_destroy((ObjectPool*)graph->adj_pool);
+    // 释放边内存池（adj_pool 已移除）
     if (graph->edge_pool) object_pool_destroy((ObjectPool*)graph->edge_pool);
 
     free(graph);
@@ -426,8 +431,12 @@ int remove_causal_edge(CausalGraph* graph, int cause_id, int effect_id) {
     int edge_idx = find_edge_index(graph, cause_id, effect_id);
     if (edge_idx < 0) return -1;
 
-    /* 边由 edge_pool 对象池分配（add_causal_edge:object_pool_acquire），
-       不可直接 free；object_pool_destroy 统一释放。仅置空标记删除。 */
+    /* 边由 edge_pool 内存池分配（add_causal_edge:object_pool_acquire）。
+     * fix(P0-2 dsh返工): 删除时必须归还池——object_pool_destroy 只释放
+     * 空闲列表对象, 已 acquire 未归还的对象不会自动回收; 原"仅置空标记
+     * 删除"会让被删边对象指针丢失→永不归还→泄漏(PC 算法批量删边放大)。 */
+    if (graph->edge_pool && graph->edges[edge_idx])
+        object_pool_release((ObjectPool*)graph->edge_pool, graph->edges[edge_idx]);
     graph->edges[edge_idx] = NULL;
 
     // 调整边数组
@@ -2588,7 +2597,7 @@ CausalSearchResult* causal_associative_search(MasterTopology* master,
     for (int i = 0; i < token_count; i++) free(tokens[i]);
     free(source_ids);
     /* v0.5.7: 图是共享缓存（g_cg_cache），不在这里 destroy——
-     * 原代码 destroy 缓存图导致悬垂指针（下次调用 pool_destroy 崩） */
+     * 原代码 destroy 缓存图导致悬垂指针（下次调用 object_pool_destroy 崩） */
     /* causal_graph_destroy(graph); */
 
     *out_count = result_count;

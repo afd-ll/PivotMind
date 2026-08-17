@@ -1,5 +1,28 @@
 # Changelog
 
+## v0.5.21 — 2026-08-15
+
+### Security
+- **C1 远程 RCE 封堵**：`media_reader.c`/`visual_cortex.c` 7 个 `popen/system` 调用点全部 execvp 化（去 shell 解释层）；`/media/*` 加 `X-Pivot-Token` 鉴权（启动生成 64 位 hex token 打印日志，无 token 401）；realpath+S_ISREG+媒体目录白名单灭 SSRF；`"> NUL"` Windows-ism 修复。
+- **B1 边界**：H1 状态加载 `from_node` 范围校验（防损坏文件 OOB/OOM）；M4 去重分支 `return -1` → `return result`。
+
+### Fixed
+- **B3 锁外快照写盘**（STUCK 根治）：存盘从"持 master 读锁写 330MB"改为"三锁同时拿全量深拷贝 + 锁外写盘"，字节级等价，`PIVOTMIND_SAVE=locked` 回退。
+- **B4 learn 队列化**：`handle_chat` 同步学习入队（输入 flush / 回复 fire-and-forget），worker 2→1，`_learn_tokens` 零改动。
+- **B2 broca 越界**：`pos_tags[64]` 栈越界读 → 动态分配；空格插入/NUL 无边界 → 扩容 helper。
+- **C1 side_inhibit 字节 bug**：`strncmp(...,2)` 比 2 字节（CJK 误判"一/丁"）→ UTF-8 完整字符比较。
+- **C2 词锚重叠去重**：三处词锚插入点加字符重叠检查，修"方鸿+鸿渐"裂词。
+
+### Changed
+- **C3 `MAX_REPLY_WORDS` 常量化**：主路径与降级路径共用，便于 A/B 实验。
+
+### Experiment
+- **4→6 词 A/B**：6 词只放大词层拼接垃圾、质量不升 → 回退 4。信息量瓶颈在选词/组句，不在长度限制；生成端微调收手，等 dist_sig 数据上阶段 2.5/3。
+
+详见 [changelogs/065-security-concurrency-generation.md](changelogs/065-security-concurrency-generation.md)
+
+---
+
 ## v0.5.9 — 2026-08-07
 
 ### Added

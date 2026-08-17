@@ -133,6 +133,16 @@ typedef struct {
  *      多节点加锁时按 node_id 升序（见 lock_two_nodes_by_id）
  *
  * 禁止反向加锁（如持节点锁后再请求网络锁）！
+ *
+ * ========== B3 补充（v0.5.20）：net->nodes realloc 双路径 + 快照锁序 ==========
+ * net->nodes 的 realloc 存在两条互不排斥的路径（二者同时存在是潜在隐患，见 R6）：
+ *   路径 A：huarong_net_add_node / find_or_create_node —— 仅持 net->mutex 写锁
+ *   路径 B：auto_extend_topology / auto_shrink_topology —— 仅持 master->rwlock 写锁
+ * 因此任何读侧遍历 net->nodes[] 的一致快照必须同时持
+ *   master->rwlock(读) + net->mutex(读)
+ * 才能同时挡住两条 realloc 路径。
+ * 存盘快照路径锁序：master->rwlock(读) → net->mutex(读) → node_locks[li]（逐节点短暂持有）。
+ * 禁止反向：持 node_locks 后不得再请求 net->mutex；持 net->mutex 后不得再请求 master->rwlock。
  * ============================================================
  */
 typedef struct MasterTopology {

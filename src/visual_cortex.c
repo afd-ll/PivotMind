@@ -22,6 +22,7 @@
 #include <ctype.h>
 #include <math.h>
 #include <errno.h>
+#include <limits.h>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -34,6 +35,8 @@
 #include <dirent.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
+#include <fcntl.h>
 #endif
 
 /* ==================== 内部常量 ==================== */
@@ -41,6 +44,7 @@
 #define VC_MAX_FRAMES_PER_VIDEO    400      /* 单视频最大采样帧数 */
 #define VC_MAX_TOKENS_PER_VIDEO    2000     /* 单视频最大词元数 */
 #define VC_TASK_QUEUE_SIZE         128      /* 任务队列最大容量 */
+#define VC_FRAME_PROBE_BUF         (256 * 1024)  /* C1: ffprobe 帧列表输出缓冲 (drain 用) */
 
 /* ==================== 内部数据结构 ==================== */
 
@@ -169,32 +173,143 @@ static const char* vc_get_ffprobe_path(VisualCortex* vc) {
     return derived;
 }
 
+/* ==================== 子进程执行 (C1 安全修复: 去 shell 解释层) ====================
+ *
+ * 用 fork + execvp 替代 popen/system，参数数组直接传值，杜绝 shell 命令注入。
+ *   - 用 execvp 而非 execv: probe/ffmpeg 可能是裸名 "ffprobe" (靠 PATH 查找)。
+ *   - popen 替换必须先 drain 管道再 waitpid，否则 64KB 管道写满会父子互相死锁。
+ */
+
+#ifndef _WIN32
+
+/* 执行 prog 并捕获 stdout 到 out_buf (最多保留 out_cap-1 字节，其余读空丢弃防死锁)。
+ * 返回子进程退出码；-1 = fork/pipe/wait 失败，127 = execvp 失败。 */
+static int run_capture(const char* prog, char* const argv[],
+                       char* out_buf, size_t out_cap, size_t* out_len) {
+    int pipefd[2];
+    if (out_len) *out_len = 0;
+    if (pipe(pipefd) != 0) return -1;
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        close(pipefd[0]); close(pipefd[1]);
+        return -1;
+    }
+    if (pid == 0) {
+        close(pipefd[0]);
+        dup2(pipefd[1], STDOUT_FILENO);
+        close(pipefd[1]);
+        int nullfd = open("/dev/null", O_WRONLY);
+        if (nullfd >= 0) { dup2(nullfd, STDERR_FILENO); close(nullfd); }
+        execvp(prog, argv);
+        _exit(127);
+    }
+
+    /* 父进程: 先 drain 管道到 EOF，再 waitpid (防 64KB 管道满死锁) */
+    close(pipefd[1]);
+    size_t total = 0;
+    char sink[4096];
+    ssize_t n;
+    while ((n = read(pipefd[0], sink, sizeof(sink))) > 0) {
+        if (out_buf && out_cap > 1) {
+            size_t room = out_cap - 1 - total;
+            if (room > 0) {
+                size_t copy = ((size_t)n < room) ? (size_t)n : room;
+                memcpy(out_buf + total, sink, copy);
+                total += copy;
+            }
+        }
+    }
+    close(pipefd[0]);
+    if (out_buf && out_cap > 0) {
+        out_buf[(total < out_cap) ? total : (out_cap - 1)] = '\0';
+    }
+    if (out_len) *out_len = total;
+
+    int status = 0;
+    if (waitpid(pid, &status, 0) < 0) return -1;
+    if (WIFEXITED(status)) return WEXITSTATUS(status);
+    return -1;
+}
+
+/* 执行 prog，丢弃 stdout/stderr (替代 system)，返回退出码；-1=fork/wait 失败, 127=exec 失败 */
+static int run_silent(const char* prog, char* const argv[]) {
+    pid_t pid = fork();
+    if (pid < 0) return -1;
+    if (pid == 0) {
+        int nullfd = open("/dev/null", O_WRONLY);
+        if (nullfd >= 0) {
+            dup2(nullfd, STDOUT_FILENO);
+            dup2(nullfd, STDERR_FILENO);
+            close(nullfd);
+        }
+        execvp(prog, argv);
+        _exit(127);
+    }
+    int status = 0;
+    if (waitpid(pid, &status, 0) < 0) return -1;
+    if (WIFEXITED(status)) return WEXITSTATUS(status);
+    return -1;
+}
+
+#endif /* !_WIN32 */
+
 static int vc_extract_frames(VisualCortex* vc, const char* filepath) {
     const char* probe = vc_get_ffprobe_path(vc);
-    char cmd[1536];
     int interval_secs = vc->cfg.frame_interval_ms / 1000;
     if (interval_secs < 1) interval_secs = 1;
 
+    /* C1 修复: 路径安全校验 (灭 SSRF) + 用规范化后的真实路径执行 */
+    char resolved[PATH_MAX];
+    if (media_validate_media_path(filepath, resolved, sizeof(resolved)) != 0)
+        return -1;
+
+    /* 先把 ffprobe 输出整段读入缓冲 (Linux 用 execvp 去 shell，Windows 保留旧实现) */
+    char* out = (char*)malloc(VC_FRAME_PROBE_BUF);
+    if (!out) return -1;
+    size_t out_len = 0;
+
+#ifdef _WIN32
+    char cmd[1536];
     snprintf(cmd, sizeof(cmd),
              "\"%s\" -v error -select_streams v:0 "
              "-skip_frame nokey "
              "-show_entries frame=pkt_pts_time,pict_type,width,height "
              "-of csv=p=0 "
              "\"%s\"",
-             probe, filepath);
+             probe, resolved);
 
-#ifdef _WIN32
     FILE* fp = _popen(cmd, "r");
+    if (!fp) { free(out); return -1; }
+    out_len = fread(out, 1, VC_FRAME_PROBE_BUF - 1, fp);
+    out[out_len] = '\0';
+    _pclose(fp);
 #else
-    FILE* fp = popen(cmd, "r");
+    char* argv[] = {
+        (char*)probe, "-v", "error", "-select_streams", "v:0",
+        "-skip_frame", "nokey",
+        "-show_entries", "frame=pkt_pts_time,pict_type,width,height",
+        "-of", "csv=p=0", (char*)resolved, NULL
+    };
+    int ret = run_capture(probe, argv, out, VC_FRAME_PROBE_BUF, &out_len);
+    if (ret != 0 && out_len == 0) { free(out); return -1; }
 #endif
-    if (!fp) return -1;
 
     int extracted = 0;
     float prev_pts = -999.0f;
 
-    char line[512];
-    while (fgets(line, sizeof(line), fp) && extracted < vc->frame_capacity) {
+    const char* p = out;
+    const char* buf_end = out + out_len;
+    while (p < buf_end && extracted < vc->frame_capacity) {
+        const char* nl = p;
+        while (nl < buf_end && *nl != '\n') nl++;
+        char line[512];
+        size_t len = (size_t)(nl - p);
+        if (len >= sizeof(line)) len = sizeof(line) - 1;
+        memcpy(line, p, len);
+        line[len] = '\0';
+        p = nl + 1;
+
         float pts;
         char pict_type[16];
         if (sscanf(line, "%f,%15[^,]", &pts, pict_type) < 2) continue;
@@ -220,11 +335,7 @@ static int vc_extract_frames(VisualCortex* vc, const char* filepath) {
         if (vc->cfg.max_frames_per_video > 0 && extracted >= vc->cfg.max_frames_per_video)
             break;
     }
-#ifdef _WIN32
-    _pclose(fp);
-#else
-    pclose(fp);
-#endif
+    free(out);
 
     /* 场景切换后处理 */
     if (vc->cfg.scene_threshold > 0 && extracted > 1) {
@@ -262,7 +373,6 @@ static int vc_is_index_line(const char* line) {
 
 static int vc_extract_subtitles(VisualCortex* vc, const char* filepath,
                                 SubtitleEntry* entries, int max_entries) {
-    char cmd[1536];
     char tmpfile[512];
     int count = 0;
 
@@ -272,11 +382,29 @@ static int vc_extract_subtitles(VisualCortex* vc, const char* filepath,
     snprintf(tmpfile, sizeof(tmpfile), "/tmp/pm_vc_subs_%d.srt", (int)getpid());
 #endif
 
+    /* C1 修复: 路径安全校验 (灭 SSRF) + 用规范化后的真实路径执行 */
+    char resolved[PATH_MAX];
+    if (media_validate_media_path(filepath, resolved, sizeof(resolved)) != 0)
+        return -1;
+
+#ifdef _WIN32
+    /* Windows 分支: 非目标平台，保留旧 shell 实现 */
+    char cmd[1536];
     snprintf(cmd, sizeof(cmd),
              "\"%s\" -y -v quiet -i \"%s\" -map 0:s:0 -c:s srt \"%s\"",
-             vc->cfg.ffmpeg_path, filepath, tmpfile);
+             vc->cfg.ffmpeg_path, resolved, tmpfile);
 
     if (system(cmd) != 0) { remove(tmpfile); return -1; }
+#else
+    /* Linux 分支: fork + execvp 传参，去 shell 解释层 */
+    char* argv[] = {
+        (char*)vc->cfg.ffmpeg_path, "-y", "-v", "quiet",
+        "-i", (char*)resolved, "-map", "0:s:0", "-c:s", "srt",
+        (char*)tmpfile, NULL
+    };
+
+    if (run_silent(vc->cfg.ffmpeg_path, argv) != 0) { remove(tmpfile); return -1; }
+#endif
 
     FILE* fp = fopen(tmpfile, "r");
     remove(tmpfile);

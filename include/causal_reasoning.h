@@ -94,8 +94,7 @@ typedef struct CausalGraph {
     float avg_causal_strength; // 平均因果强度
     time_t last_updated;      // 最后更新时间
 
-    // 内存池（用于优化邻接表分配）
-    void* adj_pool;          // 邻接表内存池
+    // 内存池（边分配用；adj_pool 已移除——邻接表实际用 realloc/free，见 P2 dsh返工）
     void* edge_pool;          // 边内存池
 } CausalGraph;
 

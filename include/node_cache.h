@@ -90,6 +90,11 @@ int node_cache_thaw_all(NodeCache* nc, MasterTopology* master);
 int node_cache_export_frozen_edges(NodeCache* nc, MasterTopology* master,
                                    HuarongTopologyNet* net, ReasoningNode* node,
                                    FILE* fp);
+/* v0.5.20 B3: 锁外快照式导出冻结边——与 node_cache_export_frozen_edges 字节等价，
+ * 唯一区别：目标 concept 解析改用快照 concept_by_id 查表（绝不碰 live net，锁外安全）。 */
+int node_cache_export_frozen_edges_snap(NodeCache* nc, int node_id,
+                                        char* const* concept_by_id, int concept_count,
+                                        FILE* fp);
 
 /**
  * 查询节点是否已冷却
