@@ -2464,7 +2464,12 @@ CausalSearchResult* causal_associative_search(MasterTopology* master,
     char* tokens[100];
     int token_count = utf8_tokenize(input_text, tokens, 100);
     if (token_count <= 0) {
-        causal_graph_destroy(graph);
+        /* v0.5.7: graph 是共享缓存 g_cg_cache——不能在这里 destroy！
+         * 原代码 causal_graph_destroy(graph) destroy 共享缓存后未置 NULL
+         * （且锁已释放、锁外 destroy），下次调用要么在指纹容差内直接
+         * 使用悬垂指针（UAF），要么指纹超差时对已释放图二次 destroy
+         * （double-free → free(): invalid size / SIGSEGV）。缓存图统一
+         * 由指纹变化分支（destroy 后置 NULL）销毁重建。 */
         return NULL;
     }
 

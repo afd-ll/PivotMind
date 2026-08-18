@@ -398,11 +398,24 @@ void* object_pool_acquire(ObjectPool* pool) {
         }
     }
 
-    pool->total_capacity = new_capacity;
-    pool->free_count = new_capacity - pool->total_capacity;
+    /* 修复(08-18): 原代码 free_count = new_capacity - total_capacity 恒为 0，
+     * 再取 free_list[--free_count] = free_list[-1] 越界读返回垃圾指针——
+     * infer 建图边数超过池容量(128)时 acquire 返回悬垂地址，调用方写入
+     * 即 SIGSEGV（"薛定谔的猫"类因果查询偶发崩溃的真正根因）。 */
+    int old_capacity = pool->total_capacity;
+    int allocated = 0;
+    for (int i = old_capacity; i < new_capacity; i++) {
+        pool->free_list[i] = malloc(pool->object_size);
+        if (pool->free_list[i] == NULL) break;
+        allocated++;
+    }
+    pool->total_capacity = old_capacity + allocated;
+    pool->free_count = allocated;
     pool->used_count++;
 
-    // 取最后一个
+    if (pool->free_count <= 0) return NULL;
+
+    // 取最后一个（新分配对象）
     return pool->free_list[--pool->free_count];
 }
 
