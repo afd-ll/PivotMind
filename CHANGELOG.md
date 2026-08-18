@@ -1,5 +1,29 @@
 # Changelog
 
+## v0.5.22 — 2026-08-18
+
+### Security
+- **网关全端点鉴权**：`X-Pivot-Token` 覆盖除 /health、/healthz 外所有端点（/chat /learn /feedback /qa /debug /force_templates /train/* 等）；默认绑定 127.0.0.1（`PIVOTMIND_BIND_ADDR=0.0.0.0` 可覆盖），局域网直接访问面关闭。
+- **qa_crawler 注入面清除**：`system()` 全清零 → `fork+execvp`（argv 直传杜绝 shell 注入）+ 父进程超时 SIGKILL 保护；URL 白名单默认拒绝 + 协议/域名/路径三级校验（封堵子串伪造）。
+
+### Fixed
+- **SIGSEGV 真根因修复**：`object_pool_acquire` 扩容分支 `free_count` 恒 0 → `free_list[-1]` 越界读返回垃圾指针——infer 建图边数超过池容量时崩溃（"薛定谔的猫"类因果查询偶发 SIGSEGV；GPT 审查/pro 复审曾误判为缓存悬垂）。压测 6/6 因果查询零崩溃。
+- **causal_reasoning 缓存悬垂**：`causal_associative_search` early-return 路径 destroy 共享缓存 `g_cg_cache` 后未置 NULL（且锁外 destroy）→ 改为不销毁，统一由指纹变化分支管理。
+- **UTF-8 标点比较**：gateway CJK 多字节字符常量 vs 单字节 char 恒 false → strncmp UTF-8 序列比较，汉字标点真正计入统计。
+- **corpus_train fread 缓冲未终止**：按实际读取数定 NUL 位置。
+
+### Changed
+- **Makefile 并行度**：删 `MAKEFLAGS += -j$(nproc)`（3.8GB 板全核编译 OOM）→ `JOBS ?= 2`，命令行 -j 优先。
+- **_ar_find_pair 查找优化**：PairEntry 固化键哈希 + 每槽 2×strcmp → 1 次 int 短路 + rehash 免 snprintf 重哈希（哈希同值性 10 万对验证，语义零漂移）。澄清：查找本就是开放定址哈希，O(n²) 真根因（三字扩展双层迭代）已于 3878e84 修复。
+
+### Quality
+- **test_tensor 13/13**：3 处断言修复（reshape 3×5→{1,15}、matmul size 6→4、NULL 输入测试传参错误）。
+- **全仓编译警告清零**：20 条 -Wall -Wextra 全消（未用变量/未用参数/符号比较/多字节字符常量等）。
+
+详见 [changelogs/066-security-hardening-crash-fix.md](changelogs/066-security-hardening-crash-fix.md)
+
+---
+
 ## v0.5.21 — 2026-08-15
 
 ### Security
