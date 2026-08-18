@@ -7,7 +7,7 @@
  *
  * 处理流程:
  *   1. 加载已有状态
- *   2. 遍历 ~/本地书库/*.txt — 相邻字符共现建边（语序学习）
+ *   2. 遍历 ~/本地书库 下全部 .txt — 相邻字符共现建边（语序学习）
  *   3. 遍历 data/hermes_knowledge_base.json — QA 共现建边（对话学习）
  *   4. 保存 v3 状态文件
  *
@@ -92,6 +92,7 @@ static void add_or_strengthen(HuarongTopologyNet* net, ReasoningNode* from, Reas
 // ==================== 处理单本书 ====================
 static int process_book_file(MasterTopology* master, SubTopology* vocab_sub,
                              const char* filepath, const char* book_name) {
+    (void)master;  /* 建边仅依赖 vocab_sub，master 保留作签名一致 */
     FILE* f = fopen(filepath, "rb");
     if (!f) { printf("  ⚠ 无法打开: %s\n", filepath); return 0; }
 
@@ -245,8 +246,8 @@ static int read_qa_json(const char* path, char*** out_q, char*** out_a, int max)
     fseek(f, 0, SEEK_SET);
     char* data = (char*)malloc(size + 1);
     if (!data) { fclose(f); return 0; }
-    fread(data, 1, size, f);
-    data[size] = '\0';
+    size_t nread = fread(data, 1, (size_t)size, f);
+    data[nread] = '\0';
     fclose(f);
 
     char** questions = (char**)calloc(max, sizeof(char*));

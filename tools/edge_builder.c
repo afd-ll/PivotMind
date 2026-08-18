@@ -12,7 +12,7 @@
 #define HASH_SIZE 32768
 
 /* 简易哈希表: concept → node_id */
-typedef struct { char* key; int val; struct hash_entry* next; } hash_entry;
+typedef struct hash_entry { char* key; int val; struct hash_entry* next; } hash_entry;
 static hash_entry* g_hash[HASH_SIZE];
 
 static unsigned hash_str(const char* s) {
@@ -81,8 +81,8 @@ int main(int argc, char* argv[]) {
         if (tsz > 0 && tsz < 10 * 1024 * 1024) {
             text = malloc(tsz + 1);
             if (text) {
-                fread(text, 1, tsz, f);
-                text[tsz] = '\0';
+                size_t got = fread(text, 1, (size_t)tsz, f);
+                text[got] = '\0';
             }
         }
         fclose(f);

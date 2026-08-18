@@ -433,6 +433,7 @@ int node_cache_export_frozen_edges(NodeCache* nc, MasterTopology* master,
      * 调用方 master_save_state 靠 <0 识别"文件流缺失"并补写 conn_count=0。
      * 此前失败返回 0 与"成功但 0 条边"无法区分→存盘文件流错位→
      * 加载只剩 1 节点（实测 216M 状态读完只剩"我"） */
+    (void)master;  /* 冻结边数据直接读 node_cache 文件流，master 仅作签名兼容保留 */
     if (!nc || !node || !node->is_cooled || !fp) return -1;
     if (!bitmap_test(nc->bitmap, node->node_id)) return -1;
 

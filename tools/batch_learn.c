@@ -210,7 +210,7 @@ static void collect_topo_health(MasterTopology* master,
         if (!sub || !sub->net) continue;
 
         // 保护读取连接数组不被并发写线程（boost_connection_weighted 等）损坏
-        pthread_mutex_lock(&sub->net->mutex);
+        pthread_rwlock_wrlock(&sub->net->mutex);  /* net->mutex 是读写锁 */
 
         const char* name = sub->name ? sub->name : "未知";
         int te = 0;
@@ -243,7 +243,7 @@ static void collect_topo_health(MasterTopology* master,
         if (topo_names && t_count < 20) topo_names[t_count] = name;
         if (topo_edges) topo_edges[t_count] = te;
         t_count++;
-        pthread_mutex_unlock(&sub->net->mutex);
+        pthread_rwlock_unlock(&sub->net->mutex);
     }
 
     if (topo_count) *topo_count = t_count;

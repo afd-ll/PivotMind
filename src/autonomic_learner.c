@@ -520,17 +520,13 @@ static void boost_connection_weighted(SubTopology* topo, ReasoningNode* a, Reaso
  * 里，对话少/走 PFE 路径时从不触发 → 领域拓扑永远 0 节点） */
 void autonomic_seed_topologies(MasterTopology* master) {
     if (!master) return;
-    SubTopology* vocab = NULL, *semantic = NULL, *concept_t = NULL;
-    SubTopology* emotion = NULL, *syntax = NULL, *context = NULL;
+    SubTopology* vocab = NULL, *syntax = NULL, *context = NULL;
     SubTopology* domain = NULL, *pragma = NULL, *culture = NULL;
     for (int t = 0; t < master->sub_topo_count; t++) {
         SubTopology* sub = master->sub_topologies[t];
         if (!sub) continue;
         switch (sub->type) {
             case TOPO_VOCABULARY: vocab = sub; break;
-            case TOPO_SEMANTIC:   semantic = sub; break;
-            case TOPO_CONCEPT:    concept_t = sub; break;
-            case TOPO_EMOTION:    emotion = sub; break;
             case TOPO_SYNTAX:     syntax = sub; break;
             case TOPO_CONTEXT:    context = sub; break;
             case TOPO_DOMAIN:     domain = sub; break;

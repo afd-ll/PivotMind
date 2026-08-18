@@ -170,6 +170,8 @@ typedef struct {
     int is_speech:1;        /* 言说动词: 说/问/告诉/叫 */
 } VerbValency;
 
+/* v0.5.16 起不再查配价表（TWN 红线清洗）——保留作参考数据 */
+__attribute__((unused))
 static const VerbValency CHINESE_VERB_VALENCY[] = {
     /* 常用及物动词 */
     {"吃",    1,0,1,0,0,0,0,0},  {"喝",    1,0,1,0,0,0,0,0},
@@ -215,6 +217,8 @@ static const VerbValency CHINESE_VERB_VALENCY[] = {
  *   is_you       →  have 动词 (have/has/had)
  *   is_descriptive → feel/become/seem (系动词 + Adj)
  */
+/* v0.5.16 起不再查配价表——保留作参考数据 */
+__attribute__((unused))
 static const VerbValency ENGLISH_VERB_VALENCY[] = {
     /* Be 动词 (copula) */
     {"be",   0,0,0,1,0,0,0,0},  {"am",    0,0,0,1,0,0,0,0},
@@ -360,6 +364,7 @@ static VerbValency diffusion_infer_valency(const char* verb,
     return vv;
 }
 
+__attribute__((unused))
 static int diffusion_assemble_grammar(
     const char** word_buf, POSTag* word_pos, int word_count,
     const char** output_words, int max_output,
@@ -663,6 +668,7 @@ typedef struct {
     float  weight;
 } DiffSentencePattern;
 
+__attribute__((unused))
 static int diffusion_assemble_scaffold_fallback(
     const char** word_buf, POSTag* word_pos, int word_count,
     const char** output_words, int max_output, int is_english) {
