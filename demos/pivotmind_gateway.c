@@ -18,6 +18,7 @@
  *   pivotmind_gateway [port] [workdir]
  *   pivotmind_gateway           # 默认 8080, 工作目录 .
  *   pivotmind_gateway 9090 /opt/pivotmind
+ *   PIVOTMIND_BIND_ADDR=0.0.0.0 pivotmind_gateway  # 监听全网卡（默认仅 127.0.0.1）
  */
 
 #include <stdio.h>
@@ -941,13 +942,19 @@ static void handle_chat(GatewaySystem* gw, int fd, const char* body) {
      * 或纯标点/单字重复 → 替换为礼貌默认。扩散组装在无实义词时
      * 会选 ADJ 组合当主语，这是"很大。"泛滥的根源。 */
     if (response) {
-        int len = (int)strlen(response);
         int cjk_cnt = 0, punct_cnt = 0;
         for (const char* p = response; *p; p++) {
             unsigned char c = (unsigned char)*p;
-            if (c >= 0x80) cjk_cnt++;
-            else if (c == ' ' || c == '.' || c == '。' || c == '、' ||
-                     c == ',' || c == '，' || c == '!' || c == '！')
+            if (c >= 0x80) {
+                /* CJK 标点按 UTF-8 序列识别（。、，！）；不能用多字节字符常量
+                 * 与单字节 char 比较（恒为 false）。cjk_cnt 仍逐字节计数，
+                 * 除以 3 得汉字数（含标点容差），与旧逻辑一致。 */
+                if (strncmp(p, "。", 3) == 0 || strncmp(p, "、", 3) == 0 ||
+                    strncmp(p, "，", 3) == 0 || strncmp(p, "！", 3) == 0)
+                    punct_cnt++;
+                cjk_cnt++;
+            }
+            else if (c == ' ' || c == '.' || c == ',')
                 punct_cnt++;
         }
         int wordish = (cjk_cnt / 3);  /* 汉字数（含标点容差，如"很大。"=3） */
@@ -1769,10 +1776,12 @@ static void handle_connection(GatewaySystem* gw, int client_fd) {
         return;
     }
 
-    /* C1: 媒体端点鉴权 — /media/ 下所有端点必须携带有效 X-Pivot-Token。
-     * 只锁媒体端点（RCE 入口），/learn /chat 等内部端点保持兼容
-     * （喂料脚本不打断）。token 为空则拒绝（安全默认）。 */
-    if (strncmp(req.path, "/media/", 7) == 0 &&
+    /* 安全加固: 鉴权扩展到所有非健康检查端点 — 除 /health(/healthz) 外，
+     * 所有端点必须携带有效 X-Pivot-Token（与现有 /media 端点同一机制，兼容现有调用方）。
+     * 只保留 /health 匿名，供负载均衡/监控/启动探测。token 为空则拒绝（安全默认）。 */
+    int is_health = (strcmp(req.path, "/health") == 0 ||
+                     strcmp(req.path, "/healthz") == 0);
+    if (!is_health &&
         (gw->api_token[0] == '\0' || strcmp(req.token, gw->api_token) != 0)) {
         http_json(client_fd, 401, "{\"error\":\"unauthorized: missing or invalid X-Pivot-Token\"}");
         close(client_fd);
@@ -2022,7 +2031,7 @@ int main(int argc, char* argv[]) {
     /* C1: 生成 API token 并打印到日志（媒体端点鉴权） */
     gw_generate_token(gw.api_token, sizeof(gw.api_token));
     printf("[gateway] API token: %s\n", gw.api_token);
-    printf("[gateway] 媒体端点 /media/* 需要请求头 X-Pivot-Token: <上面token> 才能访问\n");
+    printf("[gateway] 除 /health 外所有端点需要请求头 X-Pivot-Token: <上面token> 才能访问\n");
 
     /* load runtime config (optional; defaults if file missing) */
     gw.config = config_load(NULL);
@@ -2047,9 +2056,24 @@ int main(int argc, char* argv[]) {
     int opt = 1;
     setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
+    /* 安全加固: 默认仅绑定 127.0.0.1（仅本机可访问）。
+     * 需要局域网/远程访问时用环境变量 PIVOTMIND_BIND_ADDR 覆盖，例如:
+     *   PIVOTMIND_BIND_ADDR=0.0.0.0 pivotmind_gateway
+     * 注意: 绑 127.0.0.1 后局域网/Tailscale 直接访问会断，本机调用不受影响。 */
+    in_addr_t bind_addr = inet_addr("127.0.0.1");
+    const char* bind_env = getenv("PIVOTMIND_BIND_ADDR");
+    if (bind_env && bind_env[0] != '\0') {
+        in_addr_t env_addr = inet_addr(bind_env);
+        if (env_addr == (in_addr_t)INADDR_NONE) {
+            fprintf(stderr, "[gateway] 警告: PIVOTMIND_BIND_ADDR=\"%s\" 无效，回退绑定 127.0.0.1\n", bind_env);
+        } else {
+            bind_addr = env_addr;
+        }
+    }
+
     struct sockaddr_in addr = {
         .sin_family = AF_INET,
-        .sin_addr.s_addr = INADDR_ANY,
+        .sin_addr.s_addr = bind_addr,
         .sin_port = htons(port)
     };
 
@@ -2068,7 +2092,7 @@ int main(int argc, char* argv[]) {
     { FILE* pf = fopen("/tmp/pivotmind.port", "w"); if (pf) { fprintf(pf, "%d", port); fclose(pf); } }
     { FILE* pf = fopen("/tmp/pivotmind.port", "w"); if (pf) { fprintf(pf, "%d", port); fclose(pf); } }
     { FILE* pf = fopen("/tmp/pivotmind.port", "w"); if (pf) { fprintf(pf, "%d", port); fclose(pf); } }
-    printf("[gateway] 端口 %d 已绑定 (引擎初始化中...)\n", port);
+    printf("[gateway] 端口 %d 已绑定 %s (引擎初始化中...)\n", port, inet_ntoa(addr.sin_addr));
 
     // 后台线程初始化引擎 (避免阻塞主循环，加载期间仍可响应 /health)
     pthread_t init_thread;

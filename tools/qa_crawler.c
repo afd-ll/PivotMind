@@ -12,6 +12,11 @@
 #include <time.h>
 #include <unistd.h>
 #include <ctype.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <signal.h>
+#include <sys/types.h>
+#include <sys/wait.h>
 
 #include "multi_topology.h"
 #include "perception.h"
@@ -55,22 +60,62 @@ static void url_encode(const char* src, char* dst, int dst_sz) {
     dst[di] = '\0';
 }
 
-/* curl 抓取 (改用 system() + 临时文件，比 fork/exec 更可靠) */
+/* fork+execvp 执行外部程序: 不经 shell, argv 数组直传, 杜绝命令注入。
+ * 子进程 stdin/stdout/stderr 重定向到 /dev/null (同原 shell 命令的
+ * </dev/null 2>/dev/null); 父进程超时保护, 超时 SIGKILL 子进程。
+ * 返回子进程退出码 (0=成功), fork/exec 失败或超时返回 -1 */
+static int run_exec(char* const argv[], int timeout_s) {
+    pid_t pid = fork();
+    if (pid < 0) return -1;
+    if (pid == 0) {
+        int devnull = open("/dev/null", O_RDWR);
+        if (devnull >= 0) {
+            dup2(devnull, STDIN_FILENO);
+            dup2(devnull, STDOUT_FILENO);
+            dup2(devnull, STDERR_FILENO);
+            if (devnull > 2) close(devnull);
+        }
+        execvp(argv[0], argv);
+        _exit(127); /* exec 失败 */
+    }
+    int status = 0;
+    time_t t0 = time(NULL);
+    for (;;) {
+        pid_t r = waitpid(pid, &status, WNOHANG);
+        if (r == pid) {
+            if (WIFEXITED(status)) return WEXITSTATUS(status);
+            return -1; /* 被信号终止 */
+        }
+        if (r < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        if (time(NULL) - t0 >= timeout_s) { /* 父进程超时保护 */
+            kill(pid, SIGKILL);
+            waitpid(pid, &status, 0);
+            return -1;
+        }
+        usleep(100000);
+    }
+}
+
+/* curl 抓取: fork+execvp 直接 exec curl, URL 作为单个 argv 参数传递,
+ * 不经过 shell, 即使 URL 含 shell 元字符也无法注入 */
 static char* curl_fetch(const char* url, int max_wait_s) {
     char tmp[256];
     snprintf(tmp, sizeof(tmp), "/tmp/qa_crawl_%d.html", (int)getpid());
-    /* 先用 rm 确保文件不存在（防止旧文件干扰） */
+    /* 先确保文件不存在（防止旧文件干扰） */
     unlink(tmp);
 
-    char cmd[2048];
     int timeout = max_wait_s > 0 ? max_wait_s : 8;
-    snprintf(cmd, sizeof(cmd),
-             "curl -sL --max-time %d --connect-timeout 5 "
-             "-A 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36' "
-             "-o '%s' '%s' </dev/null 2>/dev/null",
-             timeout, tmp, url);
-
-    int rc = system(cmd);
+    char tbuf[32];
+    snprintf(tbuf, sizeof(tbuf), "%d", timeout);
+    char* argv[] = {
+        "curl", "-sL", "--max-time", tbuf, "--connect-timeout", "5",
+        "-A", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
+        "-o", tmp, (char*)url, NULL
+    };
+    int rc = run_exec(argv, timeout + 10);
     if (rc != 0) return NULL;
 
     FILE* f = fopen(tmp, "rb");
@@ -173,8 +218,45 @@ static char* html_to_text(const char* html, int max_sz) {
     return out;
 }
 
-/* 已知返回静态 HTML 的站点（白名单，避免知乎等 JS 站浪费超时等待） */
+/* URL 协议校验: 仅允许 http/https, 且不含空白/控制字符 */
+static int url_scheme_ok(const char* url) {
+    if (!url) return 0;
+    if (strncmp(url, "https://", 8) != 0 && strncmp(url, "http://", 7) != 0)
+        return 0;
+    for (const unsigned char* p = (const unsigned char*)url; *p; p++)
+        if (*p <= 0x20 || *p == 0x7f) return 0; /* 空白/控制字符 */
+    return 1;
+}
+
+/* 白名单匹配: 纯域名 token 要求 host 与之相等或为其子域
+ * (防止 "evil.com/?x=runoob.com" 之类把 token 塞进路径/查询绕过);
+ * 含路径的 token (如 cloud.tencent.com/developer) 要求 URL 的
+ * authority 部分以 "token" 后接 / ? # 或结尾 */
+static int url_matches_token(const char* url, const char* token) {
+    const char* p = strstr(url, "://");
+    p = p ? p + 3 : url;
+    size_t tl = strlen(token);
+    if (strchr(token, '/')) {
+        if (strncmp(p, token, tl) != 0) return 0;
+        char nxt = p[tl];
+        return nxt == '\0' || nxt == '/' || nxt == '?' || nxt == '#';
+    }
+    char host[256];
+    int i = 0;
+    while (*p && *p != '/' && *p != '?' && *p != '#' && *p != ':'
+           && i < (int)sizeof(host) - 1)
+        host[i++] = *p++;
+    host[i] = '\0';
+    size_t hl = strlen(host), tlen = strlen(token);
+    if (hl == tlen) return strcmp(host, token) == 0;
+    return hl > tlen && host[hl - tlen - 1] == '.'
+        && strcmp(host + hl - tlen, token) == 0;
+}
+
+/* URL 白名单: 已知返回静态 HTML 的站点才允许抓取
+ * (避免知乎等 JS 站浪费超时等待); 未知域/未知协议默认拒绝 */
 static int url_is_ok(const char* url) {
+    if (!url_scheme_ok(url)) return 0;
     const char* whitelist[] = {
         "runoob.com", "csdn.net", "cnblogs.com", "blog.csdn.net",
         "w3cschool.cn", "c.biancheng.net", "liaoxuefeng.com",
@@ -182,7 +264,7 @@ static int url_is_ok(const char* url) {
         "developer.aliyun.com", "cloud.tencent.com/developer",
         NULL
     };
-    /* 排除纯 JS 站点和明确反爬的 */
+    /* 排除纯 JS 站点和明确反爬的 (黑名单优先, 纵深防御) */
     const char* blacklist[] = {
         "zhihu.com/question", "www.zhihu.com/question",
         "bilibili.com", "youtube.com", "douyin.com",
@@ -191,9 +273,9 @@ static int url_is_ok(const char* url) {
     for (int i = 0; blacklist[i]; i++)
         if (strstr(url, blacklist[i])) return 0;
     for (int i = 0; whitelist[i]; i++)
-        if (strstr(url, whitelist[i])) return 1;
-    /* 不在黑名单的也允许（未知站点默认允许，超时保护即可） */
-    return 1;
+        if (url_matches_token(url, whitelist[i])) return 1;
+    /* 未知域/未知协议一律拒绝 */
+    return 0;
 }
 static int url_seen(char** seen, int sc, const char* url) {
     for (int i = 0; i < sc; i++)
@@ -232,8 +314,11 @@ int main(int argc, char* argv[]) {
     printf("    %d queries x %d rounds, delay %ds\n", qc, rounds, delay_s);
     printf("    Article fetch: %s\n\n", fetch_articles ? "ON" : "OFF (RSS snippets only)");
 
-    /* 确保语料目录存在 */
-    system("mkdir -p /tmp/pm_corpus 2>/dev/null");
+    /* 确保语料目录存在 (fork+execvp 直接 exec mkdir, 不经 shell) */
+    {
+        char* mk_argv[] = { "mkdir", "-p", "/tmp/pm_corpus", NULL };
+        run_exec(mk_argv, 10);
+    }
 
     MasterTopology* topo = master_topology_create(16);
     master_add_sub_topology(topo, TOPO_VOCABULARY,"词汇拓扑",50000,10);
@@ -266,7 +351,9 @@ int main(int argc, char* argv[]) {
             const char* q = qs[qi];
             printf("[%ld] '%s'\n", qi + 1L, q);
 
-            /* Bing RSS 搜索 */
+            /* Bing RSS 搜索。此 URL 受信任: host/协议为硬编码常量,
+             * query 经 url_encode 百分号编码 (仅剩 [A-Za-z0-9-_.~] 与 %XX),
+             * 无注入面, 不需过 url_is_ok 白名单 */
             char encoded[512];
             url_encode(q, encoded, sizeof(encoded));
             char rss_url[1024];
