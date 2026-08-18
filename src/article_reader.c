@@ -76,6 +76,8 @@ typedef struct {
     int    last_seen;     // 最近出现记忆 tick
     int    tier;          // 短期/长期
     int    used;
+    unsigned int h;       // 08-18: 键哈希值（a|b 复合 DJB2），插入时固化——
+                          // 探测短路 + 扩容/清理 rehash 复用，免重建复合串
 } PairEntry;
 
 /** 词哈希表条目（声明在主结构之前） */
@@ -165,6 +167,17 @@ static inline unsigned int _ar_hash(const char* s) {
     return h;
 }
 
+/** 字符对键哈希（08-18）— 与旧 snprintf("%s|%s",a,b) 复合串的 DJB2 完全同值：
+ * 逐字节哈希 a → '|' 分隔符 → b，等价于 _ar_hash("a|b")，但免掉每次查找的
+ * snprintf 格式化 + 复合串重扫（a/b 均为单字符，键总长 ≤ 8 字节）。 */
+static inline unsigned int _ar_pair_hash(const char* a, const char* b) {
+    unsigned int h = 5381;
+    while (*a) h = ((h << 5) + h) + (unsigned char)*a++;
+    h = ((h << 5) + h) + (unsigned char)'|';
+    while (*b) h = ((h << 5) + h) + (unsigned char)*b++;
+    return h;
+}
+
 /** v0.5.9: 记忆触摸——出现即巩固（Hebbian 渐近），过阈晋升长期 */
 static inline void _ar_mem_touch(float* consolidated, int* tier,
                                  int* last_seen, int tick) {
@@ -214,9 +227,8 @@ static int _ar_expand_pair_hash(ArticleReader* ar) {
 
     for (int i = 0; i < ar->pair_hash_size; i++) {
         if (!ar->pair_table[i].used) continue;
-        char key[16];
-        snprintf(key, sizeof(key), "%s|%s", ar->pair_table[i].a, ar->pair_table[i].b);
-        unsigned int h = _ar_hash(key) & new_mask;
+        /* 08-18: 复用条目内固化的键哈希（与插入时同值），免重建复合串 + 重哈希 */
+        unsigned int h = ar->pair_table[i].h & new_mask;
         for (int p = 0; p < new_size; p++) {
             int idx = (h + p) & new_mask;
             if (!new_tab[idx].used) { new_tab[idx] = ar->pair_table[i]; break; }
@@ -246,9 +258,8 @@ static void _ar_cleanup_stale_pairs(ArticleReader* ar) {
             continue;
         }
         /* 保留（长期对 或 近期活跃的短期对）：rehash 到新表 */
-        char key[16];
-        snprintf(key, sizeof(key), "%s|%s", pe->a, pe->b);
-        unsigned int h = _ar_hash(key) & mask;
+        /* 08-18: 复用固化键哈希，免重建复合串 + 重哈希 */
+        unsigned int h = pe->h & mask;
         for (int p = 0; p < ar->pair_hash_size; p++) {
             int idx = (h + p) & mask;
             if (!new_tab[idx].used) { new_tab[idx] = *pe; kept++; break; }
@@ -264,7 +275,11 @@ static void _ar_cleanup_stale_pairs(ArticleReader* ar) {
     }
 }
 
-/** 在 pair_table 中查找或插入字符对（v0.5.9 记忆化） */
+/** 在 pair_table 中查找或插入字符对（v0.5.9 记忆化）
+ * 08-18: 开放定址哈希 + 线性探测不变（75% 扩容 / 85% 清理兜底均摊 O(1)），
+ * 但每槽比较从 2×strcmp 短路为 1 次 int 哈希比较——仅哈希命中才 strcmp 精确
+ * 校验（UTF-8 单字符对碰撞率极低）。键哈希直接对 a、'|'、b 逐字节算，免
+ * snprintf 复合串。 */
 static PairEntry* _ar_find_pair(ArticleReader* ar, const char* a, const char* b) {
     /* 负载因子检查：超过75%触发扩容 */
     if ((float)ar->pair_count / ar->pair_hash_size > AR_PAIR_LOAD_MAX)
@@ -285,31 +300,33 @@ static PairEntry* _ar_find_pair(ArticleReader* ar, const char* a, const char* b)
         ar->pair_clean_tick = ar->mem_tick;
     }
 
-    char key[16];
-    snprintf(key, sizeof(key), "%s|%s", a, b);
     int mask = ar->pair_hash_size - 1;
-    unsigned int h = _ar_hash(key) & mask;
+    unsigned int h = _ar_pair_hash(a, b) & mask;
     for (int i = 0; i < ar->pair_hash_size; i++) {
         int idx = (h + i) & mask;
-        if (!ar->pair_table[idx].used) {
-            strncpy(ar->pair_table[idx].a, a, sizeof(ar->pair_table[idx].a) - 1);
-            ar->pair_table[idx].a[sizeof(ar->pair_table[idx].a) - 1] = 0;
-            strncpy(ar->pair_table[idx].b, b, sizeof(ar->pair_table[idx].b) - 1);
-            ar->pair_table[idx].b[sizeof(ar->pair_table[idx].b) - 1] = 0;
-            ar->pair_table[idx].co_count = 0;
-            ar->pair_table[idx].consolidated = AR_MEM_INIT_CONSOLIDATED;
-            ar->pair_table[idx].last_seen = ar->mem_tick;
-            ar->pair_table[idx].tier = AR_MEM_TIER_SHORT;
-            ar->pair_table[idx].used = 1;
+        PairEntry* pe = &ar->pair_table[idx];
+        if (!pe->used) {
+            strncpy(pe->a, a, sizeof(pe->a) - 1);
+            pe->a[sizeof(pe->a) - 1] = 0;
+            strncpy(pe->b, b, sizeof(pe->b) - 1);
+            pe->b[sizeof(pe->b) - 1] = 0;
+            pe->co_count = 0;
+            pe->consolidated = AR_MEM_INIT_CONSOLIDATED;
+            pe->last_seen = ar->mem_tick;
+            pe->tier = AR_MEM_TIER_SHORT;
+            pe->used = 1;
+            pe->h = h;  /* 08-18: 固化键哈希（扩容/清理 rehash 直接复用） */
             ar->pair_count++;
-            return &ar->pair_table[idx];
+            return pe;
         }
-        if (strcmp(ar->pair_table[idx].a, a) == 0 &&
-            strcmp(ar->pair_table[idx].b, b) == 0) {
-            _ar_mem_touch(&ar->pair_table[idx].consolidated,
-                          &ar->pair_table[idx].tier,
-                          &ar->pair_table[idx].last_seen, ar->mem_tick);
-            return &ar->pair_table[idx];
+        /* 08-18: 哈希短路——先比 int，命中才做精确 strcmp */
+        if (pe->h == h &&
+            strcmp(pe->a, a) == 0 &&
+            strcmp(pe->b, b) == 0) {
+            _ar_mem_touch(&pe->consolidated,
+                          &pe->tier,
+                          &pe->last_seen, ar->mem_tick);
+            return pe;
         }
     }
     return NULL;
