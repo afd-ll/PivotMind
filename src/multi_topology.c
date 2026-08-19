@@ -614,6 +614,31 @@ void master_record_cross_hit(MasterTopology* master,
     // 表满 — 静默丢弃（当前表足够大，一般不会满）
 }
 
+/* [v8] 从状态文件恢复一条 cross_hit 记录：按哈希 + 线性探测找空槽写入。
+ * 加载时表已清零（无既有键冲突），与 master_record_cross_hit 同一探测序列；
+ * 重哈希后槽位可能与保存时不同，不影响查找正确性（开放寻址按键探测）。 */
+static void cross_hit_restore_record(MasterTopology* master,
+                                     const CrossTopoHitRecord* src) {
+    if (!master || !src) return;
+    unsigned int idx = cross_hit_hash(src->from_topo, src->from_node,
+                                      src->to_topo, src->to_node);
+    unsigned int start = idx;
+    do {
+        CrossTopoHitRecord* rec = &master->cross_hit_records[idx];
+        if (!rec->is_used) {
+            *rec = *src;
+            rec->is_used = 1;
+            return;
+        }
+        if (rec->from_topo == src->from_topo && rec->from_node == src->from_node &&
+            rec->to_topo == src->to_topo && rec->to_node == src->to_node) {
+            return;  /* 已存在（表已清零时不会发生，防御） */
+        }
+        idx = (idx + 1) & (CROSS_HIT_TABLE_SIZE - 1);
+    } while (idx != start);
+    /* 表满 — 丢弃（与 master_record_cross_hit 一致） */
+}
+
 int master_process_cross_hits(MasterTopology* master, int threshold, int round_timeout) {
     if (!master || threshold <= 0) return 0;
 
@@ -1366,15 +1391,19 @@ char* master_generate_response(MasterTopology* master,
                 // 标记起点已访问
                 global_visited[start_id / 8] |= (unsigned char)(1 << (start_id % 8));
                 
-                // 走边贪心，从起点出发最多走20步
+                // 走边贪心（top-K 候选组缝合），从起点出发最多走20步
+                // 每步输出最多 PM_WALK_TOPK_DEFAULT 个候选：组内最优延续链，
+                // 其余候选（含被跨拓扑预加热的次优词，如 丈八蛇矛）作为缝合词一并输出
                 int path_nodes[32];
                 float path_scores[32];
-                int path_len = topology_walk_greedy(
+                int path_len = topology_walk_greedy_topk(
                     vocab_sub, start_id,
                     path_nodes, path_scores,
-                    20, global_visited, 1.0f, master, NULL, NULL);
+                    20, global_visited, 1.0f, master, NULL, NULL,
+                    PM_WALK_TOPK_DEFAULT);
                 
                 // 路径转输出：模板 + POS语法关系 三级回退
+                // （top-K 组内候选在路径上连续出现，逐个消费；词间仍走三级回退）
                 {
                     // 先输出起点概念（路径[0]）
                     if (path_len > 0) {
@@ -1600,15 +1629,24 @@ int master_find_template_for_pair_nolock(MasterTopology* master,
     if (!tpl || !tpl->net) return -1;
 
     /* 获取词汇节点 (用于涌现词类 + 余弦兜底) */
+    /* v0.5.23 R6 方案A: 解引用 net->nodes[] 持 net 读锁（nodes[] 唯一权威
+     * 锁）。vocab 窄临界区取 rna/rnb（节点本体由调用方 master 锁保护，
+     * realloc 只搬指针数组）；tpl 遍历（一/二/三阶段三处循环）整体持读锁。
+     * 调用方持 master 读/写，锁序 master→net；无重入（master_get_node_
+     * pos_tag 不碰 tpl->net）。 */
     SubTopology* vocab = master_get_sub_topology_by_type(master, TOPO_VOCABULARY);
     ReasoningNode* rna = NULL;
     ReasoningNode* rnb = NULL;
     if (vocab && vocab->net) {
+        pthread_rwlock_rdlock(&vocab->net->mutex);
         if (node_a >= 0 && node_a < vocab->net->node_count)
             rna = vocab->net->nodes[node_a];
         if (node_b >= 0 && node_b < vocab->net->node_count)
             rnb = vocab->net->nodes[node_b];
+        pthread_rwlock_unlock(&vocab->net->mutex);
     }
+
+    pthread_rwlock_rdlock(&tpl->net->mutex);
 
     int best_tpl = -1;
     float best_conf = 0.0f;
@@ -1685,6 +1723,7 @@ int master_find_template_for_pair_nolock(MasterTopology* master,
         }
     }
 
+    pthread_rwlock_unlock(&tpl->net->mutex);
     return best_tpl;
 }
 
@@ -1752,14 +1791,26 @@ const char* english_connector_map(int a, int b) {
     return " ";  /* 英文默认空格 */
 }
 
-int topology_walk_greedy(SubTopology* sub, int start_node_id,
-                         int* path_out, float* scores_out,
-                         int max_len, unsigned char* visited,
-                         float intent_weight,
-                         MasterTopology* master,
-                         const float* query_anchor,
-                         void* cc_ptr) {
+/**
+ * 贪心走边内部实现（top-K 候选组）
+ *
+ * top_k == 1：单链贪心，行为与旧 topology_walk_greedy 逐位一致
+ *   （含同分先到、并行边取最优、剪枝/语义场闸门、热度衰减、freq 记录）。
+ * top_k >  1：每步按综合分取前 top_k 个候选组成"候选组"，
+ *   组内最优作为链式延续（current），其余候选作为缝合词一并写入路径。
+ *   综合分 = 边三维 + 候选自身激活值 + 跨拓扑预加热投票 + 模板匹配分
+ *   （仅把"取唯一 best"改为"取有序 top-K"，公式逐项未动）。
+ */
+static int topology_walk_greedy_impl(SubTopology* sub, int start_node_id,
+                                     int* path_out, float* scores_out,
+                                     int max_len, unsigned char* visited,
+                                     float intent_weight,
+                                     MasterTopology* master,
+                                     const float* query_anchor,
+                                     void* cc_ptr, int top_k) {
     if (!sub || !sub->net || !path_out || max_len <= 0) return 0;
+    if (top_k < 1) top_k = 1;
+    if (top_k > PM_WALK_TOPK_MAX) top_k = PM_WALK_TOPK_MAX;
 
     HuarongTopologyNet* net = sub->net;
     int node_count = net->node_count;
@@ -1824,8 +1875,10 @@ int topology_walk_greedy(SubTopology* sub, int start_node_id,
         ReasoningNode* current = net->nodes[current_id];
         if (!current || current->edge_count <= 0) break;
 
-        int best_next_id = -1;
-        float best_score = -1.0f;
+        // top-K 候选组（综合分降序；K=1 时与旧 best 语义逐位一致）
+        int topk_count = 0;
+        int topk_tid[PM_WALK_TOPK_MAX];
+        float topk_score[PM_WALK_TOPK_MAX];
 
         // 动态剪枝阈值：平滑增长，避免过早扼杀长路径
         float prune_threshold;
@@ -2065,90 +2118,172 @@ int topology_walk_greedy(SubTopology* sub, int start_node_id,
                 score += scaffold_b;
             }
 
-            if (score > best_score) {
-                best_score = score;
-                best_next_id = tid;
+            // --- 综合分排序：插入 top-K 候选组 ---
+            // 同目标并行边：保留该目标的最优分（旧行为），且组内不出现重复节点
+            int dup = 0;
+            for (int d = 0; d < topk_count; d++) {
+                if (topk_tid[d] == tid) {
+                    dup = 1;
+                    if (score > topk_score[d]) {
+                        topk_score[d] = score;
+                        while (d > 0 && topk_score[d] > topk_score[d - 1]) {
+                            float ts = topk_score[d];
+                            topk_score[d] = topk_score[d - 1];
+                            topk_score[d - 1] = ts;
+                            int tt = topk_tid[d];
+                            topk_tid[d] = topk_tid[d - 1];
+                            topk_tid[d - 1] = tt;
+                            d--;
+                        }
+                    }
+                    break;
+                }
+            }
+            if (dup) continue;
+            // 严格 >：同分先到者优先（与旧单链 best 一致）
+            int pos = 0;
+            while (pos < topk_count && score <= topk_score[pos]) pos++;
+            if (pos < top_k) {
+                if (topk_count < top_k) topk_count++;
+                for (int sh = topk_count - 1; sh > pos; sh--) {
+                    topk_tid[sh] = topk_tid[sh - 1];
+                    topk_score[sh] = topk_score[sh - 1];
+                }
+                topk_tid[pos] = tid;
+                topk_score[pos] = score;
             }
         }
 
-        // 无合适的下一步或得分过低
-        if (best_next_id < 0 || best_score < prune_threshold) break;
-        /* 语义场休止：候选节点激活值 < 0.05 说明已走出输入语义范围 */
+        // 无合适的下一步或得分过低（组内最优低于剪枝阈值 → 整步放弃）
+        if (topk_count == 0 || topk_score[0] < prune_threshold) break;
+        /* 语义场休止：组内最优激活值 < 0.05 说明已走出输入语义范围 */
         {
-            ReasoningNode* bn = (best_next_id >= 0 && best_next_id < node_count)
-                ? net->nodes[best_next_id] : NULL;
+            ReasoningNode* bn = (topk_tid[0] >= 0 && topk_tid[0] < node_count)
+                ? net->nodes[topk_tid[0]] : NULL;
             if (bn && bn->activation < 0.05f) break;
         }
 
-        // 走一步
-        current_id = best_next_id;
+        // 组内过滤 + 数量钳制：降级安全（候选不足 K / 弱候选 / 缓冲区余量）
+        int emit_tid[PM_WALK_TOPK_MAX];
+        float emit_score[PM_WALK_TOPK_MAX];
+        int emit_count = 0;
+        for (int j = 0; j < topk_count && emit_count < top_k; j++) {
+            if (topk_score[j] < prune_threshold) break;      /* 降序：后面只会更差 */
+            ReasoningNode* rn = (topk_tid[j] >= 0 && topk_tid[j] < node_count)
+                ? net->nodes[topk_tid[j]] : NULL;
+            if (!rn) continue;
+            if (j > 0 && rn->activation < 0.05f) continue;   /* 缝合词语义场闸门 */
+            emit_tid[emit_count] = topk_tid[j];
+            emit_score[emit_count] = topk_score[j];
+            emit_count++;
+        }
+        int remain = max_len - path_len;                     /* 路径缓冲安全钳制 */
+        if (emit_count > remain) emit_count = remain;
+        if (emit_count <= 0) break;
 
-        /* 路径编码: 实时记录三元组 (prev, from, to) 到频率表 */
+        // 走一步：链式延续 = 组内最优；缝合输出 = 整组候选
+        current_id = topk_tid[0];
+
+        /* 路径编码: 实时记录三元组 (prev, from, to) 到频率表（组内候选各记一条） */
         if (master && master->freq_table && path_len >= 2) {
-            path_freq_table_record(master->freq_table, sub->topo_id,
-                                   path_out[path_len - 2],
-                                   path_out[path_len - 1],
-                                   best_next_id);
+            for (int j = 0; j < emit_count; j++) {
+                path_freq_table_record(master->freq_table, sub->topo_id,
+                                       path_out[path_len - 2],
+                                       path_out[path_len - 1],
+                                       emit_tid[j]);
+            }
         }
 
-        visited[current_id / 8] |= (unsigned char)(1 << (current_id % 8));
-        path_out[path_len] = current_id;
-        if (scores_out) scores_out[path_len] = best_score;
+        for (int j = 0; j < emit_count; j++) {
+            int nid = emit_tid[j];
+            visited[nid / 8] |= (unsigned char)(1 << (nid % 8));
+            path_out[path_len] = nid;
+            if (scores_out) scores_out[path_len] = emit_score[j];
+            path_len++;
 
-        // 更新 POS 追踪
-        if (cc && pos_trail_len < 64) {
-            ReasoningNode* sn = net->nodes[current_id];
-            const char* sl = sn ? sn->concept : NULL;
-            pos_trail[pos_trail_len] = (int)pos_tag_emergent(cc, sl);
-            pos_trail_len++;
+            // 更新 POS 追踪
+            if (cc && pos_trail_len < 64) {
+                ReasoningNode* sn = net->nodes[nid];
+                const char* sl = sn ? sn->concept : NULL;
+                pos_trail[pos_trail_len] = (int)pos_tag_emergent(cc, sl);
+                pos_trail_len++;
+            }
+
+            // 更新被选节点的热度（热度衰减在线更新）
+            ReasoningNode* stepped_node = net->nodes[nid];
+            if (stepped_node) {
+                stepped_node->selection_count++;
+                float decay;
+                switch (stepped_node->node_type) {
+                    case NODE_TYPE_FUNCTION_WORD: decay = 0.999f; break;
+                    case NODE_TYPE_PROPER_NOUN:  decay = 0.990f; break;
+                    default:                     decay = 0.995f; break;
+                }
+                /* 情绪调制探索率：高探索→衰减慢，更多未被选过的节点保持热度 */
+                if (master->cognitive_state_ptr) {
+                    float er = ((CognitiveState*)master->cognitive_state_ptr)->explore_rate;
+                    decay = decay + (1.0f - decay) * er * 0.5f;
+                }
+                // 增量更新：heat *= decay（比 pow() 快10倍）
+                stepped_node->heat *= decay;
+                // 软下限保护
+                if (stepped_node->heat < 0.05f) stepped_node->heat = 0.05f;
+            }
         }
 
-        // 更新被选节点的热度（热度衰减在线更新）
-        ReasoningNode* stepped_node = net->nodes[current_id];
-        if (stepped_node) {
-        stepped_node->selection_count++;
-        float decay;
-        switch (stepped_node->node_type) {
-            case NODE_TYPE_FUNCTION_WORD: decay = 0.999f; break;
-            case NODE_TYPE_PROPER_NOUN:  decay = 0.990f; break;
-            default:                     decay = 0.995f; break;
-        }
-        /* 情绪调制探索率：高探索→衰减慢，更多未被选过的节点保持热度 */
-        if (master->cognitive_state_ptr) {
-            float er = ((CognitiveState*)master->cognitive_state_ptr)->explore_rate;
-            decay = decay + (1.0f - decay) * er * 0.5f;
-        }
-        // 增量更新：heat *= decay（比 pow() 快10倍）
-            stepped_node->heat *= decay;
-            // 软下限保护
-            if (stepped_node->heat < 0.05f) stepped_node->heat = 0.05f;
-        }
-
-        // 更新语义上下文 + 增量维护均值
-        if (stepped_node && stepped_node->features) {
+        // 更新语义上下文 + 增量维护均值（只跟随链式延续节点 = 组内最优）
+        ReasoningNode* cont_node = net->nodes[current_id];
+        if (cont_node && cont_node->features) {
             if (context_count == 0) {
                 for (int d = 0; d < NODE_FEATURE_DIM; d++)
-                    mean_features[d] = stepped_node->features[d];
+                    mean_features[d] = cont_node->features[d];
                 context_count = 1;
             } else {
                 float inv_new = 1.0f / (float)(context_count + 1);
                 for (int d = 0; d < NODE_FEATURE_DIM; d++) {
-                    context_features[d] += stepped_node->features[d];
-                    mean_features[d] = (mean_features[d] * context_count + stepped_node->features[d]) * inv_new;
+                    context_features[d] += cont_node->features[d];
+                    mean_features[d] = (mean_features[d] * context_count + cont_node->features[d]) * inv_new;
                 }
                 context_count++;
             }
             has_mean = 1;
         }
         // 更新情感基调（EMA，α=0.3）
-        if (stepped_node)
-            context_valence = context_valence * 0.7f + stepped_node->valence * 0.3f;
-        path_len++;
+        if (cont_node)
+            context_valence = context_valence * 0.7f + cont_node->valence * 0.3f;
         free(path_target_weights);
     }
 
     if (local_visited) free(local_visited);
     return path_len;
+}
+
+int topology_walk_greedy(SubTopology* sub, int start_node_id,
+                         int* path_out, float* scores_out,
+                         int max_len, unsigned char* visited,
+                         float intent_weight,
+                         MasterTopology* master,
+                         const float* query_anchor,
+                         void* cc_ptr) {
+    /* 兼容入口：K=1 单链贪心，全部旧调用方行为不变 */
+    return topology_walk_greedy_impl(sub, start_node_id, path_out, scores_out,
+                                     max_len, visited, intent_weight,
+                                     master, query_anchor, cc_ptr, 1);
+}
+
+int topology_walk_greedy_topk(SubTopology* sub, int start_node_id,
+                              int* path_out, float* scores_out,
+                              int max_len, unsigned char* visited,
+                              float intent_weight,
+                              MasterTopology* master,
+                              const float* query_anchor,
+                              void* cc_ptr, int top_k) {
+    /* top-K 候选组：K=1 时与 topology_walk_greedy 完全一致（降级安全） */
+    if (top_k < 1) top_k = 1;
+    if (top_k > PM_WALK_TOPK_MAX) top_k = PM_WALK_TOPK_MAX;
+    return topology_walk_greedy_impl(sub, start_node_id, path_out, scores_out,
+                                     max_len, visited, intent_weight,
+                                     master, query_anchor, cc_ptr, top_k);
 }
 
 // ==================== 竞争队列生成（替代贪心走边） ====================
@@ -3557,7 +3692,7 @@ int master_count_total_nodes(MasterTopology* master) {
     return total;
 }
 
-#define STATE_FORMAT_VERSION 7
+#define STATE_FORMAT_VERSION 8
 /* v0.5.20: 6 = 在每节点记录尾部追加 dist_sig[26]+dist_sig_count（虚词分类器
  * 位置画像，跨重启累积）。加载端向前兼容 v2..v5（旧文件无 dist_sig 段 → 归零）。
  * v0.5.21: 7 = 加载端迁移清洗——fmt_ver==6 状态加载时归零 dist_sig[0..21]
@@ -3569,8 +3704,19 @@ int master_count_total_nodes(MasterTopology* master) {
  * 不删边不重建索引；垃圾边权重 0 后等于不存在，外部喂料只抬正确边）。边权归零
  * 不写新版本号（复用 7），幂等靠 fmt_ver==6 只触发一次；v7 状态想单独再归零边权
  * 用 PIVOTMIND_RESET_EDGE_WEIGHTS=1 显式触发（不依赖 fmt_ver）。
- * ⚠️ 一旦用 7 存盘，回退到旧二进制（只认 2..6）会因 fmt_ver=7 不被识别而误判——
- * 回退前需先备份或接受 dist_sig 段丢失（不影响节点/边/频率表主体）。
+ * v0.5.22: 8 = 文件末尾追加 cross_hit 块（跨拓扑联合激活计数持久化，让跨拓扑
+ * 学习跨重启存活；08-18 绑定机制分析：save 无此字段 → 重启后计数归零，
+ * 阈值 5 的自动建边从未触发）。布局：
+ *   int count                     —— used 条目数，[0, CROSS_HIT_TABLE_SIZE]
+ *   count × CrossTopoHitRecord    —— 24B/条：from_topo, from_node, to_topo,
+ *                                    to_node, hit_count, last_round, is_used
+ *   int cross_hit_round           —— 轮次，恢复后 100 轮过期窗口语义连续
+ * 加载端仅 fmt_ver==8 读此块；v2..v7 旧文件无此块 → 表保持全零从零计数（兼容，
+ * 自动建边需要重新积累 5 次命中）。其他块字节布局与 v7 完全一致。体积上限：
+ * CROSS_HIT_TABLE_SIZE(2048) × 24B ≈ 49KB，且只序列化 used 条目（正常远小于此）。
+ * 解析工具（parse_state.py skill 版支持到 v7）需同步支持 v8 才能识别该块。
+ * ⚠️ 一旦用 8 存盘，回退到旧二进制（只认 2..7）会因 fmt_ver=8 不被识别而误判为
+ * 旧 v1 格式——回退前需先备份或接受 cross_hit 段丢失（不影响节点/边/频率表主体）。
  * 迁移回退开关：PIVOTMIND_SKIP_DIST_SIG_MIGRATE=1 → 加载 v6 时跳过 dist_sig 归零；
  * PIVOTMIND_SKIP_EDGE_WEIGHT_RESET=1 → 加载 v6 时跳过边权归零（对比实验/回退用）。 */
 
@@ -3631,6 +3777,10 @@ typedef struct SaveSnapshot {
     int freq_entries_count;     /* 实际活跃记录数（iterator 输出） */
     PathTripletRecord* freq_entries;
     void* node_cache;           /* master->node_cache 句柄（稳定，不随 realloc 变） */
+    /* [v8] cross_hit 表快照：仅 used 条目（上限 CROSS_HIT_TABLE_SIZE=2048，≤49KB） */
+    int cross_hit_count;        /* used 条目数 */
+    CrossTopoHitRecord* cross_hits;  /* 长度 cross_hit_count（按下标升序，序列化顺序与锁内路径一致） */
+    int cross_hit_round;        /* 跨拓扑命中轮次 */
 } SaveSnapshot;
 
 /* B3 回退开关：PIVOTMIND_SAVE=locked 时走锁内旧路径（快照失败/内存吃紧时的安全网）。 */
@@ -3717,6 +3867,7 @@ static void master_snapshot_free(SaveSnapshot* snap) {
     }
     free(snap->cross_links);
     free(snap->freq_entries);
+    free(snap->cross_hits);     /* [v8] */
     free(snap);
 }
 
@@ -3869,6 +4020,33 @@ static SaveSnapshot* master_snapshot_capture(MasterTopology* master) {
         pthread_mutex_unlock(&master->freq_table->mutex);
     }
 
+    /* [v8] cross_hit 表快照：仅 used 条目（表上限 2048，≤49KB）。
+     * 记录写端 master_record_cross_hit 无锁（单写者），这里逐字段拷贝，
+     * 避免整结构体赋值被编译器优化成非原子 memcpy 读到撕裂中间态。 */
+    snap->cross_hit_count = 0;
+    for (int i = 0; i < CROSS_HIT_TABLE_SIZE; i++) {
+        if (master->cross_hit_records[i].is_used) snap->cross_hit_count++;
+    }
+    if (snap->cross_hit_count > 0) {
+        snap->cross_hits = (CrossTopoHitRecord*)malloc(
+            (size_t)snap->cross_hit_count * sizeof(CrossTopoHitRecord));
+        if (!snap->cross_hits) goto oom;
+        int w = 0;
+        for (int i = 0; i < CROSS_HIT_TABLE_SIZE; i++) {
+            const CrossTopoHitRecord* src = &master->cross_hit_records[i];
+            if (!src->is_used) continue;
+            snap->cross_hits[w].from_topo  = src->from_topo;
+            snap->cross_hits[w].from_node  = src->from_node;
+            snap->cross_hits[w].to_topo    = src->to_topo;
+            snap->cross_hits[w].to_node    = src->to_node;
+            snap->cross_hits[w].hit_count  = src->hit_count;
+            snap->cross_hits[w].last_round = src->last_round;
+            snap->cross_hits[w].is_used    = 1;
+            w++;
+        }
+    }
+    snap->cross_hit_round = master->cross_hit_round;
+
     pthread_rwlock_unlock(&master->rwlock);
     return snap;
 
@@ -3980,12 +4158,22 @@ static int master_snapshot_serialize(SaveSnapshot* snap, const char* tmp_path,
                 fwrite(snap->freq_entries, sizeof(PathTripletRecord),
                        (size_t)snap->freq_entries_count, fp);
         } else {
+            /* 与 has_freq_table 分支同宽（int+int64+int=16B）：freq_table 仅在
+             * destroy 时置 NULL，正常不触发；[v8] 块紧跟其后，宽度不一致会错位 */
             int zero = 0;
+            int64_t zero64 = 0;
             fwrite(&zero, sizeof(int), 1, fp);
-            fwrite(&zero, sizeof(int), 1, fp);
+            fwrite(&zero64, sizeof(int64_t), 1, fp);
             fwrite(&zero, sizeof(int), 1, fp);
         }
     }
+
+    /* [v8] cross_hit 块：跨拓扑联合激活计数持久化（布局见 STATE_FORMAT_VERSION 8 注释） */
+    fwrite(&snap->cross_hit_count, sizeof(int), 1, fp);
+    for (int i = 0; i < snap->cross_hit_count; i++) {
+        fwrite(&snap->cross_hits[i], sizeof(CrossTopoHitRecord), 1, fp);
+    }
+    fwrite(&snap->cross_hit_round, sizeof(int), 1, fp);
 
     fclose(fp);
     *out_saved_nodes = saved_nodes;
@@ -4187,11 +4375,30 @@ static int master_save_state_locked(MasterTopology* master, const char* file_pat
             }
             pthread_mutex_unlock(&master->freq_table->mutex);
         } else {
+            /* 与 freq_table 分支同宽（int+int64+int=16B），[v8] 块紧跟其后防错位 */
             int zero = 0;
+            int64_t zero64 = 0;
             fwrite(&zero, sizeof(int), 1, fp);
-            fwrite(&zero, sizeof(int), 1, fp);
+            fwrite(&zero64, sizeof(int64_t), 1, fp);
             fwrite(&zero, sizeof(int), 1, fp);
         }
+    }
+
+    /* [v8] cross_hit 块：跨拓扑联合激活计数持久化（与快照路径字节一致）。
+     * 持读锁扫描，写端 master_record_cross_hit 无锁（最终一致，同快照语义）。 */
+    {
+        int cross_hit_count = 0;
+        for (int i = 0; i < CROSS_HIT_TABLE_SIZE; i++) {
+            if (master->cross_hit_records[i].is_used) cross_hit_count++;
+        }
+        fwrite(&cross_hit_count, sizeof(int), 1, fp);
+        for (int i = 0; i < CROSS_HIT_TABLE_SIZE; i++) {
+            if (master->cross_hit_records[i].is_used) {
+                fwrite(&master->cross_hit_records[i],
+                       sizeof(CrossTopoHitRecord), 1, fp);
+            }
+        }
+        fwrite(&master->cross_hit_round, sizeof(int), 1, fp);
     }
     
     fclose(fp);
@@ -4378,9 +4585,9 @@ int master_load_state(MasterTopology* master, const char* file_path) {
     // 读文件头: 格式版本
     int fmt_ver = 1;
     READ(&fmt_ver, sizeof(int));
-    // fmt_ver ∈ {2,3,4,5,6,7} = 带版本头的格式化文件
+    // fmt_ver ∈ {2,3,4,5,6,7,8} = 带版本头的格式化文件
     if (fmt_ver != 2 && fmt_ver != 3 && fmt_ver != 4 && fmt_ver != 5 &&
-        fmt_ver != 6 && fmt_ver != 7) {
+        fmt_ver != 6 && fmt_ver != 7 && fmt_ver != 8) {
         p = buf;       // 回退到文件头
         fmt_ver = 1;
     }
@@ -4798,7 +5005,48 @@ int master_load_state(MasterTopology* master, const char* file_path) {
                                         rec.topo_id, rec.node_a, rec.node_b, rec.node_c,
                                         rec.count);
                 }
+            } else if (freq_entry_count > 0) {
+                /* [v8] freq_table 未创建（仅 destroy 路径会 NULL）也须跳过条目
+                 * 字节，保持流对齐到紧随其后的 cross_hit 块（v7 前文件到此即尾，
+                 * 无碍；v8 后错位会把记录残渣当 cross_hit 块解析）。 */
+                if (p + freq_entry_count * (int)sizeof(PathTripletRecord) > end)
+                    goto buffer_exhausted;
+                SKIP(freq_entry_count * (int)sizeof(PathTripletRecord));
             }
+        }
+    }
+
+    /* === [v8] cross_hit 块加载：跨拓扑联合激活计数（跨重启存活） ===
+     * 仅 fmt_ver==8 的文件含此块（且必须已越过 freq 哨兵 from_topo==-1，否则
+     * 文件在跨链接段截断/损坏，不读尾部块）；v2..v7 旧文件无此块 → 表保持全零，
+     * 从零计数（兼容，自动建边需重新积累 5 次命中）。count 越界视为损坏整块丢弃。
+     * 布局：int count + count × CrossTopoHitRecord + int cross_hit_round。 */
+    if (fmt_ver >= 8 && from_topo == -1) {
+        memset(master->cross_hit_records, 0, sizeof(master->cross_hit_records));
+        master->cross_hit_round = 0;
+        int ch_count = 0;
+        if (p + (int)sizeof(int) <= end) {
+            READ(&ch_count, sizeof(int));
+            if (ch_count > 0 && ch_count <= CROSS_HIT_TABLE_SIZE) {
+                int ch_restored = 0;
+                for (int i = 0; i < ch_count; i++) {
+                    CrossTopoHitRecord rec;
+                    if (p + (int)sizeof(CrossTopoHitRecord) > end)
+                        goto buffer_exhausted;
+                    READ(&rec, sizeof(CrossTopoHitRecord));
+                    if (!rec.is_used) continue;   /* 损坏防御：非 used 条目跳过 */
+                    cross_hit_restore_record(master, &rec);
+                    ch_restored++;
+                }
+                READ(&master->cross_hit_round, sizeof(int));
+                if (ch_restored > 0) {
+                    fprintf(stderr, "[状态加载] 恢复 %d 条跨拓扑 hit 记录 (round=%d)\n",
+                            ch_restored, master->cross_hit_round);
+                    LOG_INFO("[状态持久化] 恢复 %d 条跨拓扑 hit 记录 (round=%d)",
+                             ch_restored, master->cross_hit_round);
+                }
+            }
+            /* count 非法（>CROSS_HIT_TABLE_SIZE 或 <0）→ 块已弃用，表留空从零计数 */
         }
     }
 

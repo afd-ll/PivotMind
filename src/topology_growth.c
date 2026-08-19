@@ -193,13 +193,29 @@ int remove_node_dynamic(MasterTopology* master, int topo_id,
     if (!master || node_id < 0) return -1;
 
     SubTopology* sub = master_get_sub_topology(master, topo_id);
-    if (!sub || !sub->net || node_id >= sub->net->node_count) return -1;
+    if (!sub || !sub->net) return -1;
+
+    /* v0.5.23 R6 方案A: 本函数写 net->nodes[id]=NULL（数组结构写），
+     * 必须持 net 写锁——另一路径 huarong_net_add_node 的 realloc 只持
+     * net 写锁（不与 master 互斥），曾无锁 → 并发 free↔reassign 竞态。
+     * 调用契约: 调用方必须已持 master 写锁（锁序 master→net）。
+     * 节点本体 free 移到锁外（与 W7 huarong_net_dynamic_remove_node 同款）。 */
+    pthread_rwlock_wrlock(&sub->net->mutex);
+
+    if (node_id >= sub->net->node_count) {
+        pthread_rwlock_unlock(&sub->net->mutex);
+        return -1;
+    }
 
     ReasoningNode* node = sub->net->nodes[node_id];
-    if (!node) return -1;
+    if (!node) {
+        pthread_rwlock_unlock(&sub->net->mutex);
+        return -1;
+    }
 
     // 检查连接
     if (!force && node->edge_count > 0) {
+        pthread_rwlock_unlock(&sub->net->mutex);
         return -1;  // 有连接，不能删除
     }
 
@@ -267,9 +283,7 @@ int remove_node_dynamic(MasterTopology* master, int topo_id,
                 }
             }
         }
-        free(node->edges);
-        node->edges = NULL;
-        node->edge_count = 0;
+        /* node->edges 的 free 移到锁外（节点本体销毁，与 concept/features 同组） */
     }
 
     // 从哈希表移除
@@ -277,10 +291,14 @@ int remove_node_dynamic(MasterTopology* master, int topo_id,
         node_hash_remove(sub->node_hash, node->concept);
     }
 
-    // 释放节点
+    // 数组槽位置空（锁内——nodes[] 结构写）
+    sub->net->nodes[node_id] = NULL;
+    pthread_rwlock_unlock(&sub->net->mutex);
+
+    // 释放节点本体（锁外，与 W7 huarong_net_dynamic_remove_node 同款）
     if (node->concept) free(node->concept);
     if (node->features) free(node->features);
-    sub->net->nodes[node_id] = NULL;
+    if (node->edges) free(node->edges);
     free(node);
 
     // 更新统计
@@ -453,11 +471,12 @@ int auto_extend_topology(MasterTopology* master, int topo_id) {
 int auto_extend_topology_nolock(MasterTopology* master, int topo_id) {
     if (!master) return -1;
 
-    /* R6 隐患 flag (v0.5.20): 本路径 realloc net->nodes 仅持 master->rwlock 写锁（wrapper :447）；
-     * 另一条 realloc 路径 huarong_net_add_node/find_or_create_node（huarong_topology.c）
-     * 仅持 net->mutex 写锁——两把锁互不排斥，并发 double-realloc 隐患。读侧一致快照必须
-     * 同时持 master 读锁 + net 读锁（见 multi_topology.h 锁序块）。 */
-
+    /* v0.5.23 R6 方案A: net->nodes[] 结构唯一权威锁 = net->mutex 写锁。
+     * 本函数 realloc net->nodes，补 net 写锁（原仅持调用方传入的 master
+     * 写锁，与 add_node 的 net 写锁 realloc 路径互不排斥 → double-realloc
+     * 隐患，08-19 崩溃 #1/#2 根因）。调用契约: 调用方必须已持 master 写锁
+     * （wrapper auto_extend_topology / insert_node_dynamic / active_learner
+     * 均如此；锁序 master→net）。单出口 goto out 防漏解锁。 */
     TopologyGrowthConfig* config = topology_growth_get_default_config();
     SubTopology* sub = master_get_sub_topology(master, topo_id);
 
@@ -465,18 +484,26 @@ int auto_extend_topology_nolock(MasterTopology* master, int topo_id) {
 
     HuarongTopologyNet* net = sub->net;
 
+    int ret = 0;
+    ReasoningNode** new_nodes = NULL;
+
+    pthread_rwlock_wrlock(&net->mutex);
+
     // 计算需要扩展的容量 (v0.5.1: 取消硬天花板, huarong_net_add_node 已自动扩容)
     size_t current_capacity = net->max_nodes;
     size_t new_capacity = current_capacity + (size_t)config->growth_increment;
 
     if (new_capacity <= current_capacity) {
-        return 0;  // 无需扩展
+        goto out;  // 无需扩展
     }
 
     // 扩容
-    ReasoningNode** new_nodes = (ReasoningNode**)realloc(
+    new_nodes = (ReasoningNode**)realloc(
         net->nodes, new_capacity * sizeof(ReasoningNode*));
-    if (!new_nodes) return -1;
+    if (!new_nodes) {
+        ret = -1;
+        goto out;
+    }
 
     // 初始化新空间
     for (size_t i = current_capacity; i < new_capacity; i++) {
@@ -494,7 +521,11 @@ int auto_extend_topology_nolock(MasterTopology* master, int topo_id) {
         update_trigger_time(&config->node_count_trigger);
     }
 
-    return new_capacity;
+    ret = (int)new_capacity;
+
+out:
+    pthread_rwlock_unlock(&net->mutex);
+    return ret;
 }
 
 int auto_shrink_topology(MasterTopology* master, int topo_id) {
@@ -517,15 +548,22 @@ int auto_shrink_topology(MasterTopology* master, int topo_id) {
 
     HuarongTopologyNet* net = sub->net;
 
+    /* v0.5.23 R6 方案A: realloc net->nodes 补 net 写锁（唯一权威锁，
+     * 锁序 master→net；单出口 goto out 防漏解锁）。 */
+    int ret = 0;
+    size_t new_capacity = 0;
+    ReasoningNode** new_nodes = NULL;
+
+    pthread_rwlock_wrlock(&net->mutex);
+
     // 检查使用率
     float usage = (float)net->node_count / net->max_nodes;
     if (usage > config->shrink_threshold) {
-        pthread_rwlock_unlock(&master->rwlock);
-        return 0;  // 不需要收缩
+        goto out;  // 不需要收缩
     }
 
     // 计算新的容量
-    size_t new_capacity = net->max_nodes - (size_t)config->growth_increment;
+    new_capacity = net->max_nodes - (size_t)config->growth_increment;
     if (new_capacity < (size_t)net->node_count) {
         new_capacity = (size_t)net->node_count + 10;  // 保留一些余量
     }
@@ -536,16 +574,15 @@ int auto_shrink_topology(MasterTopology* master, int topo_id) {
     }
 
     if (new_capacity >= net->max_nodes) {
-        pthread_rwlock_unlock(&master->rwlock);
-        return 0;
+        goto out;
     }
 
     // 扩容 (收缩后可能需要扩容来处理现有节点)
-    ReasoningNode** new_nodes = (ReasoningNode**)realloc(
+    new_nodes = (ReasoningNode**)realloc(
         net->nodes, new_capacity * sizeof(ReasoningNode*));
     if (!new_nodes) {
-        pthread_rwlock_unlock(&master->rwlock);
-        return -1;
+        ret = -1;
+        goto out;
     }
 
     net->nodes = new_nodes;
@@ -555,8 +592,12 @@ int auto_shrink_topology(MasterTopology* master, int topo_id) {
     g_global_stats.total_shrink_events++;
     g_global_stats.last_shrink = time(NULL);
 
+    ret = (int)new_capacity;
+
+out:
+    pthread_rwlock_unlock(&net->mutex);
     pthread_rwlock_unlock(&master->rwlock);
-    return new_capacity;
+    return ret;
 }
 
 int topology_load_balancing(MasterTopology* master) {
@@ -619,6 +660,21 @@ int topology_load_balancing(MasterTopology* master) {
         );
         to_migrate = MIN(to_migrate, 10);  // 每次最多迁移10个
 
+        /* v0.5.23 R6 方案A: 迁移读写 src/dst 的 net->nodes[]（读遍历 +
+         * nodes[]=NULL + node_count-- + dst realloc/追加），两 net 都持写锁；
+         * 多 net 按 topo_id 升序加锁防 ABBA。锁序 master(写)→net(写)。
+         * 当前无调用者（防御性修复，规则与 W3/W4 一致）。 */
+        HuarongTopologyNet* src_net = src->net;
+        HuarongTopologyNet* dst_net = dst->net;
+        int src_first = (src->topo_id <= dst->topo_id);
+        if (src_first) {
+            pthread_rwlock_wrlock(&src_net->mutex);
+            pthread_rwlock_wrlock(&dst_net->mutex);
+        } else {
+            pthread_rwlock_wrlock(&dst_net->mutex);
+            pthread_rwlock_wrlock(&src_net->mutex);
+        }
+
         for (int k = 0; k < to_migrate && src->net->node_count > avg_nodes; k++) {
             // 找最小度节点迁移（连接少的节点迁移成本低）
             int min_degree_node = -1;
@@ -631,11 +687,11 @@ int topology_load_balancing(MasterTopology* master) {
                 }
             }
 
-            if (min_degree_node < 0) break;
+            if (min_degree_node < 0) goto migrate_done;
 
             // 执行实际迁移
             ReasoningNode* node_to_move = src->net->nodes[min_degree_node];
-            if (!node_to_move) break;
+            if (!node_to_move) goto migrate_done;
 
             // 检查目标拓扑是否有空间
             if ((size_t)dst->net->node_count >= dst->net->max_nodes) {
@@ -643,7 +699,7 @@ int topology_load_balancing(MasterTopology* master) {
                 int new_cap = dst->net->max_nodes + 100;
                 ReasoningNode** new_nodes = (ReasoningNode**)realloc(
                     dst->net->nodes, new_cap * sizeof(ReasoningNode*));
-                if (!new_nodes) break; // 扩容失败
+                if (!new_nodes) goto migrate_done; // 扩容失败
                 for (int n = dst->net->max_nodes; n < new_cap; n++) {
                     new_nodes[n] = NULL;
                 }
@@ -690,6 +746,16 @@ int topology_load_balancing(MasterTopology* master) {
             }
 
             migrated++;
+        }
+
+migrate_done:
+        /* 释放 net 写锁（与加锁顺序相反） */
+        if (src_first) {
+            pthread_rwlock_unlock(&dst_net->mutex);
+            pthread_rwlock_unlock(&src_net->mutex);
+        } else {
+            pthread_rwlock_unlock(&src_net->mutex);
+            pthread_rwlock_unlock(&dst_net->mutex);
         }
     }
 

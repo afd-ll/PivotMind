@@ -456,6 +456,114 @@ static int _ar_extract_chars(ArticleReader* ar, const char* line) {
 
 // ==================== 建图 ====================
 
+// ==================== 种子实体词表（v0.6.x） ====================
+// 背景（08-18 调查报告）：整词节点注册唯一机制是 PMI 词发现，
+// "张飞"这类低频实体永远达不到 min_freq/PMI 门槛，被拆成字符节点。
+// 方案 A：这里的内置种子词表在 _ar_build_topo 建节点循环前直接预注册
+// 为整词节点（词汇拓扑），绕开 PMI/min_freq/词表满三个门槛，与 PMI
+// 涌现机制共存（补充而非替换），已存在的词自动跳过（幂等）。
+// 开关：编译期宏 PIVOTMIND_SEED_WORDS（默认 1=开）+ 运行期环境变量
+// PIVOTMIND_SEED_WORDS=0 可关（便于对比实验，无需重新编译）。
+#ifndef PIVOTMIND_SEED_WORDS
+#define PIVOTMIND_SEED_WORDS 1
+#endif
+
+/** 内置种子实体词（低频实体词，PMI 统计机制无法稳定注册，可后续扩充） */
+static const char* _ar_builtin_seed_words[] = {
+    "关羽", "张飞", "刘备", "曹操", "孙权", "吕布", "赵云", "诸葛亮",
+    "青龙偃月刀", "丈八蛇矛", "赤兔马", "方天画戟", "桃园结义",
+    "饺子", "武器", "天气",
+};
+#define _AR_BUILTIN_SEED_COUNT \
+    ((int)(sizeof(_ar_builtin_seed_words) / sizeof(_ar_builtin_seed_words[0])))
+
+/** 种子词总开关：编译期宏 && 运行期环境变量双重控制（默认开） */
+static int _ar_seed_words_enabled(void) {
+#if PIVOTMIND_SEED_WORDS
+    const char* env = getenv("PIVOTMIND_SEED_WORDS");
+    if (env && env[0] == '0') return 0;
+    return 1;
+#else
+    return 0;
+#endif
+}
+
+/**
+ * 注册单个词为整词节点（词汇拓扑）
+ * 与 PMI 发现词的建节点逻辑完全一致（查重→脏词过滤→insert_node_dynamic
+ * →确定性特征向量→activation），供 PMI 词与种子词共用。
+ * @return 1=新建节点, 0=已存在或被过滤, -1=插入失败
+ */
+static int _ar_register_word_node(ArticleReader* ar, SubTopology* topo,
+                                  const char* text, int freq) {
+    if (!ar || !topo || !topo->net || !text || !text[0]) return 0;
+    HuarongTopologyNet* net = topo->net;
+
+    int nid = huarong_net_find_concept(net, text);
+    if (nid >= 0) return 0;  /* 已存在——幂等，不重复注册 */
+
+    // 拒绝含有标点的脏词（如 "A@yuan" 不会作为词节点）
+    int has_punct = 0;
+    for (const char* cp = text; *cp && !has_punct; ) {
+        if (is_punctuation(cp)) has_punct = 1;
+        int b = get_char_bytes(cp);
+        if (b <= 0) b = 1;
+        cp += b;
+    }
+    if (has_punct) return 0;
+    if (strstr(text, "//")) return 0;  /* URL/路径残留 */
+
+    /* v0.5.7: 英文垃圾词过滤（请求参数/cookie 名/乱码——实测
+     * 抽查 67 个新词 ~90% 是 _G/SID/wXMLH 这类） */
+    if ((unsigned char)text[0] < 0x80) {  /* ASCII 词 */
+        const char* w = text;
+        size_t wl = strlen(w);
+        int has_vowel = 0, has_underscore = 0, has_digit = 0, has_lower = 0;
+        for (const char* cp = w; *cp; cp++) {
+            char ch = *cp;
+            if (ch == '_' || ch == '-') has_underscore = 1;
+            if (ch >= '0' && ch <= '9') has_digit = 1;
+            if (islower((unsigned char)ch)) has_lower = 1;
+            if (ch=='a'||ch=='e'||ch=='i'||ch=='o'||ch=='u'||
+                ch=='A'||ch=='E'||ch=='I'||ch=='O'||ch=='U') has_vowel = 1;
+        }
+        if (wl < 2 || has_underscore || has_digit ||
+            (!has_vowel && wl < 6) || (!has_lower && wl >= 4)) return 0;
+    }
+
+    // insert_node_dynamic：具备自动扩容 + 全局统计
+    nid = insert_node_dynamic(ar->master, topo->topo_id, text, NULL, 0);
+    if (nid < 0) return -1;
+
+    /* v0.5.23 R6 方案A: insert_node_dynamic 返回后其内部 net 锁已释放，
+     * 此处读 net->node_count/nodes[nid] 必须持 net 读锁——否则与其它线程
+     * add_node 的 net 写 realloc 竞态（崩溃 #1 嫌疑 :536/:543）。
+     * 窄临界区取节点指针；节点本体由调用链 ar->mutex 保护（新建节点独占）。 */
+    pthread_rwlock_rdlock(&net->mutex);
+    ReasoningNode* node = (nid < net->node_count) ? net->nodes[nid] : NULL;
+    pthread_rwlock_unlock(&net->mutex);
+    if (!node) return -1;
+
+    if (ar->p_added_nodes) (*ar->p_added_nodes)++;
+    /* v0.5.7: 抽查——打印实际进拓扑的新词（污染比例分析） */
+    LOG_INFO("[文章阅读] 新词抽查: %s", text);
+
+    // 基于词文本的确定性特征向量初始化
+    if (!node->features) {
+        node->features = (float*)malloc(NODE_FEATURE_DIM * sizeof(float));
+        node->feature_dim = NODE_FEATURE_DIM;
+    }
+    if (node->features) {
+        unsigned int seed = _ar_hash(text);
+        for (int d = 0; d < NODE_FEATURE_DIM; d++) {
+            int val = (seed * (d + 1) * 7 + 13) % 20001;
+            node->features[d] = ((float)val / 100000.0f) - 0.1f;
+        }
+    }
+    node->activation = freq > 5 ? 0.5f : 0.2f;
+    return 1;
+}
+
 /**
  * 将发现的词构建到拓扑中
  * 每个词 → 一个概念节点
@@ -464,72 +572,48 @@ static int _ar_extract_chars(ArticleReader* ar, const char* line) {
  * 词→句子的序列保存在一个临时数组中，flush 时从 words 重建序列。
  */
 static int _ar_build_topo(ArticleReader* ar, SubTopology* topo) {
-    if (!ar || !topo || !topo->net || ar->word_count == 0) return 0;
+    if (!ar || !topo || !topo->net) return 0;
 
-    HuarongTopologyNet* net = topo->net;
     int created = 0;
+    int seed_active = _ar_seed_words_enabled();
+
+    // 词表为空且种子词关闭 → 无事可做
+    if (ar->word_count == 0 && !seed_active) return 0;
+
+    // ============ 种子实体词预注册（v0.6.x，方案A） ============
+    // 在建节点循环前直接预注册整词节点，绕开 PMI/min_freq 门槛。
+    // 幂等：已存在节点跳过，与 PMI 机制共存。
+    //
+    // 目标拓扑强制为词汇拓扑 TOPO_VOCABULARY，不能用 _ar_build_topo 传入的
+    // topo 参数——白话文域喂料时该参数是领域拓扑，种子词注册进去后扩散
+    // 第 0 步滑窗整词匹配（diffusion.c find_concept 匹配 vocab 拓扑）用不上
+    // （08-19 pro 分析确认）。PMI 词发现路径（下方建节点循环）仍用传入 topo，
+    // 不受影响。
+    if (seed_active) {
+        SubTopology* vtopo = ar->vocab_topo;
+        if (!vtopo || !vtopo->net) {
+            vtopo = master_get_sub_topology_by_type(ar->master, TOPO_VOCABULARY);
+        }
+        const char** seeds = ar->cfg.seed_words;
+        int seed_count = ar->cfg.seed_count;
+        if (!seeds || seed_count <= 0) {   /* 未配置 → 使用内置表 */
+            seeds = _ar_builtin_seed_words;
+            seed_count = _AR_BUILTIN_SEED_COUNT;
+        }
+        for (int s = 0; s < seed_count && vtopo && vtopo->net; s++) {
+            if (!seeds[s] || !seeds[s][0]) continue;
+            int rc = _ar_register_word_node(ar, vtopo, seeds[s], 5);
+            if (rc > 0) created++;
+        }
+    }
 
     // 扫描词表，每个词尝试创建节点（仅建节点，边缘由后续训练自动形成）
     for (int i = 0; i < ar->word_count; i++) {
         WordEntry* we = &ar->words[i];
         if (!we->text[0]) continue;
 
-        int nid = huarong_net_find_concept(net, we->text);
-        if (nid < 0) {
-            // 拒绝含有标点的脏词（如 "A@yuan" 不会作为词节点）
-            int has_punct = 0;
-            for (const char* cp = we->text; *cp && !has_punct; ) {
-                if (is_punctuation(cp)) has_punct = 1;
-                int b = get_char_bytes(cp);
-                if (b <= 0) b = 1;
-                cp += b;
-            }
-            if (has_punct) continue;
-            if (strstr(we->text, "//")) continue;  /* URL/路径残留 */
-
-            /* v0.5.7: 英文垃圾词过滤（请求参数/cookie 名/乱码——实测
-             * 抽查 67 个新词 ~90% 是 _G/SID/wXMLH 这类） */
-            if ((unsigned char)we->text[0] < 0x80) {  /* ASCII 词 */
-                const char* w = we->text;
-                size_t wl = strlen(w);
-                int has_vowel = 0, has_underscore = 0, has_digit = 0, has_lower = 0;
-                for (const char* cp = w; *cp; cp++) {
-                    char ch = *cp;
-                    if (ch == '_' || ch == '-') has_underscore = 1;
-                    if (ch >= '0' && ch <= '9') has_digit = 1;
-                    if (islower((unsigned char)ch)) has_lower = 1;
-                    if (ch=='a'||ch=='e'||ch=='i'||ch=='o'||ch=='u'||
-                        ch=='A'||ch=='E'||ch=='I'||ch=='O'||ch=='U') has_vowel = 1;
-                }
-                if (wl < 2 || has_underscore || has_digit ||
-                    (!has_vowel && wl < 6) || (!has_lower && wl >= 4)) continue;
-            }
-
-            // insert_node_dynamic：具备自动扩容 + 全局统计
-            nid = insert_node_dynamic(ar->master, topo->topo_id,
-                                       we->text, NULL, 0);
-            if (nid >= 0 && nid < topo->net->node_count && topo->net->nodes[nid]) {
-                created++;
-                if (ar->p_added_nodes) (*ar->p_added_nodes)++;
-                /* v0.5.7: 抽查——打印实际进拓扑的新词（污染比例分析） */
-                LOG_INFO("[文章阅读] 新词抽查: %s", we->text);
-
-                // 基于词文本的确定性特征向量初始化
-                ReasoningNode* node = topo->net->nodes[nid];
-                if (!node->features) {
-                    node->features = (float*)malloc(NODE_FEATURE_DIM * sizeof(float));
-                    node->feature_dim = NODE_FEATURE_DIM;
-                }
-                if (node->features) {
-                    unsigned int seed = _ar_hash(we->text);
-                    for (int d = 0; d < NODE_FEATURE_DIM; d++) {
-                        int val = (seed * (d + 1) * 7 + 13) % 20001;
-                        node->features[d] = ((float)val / 100000.0f) - 0.1f;
-                    }
-                }
-                node->activation = we->freq > 5 ? 0.5f : 0.2f;
-            }
-        }
+        int rc = _ar_register_word_node(ar, topo, we->text, we->freq);
+        if (rc > 0) created++;
     }
 
     return created;

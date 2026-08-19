@@ -87,6 +87,7 @@ static void learn_task_wait(LearnTask* task);
 #define GW_READ_TIMEOUT_S  10
 #define GW_BACKLOG         16
 #define GW_TOKEN_LEN       64            // C1: API token 十六进制长度 (32 字节随机数)
+#define GW_TOKEN_FILE      "/home/cx/pivotmind/gw_token"  // C1+: token 持久化文件 (0600, 跨重启不变)
 
 /* B4 (v0.5.20): learn 并发队列化开关。
  * LEARN_ASYNC_CHAT: 1 = handle_chat 两处同步 _learn_tokens 改入队（输入 flush / 回复 fire-and-forget）；
@@ -185,6 +186,39 @@ static void gw_generate_token(char* buf, size_t cap) {
         o += 2;
     }
     buf[o] = '\0';
+}
+
+/* C1+ token 持久化: API token 跨重启保持不变。
+ * 随机生成后写入 GW_TOKEN_FILE (与 pivotmind_state.dat 同目录)，下次启动直接复用。
+ * 树莓派黑匣子 / feed 脚本用固定 token，无需跟随网关重启动态提取。 */
+static int gw_token_file_load(char* buf, size_t cap) {
+    FILE* fp = fopen(GW_TOKEN_FILE, "rb");
+    if (!fp) return 0;                      /* 文件不存在 → 调用方随机生成 */
+    size_t n = fread(buf, 1, cap - 1, fp);
+    fclose(fp);
+    if (n == 0) return 0;
+    buf[n] = '\0';
+    /* 允许末尾换行/空白（文本文件惯例） */
+    while (n > 0 && (buf[n - 1] == '\n' || buf[n - 1] == '\r' ||
+                     buf[n - 1] == ' ' || buf[n - 1] == '\t'))
+        buf[--n] = '\0';
+    if (n != GW_TOKEN_LEN) return 0;        /* 长度必须恰好 64 */
+    for (size_t i = 0; i < n; i++)
+        if (!isxdigit((unsigned char)buf[i])) return 0;  /* 必须全是 hex */
+    return 1;
+}
+
+static void gw_token_file_save(const char* token) {
+    FILE* fp = fopen(GW_TOKEN_FILE, "wb");
+    if (!fp) {
+        fprintf(stderr, "[gateway] 警告: 无法写入 token 文件 %s: %s (token 仅本次运行有效)\n",
+                GW_TOKEN_FILE, strerror(errno));
+        return;
+    }
+    fprintf(fp, "%s\n", token);
+    fclose(fp);
+    if (chmod(GW_TOKEN_FILE, 0600) != 0)
+        fprintf(stderr, "[gateway] 警告: chmod 0600 %s 失败: %s\n", GW_TOKEN_FILE, strerror(errno));
 }
 
 // ==================== 信号处理 ====================
@@ -2028,8 +2062,13 @@ int main(int argc, char* argv[]) {
     gw.port = port;
     strncpy(gw.workdir, workdir, sizeof(gw.workdir) - 1);
 
-    /* C1: 生成 API token 并打印到日志（媒体端点鉴权） */
-    gw_generate_token(gw.api_token, sizeof(gw.api_token));
+    /* C1: 生成 API token 并打印到日志（媒体端点鉴权）
+     * C1+ 持久化: 优先复用 GW_TOKEN_FILE 中的有效 token（跨重启不变，黑匣子/feed
+     * 脚本无需跟随变化）；文件不存在/内容非法则随机生成并写入 (0600)。 */
+    if (!gw_token_file_load(gw.api_token, sizeof(gw.api_token))) {
+        gw_generate_token(gw.api_token, sizeof(gw.api_token));
+        gw_token_file_save(gw.api_token);
+    }
     printf("[gateway] API token: %s\n", gw.api_token);
     printf("[gateway] 除 /health 外所有端点需要请求头 X-Pivot-Token: <上面token> 才能访问\n");
 

@@ -55,7 +55,8 @@ typedef struct Edge {
  * ========== 线程安全锁序（重要，违反会导致死锁）==========
  * 三层锁必须严格按以下顺序获取：
  *   ① MasterTopology.rwlock (全局读写锁，推理线程读取时只拿读锁)
- *   ② HuarongTopologyNet.mutex (网络级互斥锁，保护扩容/节点创建)
+ *   ② HuarongTopologyNet.mutex (网络级读写锁——net->nodes[] 结构的唯一权威锁：
+ *      写侧 realloc/append/remove/shift 持写锁；读侧解引用 nodes[i]/遍历 node_count 持读锁)
  *   ③ HuarongTopologyNet.node_locks[] (节点级锁池，按 node_id 升序加锁)
  *
  * 反向顺序（如：持节点锁再请求网络锁）会导致 ABBA 死锁。

@@ -134,13 +134,12 @@ typedef struct {
  *
  * 禁止反向加锁（如持节点锁后再请求网络锁）！
  *
- * ========== B3 补充（v0.5.20）：net->nodes realloc 双路径 + 快照锁序 ==========
- * net->nodes 的 realloc 存在两条互不排斥的路径（二者同时存在是潜在隐患，见 R6）：
- *   路径 A：huarong_net_add_node / find_or_create_node —— 仅持 net->mutex 写锁
- *   路径 B：auto_extend_topology / auto_shrink_topology —— 仅持 master->rwlock 写锁
- * 因此任何读侧遍历 net->nodes[] 的一致快照必须同时持
- *   master->rwlock(读) + net->mutex(读)
- * 才能同时挡住两条 realloc 路径。
+ * ========== B3 补充（v0.5.20 → v0.5.23 方案A 修订）：net->nodes 唯一权威锁 ==========
+ * net->nodes[] 结构的唯一权威锁 = HuarongTopologyNet.mutex（读写锁）：
+ *   - 写侧（realloc / append / remove / shift）：持 net->mutex 写锁
+ *   - 读侧（解引用 nodes[i] / 遍历 node_count）：持 net->mutex 读锁
+ * master->rwlock 仅保护 master 级结构（sub_topologies / cross_links / 激活状态），
+ * 与 net->nodes[] 正交；需要同时拿时锁序恒 master → net → node_locks。
  * 存盘快照路径锁序：master->rwlock(读) → net->mutex(读) → node_locks[li]（逐节点短暂持有）。
  * 禁止反向：持 node_locks 后不得再请求 net->mutex；持 net->mutex 后不得再请求 master->rwlock。
  * ============================================================
@@ -445,6 +444,43 @@ int topology_walk_greedy(SubTopology* sub, int start_node_id,
                          MasterTopology* master,
                          const float* query_anchor,
                          void* cc_ptr);
+
+/**
+ * top-K 候选组走边（输出缝合 — 阶段3 组装器 MVP）
+ *
+ * 与 topology_walk_greedy 同构，但每步输出前 top_k 个候选节点作为"候选组"：
+ * 组内最优作为链式延续（current 继续走边），组内其余候选作为缝合词一并写入
+ * 路径。因此被跨拓扑预加热的次优候选（如 丈八蛇矛 vs 拓扑内垄断边的
+ * 青龙偃月刀）也能进入输出，打破单链贪心的垄断瓶颈。
+ *
+ * 综合打分（与 topology_walk_greedy 同一套公式，逐项一致）：
+ *   score = base_score × valence_mod × intent_mod × heat_mod × edge_spec ...
+ *           (+ 三元组链奖励 + 模板锚点对奖励 + POS 句式引导分)
+ *   base_score = 边三维 + 候选自身激活值(EDGE_WALK_W_ACTIVATION×activation)
+ *              + 跨拓扑预加热投票(semantic/template/concept cross_adj 归一化)
+ *              + 目标引力(query_anchor) + 路径回溯 + 语义得分
+ *
+ * 兼容/降级安全：
+ *  - top_k <= 1：行为与 topology_walk_greedy 完全一致（单链贪心）
+ *  - 候选不足 top_k / 分数低于剪枝阈值 / 激活值低于语义场休止线(0.05)：
+ *    该步输出更少候选（最少 1 个），绝不补垃圾候选；分数全为 0 时整步放弃
+ *  - 组内所有候选均标记 visited 并计入热度衰减，防止跨步重复输出
+ *  - path_len 受 max_len 钳制，path_out/scores_out 缓冲区只需 ≥ max_len
+ *
+ * @param top_k 候选组大小（1 ~ PM_WALK_TOPK_MAX，推荐 PM_WALK_TOPK_DEFAULT）
+ * @return 路径长度（含起点，至少 1），0 表示无有效路径
+ */
+#define PM_WALK_TOPK_MAX     8
+#define PM_WALK_TOPK_DEFAULT 3
+
+int topology_walk_greedy_topk(SubTopology* sub, int start_node_id,
+                              int* path_out, float* scores_out,
+                              int max_len, unsigned char* visited,
+                              float intent_weight,
+                              MasterTopology* master,
+                              const float* query_anchor,
+                              void* cc_ptr,
+                              int top_k);
 
 /**
  * Beam search 走边路径生成 (K=3)

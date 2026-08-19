@@ -42,10 +42,14 @@ typedef struct {
     float gamma;              // 连接奖励权重 (默认 0.2)
     int   batch_size;         // 每处理 N 行执行一次词发现 (默认 200)
     int   verbose;            // 详细输出
+    /* v0.6.x 种子实体词表：_ar_build_topo 建节点前预注册整词节点，
+     * 绕开 PMI/min_freq/词表满门槛。NULL/0=使用内置种子词表。 */
+    const char** seed_words;  // 种子实体词数组（NULL=内置表）
+    int          seed_count;  // 种子词数量（0=内置表）
 } ArticleReaderConfig;
 
 #define ARTICLE_READER_DEFAULT_CONFIG ((ArticleReaderConfig){ \
-    2, 1.5f, 2, 0.4f, 0.4f, 0.2f, 200, 0 \
+    2, 1.5f, 2, 0.4f, 0.4f, 0.2f, 200, 0, NULL, 0 \
 })
 
 // ==================== 公共 API ====================
