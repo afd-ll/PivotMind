@@ -12,8 +12,9 @@ else
   CC = ccache gcc
 endif
 
-# 并行编译 — 利用全部 CPU 核心
-MAKEFLAGS += -j$(nproc)
+# 并行编译 — 默认 2 路（低内存板防 OOM），命令行 make -jN 优先
+JOBS ?= 2
+MAKEFLAGS += -j$(JOBS)
 
 CFLAGS = -pipe -Wall -Wextra -O2 -Iinclude -Iinclude/nn -Isrc/nn -I. -Ilibs -std=gnu99 -fopenmp -pthread -MD -MP -D_USE_MATH_DEFINES -D_FORTIFY_SOURCE=2 -flto=auto -DHAS_OPENSSL
 LDFLAGS = -lm -lssl -lcrypto -lcurl -lz -flto=auto

@@ -400,11 +400,19 @@ void* object_pool_acquire(ObjectPool* pool) {
     }
     if (grown == 0) return NULL;
 
+    // 合并说明（08-19 merge github/main）：
+    // 两边修复的是同一 bug——原代码 free_count = new_capacity - total_capacity 恒为 0，
+    // 再取 free_list[--free_count] = free_list[-1] 越界读返回垃圾指针——
+    // infer 建图边数超过池容量(128)时 acquire 返回悬垂地址，调用方写入
+    // 即 SIGSEGV（"薛定谔的猫"类因果查询偶发崩溃的真正根因）。
+    // 逻辑等价（扩容时 free_count 必为 0），保留 grown==0 提前返回以免 used_count 误增。
     pool->free_count += grown;
     pool->total_capacity += grown;
     pool->used_count++;
 
-    // 取最后一个
+    if (pool->free_count <= 0) return NULL;
+
+    // 取最后一个（新分配对象）
     return pool->free_list[--pool->free_count];
 }
 

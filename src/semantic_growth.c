@@ -96,7 +96,7 @@ int semantic_grow_from_topology(MasterTopology* master, int topo_type) {
     /* node_id → sample_ids 索引映射（O(1) 成员标记） */
     int* pos_by_node = (int*)malloc((size_t)vnet->max_nodes * sizeof(int));
     if (pos_by_node) {
-        for (int k = 0; k < vnet->max_nodes; k++) pos_by_node[k] = -1;
+        for (size_t k = 0; k < vnet->max_nodes; k++) pos_by_node[k] = -1;
     }
     if (pos_by_node) {
         for (int k = 0; k < actual; k++) pos_by_node[sample_ids[k]] = k;
@@ -114,7 +114,8 @@ int semantic_grow_from_topology(MasterTopology* master, int topo_type) {
             if (!l) continue;
             if (l->to_topo_id == TOPO_SEMANTIC &&
                 l->from_topo_id == topo_type &&
-                l->from_node_id >= 0 && l->from_node_id < vnet->max_nodes) {
+                l->from_node_id >= 0 &&
+                (size_t)l->from_node_id < vnet->max_nodes) {
                 has_sem_link[l->from_node_id] = 1;
             }
         }

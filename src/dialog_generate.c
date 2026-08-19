@@ -693,8 +693,12 @@ void auto_learn_concepts(MasterTopology* master, const char* text, void* str_poo
         if ((c0 & 0x80) == 0) continue;
         int nid = huarong_net_find_concept(vocab->net, tokens[i]);
         if (nid >= 0) {
-            funcword_record_position(vocab->net->nodes[nid],
-                                     (i == 0), (i == token_count - 1));
+            /* v0.5.23 R6 方案A: nodes[] 解引用窄 net 读临界区（取指针即释放，
+             * 节点本体由本函数持有的 master 写锁保护；realloc 只搬数组不搬本体） */
+            pthread_rwlock_rdlock(&vocab->net->mutex);
+            ReasoningNode* wn = (nid < vocab->net->node_count) ? vocab->net->nodes[nid] : NULL;
+            pthread_rwlock_unlock(&vocab->net->mutex);
+            funcword_record_position(wn, (i == 0), (i == token_count - 1));
         }
         if (contains_punctuation(tokens[i]) || is_stop_word(tokens[i])) continue;
         nid = get_or_create_concept(vocab, tokens[i]);
@@ -721,14 +725,22 @@ void auto_learn_concepts(MasterTopology* master, const char* text, void* str_poo
                  tokens[cjk_pos[i]], tokens[cjk_pos[i+1]]);
         int existing = huarong_net_find_concept(vocab->net, cname);
         if (existing >= 0) {
-            if (existing < vocab->net->node_count && vocab->net->nodes[existing])
-                vocab->net->nodes[existing]->activation += 0.05f;
+            /* v0.5.23 R6 方案A: 窄 net 读临界区取指针 */
+            pthread_rwlock_rdlock(&vocab->net->mutex);
+            ReasoningNode* en = (existing < vocab->net->node_count) ? vocab->net->nodes[existing] : NULL;
+            pthread_rwlock_unlock(&vocab->net->mutex);
+            if (en)
+                en->activation += 0.05f;
             continue;
         }
 
         /* 特征向量 = 两源节点均值 */
         float feat[NODE_FEATURE_DIM];
-        ReasoningNode *na = vocab->net->nodes[id_a], *nb = vocab->net->nodes[id_b];
+        /* v0.5.23 R6 方案A: 窄 net 读临界区取指针（realloc 只搬数组不搬本体） */
+        pthread_rwlock_rdlock(&vocab->net->mutex);
+        ReasoningNode *na = (id_a >= 0 && id_a < vocab->net->node_count) ? vocab->net->nodes[id_a] : NULL;
+        ReasoningNode *nb = (id_b >= 0 && id_b < vocab->net->node_count) ? vocab->net->nodes[id_b] : NULL;
+        pthread_rwlock_unlock(&vocab->net->mutex);
         if (na && na->features && nb && nb->features) {
             for (int d = 0; d < NODE_FEATURE_DIM; d++)
                 feat[d] = (na->features[d] + nb->features[d]) * 0.5f;
@@ -766,7 +778,10 @@ void auto_learn_concepts(MasterTopology* master, const char* text, void* str_poo
         int j_max = (i + COOCCUR_WINDOW < node_count) ? i + COOCCUR_WINDOW : node_count;
         for (int j = i + 1; j < j_max; j++) {
             int found = 0;
-            ReasoningNode* na = vocab->net->nodes[node_ids[i]];
+            /* v0.5.23 R6 方案A: 窄 net 读临界区取指针 */
+            pthread_rwlock_rdlock(&vocab->net->mutex);
+            ReasoningNode* na = (node_ids[i] >= 0 && node_ids[i] < vocab->net->node_count) ? vocab->net->nodes[node_ids[i]] : NULL;
+            pthread_rwlock_unlock(&vocab->net->mutex);
             if (na) {
                 for (int k = 0; k < na->edge_count; k++) {
                     if (na->edges[k].target &&
@@ -785,10 +800,15 @@ void auto_learn_concepts(MasterTopology* master, const char* text, void* str_poo
     /* ---- Hebbian 在线更新 ---- */
     float lr = 0.02f;
     for (int i = 0; i < node_count; i++) {
-        ReasoningNode* ni = vocab->net->nodes[node_ids[i]];
+        /* v0.5.23 R6 方案A: 窄 net 读临界区取指针（每处解引用均锁内取值） */
+        pthread_rwlock_rdlock(&vocab->net->mutex);
+        ReasoningNode* ni = (node_ids[i] >= 0 && node_ids[i] < vocab->net->node_count) ? vocab->net->nodes[node_ids[i]] : NULL;
+        pthread_rwlock_unlock(&vocab->net->mutex);
         if (!ni || !ni->features || ni->feature_dim != NODE_FEATURE_DIM) continue;
         for (int j = i + 1; j < node_count; j++) {
-            ReasoningNode* nj = vocab->net->nodes[node_ids[j]];
+            pthread_rwlock_rdlock(&vocab->net->mutex);
+            ReasoningNode* nj = (node_ids[j] >= 0 && node_ids[j] < vocab->net->node_count) ? vocab->net->nodes[node_ids[j]] : NULL;
+            pthread_rwlock_unlock(&vocab->net->mutex);
             if (!nj || !nj->features || nj->feature_dim != NODE_FEATURE_DIM) continue;
             hebbian_update(ni->features, nj->features, NODE_FEATURE_DIM, lr);
         }

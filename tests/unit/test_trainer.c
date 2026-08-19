@@ -150,7 +150,6 @@ void test_trainer_train_batch() {
         input_data[i * 2 + 1] = (i + 1) * 2.0f;
     }
 
-    size_t target_shape[] = {1};
     Tensor* target_batch = tensor_create(DT_FLOAT32, 2, (size_t[]){4, 1});
     float* target_data = (float*)target_batch->data;
     target_data[0] = 3.0f;
@@ -201,7 +200,6 @@ void test_trainer_grad_clip() {
         input_data[i] = (float)(i % 10);
     }
 
-    size_t target_shape[] = {1};
     Tensor* target_batch = tensor_create(DT_FLOAT32, 2, (size_t[]){2, 1});
     float* target_data = (float*)target_batch->data;
     target_data[0] = 5.0f;
@@ -339,6 +337,7 @@ void test_trainer_train_epoch() {
 
 static int callback_count = 0;
 static void test_callback(TrainStats* stats, void* user_data) {
+    (void)stats;  /* 回调不读取训练统计 */
     callback_count++;
     int* counter = (int*)user_data;
     if (counter) (*counter)++;
@@ -377,7 +376,6 @@ void test_trainer_callback() {
     input_data[0] = 1.0f;
     input_data[1] = 2.0f;
 
-    size_t target_shape[] = {1};
     Tensor* target_batch = tensor_create(DT_FLOAT32, 2, (size_t[]){1, 1});
     float* target_data = (float*)target_batch->data;
     target_data[0] = 3.0f;
@@ -431,7 +429,6 @@ void test_trainer_stats() {
     input_data[0] = 1.0f;
     input_data[1] = 2.0f;
 
-    size_t target_shape[] = {1};
     Tensor* target_batch = tensor_create(DT_FLOAT32, 2, (size_t[]){1, 1});
     float* target_data = (float*)target_batch->data;
     target_data[0] = 3.0f;

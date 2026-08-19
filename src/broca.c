@@ -6,6 +6,13 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* v2.1 阶段0-A 回退开关：1=恢复输出路径 dist_sig 累积(旧行为)，0=删除(新行为，默认)。
+ * 输出路径累积=把系统自己生成的 ≤4 词当语料喂 dist_sig（数据源错位 + 错尺子标签），
+ * 已迁移到喂料路径（train_mode.c）。默认删，仅保留 emergent_pos_tag(模板) + 诊断(只读)。 */
+#ifndef DIST_SIG_OUTPUT_ACCUM
+#define DIST_SIG_OUTPUT_ACCUM 0
+#endif
+
 Broca* broca_create(MasterTopology* master) {
     if (!master) return NULL;
     Broca* b = (Broca*)calloc(1, sizeof(Broca));
@@ -149,7 +156,11 @@ char* broca_wrap_response(MasterTopology* master, EmergentPOS* ep,
         int n = word_count;
         for (int i = 0; i < n; i++) {
             pos_tags[i] = emergent_pos_tag(ep, master, words[i]);
-            /* v0.5.19: 分布签名累积——左右邻POS + 位置标志（语法类涌现的数据源） */
+#if DIST_SIG_OUTPUT_ACCUM
+            /* v0.5.19: 分布签名累积——左右邻POS + 位置标志（语法类涌现的数据源）
+             * ⚠️ v2.1 阶段0-A 已废除此输出路径累积（数据源错位：把系统自己生成的
+             * ≤4 词当语料 + emergent_pos_tag 错尺子标签），迁移到喂料路径。
+             * 此块仅在 DIST_SIG_OUTPUT_ACCUM=1 时编译（回退用）。 */
             if (master && words[i]) {
                 SubTopology* vsub = master_get_sub_topology_by_type(master, TOPO_VOCABULARY);
                 if (vsub && vsub->net && words[i][0]) {
@@ -167,9 +178,11 @@ char* broca_wrap_response(MasterTopology* master, EmergentPOS* ep,
                     }
                 }
             }
+#endif
         }
         can_template = 1;
-        /* v0.5.19: 分布聚类诊断（内部每100次限流）——验证分布签名>语义聚类 */
+        /* v0.5.19: 分布聚类诊断（内部每100次限流）——验证分布签名>语义聚类
+         * v2.1 阶段0-A：诊断是只读（C 类），保留。 */
         emergent_pos_diag_dist_clusters(ep, master);
     }
 

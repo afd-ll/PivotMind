@@ -166,6 +166,18 @@ void autonomic_learn_from_dialog(MasterTopology* master,
                                  void* causal_graph,
                                  MemorySystem* memory);
 
+/* v2.1 阶段0-C：response 半边去毒变体。
+ * response_is_trusted=1 → 旧行为（response 半边参与建边涨权）；
+ * response_is_trusted=0 → response 半边只读、不建边不涨权（默认新行为）。
+ * 对话路径（系统自己生成的回复）传 0；外部喂料路径（perception/web 语料）传 1。 */
+void autonomic_learn_from_dialog_trusted(MasterTopology* master,
+                                 const char* user_input,
+                                 const char* ai_response,
+                                 AutonomicState* state,
+                                 void* causal_graph,
+                                 MemorySystem* memory,
+                                 int response_is_trusted);
+
 /**
  * 对拓扑中所有节点执行竞争衰减
  * 

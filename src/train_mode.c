@@ -8,6 +8,7 @@
 #include "train_mode.h"
 #include "huarong_topology.h"
 #include "funcword.h"
+#include "emergent_pos.h"   /* v2.1 阶段0-A：喂料路径 dist_sig 累积 + seed_tag */
 #include "feature_io.h"
 #include "article_reader.h"
 #include "visual_cortex.h"    /* v0.5 CORPUS_MEDIA */
@@ -475,6 +476,39 @@ static int train_feed_qa_json(TrainMode* tm, const char* path) {
 
 #define TRAIN_MAX_TOKENS 2048
 
+/* v2.1 阶段0-C 回退开关：1=边权重喂(边权=外部共现计数，频率代理)，0=旧行为(固定权重) */
+#ifndef EDGE_WEIGHT_EXTERNAL_FEED
+#define EDGE_WEIGHT_EXTERNAL_FEED 1
+#endif
+
+#if EDGE_WEIGHT_EXTERNAL_FEED
+/* v2.1 阶段0-C 边权重喂：喂料路径补外部共现计数——边权=外部信源（0-D 裁判的前提）。
+ * 已存在边 → EMA 抬权（共现越频繁权重越接近 1.0，作为外部支撑度的频率代理）；
+ * 新边 → 以 base_weight 建边。锁序同 boost_connection_weighted：
+ * 先锁外 node_conn_find，命中则持锁 double-check 后抬权，未命中则 add_connection（内部自持锁）。 */
+static void train_feed_cooccur_edge(HuarongTopologyNet* net, int from, int to,
+                                    float base_weight) {
+    if (!net || from < 0 || to < 0 || from >= net->node_count || to >= net->node_count) return;
+    ReasoningNode* from_node = net->nodes[from];
+    ReasoningNode* to_node = net->nodes[to];
+    if (!from_node || !to_node) return;
+
+    int idx = node_conn_find(from_node, to_node);
+    if (idx >= 0) {
+        int li = from & (PM_NODE_LOCK_COUNT - 1);
+        pthread_mutex_lock(&net->node_locks[li]);
+        idx = node_conn_find(from_node, to_node);   /* double-check 持锁后 */
+        if (idx >= 0 && idx < from_node->edge_count) {
+            from_node->edges[idx].weight += 0.05f * (1.0f - from_node->edges[idx].weight);
+            if (from_node->edges[idx].weight > 0.95f) from_node->edges[idx].weight = 0.95f;
+        }
+        pthread_mutex_unlock(&net->node_locks[li]);
+        return;
+    }
+    huarong_net_add_connection(net, from, to, base_weight);
+}
+#endif
+
 /**
  * 将 utf8_tokenize 产出的 token 数组逐个建节点，相邻 token 间拉序贯边。
  * 返回新增节点数；first_id_out / last_id_out 输出首尾节点 id（用于跨句连接）。
@@ -506,12 +540,27 @@ static int train_feed_token_sequence(TrainMode* tm, SubTopology* vocab,
              * 句首=i==0，句尾=i==token_count-1（token 级位置） */
             funcword_record_position(vocab->net->nodes[nid],
                                      (i == 0), (i == token_count - 1));
+            /* v2.1 阶段0-A：喂料路径累积 dist_sig[0..21]（外部语料独占，标签=种子词可信标签）。
+             * 已持 node_locks[lk]，emergent_pos_update_dist_sig 只写节点自身 dist_sig，
+             * 不碰其他锁（decay-all 是纯内存写），与 funcword_record_position 同锁区安全。
+             * [22][23] 由上面的 funcword_record_position 负责（标签无关），dist_sig_count
+             * 由其独占（update_dist_sig 已不再 ++），喂料每 token 只 +1 次。 */
+            if (tm->emergent_pos) {
+                ReasoningNode* nd = vocab->net->nodes[nid];
+                int lpos = (i > 0) ? (int)emergent_pos_seed_tag(tm->emergent_pos, tokens[i-1]) : -1;
+                int rpos = (i < token_count - 1) ? (int)emergent_pos_seed_tag(tm->emergent_pos, tokens[i+1]) : -1;
+                emergent_pos_update_dist_sig(nd, lpos, rpos, 0);
+            }
             pthread_mutex_unlock(&vocab->net->node_locks[lk]);
             if (first_id < 0) first_id = nid;
             if (prev_id >= 0 && prev_id != nid) {
                 ReasoningNode* prev_node = vocab->net->nodes[prev_id];
                 int exists = node_conn_find(prev_node, vocab->net->nodes[nid]);
+#if EDGE_WEIGHT_EXTERNAL_FEED
+                train_feed_cooccur_edge(vocab->net, prev_id, nid, edge_weight);
+#else
                 huarong_net_add_connection(vocab->net, prev_id, nid, edge_weight);
+#endif
                 if (exists < 0) tm->progress.total_added_edges++;
             }
             prev_id = nid;
@@ -1068,4 +1117,8 @@ void train_mode_set_thalamus(TrainMode* tm, Thalamus* th) {
 
 void train_mode_set_visual_cortex(TrainMode* tm, VisualCortex* vc) {
     if (tm) tm->visual_cortex = vc;
+}
+
+void train_mode_set_emergent_pos(TrainMode* tm, EmergentPOS* ep) {
+    if (tm) tm->emergent_pos = ep;
 }

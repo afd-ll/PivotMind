@@ -59,6 +59,29 @@ static const char* get_confidence_level_name(CausalConfidenceLevel level);
 #define DEFAULT_HOP_COUNT PM_DEFAULT_HOP_COUNT
 #define OUTPUT_CACHE_SIZE PM_OUTPUT_CACHE_SIZE
 
+/* ================================================================
+ * v2.1 阶段0-C 学习信源回退开关（默认=新行为，置 1 恢复旧行为）
+ * ================================================================ */
+
+/* 1=auto_learn_concepts(response) 回灌系统自己回复（旧行为，自举污染）；
+ * 0=禁止回灌，仅保留 auto_learn_concepts(user_input)（外部，新行为，默认）。 */
+#ifndef AUTO_LEARN_RESPONSE
+#define AUTO_LEARN_RESPONSE 0
+#endif
+
+/* 1=学习源=外部语料（新行为，默认）：BPTT 不再用自己回复当 target，在线自举跳过；
+ * 0=学习源=自己回复（最纯自举，旧行为）：BPTT 在线学习继续用 response 当 target。
+ *   外部语料目标接入前，BPTT 在线学习保持禁用。 */
+#ifndef LEARN_SOURCE_EXTERNAL
+#define LEARN_SOURCE_EXTERNAL 1
+#endif
+
+/* 1=autonomic 共激活学习的 response 半边可信（旧行为，给输出词建边涨权）；
+ * 0=response 半边不可信（只读、不建边不涨权，新行为，默认）。 */
+#ifndef AUTONOMIC_DIALOG_RESPONSE_TRUSTED
+#define AUTONOMIC_DIALOG_RESPONSE_TRUSTED 0
+#endif
+
 // ==================== 并行拓扑传播任务（每跳内部） ====================
 
 /** 单跳内子拓扑传播任务 */
@@ -1760,10 +1783,20 @@ char* dialog_process(DialogSystem* sys, const char* user_input, DialogReasoning*
 
             /* 自主学习（在跳过崩溃区之前执行） */
             if (sys->master && user_input && response) {
+#if AUTONOMIC_DIALOG_RESPONSE_TRUSTED
+                /* 旧行为：response 半边可信，参与建边涨权 */
                 autonomic_learn_from_dialog(sys->master, user_input, response,
                                      (AutonomicState*)sys->auto_state,
                                      sys->controller ? sys->controller->causal_graph : NULL,
                                      sys->controller ? sys->controller->memory : NULL);
+#else
+                /* 新行为（默认）：response 半边去毒（只读、不建边不涨权），仅 input 半边可学 */
+                autonomic_learn_from_dialog_trusted(sys->master, user_input, response,
+                                     (AutonomicState*)sys->auto_state,
+                                     sys->controller ? sys->controller->causal_graph : NULL,
+                                     sys->controller ? sys->controller->memory : NULL,
+                                     0);
+#endif
 
                 /* 主动学习：不满意时压制走错的边 */
                 if (sys->learner && sys->controller && sys->last_knowledge_quality < 0.5f) {
@@ -1799,11 +1832,23 @@ char* dialog_process(DialogSystem* sys, const char* user_input, DialogReasoning*
         
         if (sys->master && user_input && response) {
             // 自主学习：同时激活→涨置信度（不需要反馈）
+#if AUTONOMIC_DIALOG_RESPONSE_TRUSTED
+            /* 旧行为：response 半边可信，参与建边涨权 */
             autonomic_learn_from_dialog(sys->master, user_input, response,
                                      (AutonomicState*)sys->auto_state,
                                      sys->controller ? sys->controller->causal_graph : NULL,
                                      sys->controller ? sys->controller->memory : NULL);
+#else
+            /* 新行为（默认）：response 半边去毒（只读、不建边不涨权），仅 input 半边可学 */
+            autonomic_learn_from_dialog_trusted(sys->master, user_input, response,
+                                     (AutonomicState*)sys->auto_state,
+                                     sys->controller ? sys->controller->causal_graph : NULL,
+                                     sys->controller ? sys->controller->memory : NULL,
+                                     0);
+#endif
             // BPTT 在线学习：RNN 反向传播（与拓扑学习互补）
+#if !LEARN_SOURCE_EXTERNAL
+            /* 旧行为：训练目标=系统自己回复（最纯自举） */
             if (sys->bptt) {
                 float loss = bptt_learn_from_dialog(sys->bptt, user_input, response);
                 if (loss >= 0.0f && sys->turn_count % 10 == 0) {
@@ -1811,6 +1856,11 @@ char* dialog_process(DialogSystem* sys, const char* user_input, DialogReasoning*
                            sys->bptt->steps, loss);
                 }
             }
+#else
+            /* 新行为（默认）：学习源=外部，BPTT 不用自己回复当 target，
+             * 外部语料目标接入前，在线 BPTT 学习跳过（自举禁用）。 */
+            (void)0;
+#endif
         }
         if (sys->master && user_input) {
             auto_learn_concepts(sys->master, user_input, sys->str_pool);
@@ -1855,9 +1905,12 @@ char* dialog_process(DialogSystem* sys, const char* user_input, DialogReasoning*
                 }
             }
         }
+#if AUTO_LEARN_RESPONSE
+        /* 旧行为：回灌系统自己回复建词/建边/记位置（自举污染） */
         if (sys->master && response) {
             auto_learn_concepts(sys->master, response, sys->str_pool);
         }
+#endif
     }
 
     // === 更新认知状态（情感/动机系统）===

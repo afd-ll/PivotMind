@@ -68,7 +68,6 @@ void test_model_add_layer() {
     // Add first layer
     size_t input_size = 10;
     size_t output_size = 20;
-    size_t weight_shape[] = {input_size, output_size};
     
     Layer* layer1 = layer_create_linear(input_size, output_size, true);
     ASSERT_NOT_NULL(layer1, "layer_create_linear() returned NULL");
@@ -194,7 +193,6 @@ void test_model_mse_loss() {
 
     // Check loss value
     float* loss_data = (float*)loss->data;
-    float expected_loss = 0.25f; // (0.5^2 * 6) / 6 = 0.25
     
     ASSERT_TRUE(loss_data[0] > 0.24f && loss_data[0] < 0.26f,
                "MSE loss should be approximately 0.25");

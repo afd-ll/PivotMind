@@ -63,6 +63,8 @@ static void fetch_lock_init(void) {
 }
 #endif
 
+/* 遗留助手：实际路径走 web_fetch_lock_timeout（带超时），保留以防回退 */
+__attribute__((unused))
 static void web_fetch_lock(void) {
 #ifdef _WIN32
     fetch_lock_init();

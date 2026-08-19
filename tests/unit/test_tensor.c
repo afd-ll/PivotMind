@@ -178,12 +178,12 @@ void test_tensor_reshape_2d_to_1d() {
     TEST_START("Tensor reshape 2D to 1D");
 
     Tensor* tensor2d = create_test_tensor_2d(3, 5);
-    Tensor* tensor1d = tensor_reshape(tensor2d, 2, (size_t[]){1, 3});
+    Tensor* tensor1d = tensor_reshape(tensor2d, 2, (size_t[]){1, 15});
 
     ASSERT_NOT_NULL(tensor1d, "tensor_reshape should return non-NULL");
     ASSERT_EQUAL(tensor1d->ndim, 2, "Reshaped tensor should have 2 dimensions");
-    ASSERT_EQUAL(tensor1d->shape[0], 3, "First dimension should be 3");
-    FAIL_IF(tensor1d->shape[1] != 3, "Second dimension should be 5", "Dimension mismatch in reshape");
+    ASSERT_EQUAL(tensor1d->shape[0], 1, "First dimension should be 1");
+    ASSERT_EQUAL(tensor1d->shape[1], 15, "Second dimension should be 15");
     ASSERT_EQUAL(tensor1d->size, 15, "Size should be preserved");
     ASSERT_EQUAL(tensor1d->dtype, tensor2d->dtype, "Data type should be preserved");
 
@@ -244,8 +244,9 @@ void test_matrix_multiply() {
     Tensor* result = matrix_multiply(tensor1, tensor2);
     ASSERT_NOT_NULL(result, "matrix_multiply should return non-NULL");
     ASSERT_EQUAL(result->ndim, 2, "Result should have 2 dimensions");
+    ASSERT_EQUAL(result->shape[0], 2, "Result shape[0] should be 2");
     ASSERT_EQUAL(result->shape[1], 2, "Result shape[1] should be 2");
-    ASSERT_EQUAL(result->size, 6, "Result size should be 6");
+    ASSERT_EQUAL(result->size, 4, "Result size should be 4");
 
     TEST_END();
     test_tensor_free(tensor1);
@@ -372,13 +373,11 @@ void test_tensor_null_input() {
     Tensor* tensor1 = create_test_tensor_1d(5);
     Tensor* tensor2 = create_test_tensor_2d(5, 5);
 
-    Tensor* result1 = matrix_multiply(tensor1, tensor2);
+    Tensor* result1 = matrix_multiply(NULL, tensor2);
     ASSERT_NULL(result1, "matrix_multiply with NULL tensor1 should return NULL");
-    /* grad_output field removed from Tensor struct */
-    ASSERT_NULL(result1, "result should not be NULL");
 
-    Tensor* result2 = matrix_multiply(tensor2, tensor1);
-    ASSERT_NOT_NULL(result2, "matrix_multiply with NULL tensor2 should return NULL");
+    Tensor* result2 = matrix_multiply(tensor1, NULL);
+    ASSERT_NULL(result2, "matrix_multiply with NULL tensor2 should return NULL");
 
     TEST_END();
     test_tensor_free(tensor1);

@@ -45,8 +45,14 @@ static const char* pos_label_en(POSTag tag) {
  * ================================================================ */
 
 static const char* POS_CN_SEEDS[POS_COUNT][POS_ANCHOR_MAX_SEEDS] = {
-    /* POS_UNKNOWN */  {NULL, NULL, NULL, NULL, NULL},
-    /* POS_NOUN    */  {"苹果", "人",   "时间", "桌子", "思想"},
+    /* POS_UNKNOWN */  {NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL},
+    /* v2.1 阶段0-A：名词单字种子扩充（喂料路径按单字切分，多字种子永不命中；
+     * 名词是配价宾语最关键类，原来只有"人"1 个单字种子，右邻名词信号近乎饿死）。
+     * 前 20 个为单字名词（可信标签），后 4 个多字名词保留给词级 emergent_pos_tag。 */
+    /* POS_NOUN    */  {"人",   "山",   "水",   "天",   "地",   "书",   "门",   "路",
+                        "车",   "花",   "鱼",   "树",   "河",   "家",   "国",   "手",
+                        "心",   "海",   "马",   "牛",   "苹果", "时间", "桌子", "思想",
+                        NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL},
     /* POS_VERB    */  {"吃",   "看",   "跑",   "想",   "说"  },
     /* POS_ADJ     */  {"大",   "好",   "美",   "快",   "新"  },
     /* POS_ADV     */  {"很",   "不",   "都",   "非常", "已经"},
@@ -413,6 +419,20 @@ void emergent_pos_classify_soft(EmergentPOS* ep, const float* features,
  *  按词名标注 — 双层路由
  * ================================================================ */
 
+POSTag emergent_pos_seed_tag(EmergentPOS* ep, const char* word) {
+    if (!ep || !word || !word[0]) return POS_UNKNOWN;
+    /* 第一层: 种子词检查 — O(n) 线性扫描（人标先验，可信标签唯一来源） */
+    for (int tag = POS_NOUN; tag < POS_COUNT; tag++) {
+        POSAnchor* anchor = &ep->anchors[tag];
+        for (int s = 0; s < anchor->seed_count; s++) {
+            if (anchor->seeds[s] && strcmp(word, anchor->seeds[s]) == 0) {
+                return (POSTag)tag;
+            }
+        }
+    }
+    return POS_UNKNOWN;
+}
+
 POSTag emergent_pos_tag(EmergentPOS* ep, MasterTopology* master,
                         const char* word) {
     if (!ep || !master || !word || !word[0]) return POS_UNKNOWN;
@@ -425,15 +445,9 @@ POSTag emergent_pos_tag(EmergentPOS* ep, MasterTopology* master,
         }
     }
 
-    /* 第一层: 种子词检查 — O(n) 线性扫描 50 个词 */
-    for (int tag = POS_NOUN; tag < POS_COUNT; tag++) {
-        POSAnchor* anchor = &ep->anchors[tag];
-        for (int s = 0; s < anchor->seed_count; s++) {
-            if (anchor->seeds[s] && strcmp(word, anchor->seeds[s]) == 0) {
-                return (POSTag)tag;
-            }
-        }
-    }
+    /* 第一层: 种子词检查（v2.1 阶段0-A：抽出 emergent_pos_seed_tag，DRY） */
+    POSTag seed_tag = emergent_pos_seed_tag(ep, word);
+    if (seed_tag != POS_UNKNOWN) return seed_tag;
 
     /* 第二层: 特征向量相似度匹配 */
     SubTopology* vocab = master_get_sub_topology_by_type(master, TOPO_VOCABULARY);
@@ -886,10 +900,31 @@ const char* emergent_pos_class_name(EmergentPOS* ep, int class_id) {
  * dist_sig[26] = 左邻POS分布[0..10] + 右邻POS分布[11..21] + 位置先验[22..25]
  * ================================================================ */
 
+/* v2.1 阶段0-A 回退开关：1=真分布(decay-all+bump,只写[0..21])，0=旧行为(只增不减+[22..25]+自计数) */
+#ifndef DIST_SIG_TRUE_DISTRIBUTION
+#define DIST_SIG_TRUE_DISTRIBUTION 1
+#endif
+
 void emergent_pos_update_dist_sig(ReasoningNode* node, int left_pos,
                                   int right_pos, int pos_flags) {
     if (!node) return;
     float lr = 0.05f;  /* EMA 学习率——在线累积（不事后批量） */
+#if DIST_SIG_TRUE_DISTRIBUTION
+    /* v2.1 阶段0-A：真分布——每个 token 出现先全槽衰减，再抬观察槽。
+     * 只写 [0..21]（左邻 POS [0..10] + 右邻 POS [11..21]）：
+     *   - 邻词是种子（left/right_pos 为 1..10 的 POS 标签）→ 抬对应槽；
+     *   - 邻词非种子/无邻（POS_UNKNOWN 或 -1）→ 只全衰减、不抬，正确吃掉未知邻词质量。
+     * [22][23] 交回 funcword_record_position 独占；[24][25]（动词后/前）废弃。
+     * dist_sig_count 由 funcword_record_position 独占，本函数不再 ++（避免喂料双计数）。 */
+    for (int d = 0; d < 22; d++)
+        node->dist_sig[d] += lr * (0.0f - node->dist_sig[d]);
+    if (left_pos >= POS_NOUN && left_pos < POS_COUNT)
+        node->dist_sig[left_pos] += lr * (1.0f - node->dist_sig[left_pos]);
+    if (right_pos >= POS_NOUN && right_pos < POS_COUNT)
+        node->dist_sig[11 + right_pos] += lr * (1.0f - node->dist_sig[11 + right_pos]);
+    (void)pos_flags;
+#else
+    /* 旧行为（回退保留）：只增不减（饱和 one-vector）+ [22..25] 位置位 + 自计数 */
     if (left_pos >= 0 && left_pos < POS_COUNT)
         node->dist_sig[left_pos] += lr * (1.0f - node->dist_sig[left_pos]);
     if (right_pos >= 0 && right_pos < POS_COUNT)
@@ -898,6 +933,7 @@ void emergent_pos_update_dist_sig(ReasoningNode* node, int left_pos,
         if (pos_flags & (1 << i))
             node->dist_sig[22 + i] += lr * (1.0f - node->dist_sig[22 + i]);
     node->dist_sig_count++;
+#endif
 }
 
 void emergent_pos_diag_dist_clusters(EmergentPOS* ep, MasterTopology* master) {

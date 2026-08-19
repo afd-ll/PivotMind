@@ -1,5 +1,52 @@
 # Changelog
 
+## v0.5.23 — 2026-08-19
+
+### Added
+- **top-K 缝合（绑定三件套①）**：`topology_walk_greedy_topk` 每步候选 top-3 + 综合打分（激活+跨拓扑预加热+模板），单链贪心升级；K=1 逐位等价，其余调用方零影响。
+- **cross_hit 持久化（绑定三件套②）**：跨拓扑联合激活计数落盘（STATE_FORMAT_VERSION 7→8），跨重启不归零，≥5 次自动建边闭环可达成。
+- **种子词表（绑定三件套③）**：16 个实体种子词预注册整词节点，强制 TOPO_VOCABULARY，带开关；实体词不再被拆成字符碎片。
+
+### Fixed
+- **R6 锁模型**：net->nodes 双路径 realloc 竞态（add_node net->mutex / auto_extend master->rwlock 互不排斥）→ net->mutex 唯一权威锁，写侧补 4 缺锁点 + 读侧补 3 缺锁点，锁序恒 master→net。修复凌晨全量重喂下 SIGABRT（堆损坏）+ SIGSEGV（auto_learn_concepts 读野指针）。
+- **种子词落错拓扑**：预注册强制 TOPO_VOCABULARY（原随喂料领域拓扑）。
+- **网关 token 持久化**：随机生成 + gw_token 文件（0600）记住有效 token，跨重启不变。
+- **watchdog 双实例并发**：gateway_watchdog.sh 加 flock（08-18 21:00 状态缩水事故元凶）。
+
+### Changed
+- **树莓派黑匣子探测**：适配网关绑 127.0.0.1（SSH 板上本地 curl + 日志动态取 token）。
+
+### Quality
+- 单测全绿：topology 3/3、tensor 13/13、learner 3/3、dialog 4/4；全仓编译零警告。
+
+详见 [changelogs/067-binding-trilogy-lock-model.md](changelogs/067-binding-trilogy-lock-model.md)
+
+---
+
+## v0.5.22 — 2026-08-18
+
+### Security
+- **网关全端点鉴权**：`X-Pivot-Token` 覆盖除 /health、/healthz 外所有端点（/chat /learn /feedback /qa /debug /force_templates /train/* 等）；默认绑定 127.0.0.1（`PIVOTMIND_BIND_ADDR=0.0.0.0` 可覆盖），局域网直接访问面关闭。
+- **qa_crawler 注入面清除**：`system()` 全清零 → `fork+execvp`（argv 直传杜绝 shell 注入）+ 父进程超时 SIGKILL 保护；URL 白名单默认拒绝 + 协议/域名/路径三级校验（封堵子串伪造）。
+
+### Fixed
+- **SIGSEGV 真根因修复**：`object_pool_acquire` 扩容分支 `free_count` 恒 0 → `free_list[-1]` 越界读返回垃圾指针——infer 建图边数超过池容量时崩溃（"薛定谔的猫"类因果查询偶发 SIGSEGV；GPT 审查/pro 复审曾误判为缓存悬垂）。压测 6/6 因果查询零崩溃。
+- **causal_reasoning 缓存悬垂**：`causal_associative_search` early-return 路径 destroy 共享缓存 `g_cg_cache` 后未置 NULL（且锁外 destroy）→ 改为不销毁，统一由指纹变化分支管理。
+- **UTF-8 标点比较**：gateway CJK 多字节字符常量 vs 单字节 char 恒 false → strncmp UTF-8 序列比较，汉字标点真正计入统计。
+- **corpus_train fread 缓冲未终止**：按实际读取数定 NUL 位置。
+
+### Changed
+- **Makefile 并行度**：删 `MAKEFLAGS += -j$(nproc)`（3.8GB 板全核编译 OOM）→ `JOBS ?= 2`，命令行 -j 优先。
+- **_ar_find_pair 查找优化**：PairEntry 固化键哈希 + 每槽 2×strcmp → 1 次 int 短路 + rehash 免 snprintf 重哈希（哈希同值性 10 万对验证，语义零漂移）。澄清：查找本就是开放定址哈希，O(n²) 真根因（三字扩展双层迭代）已于 3878e84 修复。
+
+### Quality
+- **test_tensor 13/13**：3 处断言修复（reshape 3×5→{1,15}、matmul size 6→4、NULL 输入测试传参错误）。
+- **全仓编译警告清零**：20 条 -Wall -Wextra 全消（未用变量/未用参数/符号比较/多字节字符常量等）。
+
+详见 [changelogs/066-security-hardening-crash-fix.md](changelogs/066-security-hardening-crash-fix.md)
+
+---
+
 ## v0.5.21 — 2026-08-15
 
 ### Security

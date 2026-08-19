@@ -76,6 +76,8 @@ typedef struct {
     int    last_seen;     // 最近出现记忆 tick
     int    tier;          // 短期/长期
     int    used;
+    unsigned int h;       // 08-18: 键哈希值（a|b 复合 DJB2），插入时固化——
+                          // 探测短路 + 扩容/清理 rehash 复用，免重建复合串
 } PairEntry;
 
 /** 词哈希表条目（声明在主结构之前） */
@@ -165,6 +167,17 @@ static inline unsigned int _ar_hash(const char* s) {
     return h;
 }
 
+/** 字符对键哈希（08-18）— 与旧 snprintf("%s|%s",a,b) 复合串的 DJB2 完全同值：
+ * 逐字节哈希 a → '|' 分隔符 → b，等价于 _ar_hash("a|b")，但免掉每次查找的
+ * snprintf 格式化 + 复合串重扫（a/b 均为单字符，键总长 ≤ 8 字节）。 */
+static inline unsigned int _ar_pair_hash(const char* a, const char* b) {
+    unsigned int h = 5381;
+    while (*a) h = ((h << 5) + h) + (unsigned char)*a++;
+    h = ((h << 5) + h) + (unsigned char)'|';
+    while (*b) h = ((h << 5) + h) + (unsigned char)*b++;
+    return h;
+}
+
 /** v0.5.9: 记忆触摸——出现即巩固（Hebbian 渐近），过阈晋升长期 */
 static inline void _ar_mem_touch(float* consolidated, int* tier,
                                  int* last_seen, int tick) {
@@ -202,6 +215,7 @@ static CharEntry* _ar_find_char(ArticleReader* ar, const char* ch) {
 }
 
 #define AR_PAIR_LOAD_MAX  0.75f  /* 负载因子>75%时触发扩容 */
+#define AR_PAIR_CLEAN_LOAD 0.85f /* 负载因子>85%时触发表满清理（P1: 防线性探测退化） */
 
 /** 字符对哈希表扩容 — 双倍容量 + rehash */
 static int _ar_expand_pair_hash(ArticleReader* ar) {
@@ -213,9 +227,8 @@ static int _ar_expand_pair_hash(ArticleReader* ar) {
 
     for (int i = 0; i < ar->pair_hash_size; i++) {
         if (!ar->pair_table[i].used) continue;
-        char key[16];
-        snprintf(key, sizeof(key), "%s|%s", ar->pair_table[i].a, ar->pair_table[i].b);
-        unsigned int h = _ar_hash(key) & new_mask;
+        /* 08-18: 复用条目内固化的键哈希（与插入时同值），免重建复合串 + 重哈希 */
+        unsigned int h = ar->pair_table[i].h & new_mask;
         for (int p = 0; p < new_size; p++) {
             int idx = (h + p) & new_mask;
             if (!new_tab[idx].used) { new_tab[idx] = ar->pair_table[i]; break; }
@@ -245,9 +258,8 @@ static void _ar_cleanup_stale_pairs(ArticleReader* ar) {
             continue;
         }
         /* 保留（长期对 或 近期活跃的短期对）：rehash 到新表 */
-        char key[16];
-        snprintf(key, sizeof(key), "%s|%s", pe->a, pe->b);
-        unsigned int h = _ar_hash(key) & mask;
+        /* 08-18: 复用固化键哈希，免重建复合串 + 重哈希 */
+        unsigned int h = pe->h & mask;
         for (int p = 0; p < ar->pair_hash_size; p++) {
             int idx = (h + p) & mask;
             if (!new_tab[idx].used) { new_tab[idx] = *pe; kept++; break; }
@@ -263,48 +275,58 @@ static void _ar_cleanup_stale_pairs(ArticleReader* ar) {
     }
 }
 
-/** 在 pair_table 中查找或插入字符对（v0.5.9 记忆化） */
+/** 在 pair_table 中查找或插入字符对（v0.5.9 记忆化）
+ * 08-18: 开放定址哈希 + 线性探测不变（75% 扩容 / 85% 清理兜底均摊 O(1)），
+ * 但每槽比较从 2×strcmp 短路为 1 次 int 哈希比较——仅哈希命中才 strcmp 精确
+ * 校验（UTF-8 单字符对碰撞率极低）。键哈希直接对 a、'|'、b 逐字节算，免
+ * snprintf 复合串。 */
 static PairEntry* _ar_find_pair(ArticleReader* ar, const char* a, const char* b) {
     /* 负载因子检查：超过75%触发扩容 */
     if ((float)ar->pair_count / ar->pair_hash_size > AR_PAIR_LOAD_MAX)
         _ar_expand_pair_hash(ar);
 
-    /* v0.5.9: 表达上限（扩容被 2M 槽封顶）→ 清理短期不活跃对。
-     * ⚠️ 冷却防抖：pair_clean_tick + COOLDOWN < mem_tick 才清——
+    /* P1（08-16 修复）：清理触发从「绝对表满 AR_MEM_TABLE_MAX(2M)」改为
+     * 「负载因子 > AR_PAIR_CLEAN_LOAD(85%)」。原判据要等 pair_count 撞 2M
+     * 封顶才清，此时负载已 ~95%，线性探测退化到每次查找数百次 strcmp
+     * （08-15 19:44 / 01:22 两次 STUCK 抓栈实锤）。改为 85% 提前清理，
+     * 避免探测链退化成 O(n) 扫描。
+     * ⚠️ 冷却防抖保留：pair_clean_tick + COOLDOWN < mem_tick 才清——
      * 早期实现 pair_clean_tick < mem_tick 恒真（mem_tick 每行 +1），
      * 表满后每次 find 都触发 88MB calloc + 2M rehash（锁内！）
      * → 学习线程全部卡死（08-07 14:xx 实锤，STUCK 53 分钟） */
-    if (ar->pair_count >= AR_MEM_TABLE_MAX &&
+    if ((float)ar->pair_count / ar->pair_hash_size > AR_PAIR_CLEAN_LOAD &&
         ar->pair_clean_tick + AR_MEM_CLEAN_COOLDOWN < ar->mem_tick) {
         _ar_cleanup_stale_pairs(ar);
         ar->pair_clean_tick = ar->mem_tick;
     }
 
-    char key[16];
-    snprintf(key, sizeof(key), "%s|%s", a, b);
     int mask = ar->pair_hash_size - 1;
-    unsigned int h = _ar_hash(key) & mask;
+    unsigned int h = _ar_pair_hash(a, b) & mask;
     for (int i = 0; i < ar->pair_hash_size; i++) {
         int idx = (h + i) & mask;
-        if (!ar->pair_table[idx].used) {
-            strncpy(ar->pair_table[idx].a, a, sizeof(ar->pair_table[idx].a) - 1);
-            ar->pair_table[idx].a[sizeof(ar->pair_table[idx].a) - 1] = 0;
-            strncpy(ar->pair_table[idx].b, b, sizeof(ar->pair_table[idx].b) - 1);
-            ar->pair_table[idx].b[sizeof(ar->pair_table[idx].b) - 1] = 0;
-            ar->pair_table[idx].co_count = 0;
-            ar->pair_table[idx].consolidated = AR_MEM_INIT_CONSOLIDATED;
-            ar->pair_table[idx].last_seen = ar->mem_tick;
-            ar->pair_table[idx].tier = AR_MEM_TIER_SHORT;
-            ar->pair_table[idx].used = 1;
+        PairEntry* pe = &ar->pair_table[idx];
+        if (!pe->used) {
+            strncpy(pe->a, a, sizeof(pe->a) - 1);
+            pe->a[sizeof(pe->a) - 1] = 0;
+            strncpy(pe->b, b, sizeof(pe->b) - 1);
+            pe->b[sizeof(pe->b) - 1] = 0;
+            pe->co_count = 0;
+            pe->consolidated = AR_MEM_INIT_CONSOLIDATED;
+            pe->last_seen = ar->mem_tick;
+            pe->tier = AR_MEM_TIER_SHORT;
+            pe->used = 1;
+            pe->h = h;  /* 08-18: 固化键哈希（扩容/清理 rehash 直接复用） */
             ar->pair_count++;
-            return &ar->pair_table[idx];
+            return pe;
         }
-        if (strcmp(ar->pair_table[idx].a, a) == 0 &&
-            strcmp(ar->pair_table[idx].b, b) == 0) {
-            _ar_mem_touch(&ar->pair_table[idx].consolidated,
-                          &ar->pair_table[idx].tier,
-                          &ar->pair_table[idx].last_seen, ar->mem_tick);
-            return &ar->pair_table[idx];
+        /* 08-18: 哈希短路——先比 int，命中才做精确 strcmp */
+        if (pe->h == h &&
+            strcmp(pe->a, a) == 0 &&
+            strcmp(pe->b, b) == 0) {
+            _ar_mem_touch(&pe->consolidated,
+                          &pe->tier,
+                          &pe->last_seen, ar->mem_tick);
+            return pe;
         }
     }
     return NULL;
@@ -434,6 +456,114 @@ static int _ar_extract_chars(ArticleReader* ar, const char* line) {
 
 // ==================== 建图 ====================
 
+// ==================== 种子实体词表（v0.6.x） ====================
+// 背景（08-18 调查报告）：整词节点注册唯一机制是 PMI 词发现，
+// "张飞"这类低频实体永远达不到 min_freq/PMI 门槛，被拆成字符节点。
+// 方案 A：这里的内置种子词表在 _ar_build_topo 建节点循环前直接预注册
+// 为整词节点（词汇拓扑），绕开 PMI/min_freq/词表满三个门槛，与 PMI
+// 涌现机制共存（补充而非替换），已存在的词自动跳过（幂等）。
+// 开关：编译期宏 PIVOTMIND_SEED_WORDS（默认 1=开）+ 运行期环境变量
+// PIVOTMIND_SEED_WORDS=0 可关（便于对比实验，无需重新编译）。
+#ifndef PIVOTMIND_SEED_WORDS
+#define PIVOTMIND_SEED_WORDS 1
+#endif
+
+/** 内置种子实体词（低频实体词，PMI 统计机制无法稳定注册，可后续扩充） */
+static const char* _ar_builtin_seed_words[] = {
+    "关羽", "张飞", "刘备", "曹操", "孙权", "吕布", "赵云", "诸葛亮",
+    "青龙偃月刀", "丈八蛇矛", "赤兔马", "方天画戟", "桃园结义",
+    "饺子", "武器", "天气",
+};
+#define _AR_BUILTIN_SEED_COUNT \
+    ((int)(sizeof(_ar_builtin_seed_words) / sizeof(_ar_builtin_seed_words[0])))
+
+/** 种子词总开关：编译期宏 && 运行期环境变量双重控制（默认开） */
+static int _ar_seed_words_enabled(void) {
+#if PIVOTMIND_SEED_WORDS
+    const char* env = getenv("PIVOTMIND_SEED_WORDS");
+    if (env && env[0] == '0') return 0;
+    return 1;
+#else
+    return 0;
+#endif
+}
+
+/**
+ * 注册单个词为整词节点（词汇拓扑）
+ * 与 PMI 发现词的建节点逻辑完全一致（查重→脏词过滤→insert_node_dynamic
+ * →确定性特征向量→activation），供 PMI 词与种子词共用。
+ * @return 1=新建节点, 0=已存在或被过滤, -1=插入失败
+ */
+static int _ar_register_word_node(ArticleReader* ar, SubTopology* topo,
+                                  const char* text, int freq) {
+    if (!ar || !topo || !topo->net || !text || !text[0]) return 0;
+    HuarongTopologyNet* net = topo->net;
+
+    int nid = huarong_net_find_concept(net, text);
+    if (nid >= 0) return 0;  /* 已存在——幂等，不重复注册 */
+
+    // 拒绝含有标点的脏词（如 "A@yuan" 不会作为词节点）
+    int has_punct = 0;
+    for (const char* cp = text; *cp && !has_punct; ) {
+        if (is_punctuation(cp)) has_punct = 1;
+        int b = get_char_bytes(cp);
+        if (b <= 0) b = 1;
+        cp += b;
+    }
+    if (has_punct) return 0;
+    if (strstr(text, "//")) return 0;  /* URL/路径残留 */
+
+    /* v0.5.7: 英文垃圾词过滤（请求参数/cookie 名/乱码——实测
+     * 抽查 67 个新词 ~90% 是 _G/SID/wXMLH 这类） */
+    if ((unsigned char)text[0] < 0x80) {  /* ASCII 词 */
+        const char* w = text;
+        size_t wl = strlen(w);
+        int has_vowel = 0, has_underscore = 0, has_digit = 0, has_lower = 0;
+        for (const char* cp = w; *cp; cp++) {
+            char ch = *cp;
+            if (ch == '_' || ch == '-') has_underscore = 1;
+            if (ch >= '0' && ch <= '9') has_digit = 1;
+            if (islower((unsigned char)ch)) has_lower = 1;
+            if (ch=='a'||ch=='e'||ch=='i'||ch=='o'||ch=='u'||
+                ch=='A'||ch=='E'||ch=='I'||ch=='O'||ch=='U') has_vowel = 1;
+        }
+        if (wl < 2 || has_underscore || has_digit ||
+            (!has_vowel && wl < 6) || (!has_lower && wl >= 4)) return 0;
+    }
+
+    // insert_node_dynamic：具备自动扩容 + 全局统计
+    nid = insert_node_dynamic(ar->master, topo->topo_id, text, NULL, 0);
+    if (nid < 0) return -1;
+
+    /* v0.5.23 R6 方案A: insert_node_dynamic 返回后其内部 net 锁已释放，
+     * 此处读 net->node_count/nodes[nid] 必须持 net 读锁——否则与其它线程
+     * add_node 的 net 写 realloc 竞态（崩溃 #1 嫌疑 :536/:543）。
+     * 窄临界区取节点指针；节点本体由调用链 ar->mutex 保护（新建节点独占）。 */
+    pthread_rwlock_rdlock(&net->mutex);
+    ReasoningNode* node = (nid < net->node_count) ? net->nodes[nid] : NULL;
+    pthread_rwlock_unlock(&net->mutex);
+    if (!node) return -1;
+
+    if (ar->p_added_nodes) (*ar->p_added_nodes)++;
+    /* v0.5.7: 抽查——打印实际进拓扑的新词（污染比例分析） */
+    LOG_INFO("[文章阅读] 新词抽查: %s", text);
+
+    // 基于词文本的确定性特征向量初始化
+    if (!node->features) {
+        node->features = (float*)malloc(NODE_FEATURE_DIM * sizeof(float));
+        node->feature_dim = NODE_FEATURE_DIM;
+    }
+    if (node->features) {
+        unsigned int seed = _ar_hash(text);
+        for (int d = 0; d < NODE_FEATURE_DIM; d++) {
+            int val = (seed * (d + 1) * 7 + 13) % 20001;
+            node->features[d] = ((float)val / 100000.0f) - 0.1f;
+        }
+    }
+    node->activation = freq > 5 ? 0.5f : 0.2f;
+    return 1;
+}
+
 /**
  * 将发现的词构建到拓扑中
  * 每个词 → 一个概念节点
@@ -442,72 +572,48 @@ static int _ar_extract_chars(ArticleReader* ar, const char* line) {
  * 词→句子的序列保存在一个临时数组中，flush 时从 words 重建序列。
  */
 static int _ar_build_topo(ArticleReader* ar, SubTopology* topo) {
-    if (!ar || !topo || !topo->net || ar->word_count == 0) return 0;
+    if (!ar || !topo || !topo->net) return 0;
 
-    HuarongTopologyNet* net = topo->net;
     int created = 0;
+    int seed_active = _ar_seed_words_enabled();
+
+    // 词表为空且种子词关闭 → 无事可做
+    if (ar->word_count == 0 && !seed_active) return 0;
+
+    // ============ 种子实体词预注册（v0.6.x，方案A） ============
+    // 在建节点循环前直接预注册整词节点，绕开 PMI/min_freq 门槛。
+    // 幂等：已存在节点跳过，与 PMI 机制共存。
+    //
+    // 目标拓扑强制为词汇拓扑 TOPO_VOCABULARY，不能用 _ar_build_topo 传入的
+    // topo 参数——白话文域喂料时该参数是领域拓扑，种子词注册进去后扩散
+    // 第 0 步滑窗整词匹配（diffusion.c find_concept 匹配 vocab 拓扑）用不上
+    // （08-19 pro 分析确认）。PMI 词发现路径（下方建节点循环）仍用传入 topo，
+    // 不受影响。
+    if (seed_active) {
+        SubTopology* vtopo = ar->vocab_topo;
+        if (!vtopo || !vtopo->net) {
+            vtopo = master_get_sub_topology_by_type(ar->master, TOPO_VOCABULARY);
+        }
+        const char** seeds = ar->cfg.seed_words;
+        int seed_count = ar->cfg.seed_count;
+        if (!seeds || seed_count <= 0) {   /* 未配置 → 使用内置表 */
+            seeds = _ar_builtin_seed_words;
+            seed_count = _AR_BUILTIN_SEED_COUNT;
+        }
+        for (int s = 0; s < seed_count && vtopo && vtopo->net; s++) {
+            if (!seeds[s] || !seeds[s][0]) continue;
+            int rc = _ar_register_word_node(ar, vtopo, seeds[s], 5);
+            if (rc > 0) created++;
+        }
+    }
 
     // 扫描词表，每个词尝试创建节点（仅建节点，边缘由后续训练自动形成）
     for (int i = 0; i < ar->word_count; i++) {
         WordEntry* we = &ar->words[i];
         if (!we->text[0]) continue;
 
-        int nid = huarong_net_find_concept(net, we->text);
-        if (nid < 0) {
-            // 拒绝含有标点的脏词（如 "A@yuan" 不会作为词节点）
-            int has_punct = 0;
-            for (const char* cp = we->text; *cp && !has_punct; ) {
-                if (is_punctuation(cp)) has_punct = 1;
-                int b = get_char_bytes(cp);
-                if (b <= 0) b = 1;
-                cp += b;
-            }
-            if (has_punct) continue;
-            if (strstr(we->text, "//")) continue;  /* URL/路径残留 */
-
-            /* v0.5.7: 英文垃圾词过滤（请求参数/cookie 名/乱码——实测
-             * 抽查 67 个新词 ~90% 是 _G/SID/wXMLH 这类） */
-            if ((unsigned char)we->text[0] < 0x80) {  /* ASCII 词 */
-                const char* w = we->text;
-                size_t wl = strlen(w);
-                int has_vowel = 0, has_underscore = 0, has_digit = 0, has_lower = 0;
-                for (const char* cp = w; *cp; cp++) {
-                    char ch = *cp;
-                    if (ch == '_' || ch == '-') has_underscore = 1;
-                    if (ch >= '0' && ch <= '9') has_digit = 1;
-                    if (islower((unsigned char)ch)) has_lower = 1;
-                    if (ch=='a'||ch=='e'||ch=='i'||ch=='o'||ch=='u'||
-                        ch=='A'||ch=='E'||ch=='I'||ch=='O'||ch=='U') has_vowel = 1;
-                }
-                if (wl < 2 || has_underscore || has_digit ||
-                    (!has_vowel && wl < 6) || (!has_lower && wl >= 4)) continue;
-            }
-
-            // insert_node_dynamic：具备自动扩容 + 全局统计
-            nid = insert_node_dynamic(ar->master, topo->topo_id,
-                                       we->text, NULL, 0);
-            if (nid >= 0 && nid < topo->net->node_count && topo->net->nodes[nid]) {
-                created++;
-                if (ar->p_added_nodes) (*ar->p_added_nodes)++;
-                /* v0.5.7: 抽查——打印实际进拓扑的新词（污染比例分析） */
-                LOG_INFO("[文章阅读] 新词抽查: %s", we->text);
-
-                // 基于词文本的确定性特征向量初始化
-                ReasoningNode* node = topo->net->nodes[nid];
-                if (!node->features) {
-                    node->features = (float*)malloc(NODE_FEATURE_DIM * sizeof(float));
-                    node->feature_dim = NODE_FEATURE_DIM;
-                }
-                if (node->features) {
-                    unsigned int seed = _ar_hash(we->text);
-                    for (int d = 0; d < NODE_FEATURE_DIM; d++) {
-                        int val = (seed * (d + 1) * 7 + 13) % 20001;
-                        node->features[d] = ((float)val / 100000.0f) - 0.1f;
-                    }
-                }
-                node->activation = we->freq > 5 ? 0.5f : 0.2f;
-            }
-        }
+        int rc = _ar_register_word_node(ar, topo, we->text, we->freq);
+        if (rc > 0) created++;
     }
 
     return created;
@@ -767,16 +873,25 @@ int _article_flush_locked(ArticleReader* ar, SubTopology* topo,
 
     free(pair_scores);
 
-    // ============ 一轮三字扩展（首字哈希索引 O(n)） ============
-    // 构建首字→词索引列表（存索引而非指针，防御下方 _ar_find_or_add_word 内部 realloc）
+    // ============ 一轮三字扩展（首字符哈希索引 O(n)） ============
+    // 构建首字符→词索引列表（存索引而非指针，防御下方 _ar_find_or_add_word 内部 realloc）
+    // P2（08-16 修复）：索引 key 从「首字节」升级为「UTF-8 前 2 字节」。
+    //   中文是 3 字节编码，首字节几乎全落在 0xE4~0xE9 六个桶 → 全部单字词
+    //   挤在这 6 个桶里，内层仍要遍历大量无关词（真根因 O(n²) 迭代）。
+    //   取前 2 字节后有效桶 ≈ 6×64 ≈ 384，内层遍历量降约 64 倍。
+    //   同时只收录单字词（char_len==1）：多字词作 w2 经 PairEntry.b[8]
+    //   截断永不命中，是纯污染源（见 P0），收录无意义。
     typedef struct { int* list; int count; int cap; } CharWordList;
-    CharWordList first_char_map[256];  // 仅索引首个字节
-    memset(first_char_map, 0, sizeof(first_char_map));
+    // 堆分配 [256][256]（≈1MB，避免线程栈吃紧；栈上限 8MB）
+    CharWordList (*first_char_map)[256] =
+        (CharWordList(*)[256])calloc(256 * 256, sizeof(CharWordList));
+    if (!first_char_map) goto _flush_out;  /* 分配失败 → 本轮放弃三字扩展 */
     for (int wi = 0; wi < ar->word_count; wi++) {
         WordEntry* w = &ar->words[wi];
-        if (w->char_len < 1) continue;
-        unsigned char first_byte = (unsigned char)w->text[0];
-        CharWordList* cwl = &first_char_map[first_byte];
+        if (w->char_len != 1) continue;  /* P2: 只收单字词 */
+        unsigned char b0 = (unsigned char)w->text[0];
+        unsigned char b1 = (unsigned char)w->text[1];  /* 单字词：ASCII 时 text[1]==0 */
+        CharWordList* cwl = &first_char_map[b0][b1];
         if (cwl->count >= cwl->cap) {
             int new_cap = cwl->cap ? cwl->cap * 2 : 8;
             int* tmp = (int*)realloc(cwl->list, new_cap * sizeof(int));
@@ -806,14 +921,19 @@ int _article_flush_locked(ArticleReader* ar, SubTopology* topo,
         }
         if (!last_c[0]) continue;
 
-        // 用首字哈希快速查找
-        unsigned char first_byte = (unsigned char)last_c[0];
-        CharWordList* cwl = &first_char_map[first_byte];
+        // 用首字符（UTF-8 前 2 字节）哈希快速查找
+        unsigned char b0 = (unsigned char)last_c[0];
+        unsigned char b1 = (unsigned char)last_c[1];  /* 单字 last_c：ASCII 时 text[1]==0 */
+        CharWordList* cwl = &first_char_map[b0][b1];
         for (int wi2 = 0; wi2 < cwl->count; wi2++) {
             int widx2 = cwl->list[wi2];
             if (wi == widx2) continue;  /* 用索引去重，防御 realloc */
             WordEntry* w2 = &ar->words[widx2];  /* 每次从最新 ar->words 取，防御 realloc */
             if (w2->char_len < 1) continue;
+            /* P0（08-16 修复）：只处理单字词。多字词作 b 经 PairEntry.b[8]
+             * （仅 7 字节）strncpy 截断 → 下次 strcmp 整词 vs 截断串永不相等
+             * → 每次 flush 重复插入 char|word 垃圾条目 → pair_count 无界增长。 */
+            if (w2->char_len != 1) continue;
 
             // 检查 pair_table 中该字对是否高频
             PairEntry* pe = _ar_find_pair(ar, last_c, w2->text);
@@ -836,10 +956,13 @@ int _article_flush_locked(ArticleReader* ar, SubTopology* topo,
         }
     }
 
-    // 释放首字索引
+    // 释放首字符索引（每桶动态 list + 2D 数组本体）
     for (int i = 0; i < 256; i++) {
-        free(first_char_map[i].list);
+        for (int j = 0; j < 256; j++) {
+            free(first_char_map[i][j].list);
+        }
     }
+    free(first_char_map);
 
     // 清空序列缓冲区（下一轮重新累积）
     ar->seq_len = 0;

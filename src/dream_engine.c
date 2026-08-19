@@ -29,6 +29,16 @@
 #include <time.h>
 
 /* ================================================================
+ * v2.1 阶段0-C 梦境自造样本回退开关（默认=新行为禁，置 1 恢复旧行为）
+ * ================================================================ */
+/* 1=保留交叉训练(alt_q 邻近词)+扰动(varied 随机拼词)自造样本（旧行为，
+ *   越界生成内部内容当训练样本，违反"信源内容外部性"红线）；
+ * 0=只保留原 QA 对回放（外部母本，新行为，默认）。 */
+#ifndef DREAM_AUGMENT_ENABLED
+#define DREAM_AUGMENT_ENABLED 0
+#endif
+
+/* ================================================================
  *  QA 重放缓冲区 — 白天学习，夜间巩固
  * ================================================================ */
 #define PM_DREAM_REPLAY_MAX 256
@@ -119,58 +129,66 @@ int dream_cycle(MasterTopology* master, MemorySystem* memory,
             AutonomicState astate;
             memset(&astate, 0, sizeof(astate));
             autonomic_state_init(&astate);
-            SubTopology* vocab = master_get_sub_topology_by_type(master, TOPO_VOCABULARY);
 
             for (int i = 0; i < pairs; i++) {
                 /* 1. 原对强化 */
                 autonomic_learn_from_dialog(master, qs[i], as[i], &astate, NULL, memory);
 
-                /* 2. 交叉训练：找语义相近的问题，拓展回答的覆盖范围 */
-                if (vocab && vocab->net) {
-                    ReasoningNode* qnode = node_hash_find(vocab->node_hash, qs[i]);
-                    if (qnode) {
-                        /* 从问题节点出发，找边权最高的 2 个邻近词作为替代问题 */
-                        float best_w[2] = {0, 0};
-                        const char* alt_q[2] = {NULL, NULL};
-                        for (int e = 0; e < qnode->edge_count; e++) {
-                            ReasoningNode* tgt = qnode->edges[e].target;
-                            if (!tgt || !tgt->concept) continue;
-                            float w = qnode->edges[e].weight;
-                            if (w > best_w[0]) { best_w[1] = best_w[0]; alt_q[1] = alt_q[0]; best_w[0] = w; alt_q[0] = tgt->concept; }
-                            else if (w > best_w[1]) { best_w[1] = w; alt_q[1] = tgt->concept; }
-                        }
-                        /* 用邻近词做交叉训练：您好→我可以帮你什么 */
-                        for (int j = 0; j < 2; j++) {
-                            if (alt_q[j] && best_w[j] > 0.3f) {
-                                autonomic_learn_from_dialog(master, alt_q[j], as[i],
-                                                            &astate, NULL, memory);
+#if DREAM_AUGMENT_ENABLED
+                /* 2. 交叉训练：找语义相近的问题，拓展回答的覆盖范围（旧行为） */
+                {
+                    SubTopology* vocab = master_get_sub_topology_by_type(master, TOPO_VOCABULARY);
+                    if (vocab && vocab->net) {
+                        ReasoningNode* qnode = node_hash_find(vocab->node_hash, qs[i]);
+                        if (qnode) {
+                            /* 从问题节点出发，找边权最高的 2 个邻近词作为替代问题 */
+                            float best_w[2] = {0, 0};
+                            const char* alt_q[2] = {NULL, NULL};
+                            for (int e = 0; e < qnode->edge_count; e++) {
+                                ReasoningNode* tgt = qnode->edges[e].target;
+                                if (!tgt || !tgt->concept) continue;
+                                float w = qnode->edges[e].weight;
+                                if (w > best_w[0]) { best_w[1] = best_w[0]; alt_q[1] = alt_q[0]; best_w[0] = w; alt_q[0] = tgt->concept; }
+                                else if (w > best_w[1]) { best_w[1] = w; alt_q[1] = tgt->concept; }
+                            }
+                            /* 用邻近词做交叉训练：您好→我可以帮你什么 */
+                            for (int j = 0; j < 2; j++) {
+                                if (alt_q[j] && best_w[j] > 0.3f) {
+                                    autonomic_learn_from_dialog(master, alt_q[j], as[i],
+                                                                &astate, NULL, memory);
+                                }
                             }
                         }
                     }
-                }
 
-                /* 3. 路径扩散：在回答中加入微小扰动，让回答路径不单一 */
-                char varied[2048];
-                snprintf(varied, sizeof(varied), "%s", as[i]);
-                /* 25% 概率在回答末尾加一个相关词做扰动 */
-                if ((rand() % 100) < 25 && vocab) {
-                    strncat(varied, " ", sizeof(varied) - strlen(varied) - 1);
-                    /* 从回答最关键词的共现词中随机挑一个 */
-                    int ri = rand() % 256;
-                    for (int e = 0; e < (vocab->net->node_count > 200 ? 200 : vocab->net->node_count); e++) {
-                        ReasoningNode* n = vocab->net->nodes[(ri + e) % vocab->net->node_count];
-                        if (n && n->concept && n->edge_count > 0) {
-                            strncat(varied, n->concept, sizeof(varied) - strlen(varied) - 1);
-                            break;
+                    /* 3. 路径扩散：在回答中加入微小扰动，让回答路径不单一（旧行为） */
+                    char varied[2048];
+                    snprintf(varied, sizeof(varied), "%s", as[i]);
+                    /* 25% 概率在回答末尾加一个相关词做扰动 */
+                    if ((rand() % 100) < 25 && vocab) {
+                        strncat(varied, " ", sizeof(varied) - strlen(varied) - 1);
+                        /* 从回答最关键词的共现词中随机挑一个 */
+                        int ri = rand() % 256;
+                        for (int e = 0; e < (vocab->net->node_count > 200 ? 200 : vocab->net->node_count); e++) {
+                            ReasoningNode* n = vocab->net->nodes[(ri + e) % vocab->net->node_count];
+                            if (n && n->concept && n->edge_count > 0) {
+                                strncat(varied, n->concept, sizeof(varied) - strlen(varied) - 1);
+                                break;
+                            }
                         }
                     }
+                    autonomic_learn_from_dialog(master, qs[i], varied, &astate, NULL, memory);
                 }
-                autonomic_learn_from_dialog(master, qs[i], varied, &astate, NULL, memory);
+#endif
             }
 
             autonomic_state_destroy(&astate);
             if (cfg.verbose)
+#if DREAM_AUGMENT_ENABLED
                 fprintf(stderr, "[梦境重放] 巩固+交叉训练+扩散 %d 对 QA (含邻近词泛化)\n", pairs);
+#else
+                fprintf(stderr, "[梦境重放] 巩固 %d 对 QA (原对回放)\n", pairs);
+#endif
         }
     }
 
