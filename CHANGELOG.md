@@ -1,5 +1,28 @@
 # Changelog
 
+## v0.5.23 — 2026-08-19
+
+### Added
+- **top-K 缝合（绑定三件套①）**：`topology_walk_greedy_topk` 每步候选 top-3 + 综合打分（激活+跨拓扑预加热+模板），单链贪心升级；K=1 逐位等价，其余调用方零影响。
+- **cross_hit 持久化（绑定三件套②）**：跨拓扑联合激活计数落盘（STATE_FORMAT_VERSION 7→8），跨重启不归零，≥5 次自动建边闭环可达成。
+- **种子词表（绑定三件套③）**：16 个实体种子词预注册整词节点，强制 TOPO_VOCABULARY，带开关；实体词不再被拆成字符碎片。
+
+### Fixed
+- **R6 锁模型**：net->nodes 双路径 realloc 竞态（add_node net->mutex / auto_extend master->rwlock 互不排斥）→ net->mutex 唯一权威锁，写侧补 4 缺锁点 + 读侧补 3 缺锁点，锁序恒 master→net。修复凌晨全量重喂下 SIGABRT（堆损坏）+ SIGSEGV（auto_learn_concepts 读野指针）。
+- **种子词落错拓扑**：预注册强制 TOPO_VOCABULARY（原随喂料领域拓扑）。
+- **网关 token 持久化**：随机生成 + gw_token 文件（0600）记住有效 token，跨重启不变。
+- **watchdog 双实例并发**：gateway_watchdog.sh 加 flock（08-18 21:00 状态缩水事故元凶）。
+
+### Changed
+- **树莓派黑匣子探测**：适配网关绑 127.0.0.1（SSH 板上本地 curl + 日志动态取 token）。
+
+### Quality
+- 单测全绿：topology 3/3、tensor 13/13、learner 3/3、dialog 4/4；全仓编译零警告。
+
+详见 [changelogs/067-binding-trilogy-lock-model.md](changelogs/067-binding-trilogy-lock-model.md)
+
+---
+
 ## v0.5.22 — 2026-08-18
 
 ### Security
