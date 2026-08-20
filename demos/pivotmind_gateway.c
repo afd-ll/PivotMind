@@ -1981,18 +1981,61 @@ static void handle_qa(GatewaySystem* gw, int fd, const char* body) {
 }
 
 
-/* v0.5.7: 崩溃捕获——SIGSEGV/SIGABRT 打印调用栈到 stderr，
- * 板子上定位周期性崩溃（脑区索引后崩/爬虫后崩——无 core dump 难查） */
+/* v0.5.11: gw_crash_handler 重写为 async-signal-safe。
+ * 背景（devlog/crash-loop-0820-analysis）：旧版在信号上下文调用
+ * backtrace_symbols()/fprintf()/fflush()/free()——这些会再入 malloc 与
+ * stdio 锁。崩溃线程若正持堆锁，handler 内再 malloc 即自锁死锁，
+ * 把单次崩溃放大成无限重启循环。
+ * 新实现仅用 write(2)（循环写全，处理 EINTR/部分写）+ glibc
+ * backtrace_symbols_fd()（fd 直写版，内部不 malloc、不持堆锁），
+ * 输出后立即 _exit(128+sig)，绝不 return。 */
+/* 仅 write(2)：循环写全一段字节 */
+static void gw_safe_write_all(int fd, const char* s, size_t len) {
+    while (len > 0) {
+        ssize_t w = write(fd, s, len);
+        if (w <= 0) {
+            if (w < 0 && errno == EINTR) continue;
+            break;
+        }
+        s += w;
+        len -= (size_t)w;
+    }
+}
+/* 仅 write(2)：无符号整数转十进制写出（预分配栈缓冲，禁 snprintf） */
+static void gw_safe_write_uint(int fd, unsigned v) {
+    char b[16];
+    size_t i = sizeof(b);
+    do {
+        b[--i] = (char)('0' + v % 10);
+        v /= 10;
+    } while (v > 0);
+    gw_safe_write_all(fd, b + i, sizeof(b) - i);
+}
+/* 仅 write(2)：C 字符串写出（手动扫长度，不依赖 stdio） */
+static void gw_safe_write_str(int fd, const char* s) {
+    size_t len = 0;
+    while (s[len]) len++;
+    gw_safe_write_all(fd, s, len);
+}
 static void gw_crash_handler(int sig) {
-    fprintf(stderr, "\n[CRASH] 信号 %d (%s) — 调用栈:\n", sig,
-            sig == SIGSEGV ? "SIGSEGV" : sig == SIGABRT ? "SIGABRT" : "?");
-    void* bt[32];
-    int n = backtrace(bt, 32);
-    char** syms = backtrace_symbols(bt, n);
-    for (int i = 0; i < n; i++) fprintf(stderr, "  %s\n", syms ? syms[i] : "?");
-    if (syms) free(syms);
-    fflush(stderr);
-    _exit(128 + sig);
+    static const char pre[]   = "\n[CRASH] 信号 ";
+    static const char open[]  = " (";
+    static const char close[] = ") — 调用栈:\n";
+    static void* bt[32];            /* 预分配缓冲：信号上下文禁 malloc */
+
+    gw_safe_write_str(STDERR_FILENO, pre);
+    gw_safe_write_uint(STDERR_FILENO, (unsigned)sig);
+    gw_safe_write_str(STDERR_FILENO, open);
+    gw_safe_write_str(STDERR_FILENO,
+                      sig == SIGSEGV ? "SIGSEGV" : sig == SIGABRT ? "SIGABRT" : "?");
+    gw_safe_write_str(STDERR_FILENO, close);
+
+    /* glibc fd 直写版 backtrace：不调用 malloc，可安全用于信号上下文 */
+    int n = backtrace(bt, (int)(sizeof(bt) / sizeof(bt[0])));
+    if (n > 0)
+        backtrace_symbols_fd(bt, n, STDERR_FILENO);
+
+    _exit(128 + sig);               /* 崩溃即终止，绝不 return 继续跑 */
 }
 
 int main(int argc, char* argv[]) {

@@ -4237,6 +4237,12 @@ static int master_save_state_locked(MasterTopology* master, const char* file_pat
     for (int t = 0; t < master->sub_topo_count; t++) {
         SubTopology* sub = master->sub_topologies[t];
         if (!sub || !sub->net) continue;
+
+        /* v0.5.24 R6 锁序修复: 补 net 读锁——回退路径此前仅持 master 读锁，
+         * 却裸读 sub->net->nodes[]/node_count，与 add_node/auto_extend 的
+         * net 写锁（realloc 搬移 nodes 数组）、节点删除的 net 写锁失配 → UAF。
+         * 锁序 master→net 与快照路径 master_snapshot_capture 一致，不破坏 R6。 */
+        pthread_rwlock_rdlock(&sub->net->mutex);
         
         for (int n = 0; n < sub->net->node_count; n++) {
             ReasoningNode* node = sub->net->nodes[n];
@@ -4291,6 +4297,13 @@ static int master_save_state_locked(MasterTopology* master, const char* file_pat
                     fwrite(&zero_conn, sizeof(int), 1, fp);
                 }
             } else {
+            /* v0.5.24 R6 锁序修复: 补节点级锁——边修改端 huarong_net_add_connection
+             * 持 net->node_locks[li] swap 扩容 edges 数组（旧数组退役、epoch 清理
+             * free），回退路径此前裸读 edge_count/edges[] 与其失配 → UAF 堆损坏
+             * （物证: 276MB 状态文件 edge_count=0xABBB0000 垃圾值）。锁序
+             * net→node_locks，与 R6 快照路径 node_locks 用法完全一致。 */
+            int li = node->node_id & (PM_NODE_LOCK_COUNT - 1);
+            pthread_mutex_lock(&sub->net->node_locks[li]);
             int safe_conn_count = node->edge_count;
             if (!node->edges) safe_conn_count = 0;
             fwrite(&safe_conn_count, sizeof(int), 1, fp);
@@ -4316,6 +4329,7 @@ static int master_save_state_locked(MasterTopology* master, const char* file_pat
                 fwrite(&b, sizeof(float), 1, fp);
                 fwrite(&c2, sizeof(float), 1, fp);
             }
+            pthread_mutex_unlock(&sub->net->node_locks[li]);
             }
             
             // [v6] dist_sig 持久化（虚词分类器位置画像，跨重启累积）
@@ -4324,6 +4338,8 @@ static int master_save_state_locked(MasterTopology* master, const char* file_pat
             
             saved_nodes++;
         }
+
+        pthread_rwlock_unlock(&sub->net->mutex);
     }
     
     // Sentinel: mark end of node data section
