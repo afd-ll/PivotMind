@@ -175,9 +175,14 @@ typedef struct {
 // 初始化优先队列
 static PriorityQueue* pq_create(int capacity) {
     PriorityQueue* pq = (PriorityQueue*)malloc(sizeof(PriorityQueue));
+    if (!pq) return NULL;
     pq->capacity = capacity;
     pq->size = 0;
     pq->nodes = (AStarNode*)malloc(capacity * sizeof(AStarNode));
+    if (!pq->nodes) {
+        free(pq);
+        return NULL;
+    }
     return pq;
 }
 
@@ -303,12 +308,18 @@ CausalGraph* causal_graph_create(int node_count, int edge_capacity) {
     graph->topo_node_count = 0;
 
     graph->node_mapping = (int*)calloc(graph->node_count, sizeof(int));
+    if (!graph->node_mapping) { free(graph); return NULL; }
     graph->edges = (CausalEdge**)malloc(graph->edge_capacity * sizeof(CausalEdge*));
+    if (!graph->edges) { free(graph->node_mapping); free(graph); return NULL; }
 
     graph->outgoing = (int**)calloc(graph->node_count, sizeof(int*));
+    if (!graph->outgoing) { free(graph->edges); free(graph->node_mapping); free(graph); return NULL; }
     graph->outgoing_count = (int*)calloc(graph->node_count, sizeof(int));
+    if (!graph->outgoing_count) { free(graph->outgoing); free(graph->edges); free(graph->node_mapping); free(graph); return NULL; }
     graph->incoming = (int**)calloc(graph->node_count, sizeof(int*));
+    if (!graph->incoming) { free(graph->outgoing_count); free(graph->outgoing); free(graph->edges); free(graph->node_mapping); free(graph); return NULL; }
     graph->incoming_count = (int*)calloc(graph->node_count, sizeof(int));
+    if (!graph->incoming_count) { free(graph->incoming); free(graph->outgoing_count); free(graph->outgoing); free(graph->edges); free(graph->node_mapping); free(graph); return NULL; }
 
     graph->is_dag = true;
     graph->topological_order = NULL;
@@ -318,6 +329,12 @@ CausalGraph* causal_graph_create(int node_count, int edge_capacity) {
 
     // 初始化边内存池（P2 dsh返工: adj_pool 死代码已移除——从未 acquire）
     graph->edge_pool = object_pool_create(sizeof(CausalEdge), 128);
+    if (!graph->edge_pool) {
+        free(graph->incoming_count); free(graph->incoming);
+        free(graph->outgoing_count); free(graph->outgoing);
+        free(graph->edges); free(graph->node_mapping);
+        free(graph); return NULL;
+    }
 
     return graph;
 }

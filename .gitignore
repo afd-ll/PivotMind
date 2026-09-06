@@ -21,3 +21,4 @@ data/
 
 pivotmind_state.dat
 gw_token
+tools/feed_cli

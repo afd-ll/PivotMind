@@ -27,7 +27,6 @@
 #include <ctype.h>
 #include <unistd.h>
 #include <signal.h>
-#include <execinfo.h>
 #include <errno.h>
 #include <time.h>
 #include <pthread.h>
@@ -1981,15 +1980,16 @@ static void handle_qa(GatewaySystem* gw, int fd, const char* body) {
 }
 
 
-/* v0.5.11: gw_crash_handler 重写为 async-signal-safe。
- * 背景（devlog/crash-loop-0820-analysis）：旧版在信号上下文调用
- * backtrace_symbols()/fprintf()/fflush()/free()——这些会再入 malloc 与
- * stdio 锁。崩溃线程若正持堆锁，handler 内再 malloc 即自锁死锁，
- * 把单次崩溃放大成无限重启循环。
- * 新实现仅用 write(2)（循环写全，处理 EINTR/部分写）+ glibc
- * backtrace_symbols_fd()（fd 直写版，内部不 malloc、不持堆锁），
- * 输出后立即 _exit(128+sig)，绝不 return。 */
-/* 仅 write(2)：循环写全一段字节 */
+/* v0.5.12: gw_crash_handler 改为纯 async-signal-safe。
+ * 背景（devlog/crash-loop-0820-analysis + 复查）：上一版虽已去掉 malloc，
+ * 但仍调用 backtrace()/backtrace_symbols_fd()——尽管 man 页称 fd 版
+ * async-signal-safe，实际内部走 dlopen/dladdr 解析符号，会再入动态连接器
+ * 与 malloc。堆损坏时（越界写毁 free list），handler 内再入堆锁即自锁
+ * 死锁，进程永久冻结，watchdog 误判"存活"而反复重启 → 无限循环。
+ * 今彻底删掉 backtrace 系列：预分配 static 缓冲拼出 [CRASH] 信号行，
+ * 仅 write(2) 写出，不 malloc / 不 dlopen / 不 backtrace，随后立即
+ * _exit(128+sig)，绝不 return。 */
+/* 仅 write(2)：循环写全一段字节，处理 EINTR/部分写 */
 static void gw_safe_write_all(int fd, const char* s, size_t len) {
     while (len > 0) {
         ssize_t w = write(fd, s, len);
@@ -2001,41 +2001,29 @@ static void gw_safe_write_all(int fd, const char* s, size_t len) {
         len -= (size_t)w;
     }
 }
-/* 仅 write(2)：无符号整数转十进制写出（预分配栈缓冲，禁 snprintf） */
-static void gw_safe_write_uint(int fd, unsigned v) {
-    char b[16];
-    size_t i = sizeof(b);
-    do {
-        b[--i] = (char)('0' + v % 10);
-        v /= 10;
-    } while (v > 0);
-    gw_safe_write_all(fd, b + i, sizeof(b) - i);
-}
-/* 仅 write(2)：C 字符串写出（手动扫长度，不依赖 stdio） */
-static void gw_safe_write_str(int fd, const char* s) {
-    size_t len = 0;
-    while (s[len]) len++;
-    gw_safe_write_all(fd, s, len);
-}
 static void gw_crash_handler(int sig) {
-    static const char pre[]   = "\n[CRASH] 信号 ";
-    static const char open[]  = " (";
-    static const char close[] = ") — 调用栈:\n";
-    static void* bt[32];            /* 预分配缓冲：信号上下文禁 malloc */
+    static char buf[128];   /* 预分配静态缓冲：信号上下文禁 malloc */
+    size_t n = 0;
 
-    gw_safe_write_str(STDERR_FILENO, pre);
-    gw_safe_write_uint(STDERR_FILENO, (unsigned)sig);
-    gw_safe_write_str(STDERR_FILENO, open);
-    gw_safe_write_str(STDERR_FILENO,
-                      sig == SIGSEGV ? "SIGSEGV" : sig == SIGABRT ? "SIGABRT" : "?");
-    gw_safe_write_str(STDERR_FILENO, close);
+/* 追加一串到 buf（越界即截断，绝不过写） */
+#define GW_APPEND(s) do { const char* _p = (s); \
+    while (*_p && n < sizeof(buf) - 1) buf[n++] = *_p++; } while (0)
 
-    /* glibc fd 直写版 backtrace：不调用 malloc，可安全用于信号上下文 */
-    int n = backtrace(bt, (int)(sizeof(bt) / sizeof(bt[0])));
-    if (n > 0)
-        backtrace_symbols_fd(bt, n, STDERR_FILENO);
+    GW_APPEND("\n[CRASH] 信号 ");
+    /* 十进制信号号手工拼：禁 snprintf/stdio */
+    { unsigned v = (unsigned)sig, tmp[16], i = sizeof(tmp);
+      do { tmp[--i] = v % 10; v /= 10; } while (v > 0);
+      while (i < sizeof(tmp) && n < sizeof(buf) - 1) buf[n++] = (char)('0' + tmp[i++]); }
+    GW_APPEND(" (");
+    GW_APPEND(sig == SIGSEGV ? "SIGSEGV" : sig == SIGABRT ? "SIGABRT" :
+              sig == SIGILL  ? "SIGILL"  : sig == SIGFPE ? "SIGFPE"  :
+              sig == SIGBUS  ? "SIGBUS"  : "?");
+    GW_APPEND(")\n");
+#undef GW_APPEND
 
-    _exit(128 + sig);               /* 崩溃即终止，绝不 return 继续跑 */
+    buf[n] = '\0';
+    gw_safe_write_all(STDERR_FILENO, buf, n);
+    _exit(128 + sig);      /* 崩溃即终止，绝不 return 继续跑 */
 }
 
 int main(int argc, char* argv[]) {

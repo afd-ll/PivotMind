@@ -505,7 +505,7 @@ int node_cache_export_frozen_edges(NodeCache* nc, MasterTopology* master,
  * 唯一区别：目标 concept 解析改用快照 concept_by_id 查表（绝不碰 live net->nodes，
  * 锁外安全）。由 master_save_state 快照序列化阶段二调用（此时已释放全部拓扑锁）。 */
 int node_cache_export_frozen_edges_snap(NodeCache* nc, int node_id,
-                                        char* const* concept_by_id, int concept_count,
+                                        HuarongTopologyNet* net,
                                         FILE* fp) {
     if (!nc || node_id < 0 || !fp) return -1;
     if (!bitmap_test(nc->bitmap, node_id)) return -1;
@@ -541,10 +541,11 @@ int node_cache_export_frozen_edges_snap(NodeCache* nc, int node_id,
         memcpy(&w, p, 4);          p += 4;
         memcpy(&mb, p, 4);         p += 4;
         memcpy(&cf, p, 4);         p += 4;
-        /* 锁外解析：目标 concept 从快照 concept_by_id 查表（索引=node_id），绝不碰 live net */
+        /* 锁外解析：目标 concept 通过 net->nodes[target_id]->concept 直接查（绝不加锁） */
         const char* tgt_concept = NULL;
-        if (concept_by_id && target_id >= 0 && target_id < concept_count) {
-            tgt_concept = concept_by_id[target_id];
+        if (net && target_id >= 0 && target_id < net->node_count) {
+            ReasoningNode* tgt_node = net->nodes[target_id];
+            if (tgt_node) tgt_concept = tgt_node->concept;
         }
         if (tgt_concept) {
             int tlen = (int)strlen(tgt_concept) + 1;

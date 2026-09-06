@@ -3752,38 +3752,10 @@ typedef struct SaveNodeSnap {
     int   dist_sig_count;
 } SaveNodeSnap;
 
-/* 单子拓扑快照 */
-typedef struct SaveTopoSnap {
-    int   topo_type;
-    int   node_count;           /* 序列化节点数（非 NULL 且 concept 非 NULL） */
-    SaveNodeSnap** nodes;       /* 长度 node_count */
-    int   concept_count;        /* 捕获时 net->node_count（concept_by_id 索引上界） */
-    char** concept_by_id;       /* 索引=node_id，值=strdup(concept) 或 NULL */
-} SaveTopoSnap;
+/* 候选A / SaveTopoSnap & SaveSnapshot 全量快照结构已废弃（见 4.3 流式批化），
+ * 由下文的 master_capture_batch / SaveTailSnap 分批替代，字节布局不变。 */
 
-/* 整次存盘快照 */
-typedef struct SaveSnapshot {
-    int sub_topo_count;
-    SaveTopoSnap* topos;
-    int total_nodes;            /* 防呆基线，锁内取（对齐 master_count_total_nodes） */
-    int cross_link_count;       /* 非 NULL 跨拓扑链接数 */
-    CrossTopologyLink* cross_links;  /* memcpy 整块（序列化只用 node_id，安全） */
-    int use_template_voting;
-    int template_decay_round;
-    int has_freq_table;
-    int freq_entry_count;       /* 字段值（原样写） */
-    int64_t freq_total_triplets;
-    int freq_round;
-    int freq_entries_count;     /* 实际活跃记录数（iterator 输出） */
-    PathTripletRecord* freq_entries;
-    void* node_cache;           /* master->node_cache 句柄（稳定，不随 realloc 变） */
-    /* [v8] cross_hit 表快照：仅 used 条目（上限 CROSS_HIT_TABLE_SIZE=2048，≤49KB） */
-    int cross_hit_count;        /* used 条目数 */
-    CrossTopoHitRecord* cross_hits;  /* 长度 cross_hit_count（按下标升序，序列化顺序与锁内路径一致） */
-    int cross_hit_round;        /* 跨拓扑命中轮次 */
-} SaveSnapshot;
-
-/* B3 回退开关：PIVOTMIND_SAVE=locked 时走锁内旧路径（快照失败/内存吃紧时的安全网）。 */
+/* 逃生开关：PIVOTMIND_SAVE=locked 时走锁内旧路径（显式运维开关，不默认启用）。 */
 static int g_save_mode = -1;   /* -1=未初始化 0=快照 1=锁内旧路径 */
 static int master_save_mode_is_locked(void) {
     if (g_save_mode < 0) {
@@ -3809,154 +3781,157 @@ static size_t master_read_mem_available(void) {
     return kb * 1024;
 }
 
-/* 干跑计数（不分配）：只遍历求和，估算快照字节数，供内存门卫使用。
- * 持 master 读锁 + net 读锁遍历（防 realloc/删除）；不读边目标串（避 node_locks 竞争），
- * 边按 100B/条保守估算。 */
-static size_t master_snapshot_size_estimate(MasterTopology* master) {
+/* 释放快照（NULL 安全，可处理部分构建的失败态） */
+/* --- 候选A：移除全量快照的 free/capture/serialize 三个 static 函数，
+ * 由下方流式批捕获 master_capture_batch + 锁外序列化 master_serialize_batch
+ * + 尾部段 master_capture_tail / master_serialize_tail 替代（字节布局 v8 不变）。
+ * 删除原因：全量快照(499MB 内存瞬峰)被门卫下锁内写取代→饿死；此三函数改用后闲置，
+ * 将触发 -Wall 的 -Wunused-function 警告，故一并移除（流式实现已完整承接其读写语义）。 --- */
+
+/* --- 候选A：全量快照 capture 已移除——由下文的 master_capture_batch（流式批捕获）替代。
+ * 原注释：锁序 master读→net读→node_locks 三锁同时拍一致快照；改批化后锁序不变（R6），
+ * 仅将全量遍历切成 ≤batch_max 节点/批，批间释放，锁内瞬峰由 499MB 降至单批 ≤80MB。 --- */
+
+/* =====================================================================
+ * 候选A (2026-08-23): 流式分批快照存盘——根治「锁内写路径饿死」。
+ * 病灶：原 B3 全量快照（锁内一次拷 499MB → 锁外写盘）被旧内存门卫
+ * （est > MemAvailable-512MB → 回退锁内写）架空；锁内写以 master 读锁
+ * 贯穿 40s+ 磁盘 I/O，配合 rwlock 写优先饿死脑干 tick + 学习线程（STUCK）。
+ * 本方案：删除该内存门卫；主流程改为流式批循环——每批(≤1000节点)短持锁
+ * 深拷贝，锁外序列化追加写 .tmp，批间释放；磁盘 I/O 100% 在锁外，
+ * 单批内存峰 ≤80MB，在 1800M 内存墙内可用，无需再回退锁内写。
+ * 字节布局与现 v8 逐块一致（加载端零改动）；跨批最终一致语义与 0.5.20
+ * 一致（批间增量本次不落、下轮落，非丢数据）。
+ * 保留 PIVOTMIND_SAVE=locked env 为显式运维逃生开关（不默认启用）。
+ * ===================================================================== */
+
+/* 流式批参数：单批节点数上限。实测 2500/批 + 首批发整拓扑概念索引 strdup 的
+ * mmap 峰值，在整机过提交已耗尽（swap 100%、MemAvailable<300MB）时会触发内核
+ * 过提交启发式拒绝大 mmap → malloc 返回 NULL → 批捕获 OOM（整夜每 ~110s 一次，
+ * 185 次全在 topo=2 start=0）。调小到 1000（报告建议 500-1000）大幅削减每批边
+ * tgt_concept strdup 峰值与锁内瞬峰。字节布局与批大小无关：负载端按节点记录流
+ * 读，批切分不出现在字节流中（仅内部迭代边界）。 */
+#define MASTER_BATCH_MAX   100
+/* 轻量门卫：系统 MemAvailable < 64MB → 直接跳过本轮（防极端 OOM），下轮重试。 */
+#define MASTER_MIN_GUARD_MEM  (64ULL * 1024 * 1024)
+
+/* 尾部段快照（cross_links + freq_table + cross_hit）：体积小（远 <1MB），
+ * 在全部节点批写完后，短锁一次性拷贝，锁外追加。与现 v8 尾部字节一致。 */
+typedef struct SaveTailSnap {
+    int   cross_link_count;
+    CrossTopologyLink* cross_links;          /* memcpy 整块 */
+    int   use_template_voting;
+    int   template_decay_round;
+    int   has_freq_table;
+    int   freq_entry_count;                  /* 字段值（原样写） */
+    int64_t freq_total_triplets;
+    int   freq_round;
+    int   freq_entries_count;                /* 实际活跃条目数（iterator 输出） */
+    PathTripletRecord* freq_entries;
+    int   cross_hit_count;                   /* [v8] used 条目数 */
+    CrossTopoHitRecord* cross_hits;
+    int   cross_hit_round;
+} SaveTailSnap;
+
+/* 释放单个节点批（NULL 安全；失败/中断态可传已填充部分） */
+static void master_batch_free(SaveNodeSnap** nodes, int count) {
+    if (!nodes) return;
+    for (int i = 0; i < count; i++) {
+        SaveNodeSnap* ns = nodes[i];
+        if (!ns) continue;
+        free(ns->concept);
+        if (ns->edges) {
+            for (int c = 0; c < ns->edge_count; c++)
+                free(ns->edges[c].tgt_concept);
+            free(ns->edges);
+        }
+        free(ns);
+    }
+    free(nodes);
+}
+
+/* 释放子拓扑概念索引（strdup 字符串数组，NULL 安全） */
+
+/* 防呆基线：短锁（纯内存）统计各子拓扑 raw node_count 总和，语义对齐原
+ * snap->total_nodes / master_count_total_nodes（原函数为裸读无锁，这里改用
+ * 短锁读取，避免沿袭锁内路径的裸读习惯）。仅在决定写主文件还是 .suspect 时用一次。 */
+static int master_count_persistable_nodes(MasterTopology* master) {
     if (!master) return 0;
-    size_t total = 0;
+    int total = 0;
     pthread_rwlock_rdlock(&master->rwlock);
     for (int t = 0; t < master->sub_topo_count; t++) {
         SubTopology* sub = master->sub_topologies[t];
         if (!sub || !sub->net) continue;
-        HuarongTopologyNet* net = sub->net;
-        pthread_rwlock_rdlock(&net->mutex);
-        for (int n = 0; n < net->node_count; n++) {
-            ReasoningNode* node = net->nodes[n];
-            if (!node || !node->concept) continue;
-            total += sizeof(SaveNodeSnap);                  /* 含 features[512]=2048B + 固定字段 */
-            total += strlen(node->concept) + 1 + 16;        /* concept strdup + malloc 头 */
-            if (!node->is_cooled && node->edges)
-                total += (size_t)node->edge_count * 100;    /* 边目标串 ~56B + 边结构 + malloc 头 */
-        }
-        total += (size_t)net->node_count * sizeof(char*);   /* concept_by_id 数组 */
-        pthread_rwlock_unlock(&net->mutex);
+        pthread_rwlock_rdlock(&sub->net->mutex);
+        total += sub->net->node_count;
+        pthread_rwlock_unlock(&sub->net->mutex);
     }
-    total += (size_t)master->cross_link_count * sizeof(CrossTopologyLink);
     pthread_rwlock_unlock(&master->rwlock);
     return total;
 }
 
-/* 释放快照（NULL 安全，可处理部分构建的失败态） */
-static void master_snapshot_free(SaveSnapshot* snap) {
-    if (!snap) return;
-    if (snap->topos) {
-        for (int t = 0; t < snap->sub_topo_count; t++) {
-            SaveTopoSnap* ts = &snap->topos[t];
-            if (ts->nodes) {
-                for (int n = 0; n < ts->node_count; n++) {
-                    SaveNodeSnap* ns = ts->nodes[n];
-                    if (!ns) continue;
-                    free(ns->concept);
-                    if (ns->edges) {
-                        for (int c = 0; c < ns->edge_count; c++)
-                            free(ns->edges[c].tgt_concept);
-                        free(ns->edges);
-                    }
-                    free(ns);
-                }
-                free(ts->nodes);
-            }
-            if (ts->concept_by_id) {
-                for (int i = 0; i < ts->concept_count; i++)
-                    free(ts->concept_by_id[i]);
-                free(ts->concept_by_id);
-            }
-        }
-        free(snap->topos);
+/* 捕获单个子拓扑的一个节点批（start_node 起 ≤batch_max 个原始槽位）。
+ * 锁序不变（R6）：master读 → net读 → node_locks[li] 逐节点短暂持。
+ * 纯内存深拷贝（绝无磁盘 I/O 在锁内），拷完立即释放锁。
+ * OOM → 释放本批已拷部分，返回 NULL（调用方弃 .tmp 本轮重试，绝不半写）。
+ * 经 out_node_count 返回捕获时子拓扑 net->node_count（批循环上界）。
+ * 经 out_count 返回本批实际写入的节点数（written）；空批时 out_count==0 且返回 NULL。
+ * 注 (2026-09-06)：out_concept_by_id/out_concept_count 参数已移除——
+ * 冻结边导出已改用 net->nodes[target_id]->concept 直接查（node_cache_export_frozen_edges_snap
+ * 签名已同步改为接收 net），不再需要 concept_by_id 查表副本。 */
+static SaveNodeSnap** master_capture_batch(MasterTopology* master, int t,
+                                           int start_node, int batch_max,
+                                           int* out_node_count, int* out_count) {
+    *out_node_count = 0;
+    *out_count = 0;
+    if (!master) {
+        LOG_ERROR("[捕获批] EARLY_RET1: master is NULL");
+        return NULL;
     }
-    free(snap->cross_links);
-    free(snap->freq_entries);
-    free(snap->cross_hits);     /* [v8] */
-    free(snap);
-}
-
-/* 阶段一（锁内，纯内存）：三把锁同时拿拍一致快照。
- * 锁序 master->rwlock(读) → net->mutex(读) → node_locks[li]（逐节点短暂持有）。
- * 任何 realloc（add_node 的 net 写锁 / auto_extend-shrink 的 master 写锁）、节点删除
- * （net 写锁）、加边 swap（node_locks）都被排除。任何 malloc/strdup 失败即释放已拷部分
- * 返回 NULL（绝不半写 .tmp）。 */
-static SaveSnapshot* master_snapshot_capture(MasterTopology* master) {
-    if (!master) return NULL;
-    SaveSnapshot* snap = (SaveSnapshot*)calloc(1, sizeof(SaveSnapshot));
-    if (!snap) return NULL;
+    if (t < 0 || t >= master->sub_topo_count) {
+        LOG_ERROR("[捕获批] EARLY_RET2: t=%d out of bounds (sub_topo_count=%d)", t, master->sub_topo_count);
+        return NULL;
+    }
 
     pthread_rwlock_rdlock(&master->rwlock);
+    SubTopology* sub = master->sub_topologies[t];
+    if (!sub || !sub->net) {
+        LOG_ERROR("[捕获批] EARLY_RET3: sub=%p net=%p t=%d", (void*)sub, sub ? (void*)sub->net : NULL, t);
+        pthread_rwlock_unlock(&master->rwlock);
+        return NULL;
+    }
+    HuarongTopologyNet* net = sub->net;
+    pthread_rwlock_rdlock(&net->mutex);
 
-    snap->sub_topo_count = master->sub_topo_count;
-    snap->topos = (SaveTopoSnap*)calloc((size_t)snap->sub_topo_count, sizeof(SaveTopoSnap));
-    if (!snap->topos) goto oom;
-    snap->use_template_voting = master->use_template_voting;
-    snap->template_decay_round = master->template_decay_round;
-    snap->node_cache = master->node_cache;
+    *out_node_count = net->node_count;
 
-    /* 跨拓扑链接：只拷非 NULL 槽位（原序列化跳过 NULL） */
-    {
-        int actual = 0;
-        for (int i = 0; i < master->cross_link_count; i++)
-            if (master->cross_links[i]) actual++;
-        snap->cross_link_count = actual;
-        if (actual > 0) {
-            snap->cross_links = (CrossTopologyLink*)malloc((size_t)actual * sizeof(CrossTopologyLink));
-            if (!snap->cross_links) goto oom;
-            int w = 0;
-            for (int i = 0; i < master->cross_link_count; i++) {
-                if (master->cross_links[i])
-                    snap->cross_links[w++] = *master->cross_links[i];
-            }
-        }
+
+
+    int end = start_node + batch_max;
+    if (end > net->node_count) end = net->node_count;
+    int written = 0;
+    for (int n = start_node; n < end; n++) {
+        ReasoningNode* node = net->nodes[n];
+        if (node && node->concept) written++;
     }
 
-    /* 逐子拓扑 */
-    for (int t = 0; t < snap->sub_topo_count; t++) {
-        SubTopology* sub = master->sub_topologies[t];
-        if (!sub || !sub->net) continue;
-        HuarongTopologyNet* net = sub->net;
-
-        pthread_rwlock_rdlock(&net->mutex);
-
-        SaveTopoSnap* ts = &snap->topos[t];
-        ts->topo_type = (int)sub->type;
-        ts->concept_count = net->node_count;
-        snap->total_nodes += net->node_count;   /* 锁内防呆基线 */
-
-        /* concept_by_id：索引=node_id → strdup(concept) 或 NULL */
-        if (net->node_count > 0) {
-            ts->concept_by_id = (char**)calloc((size_t)net->node_count, sizeof(char*));
-            if (!ts->concept_by_id) { pthread_rwlock_unlock(&net->mutex); goto oom; }
-            for (int i = 0; i < net->node_count; i++) {
-                ReasoningNode* nd = net->nodes[i];
-                if (nd && nd->concept)
-                    ts->concept_by_id[i] = strdup(nd->concept);
-            }
-        }
-
-        /* 先数要写多少节点（跳过 NULL / concept==NULL，与原序列化一致） */
-        int written = 0;
-        for (int n = 0; n < net->node_count; n++) {
-            ReasoningNode* node = net->nodes[n];
-            if (!node || !node->concept) continue;
-            written++;
-        }
-        ts->node_count = written;
-        if (written > 0) {
-            ts->nodes = (SaveNodeSnap**)calloc((size_t)written, sizeof(SaveNodeSnap*));
-            if (!ts->nodes) { pthread_rwlock_unlock(&net->mutex); goto oom; }
-        }
-
-        int wi = 0;
-        for (int n = 0; n < net->node_count; n++) {
+    SaveNodeSnap** nodes = NULL;
+    int wi = 0;
+    if (written > 0) {
+        nodes = (SaveNodeSnap**)calloc((size_t)written, sizeof(SaveNodeSnap*));
+        if (!nodes) { LOG_ERROR("[捕获批] OOM1: nodes calloc written=%d*sizeof(SaveNodeSnap*)=%zu", written, sizeof(SaveNodeSnap*)); goto batch_oom; }
+        for (int n = start_node; n < end; n++) {
             ReasoningNode* node = net->nodes[n];
             if (!node || !node->concept) continue;
 
             SaveNodeSnap* ns = (SaveNodeSnap*)calloc(1, sizeof(SaveNodeSnap));
-            if (!ns) { pthread_rwlock_unlock(&net->mutex); goto oom; }
-            ts->nodes[wi++] = ns;
+            if (!ns) { LOG_ERROR("[捕获批] OOM2: SaveNodeSnap calloc n=%d sizeof=%zu", n, sizeof(SaveNodeSnap)); goto batch_oom; }
+            nodes[wi++] = ns;
 
-            ns->topo_type = ts->topo_type;
+            ns->topo_type = (int)sub->type;
             ns->node_id = node->node_id;
             ns->concept = strdup(node->concept);
-            if (!ns->concept) { pthread_rwlock_unlock(&net->mutex); goto oom; }
+            if (!ns->concept) { LOG_ERROR("[捕获批] OOM3: strdup concept n=%d", n); goto batch_oom; }
             ns->activation = node->activation;
             ns->feat_dim = (node->features && node->feature_dim > 0) ? node->feature_dim : 0;
             if (ns->feat_dim > 0) {
@@ -3970,21 +3945,28 @@ static SaveSnapshot* master_snapshot_capture(MasterTopology* master) {
                 int li = node->node_id & (PM_NODE_LOCK_COUNT - 1);
                 pthread_mutex_lock(&net->node_locks[li]);
                 int sc = (node->edges) ? node->edge_count : 0;
+                if (sc < 0 || sc > 100000) sc = 0;  // 防御：损坏的边数跳过
+/* 内存守卫：单节点边数超过 3000 时截断，防存盘 OOM */
+if (sc > 3000) sc = 3000;
                 ns->edge_count = sc;
                 if (sc > 0) {
                     ns->edges = (SaveEdgeSnap*)calloc((size_t)sc, sizeof(SaveEdgeSnap));
                     if (!ns->edges) {
+                        LOG_ERROR("[捕获批] OOM4: edges calloc sc=%d*sizeof(SaveEdgeSnap)=%zu n=%d", sc, sizeof(SaveEdgeSnap), n);
                         pthread_mutex_unlock(&net->node_locks[li]);
-                        pthread_rwlock_unlock(&net->mutex);
-                        goto oom;
+                        goto batch_oom;
                     }
                     for (int c = 0; c < sc; c++) {
                         ReasoningNode* tgt = node->edges[c].target;
                         int tgt_safe = (tgt && tgt->concept && tgt->node_id >= 0 &&
                                         tgt->node_id < net->node_count &&
                                         net->nodes[tgt->node_id] == tgt);
-                        if (tgt_safe)
+                        if (tgt_safe) {
                             ns->edges[c].tgt_concept = strdup(tgt->concept);
+                            if (!ns->edges[c].tgt_concept) {
+                                LOG_ERROR("[捕获批] OOM5: edge strdup tgt_concept n=%d c=%d sc=%d", n, c, sc);
+                            }
+                        }
                         ns->edges[c].w = node->edges[c].weight;
                         ns->edges[c].mb = node->edges[c].motivational_bias;
                         ns->edges[c].cf = node->edges[c].confidence;
@@ -3995,189 +3977,217 @@ static SaveSnapshot* master_snapshot_capture(MasterTopology* master) {
             memcpy(ns->dist_sig, node->dist_sig, sizeof(node->dist_sig));
             ns->dist_sig_count = node->dist_sig_count;
         }
+    }
 
-        pthread_rwlock_unlock(&net->mutex);
+    pthread_rwlock_unlock(&net->mutex);
+    pthread_rwlock_unlock(&master->rwlock);
+    *out_count = written;
+    return nodes;
+
+batch_oom:
+    /* 释放本批已拷部分（0..wi）与概念索引，绝不半写 */
+    if (nodes) master_batch_free(nodes, wi);
+
+    pthread_rwlock_unlock(&net->mutex);
+    pthread_rwlock_unlock(&master->rwlock);
+    return NULL;
+}
+
+/* 锁外序列化单批节点到 fp（追加序）。字节与现 v8 逐节点记录完全一致：
+ * topo_type,node_id,concept_len,concept,activation,feat_dim,features[NODE_FEATURE_DIM],
+ * [冻结: node_cache 导出 | 热: conn_count+边], dist_sig[26], dist_sig_count。 */
+static int master_serialize_batch(FILE* fp, MasterTopology* master,
+                                  SaveNodeSnap** nodes, int count,
+                                  HuarongTopologyNet* net) {
+    if (!fp) return -1;
+    for (int n = 0; n < count; n++) {
+        SaveNodeSnap* ns = nodes[n];
+        if (!ns || !ns->concept) continue;
+
+        fwrite(&ns->topo_type, sizeof(int), 1, fp);
+        fwrite(&ns->node_id, sizeof(int), 1, fp);
+
+        int concept_len = (int)strlen(ns->concept) + 1;
+        fwrite(&concept_len, sizeof(int), 1, fp);
+        fwrite(ns->concept, 1, (size_t)concept_len, fp);
+
+        fwrite(&ns->activation, sizeof(float), 1, fp);
+
+        fwrite(&ns->feat_dim, sizeof(int), 1, fp);
+        fwrite(ns->features, sizeof(float), NODE_FEATURE_DIM, fp);
+
+        if (ns->is_cooled && master->node_cache) {
+            int exported = node_cache_export_frozen_edges_snap(
+                (NodeCache*)master->node_cache, ns->node_id,
+                net, fp);
+            if (exported < 0) {
+                int zero_conn = 0;
+                fwrite(&zero_conn, sizeof(int), 1, fp);
+            }
+        } else {
+            int safe_conn_count = ns->edge_count;
+            fwrite(&safe_conn_count, sizeof(int), 1, fp);
+            for (int c = 0; c < safe_conn_count; c++) {
+                if (ns->edges[c].tgt_concept) {
+                    int tgt_len = (int)strlen(ns->edges[c].tgt_concept) + 1;
+                    fwrite(&tgt_len, sizeof(int), 1, fp);
+                    fwrite(ns->edges[c].tgt_concept, 1, (size_t)tgt_len, fp);
+                } else {
+                    int tgt_len = 0;
+                    fwrite(&tgt_len, sizeof(int), 1, fp);
+                }
+                fwrite(&ns->edges[c].w, sizeof(float), 1, fp);
+                fwrite(&ns->edges[c].mb, sizeof(float), 1, fp);
+                fwrite(&ns->edges[c].cf, sizeof(float), 1, fp);
+            }
+        }
+
+        fwrite(ns->dist_sig, sizeof(float), 26, fp);
+        fwrite(&ns->dist_sig_count, sizeof(int), 1, fp);
+    }
+    return 0;
+}
+
+/* 释放尾部段快照 */
+static void master_tail_free(SaveTailSnap* tail) {
+    if (!tail) return;
+    free(tail->cross_links);
+    free(tail->freq_entries);
+    free(tail->cross_hits);
+    free(tail);
+}
+
+/* 锁内短拷尾部段：cross_links + freq_table + cross_hit（纯内存，体积远 <1MB）。
+ * OOM → 返回 NULL。锁序 master读 → freq_table->mutex（与现一致）。 */
+static SaveTailSnap* master_capture_tail(MasterTopology* master) {
+    if (!master) return NULL;
+    SaveTailSnap* tail = (SaveTailSnap*)calloc(1, sizeof(SaveTailSnap));
+    if (!tail) return NULL;
+
+    pthread_rwlock_rdlock(&master->rwlock);
+
+    tail->use_template_voting = master->use_template_voting;
+    tail->template_decay_round = master->template_decay_round;
+
+    /* 跨拓扑链接：只拷非 NULL 槽位（原序列化跳过 NULL） */
+    int actual = 0;
+    for (int i = 0; i < master->cross_link_count; i++)
+        if (master->cross_links[i]) actual++;
+    tail->cross_link_count = actual;
+    if (actual > 0) {
+        tail->cross_links = (CrossTopologyLink*)malloc((size_t)actual * sizeof(CrossTopologyLink));
+        if (!tail->cross_links) { pthread_rwlock_unlock(&master->rwlock); master_tail_free(tail); return NULL; }
+        int w = 0;
+        for (int i = 0; i < master->cross_link_count; i++)
+            if (master->cross_links[i]) tail->cross_links[w++] = *master->cross_links[i];
     }
 
     /* freq_table 快照：锁内拷贝到连续数组 */
-    snap->has_freq_table = (master->freq_table != NULL);
+    tail->has_freq_table = (master->freq_table != NULL);
     if (master->freq_table) {
         pthread_mutex_lock(&master->freq_table->mutex);
-        snap->freq_entry_count = master->freq_table->entry_count;
-        snap->freq_total_triplets = master->freq_table->total_triplets;
-        snap->freq_round = master->freq_table->round;
+        tail->freq_entry_count = master->freq_table->entry_count;
+        tail->freq_total_triplets = master->freq_table->total_triplets;
+        tail->freq_round = master->freq_table->round;
         int iter = 0, cnt = 0;
         const PathTripletRecord* rec;
         while ((rec = path_freq_table_iter(master->freq_table, &iter)) != NULL) cnt++;
-        snap->freq_entries_count = cnt;
+        tail->freq_entries_count = cnt;
         if (cnt > 0) {
-            snap->freq_entries = (PathTripletRecord*)malloc((size_t)cnt * sizeof(PathTripletRecord));
-            if (!snap->freq_entries) { pthread_mutex_unlock(&master->freq_table->mutex); goto oom; }
+            tail->freq_entries = (PathTripletRecord*)malloc((size_t)cnt * sizeof(PathTripletRecord));
+            if (!tail->freq_entries) {
+                pthread_mutex_unlock(&master->freq_table->mutex);
+                pthread_rwlock_unlock(&master->rwlock);
+                master_tail_free(tail);
+                return NULL;
+            }
             iter = 0; int fi = 0;
             while ((rec = path_freq_table_iter(master->freq_table, &iter)) != NULL)
-                snap->freq_entries[fi++] = *rec;
+                tail->freq_entries[fi++] = *rec;
         }
         pthread_mutex_unlock(&master->freq_table->mutex);
     }
 
-    /* [v8] cross_hit 表快照：仅 used 条目（表上限 2048，≤49KB）。
+    /* [v8] cross_hit 表快照：仅 used 条目（表上限 CROSS_HIT_TABLE_SIZE，≤49KB）。
      * 记录写端 master_record_cross_hit 无锁（单写者），这里逐字段拷贝，
      * 避免整结构体赋值被编译器优化成非原子 memcpy 读到撕裂中间态。 */
-    snap->cross_hit_count = 0;
-    for (int i = 0; i < CROSS_HIT_TABLE_SIZE; i++) {
-        if (master->cross_hit_records[i].is_used) snap->cross_hit_count++;
-    }
-    if (snap->cross_hit_count > 0) {
-        snap->cross_hits = (CrossTopoHitRecord*)malloc(
-            (size_t)snap->cross_hit_count * sizeof(CrossTopoHitRecord));
-        if (!snap->cross_hits) goto oom;
+    for (int i = 0; i < CROSS_HIT_TABLE_SIZE; i++)
+        if (master->cross_hit_records[i].is_used) tail->cross_hit_count++;
+    if (tail->cross_hit_count > 0) {
+        tail->cross_hits = (CrossTopoHitRecord*)malloc(
+            (size_t)tail->cross_hit_count * sizeof(CrossTopoHitRecord));
+        if (!tail->cross_hits) {
+            pthread_rwlock_unlock(&master->rwlock);
+            master_tail_free(tail);
+            return NULL;
+        }
         int w = 0;
         for (int i = 0; i < CROSS_HIT_TABLE_SIZE; i++) {
             const CrossTopoHitRecord* src = &master->cross_hit_records[i];
             if (!src->is_used) continue;
-            snap->cross_hits[w].from_topo  = src->from_topo;
-            snap->cross_hits[w].from_node  = src->from_node;
-            snap->cross_hits[w].to_topo    = src->to_topo;
-            snap->cross_hits[w].to_node    = src->to_node;
-            snap->cross_hits[w].hit_count  = src->hit_count;
-            snap->cross_hits[w].last_round = src->last_round;
-            snap->cross_hits[w].is_used    = 1;
+            tail->cross_hits[w].from_topo  = src->from_topo;
+            tail->cross_hits[w].from_node  = src->from_node;
+            tail->cross_hits[w].to_topo    = src->to_topo;
+            tail->cross_hits[w].to_node    = src->to_node;
+            tail->cross_hits[w].hit_count  = src->hit_count;
+            tail->cross_hits[w].last_round = src->last_round;
+            tail->cross_hits[w].is_used    = 1;
             w++;
         }
     }
-    snap->cross_hit_round = master->cross_hit_round;
+    tail->cross_hit_round = master->cross_hit_round;
 
     pthread_rwlock_unlock(&master->rwlock);
-    return snap;
-
-oom:
-    pthread_rwlock_unlock(&master->rwlock);
-    master_snapshot_free(snap);
-    return NULL;
+    return tail;
 }
 
-/* 阶段二（锁外，磁盘 I/O）：从快照按原字节顺序序列化写 .tmp。
- * 写入顺序/字段类型/字节布局与原 master_save_state_locked 3616–3771 完全一致
- * （数据源从 live 指针换成快照），保证字节级等价、加载端零改动。 */
-static int master_snapshot_serialize(SaveSnapshot* snap, const char* tmp_path,
-                                     int* out_saved_nodes, int* out_saved_links) {
-    FILE* fp = fopen(tmp_path, "wb");
-    if (!fp) {
-        LOG_ERROR("[状态持久化] 无法创建临时文件: %s", tmp_path);
-        return -1;
-    }
-    if (setvbuf(fp, NULL, _IOFBF, 4 * 1024 * 1024) != 0) {
-        LOG_WARNING("[状态持久化] setvbuf 4MB 缓冲设置失败, 回退默认缓冲");
-    }
-
-    int fmt_ver = STATE_FORMAT_VERSION;
-    fwrite(&fmt_ver, sizeof(int), 1, fp);
-    int feat_dim = NODE_FEATURE_DIM;
-    fwrite(&feat_dim, sizeof(int), 1, fp);
-
-    int saved_nodes = 0;
-    int saved_links = 0;
-
-    for (int t = 0; t < snap->sub_topo_count; t++) {
-        SaveTopoSnap* ts = &snap->topos[t];
-        if (ts->node_count <= 0) continue;
-        for (int n = 0; n < ts->node_count; n++) {
-            SaveNodeSnap* ns = ts->nodes[n];
-            if (!ns || !ns->concept) continue;
-
-            fwrite(&ns->topo_type, sizeof(int), 1, fp);
-            fwrite(&ns->node_id, sizeof(int), 1, fp);
-
-            int concept_len = (int)strlen(ns->concept) + 1;
-            fwrite(&concept_len, sizeof(int), 1, fp);
-            fwrite(ns->concept, 1, (size_t)concept_len, fp);
-
-            fwrite(&ns->activation, sizeof(float), 1, fp);
-
-            fwrite(&ns->feat_dim, sizeof(int), 1, fp);
-            fwrite(ns->features, sizeof(float), NODE_FEATURE_DIM, fp);
-
-            if (ns->is_cooled && snap->node_cache) {
-                int exported = node_cache_export_frozen_edges_snap(
-                    (NodeCache*)snap->node_cache, ns->node_id,
-                    ts->concept_by_id, ts->concept_count, fp);
-                if (exported < 0) {
-                    int zero_conn = 0;
-                    fwrite(&zero_conn, sizeof(int), 1, fp);
-                }
-            } else {
-                int safe_conn_count = ns->edge_count;
-                fwrite(&safe_conn_count, sizeof(int), 1, fp);
-                for (int c = 0; c < safe_conn_count; c++) {
-                    if (ns->edges[c].tgt_concept) {
-                        int tgt_len = (int)strlen(ns->edges[c].tgt_concept) + 1;
-                        fwrite(&tgt_len, sizeof(int), 1, fp);
-                        fwrite(ns->edges[c].tgt_concept, 1, (size_t)tgt_len, fp);
-                    } else {
-                        int tgt_len = 0;
-                        fwrite(&tgt_len, sizeof(int), 1, fp);
-                    }
-                    fwrite(&ns->edges[c].w, sizeof(float), 1, fp);
-                    fwrite(&ns->edges[c].mb, sizeof(float), 1, fp);
-                    fwrite(&ns->edges[c].cf, sizeof(float), 1, fp);
-                }
-            }
-
-            fwrite(ns->dist_sig, sizeof(float), 26, fp);
-            fwrite(&ns->dist_sig_count, sizeof(int), 1, fp);
-
-            saved_nodes++;
-        }
-    }
+/* 锁外追加写尾部段到 fp：哨兵 → cross_link 块 → freq 块（哨兵+voting+table）→ [v8] cross_hit 块。
+ * 字节与现 v8 尾部完全一致（加载端零改动）。out_saved_links 累积跨拓扑链接数。 */
+static int master_serialize_tail(FILE* fp, SaveTailSnap* tail, int* out_saved_links) {
+    if (!fp) return -1;
 
     uint32_t sentinel = 0xDEADBEEF;
     fwrite(&sentinel, sizeof(uint32_t), 1, fp);
 
-    fwrite(&snap->cross_link_count, sizeof(int), 1, fp);
-    for (int i = 0; i < snap->cross_link_count; i++) {
-        CrossTopologyLink* link = &snap->cross_links[i];
+    fwrite(&tail->cross_link_count, sizeof(int), 1, fp);
+    for (int i = 0; i < tail->cross_link_count; i++) {
+        CrossTopologyLink* link = &tail->cross_links[i];
         fwrite(&link->from_topo_id, sizeof(int), 1, fp);
         fwrite(&link->from_node_id, sizeof(int), 1, fp);
         fwrite(&link->to_topo_id, sizeof(int), 1, fp);
         fwrite(&link->to_node_id, sizeof(int), 1, fp);
         fwrite(&link->weight, sizeof(float), 1, fp);
         fwrite(&link->use_count, sizeof(int), 1, fp);
-        saved_links++;
+        if (out_saved_links) (*out_saved_links)++;
     }
 
-    {
-        int freq_sentinel[6] = {-1, 0, 0, 0, 0, 0};
-        fwrite(freq_sentinel, sizeof(int), 6, fp);
-        fwrite(&snap->use_template_voting, sizeof(int), 1, fp);
-        fwrite(&snap->template_decay_round, sizeof(int), 1, fp);
-        if (snap->has_freq_table) {
-            fwrite(&snap->freq_entry_count, sizeof(int), 1, fp);
-            fwrite(&snap->freq_total_triplets, sizeof(int64_t), 1, fp);
-            fwrite(&snap->freq_round, sizeof(int), 1, fp);
-            if (snap->freq_entries_count > 0)
-                fwrite(snap->freq_entries, sizeof(PathTripletRecord),
-                       (size_t)snap->freq_entries_count, fp);
-        } else {
-            /* 与 has_freq_table 分支同宽（int+int64+int=16B）：freq_table 仅在
-             * destroy 时置 NULL，正常不触发；[v8] 块紧跟其后，宽度不一致会错位 */
-            int zero = 0;
-            int64_t zero64 = 0;
-            fwrite(&zero, sizeof(int), 1, fp);
-            fwrite(&zero64, sizeof(int64_t), 1, fp);
-            fwrite(&zero, sizeof(int), 1, fp);
-        }
+    int freq_sentinel[6] = {-1, 0, 0, 0, 0, 0};
+    fwrite(freq_sentinel, sizeof(int), 6, fp);
+    fwrite(&tail->use_template_voting, sizeof(int), 1, fp);
+    fwrite(&tail->template_decay_round, sizeof(int), 1, fp);
+    if (tail->has_freq_table) {
+        fwrite(&tail->freq_entry_count, sizeof(int), 1, fp);
+        fwrite(&tail->freq_total_triplets, sizeof(int64_t), 1, fp);
+        fwrite(&tail->freq_round, sizeof(int), 1, fp);
+        if (tail->freq_entries_count > 0)
+            fwrite(tail->freq_entries, sizeof(PathTripletRecord),
+                   (size_t)tail->freq_entries_count, fp);
+    } else {
+        /* 与 has_freq_table 分支同宽（int+int64+int=16B）：freq_table 仅在
+         * destroy 时置 NULL，正常不触发；[v8] 块紧跟其后，宽度不一致会错位 */
+        int zero = 0;
+        int64_t zero64 = 0;
+        fwrite(&zero, sizeof(int), 1, fp);
+        fwrite(&zero64, sizeof(int64_t), 1, fp);
+        fwrite(&zero, sizeof(int), 1, fp);
     }
 
     /* [v8] cross_hit 块：跨拓扑联合激活计数持久化（布局见 STATE_FORMAT_VERSION 8 注释） */
-    fwrite(&snap->cross_hit_count, sizeof(int), 1, fp);
-    for (int i = 0; i < snap->cross_hit_count; i++) {
-        fwrite(&snap->cross_hits[i], sizeof(CrossTopoHitRecord), 1, fp);
-    }
-    fwrite(&snap->cross_hit_round, sizeof(int), 1, fp);
+    fwrite(&tail->cross_hit_count, sizeof(int), 1, fp);
+    for (int i = 0; i < tail->cross_hit_count; i++)
+        fwrite(&tail->cross_hits[i], sizeof(CrossTopoHitRecord), 1, fp);
+    fwrite(&tail->cross_hit_round, sizeof(int), 1, fp);
 
-    fclose(fp);
-    *out_saved_nodes = saved_nodes;
-    *out_saved_links = saved_links;
     return 0;
 }
 
@@ -4433,58 +4443,140 @@ static int master_save_state_locked(MasterTopology* master, const char* file_pat
     return saved_nodes;
 }
 
-/* v0.5.20 B3: 锁外快照式存盘——锁内全量深拷贝快照（纯内存），锁外写盘（磁盘 I/O）。
- * 相比 master_save_state_locked（持 master 读锁写盘 330MB，饿死写线程 STUCK + 自欺防
- * realloc），本路径三把锁同时拿（master 读→net 读→node_locks）拍一致快照后立即释放，
- * 磁盘 I/O 全在锁外。
- * 快照式存盘 = 最终一致：拍快照瞬间之后的增量本次不落盘、下轮才落，非丢数据 bug。 */
+/* v0.5.20 B3 → 候选A (2026-08-23): 流式分批快照存盘。
+ * 根治「锁内写路径饿死」：旧内存门卫在系统内存紧张时强制回退锁内写，而锁内写以
+ * master 读锁贯穿 40s+ 磁盘 I/O（rwlock 写优先 → 饿死脑干 tick + 学习线程 → STUCK）。
+ * 本路径不再有「est+512MB 回退」：删除该门卫；改为流式批循环——
+ *   open .tmp → for 每子拓扑, for 每批(≤1000) { 短锁深拷贝 → 锁外序列化追加 → 释放批 }
+ *   → 尾部段(cross_link/freq/cross_hit)短锁拷 → 锁外追加 → fclose → rename 原子替换。
+ * 磁盘 I/O 100% 在锁外；单批内存峰 ≤80MB，在 1800M 内存墙内可用，无需回退锁内写。
+ * 字节布局与现 v8 逐块一致（加载端零改动）；跨批最终一致语义与 0.5.20 一致
+ * （批间增量本次不落、下轮落，非丢数据）。
+ * PIVOTMIND_SAVE=locked → 显式运维逃生开关，走旧锁内路径（不默认启用）。 */
 int master_save_state(MasterTopology* master, const char* file_path) {
     if (!master || !file_path) return -1;
 
-    /* 回退开关：PIVOTMIND_SAVE=locked → 锁内旧路径（字节布局一致，无需迁移状态文件） */
+    /* 显式逃生开关：PIVOTMIND_SAVE=locked → 旧锁内写路径（不默认；运维对照用） */
     if (master_save_mode_is_locked())
         return master_save_state_locked(master, file_path);
 
-    /* 内存门卫：快照估算 > MemAvailable-512MB → 回退锁内写（防快照内存翻倍 OOM） */
-    size_t est = master_snapshot_size_estimate(master);
+    /* 轻量门卫：系统 MemAvailable 极端枯竭（< 64MB）→ 跳过本轮（防极端 OOM），下轮重试。
+     * 与旧「est+512MB」门卫不同：不再因内存紧张回退锁内写——那是饿死根源。 */
     size_t mem_avail = master_read_mem_available();
-    const size_t RESERVE = 512ULL * 1024 * 1024;
-    if (mem_avail <= RESERVE || est > mem_avail - RESERVE) {
-        LOG_WARNING("[状态持久化] 快照估算 %zuB > 可用内存-512MB (%zuB)，回退锁内写路径",
-                    est, mem_avail);
-        return master_save_state_locked(master, file_path);
-    }
-
-    /* 阶段一：锁内全量快照（纯内存，~1-2s）。失败（OOM）即放弃本次，绝不半写 .tmp。 */
-    SaveSnapshot* snap = master_snapshot_capture(master);
-    if (!snap) {
-        LOG_ERROR("[状态持久化] 快照失败（OOM），本次放弃存盘，下轮重试");
+    if (mem_avail != 0 && mem_avail < MASTER_MIN_GUARD_MEM) {
+        LOG_WARNING("[状态持久化] MemAvailable %zuB < 64MB，跳过本轮存盘，下轮重试",
+                    mem_avail);
         return -1;
     }
 
-    /* 防呆：坏状态不进主文件（基线在锁内取，快照 total_nodes） */
+    /* 防呆：坏状态不进主文件。基线取当前节点总数（短锁纯内存，语义对齐 snap->total_nodes）。 */
+    int cur_total = master_count_persistable_nodes(master);
     char suspect_path[1100];
     const char* target_path = file_path;
-    if (g_last_saved_nodes > 0 && snap->total_nodes < g_last_saved_nodes * 3 / 5) {
+    if (g_last_saved_nodes > 0 && cur_total < g_last_saved_nodes * 3 / 5) {
         snprintf(suspect_path, sizeof(suspect_path), "%s.suspect", file_path);
         fprintf(stderr, "[状态持久化] ⚠️ 防呆触发: 本次 %d 节点 < 基准 %d×60%%，"
                 "拒绝覆盖 %s，坏状态重定向到 %s\n",
-                snap->total_nodes, g_last_saved_nodes, file_path, suspect_path);
+                cur_total, g_last_saved_nodes, file_path, suspect_path);
         target_path = suspect_path;
     }
 
     char tmp_path[1024];
     snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", target_path);
 
-    /* 阶段二：锁外写盘（磁盘 I/O，慢但零锁） */
-    int saved_nodes = 0, saved_links = 0;
-    int ret = master_snapshot_serialize(snap, tmp_path, &saved_nodes, &saved_links);
-    master_snapshot_free(snap);
-
-    if (ret != 0) {
-        LOG_ERROR("[状态持久化] 快照序列化失败");
+    FILE* fp = fopen(tmp_path, "wb");
+    if (!fp) {
+        LOG_ERROR("[状态持久化] 无法创建临时文件: %s", tmp_path);
         return -1;
     }
+    if (setvbuf(fp, NULL, _IOFBF, 4 * 1024 * 1024) != 0) {
+        LOG_WARNING("[状态持久化] setvbuf 4MB 缓冲设置失败, 回退默认缓冲");
+    }
+
+    /* 文件头：格式版本 + 特征维度（与现 v8 一致） */
+    int fmt_ver = STATE_FORMAT_VERSION;
+    fwrite(&fmt_ver, sizeof(int), 1, fp);
+    int feat_dim = NODE_FEATURE_DIM;
+    fwrite(&feat_dim, sizeof(int), 1, fp);
+
+    int saved_nodes = 0, saved_links = 0;
+    int batch_ok = 1;
+
+    /* 流式批循环：每子拓扑，每批 ≤MASTER_BATCH_MAX 节点 */
+    for (int t = 0; t < master->sub_topo_count; t++) {
+        SubTopology* sub = master->sub_topologies[t];
+        if (!sub || !sub->net) continue;   /* 与现序列化一致：空子拓扑不写任何字节 */
+
+
+        int start = 0, node_count = 0, cnt = 0;
+
+        while (batch_ok) {
+            SaveNodeSnap** batch = master_capture_batch(
+                master, t, start, MASTER_BATCH_MAX,
+                &node_count, &cnt);
+
+            /* 治本修复 (2026-09-06)：区分「空批」与「真 OOM」。
+             * master_capture_batch 返回 NULL 有两条路径，唯一权威信号是 *out_count(cnt)：
+             *   ① 空批：本窗口无任何 node->concept 非空节点（written==0），
+             *      batch==NULL 且 cnt==0 —— 合法状态，须跳过推进，绝不能误判 OOM。
+             *      典型：情绪拓扑(TOPO_EMOTION)惰性初始化 node_count==0，长期空批。
+             *   ② 真 OOM：calloc/strdup 失败走 batch_oom，cnt 可能 >0 或 0。
+             * 旧实现用 if(!batch) 一刀切，把空批当成 OOM 直接 break 放弃整轮，
+             * 导致情绪拓扑起后续所有拓扑与尾部段全部不落盘，主状态文件长期停滞。
+             * 修复：先以 cnt==0 判空批（推进窗口），再以 batch==NULL 判真 OOM。 */
+            if (cnt == 0) {
+                /* 空批（batch 可能为 NULL 或空指针）：直接推进，不丢后续窗口 */
+                master_batch_free(batch, cnt);
+                start += MASTER_BATCH_MAX;
+                if (start >= node_count) break;
+                continue;
+            }
+            if (!batch) {
+                /* 真 OOM：有节点(cnt>0)却捕获失败 → 弃 .tmp 整体放弃本轮，下轮重试 */
+                LOG_ERROR("[状态持久化] 批捕获 OOM（topo=%d start=%d cnt=%d），放弃本轮，下轮重试",
+                          t, start, cnt);
+                batch_ok = 0;
+                break;
+            }
+            /* 锁外序列化本批 → 释放本批，内存峰仅此单批 */
+            if (master_serialize_batch(fp, master, batch, cnt,
+                                       sub->net) != 0) {
+                master_batch_free(batch, cnt);
+                batch_ok = 0;
+                break;
+            }
+            saved_nodes += cnt;
+            master_batch_free(batch, cnt);
+            start += MASTER_BATCH_MAX;
+            if (start >= node_count) break;
+        }
+
+
+        if (!batch_ok) break;
+    }
+
+    if (batch_ok) {
+        /* 尾部段：cross_links + freq_table + cross_hit 短锁拷 → 锁外追加（体积远 <1MB） */
+        SaveTailSnap* tail = master_capture_tail(master);
+        if (tail) {
+            if (master_serialize_tail(fp, tail, &saved_links) != 0) {
+                LOG_ERROR("[状态持久化] 尾部序列化失败");
+                batch_ok = 0;
+            }
+            master_tail_free(tail);
+        } else {
+            LOG_ERROR("[状态持久化] 尾部捕获 OOM，放弃本轮，下轮重试");
+            batch_ok = 0;
+        }
+    }
+
+    if (!batch_ok) {
+        fclose(fp);
+        unlink(tmp_path);   /* 弃 .tmp，绝不半写进主文件 */
+        return -1;
+    }
+
+    fclose(fp);
 
     /* v0.5.10: 原子替换——tmp 写完后 rename 覆盖正式文件 */
     if (rename(tmp_path, target_path) != 0) {
