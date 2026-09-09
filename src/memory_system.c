@@ -1,4 +1,5 @@
 #include "memory_system.h"
+#include "error.h"
 #include "causal_reasoning.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -355,9 +356,14 @@ int ltm_store(LongTermMemory* ltm, const char* key, void* data,
     _ltm_hash_insert(ltm, key, ltm->size);
 
     // 更新 index_map（保留兼容）
-    ltm->index_map[ltm->index_size].key = strdup(key);
-    ltm->index_map[ltm->index_size].entry_index = ltm->size;
-    ltm->index_size++;
+    char* key_copy = strdup(key);
+    if (!key_copy) {
+        LOG_WARNING("ltm_store: strdup failed for key, index_map entry skipped");
+    } else {
+        ltm->index_map[ltm->index_size].key = key_copy;
+        ltm->index_map[ltm->index_size].entry_index = ltm->size;
+        ltm->index_size++;
+    }
 
     ltm->size++;
     return 0;

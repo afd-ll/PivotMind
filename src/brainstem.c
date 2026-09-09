@@ -42,8 +42,11 @@
 #ifdef _WIN32
 #include <windows.h>
 #define msleep(ms) Sleep(ms)
+#define bs_yield() Sleep(0)
 #else
+#include <sched.h>  /* v0.5.21: bs_yield 忙转让步，防脑干空转 */
 #define msleep(ms) usleep((ms) * 1000)
+#define bs_yield() sched_yield()
 #endif
 
 /* ================================================================
@@ -167,6 +170,11 @@ static void brainstem_tick_sleep(Brainstem* bs, const CircadianParams* cp) {
 
 /* 稀疏衰减 + 自发激活（分段持锁，防写锁饥饿） */
 #define DECAY_BATCH_SIZE 200  /* 每批处理节点数后释放读锁，给写锁留窗口 */
+/* v0.5.21: 忙转防护上限（WSL ASan+gstack 实证玄枢卡死根因）——冷却/无效节点
+ * 占比高时 local_rand 反复撞 continue 空转；DECAY_MAX_SKIPS 限制单批重采样次数，
+ * DECAY_YIELD_EVERY 连续跳过 N 次后让出 CPU，避免烧核死转。 */
+#define DECAY_MAX_SKIPS   1000
+#define DECAY_YIELD_EVERY 64
 static void brainstem_tick_decay_spontaneous(Brainstem* bs, const CircadianParams* cp) {
     MasterTopology* master = bs->master;
     float total_nodes = 0.0f;
@@ -178,16 +186,24 @@ static void brainstem_tick_decay_spontaneous(Brainstem* bs, const CircadianParam
     int sample_count = (int)(total_nodes * 0.05f * cp->circadian);
     if (sample_count < 100) sample_count = 100;
 
-    /* 稀疏衰减 — 分批执行，每批后释放 master 读锁 */
+    /* 稀疏衰减 — 分批执行，每批后释放 master 读锁
+     * v0.5.21: 忙转防护（WSL ASan+gstack 实证玄枢卡死根因）——
+     * 冷却/无效节点占比高时，local_rand 反复撞 continue 空转 CPU 100%，
+     * tick 无法推进，且 brainstem_loop 拿不到停止标志 → shutdown 时
+     * pthread_join 永久卡死。衰减语义不变（冷却节点仍不衰减），但：
+     * 单批重采样上限 DECAY_MAX_SKIPS，连续撞冷却到 DECAY_YIELD_EVERY
+     * 即让出 CPU；整批零progress 退外层——busy loop 一定终止，
+     * tick 正常返回，brainstem_loop 每轮照常重查 is_running。 */
     {
     int decayed_total = 0;
     while (decayed_total < sample_count) {
         int batch = sample_count - decayed_total;
         if (batch > DECAY_BATCH_SIZE) batch = DECAY_BATCH_SIZE;
+        int batch_skips = 0;   /* v0.5.21: 单批重采样上限计数 */
+        int batch_done  = 0;
 
         pthread_rwlock_rdlock(&master->rwlock);
 
-        int batch_done = 0;
         for (int t = 0; t < master->sub_topo_count && batch_done < batch; t++) {
             SubTopology* sub = master->sub_topologies[t];
             if (!sub || !sub->net || sub->net->node_count == 0) continue;
@@ -198,9 +214,14 @@ static void brainstem_tick_decay_spontaneous(Brainstem* bs, const CircadianParam
             if (batch_done + sub_samples > batch) sub_samples = batch - batch_done;
 
             for (int s = 0; s < sub_samples; s++) {
+                if (batch_skips >= DECAY_MAX_SKIPS) break; /* 重采样上限，不无限continue */
                 int idx = local_rand(&bs->_rng_seed) % net->node_count;
                 ReasoningNode* node = net->nodes[idx];
-                if (!node || node->is_cooled) continue;
+                if (!node || node->is_cooled) {
+                    if (++batch_skips % DECAY_YIELD_EVERY == 0)
+                        bs_yield();   /* v0.5.21: 连续撞冷却→让出CPU，不紧空转 */
+                    continue;
+                }
 
                 int lock_idx = node->node_id & (PM_NODE_LOCK_COUNT - 1);
                 pthread_mutex_lock(&net->node_locks[lock_idx]);
@@ -216,9 +237,13 @@ static void brainstem_tick_decay_spontaneous(Brainstem* bs, const CircadianParam
                 batch_done++;
                 decayed_total++;
             }
+            if (batch_skips >= DECAY_MAX_SKIPS) break;
         }
 
         pthread_rwlock_unlock(&master->rwlock);
+
+        /* v0.5.21: 整批零衰减（节点全冷却/全无效）→ 退外层，外循环不再死转 */
+        if (batch_done == 0) break;
     }
     }
 
@@ -252,6 +277,8 @@ static void brainstem_tick_decay_spontaneous(Brainstem* bs, const CircadianParam
 /* 堆监控 */
 static void brainstem_tick_monitoring(Brainstem* bs) {
     if (bs->tick_count % 30 != 0) return;
+    if (!bs->master) return;
+    pthread_rwlock_rdlock(&bs->master->rwlock);
     long rss_kb = 0, vsz_kb = 0;
     pm_get_process_memory(&rss_kb, &vsz_kb);
     int total_nodes = 0, total_conns = 0;
@@ -272,6 +299,7 @@ static void brainstem_tick_monitoring(Brainstem* bs) {
     if (bs->tick_count % 300 == 0) {
         malloc_trim(0);
     }
+    pthread_rwlock_unlock(&bs->master->rwlock);
 }
 
 /* 皮层下子系统：小脑 + 内感受 + 网状结构 + 丘脑调度 */
@@ -364,6 +392,8 @@ static int brainstem_tick_perception(Brainstem* bs) {
 /* 突触缩放（每600tick≈10min） */
 static void brainstem_tick_synapse_scale(Brainstem* bs) {
     if (bs->tick_count % 600 != 0) return;
+    if (!bs->master) return;
+    pthread_rwlock_rdlock(&bs->master->rwlock);
     int decayed = 0, released = 0;
     for (int t = 0; t < bs->master->sub_topo_count; t++) {
         SubTopology* sub = bs->master->sub_topologies[t];
@@ -422,6 +452,7 @@ static void brainstem_tick_synapse_scale(Brainstem* bs) {
     if (bs->master) {
         master_reevaluate_cross_links(bs->master, 10.0f);
     }
+    pthread_rwlock_unlock(&bs->master->rwlock);
 }
 
 /* 海马体巩固 + DMN梦境 */

@@ -56,24 +56,48 @@ typedef struct {
 } ActivatedEdges;
 
 #define MAX_CHARS_PER_TEXT PM_CHARS_PER_TEXT
-/* 线程局部存储：__thread (GCC/Clang), __declspec(thread) (MSVC), _Thread_local (C11) */
-#if defined(__GNUC__) || defined(__clang__)
-#define PM_THREAD_LOCAL __thread
-#elif defined(_MSC_VER)
-#define PM_THREAD_LOCAL __declspec(thread)
-#else
-#define PM_THREAD_LOCAL _Thread_local
-#endif
 
 #define MAX_ACTIVATED_PAIRS PM_ACTIVATED_PAIRS
 
-/* 全局激活记录（每轮对话重置）—— 线程局部存储支持可重入
- * 使用 (topo_type << 24 | node_id) 复合键避免跨拓扑 node_id 冲突 */
-static PM_THREAD_LOCAL ActivatedEdges g_activated[MAX_ACTIVATED_PAIRS];
-static PM_THREAD_LOCAL int g_activated_count;
+// ==================== 线程局部激活记录（堆分配 + pthread_key）====================
+typedef struct {
+    ActivatedEdges *activated;   // 堆分配数组 [MAX_ACTIVATED_PAIRS]
+    int count;                   // 当前记录数
+    int overflowed;              // 本轮是否溢出
+    int capacity;                // 容量（=MAX_ACTIVATED_PAIRS）
+} ThreadActivationRecord;
+
+static pthread_key_t  g_activation_key;
+static pthread_once_t g_activation_key_once = PTHREAD_ONCE_INIT;
+
+static void activation_record_destroy(void *arg) {
+    ThreadActivationRecord *rec = (ThreadActivationRecord *)arg;
+    if (rec) {
+        free(rec->activated);
+        free(rec);
+    }
+}
+
+static void activation_key_init(void) {
+    pthread_key_create(&g_activation_key, activation_record_destroy);
+}
+
+static ThreadActivationRecord* get_activation_record(void) {
+    pthread_once(&g_activation_key_once, activation_key_init);
+    ThreadActivationRecord *rec = pthread_getspecific(g_activation_key);
+    if (rec) return rec;
+    rec = calloc(1, sizeof(ThreadActivationRecord));
+    if (!rec) return NULL;
+    rec->activated = calloc(MAX_ACTIVATED_PAIRS, sizeof(ActivatedEdges));
+    if (!rec->activated) { free(rec); return NULL; }
+    rec->capacity = MAX_ACTIVATED_PAIRS;
+    pthread_setspecific(g_activation_key, rec);
+    return rec;
+}
 
 static void reset_activation_record(void) {
-    g_activated_count = 0;
+    ThreadActivationRecord *rec = get_activation_record();
+    if (rec) { rec->count = 0; rec->overflowed = 0; }
 }
 
 /* 使用复合键: (topo_type << 24) | node_id
@@ -84,24 +108,36 @@ static int make_compound_key(int topo_type, int node_id) {
 
 static void record_edge_activated(ReasoningNode* node, int edge_index, int topo_type) {
     if (!node) return;
+    ThreadActivationRecord *rec = get_activation_record();
+    if (!rec) return;
     int compound_id = make_compound_key(topo_type, node->node_id);
-    for (int i = 0; i < g_activated_count; i++) {
-        if (g_activated[i].node_id == compound_id) {
-            for (int j = 0; j < g_activated[i].edge_count; j++) {
-                if (g_activated[i].edge_indices[j] == edge_index)
+    for (int i = 0; i < rec->count; i++) {
+        if (rec->activated[i].node_id == compound_id) {
+            for (int j = 0; j < rec->activated[i].edge_count; j++) {
+                if (rec->activated[i].edge_indices[j] == edge_index)
                     return;
             }
-            if (g_activated[i].edge_count < PM_EDGE_TRACK) {
-                g_activated[i].edge_indices[g_activated[i].edge_count++] = edge_index;
+            if (rec->activated[i].edge_count < PM_EDGE_TRACK) {
+                rec->activated[i].edge_indices[rec->activated[i].edge_count++] = edge_index;
             }
             return;
         }
     }
-    if (g_activated_count < MAX_ACTIVATED_PAIRS) {
-        g_activated[g_activated_count].node_id = compound_id;
-        g_activated[g_activated_count].edge_count = 1;
-        g_activated[g_activated_count].edge_indices[0] = edge_index;
-        g_activated_count++;
+    if (rec->count < MAX_ACTIVATED_PAIRS) {
+        rec->activated[rec->count].node_id = compound_id;
+        rec->activated[rec->count].edge_count = 1;
+        rec->activated[rec->count].edge_indices[0] = edge_index;
+        rec->count++;
+    } else {
+        /* FIFO: memmove out oldest, keep newest */
+        memmove(&rec->activated[0], &rec->activated[1],
+                (MAX_ACTIVATED_PAIRS - 1) * sizeof(ActivatedEdges));
+        rec->activated[MAX_ACTIVATED_PAIRS - 1].node_id = compound_id;
+        rec->activated[MAX_ACTIVATED_PAIRS - 1].edge_count = 1;
+        rec->activated[MAX_ACTIVATED_PAIRS - 1].edge_indices[0] = edge_index;
+        rec->overflowed = 1;
+        LOG_WARNING("[自主学习] 激活记录溢出(%d条)，FIFO轮替",
+                    MAX_ACTIVATED_PAIRS);
     }
 }
 
@@ -542,15 +578,15 @@ void autonomic_seed_topologies(MasterTopology* master) {
         SubTopology* seeds[] = { syntax, context, domain, pragma, culture };
         const char* seed_names[] = {
             /* syntax: 基础POS标签 */
-            "NOUN\0VERB\0ADJ\0ADV\0PRON\0PREP\0CONJ\0NUM\0PART\0INTJ",
+            "NOUN\0VERB\0ADJ\0ADV\0PRON\0PREP\0CONJ\0NUM\0PART\0INTJ\0",
             /* context: 上下文类型 */
-            "Q&A\0CHAT\0EXPLAIN\0HOWTO\0GREET",
+            "Q&A\0CHAT\0EXPLAIN\0HOWTO\0GREET\0",
             /* domain: 领域标签（v0.5.7 扩展心理/医疗/情绪域） */
-            "TECH\0LIFE\0SCIENCE\0HISTORY\0GEOGRAPHY\0PSYCHOLOGY\0MEDICAL\0EMOTION\0LAW\0ECONOMICS",
+            "TECH\0LIFE\0SCIENCE\0HISTORY\0GEOGRAPHY\0PSYCHOLOGY\0MEDICAL\0EMOTION\0LAW\0ECONOMICS\0",
             /* pragma: 语用功能 */
-            "ASK\0TELL\0REQUEST\0SUGGEST\0GREET",
+            "ASK\0TELL\0REQUEST\0SUGGEST\0GREET\0",
             /* culture: 文化元素 */
-            "CN_CULTURE\0FESTIVAL\0CUSTOM\0LANGUAGE\0HISTORY"
+            "CN_CULTURE\0FESTIVAL\0CUSTOM\0LANGUAGE\0HISTORY\0"
         };
         for (int si = 0; si < 5; si++) {
             SubTopology* st = seeds[si];
@@ -618,15 +654,15 @@ void autonomic_learn_from_dialog_trusted(MasterTopology* master,
         SubTopology* seeds[] = { syntax, context, domain, pragma, culture };
         const char* seed_names[] = {
             /* syntax: 基础POS标签 */
-            "NOUN\0VERB\0ADJ\0ADV\0PRON\0PREP\0CONJ\0NUM\0PART\0INTJ",
+            "NOUN\0VERB\0ADJ\0ADV\0PRON\0PREP\0CONJ\0NUM\0PART\0INTJ\0",
             /* context: 上下文类型 */
-            "Q&A\0CHAT\0EXPLAIN\0HOWTO\0GREET",
+            "Q&A\0CHAT\0EXPLAIN\0HOWTO\0GREET\0",
             /* domain: 领域标签 */
-            "TECH\0LIFE\0SCIENCE\0HISTORY\0GEOGRAPHY",
+            "TECH\0LIFE\0SCIENCE\0HISTORY\0GEOGRAPHY\0",
             /* pragma: 语用功能 */
-            "ASK\0TELL\0REQUEST\0SUGGEST\0GREET",
+            "ASK\0TELL\0REQUEST\0SUGGEST\0GREET\0",
             /* culture: 文化元素 */
-            "CN_CULTURE\0FESTIVAL\0CUSTOM\0LANGUAGE\0HISTORY"
+            "CN_CULTURE\0FESTIVAL\0CUSTOM\0LANGUAGE\0HISTORY\0"
         };
         for (int si = 0; si < 5; si++) {
             SubTopology* st = seeds[si];
@@ -662,8 +698,16 @@ void autonomic_learn_from_dialog_trusted(MasterTopology* master,
         input_count  = extract_ordered_chars(user_input,  tmp_in_chars,  input_utf8_lens);
         response_count = extract_ordered_chars(ai_response, tmp_res_chars, response_utf8_lens);
         /* 复制到 input_chars 大缓冲区 */
-        for (int i = 0; i < input_count; i++)  snprintf(input_chars[i], 64, "%s", tmp_in_chars[i]);
-        for (int i = 0; i < response_count; i++) snprintf(response_chars[i], 64, "%s", tmp_res_chars[i]);
+        for (int i = 0; i < input_count; i++) {
+            size_t len = strnlen(tmp_in_chars[i], 7);
+            memcpy(input_chars[i], tmp_in_chars[i], len);
+            input_chars[i][len] = '\0';
+        }
+        for (int i = 0; i < response_count; i++) {
+            size_t len = strnlen(tmp_res_chars[i], 7);
+            memcpy(response_chars[i], tmp_res_chars[i], len);
+            response_chars[i][len] = '\0';
+        }
         /* 无词典时词性标记为空 */
         for (int i = 0; i < input_count; i++)  input_pos[i][0] = '\0';
         for (int i = 0; i < response_count; i++) response_pos[i][0] = '\0';
@@ -941,6 +985,13 @@ skip_cross_topo:
     // 刷盘判断：边数增长到一定程度触发保存
     if (state && state->initialized) {
         autonomic_request_flush(state, master);
+    }
+    {
+        ThreadActivationRecord *rec = get_activation_record();
+        if (rec && rec->overflowed) {
+            LOG_WARNING("[自主学习] 本轮对话激活记录溢出上限 %d，已触发FIFO轮替",
+                        MAX_ACTIVATED_PAIRS);
+        }
     }
 }
 
@@ -1412,14 +1463,24 @@ int autonomic_compound_consolidate(MasterTopology* master) {
             float w_lo = fwd ? w_ba : w_ab;
             if (w_lo > 0.0f && w_hi / w_lo < 1.5f) continue;
 
+            /* 边界守卫（heap-corruption fix）：cands 池容量 = vn*2。外层
+             * 循环虽带 cand_count < vn*2 守卫，但内层 j 循环同一轮可追加多条
+             * 候选（每强边一条），cand_count 会撞破容量越界写 cands[cand_count]
+             * → 污染堆元数据 → WSL ASan：WRITE@1416；板子 malloc corrupted
+             * top size → SIGABRT 崩循环。达到容量即不再追加，正常语义不变。 */
+            if (cand_count >= vn * 2) break;
+
             CCWordCand* c = &cands[cand_count++];
             c->node_a = a->node_id;
             c->node_b = b->node_id;
             c->strength = rel;
-            if (fwd)
-                snprintf(c->word, sizeof(c->word), "%s%s", a->concept, b->concept);
-            else
-                snprintf(c->word, sizeof(c->word), "%s%s", b->concept, a->concept);
+            if (fwd) {
+                int n = snprintf(c->word, sizeof(c->word), "%.120s%.120s", a->concept, b->concept);
+                (void)n;
+            } else {
+                int n = snprintf(c->word, sizeof(c->word), "%.120s%.120s", b->concept, a->concept);
+                (void)n;
+            }
         }
     }
 

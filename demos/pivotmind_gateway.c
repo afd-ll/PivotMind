@@ -27,7 +27,6 @@
 #include <ctype.h>
 #include <unistd.h>
 #include <signal.h>
-#include <execinfo.h>
 #include <errno.h>
 #include <time.h>
 #include <pthread.h>
@@ -1981,18 +1980,50 @@ static void handle_qa(GatewaySystem* gw, int fd, const char* body) {
 }
 
 
-/* v0.5.7: 崩溃捕获——SIGSEGV/SIGABRT 打印调用栈到 stderr，
- * 板子上定位周期性崩溃（脑区索引后崩/爬虫后崩——无 core dump 难查） */
+/* v0.5.12: gw_crash_handler 改为纯 async-signal-safe。
+ * 背景（devlog/crash-loop-0820-analysis + 复查）：上一版虽已去掉 malloc，
+ * 但仍调用 backtrace()/backtrace_symbols_fd()——尽管 man 页称 fd 版
+ * async-signal-safe，实际内部走 dlopen/dladdr 解析符号，会再入动态连接器
+ * 与 malloc。堆损坏时（越界写毁 free list），handler 内再入堆锁即自锁
+ * 死锁，进程永久冻结，watchdog 误判"存活"而反复重启 → 无限循环。
+ * 今彻底删掉 backtrace 系列：预分配 static 缓冲拼出 [CRASH] 信号行，
+ * 仅 write(2) 写出，不 malloc / 不 dlopen / 不 backtrace，随后立即
+ * _exit(128+sig)，绝不 return。 */
+/* 仅 write(2)：循环写全一段字节，处理 EINTR/部分写 */
+static void gw_safe_write_all(int fd, const char* s, size_t len) {
+    while (len > 0) {
+        ssize_t w = write(fd, s, len);
+        if (w <= 0) {
+            if (w < 0 && errno == EINTR) continue;
+            break;
+        }
+        s += w;
+        len -= (size_t)w;
+    }
+}
 static void gw_crash_handler(int sig) {
-    fprintf(stderr, "\n[CRASH] 信号 %d (%s) — 调用栈:\n", sig,
-            sig == SIGSEGV ? "SIGSEGV" : sig == SIGABRT ? "SIGABRT" : "?");
-    void* bt[32];
-    int n = backtrace(bt, 32);
-    char** syms = backtrace_symbols(bt, n);
-    for (int i = 0; i < n; i++) fprintf(stderr, "  %s\n", syms ? syms[i] : "?");
-    if (syms) free(syms);
-    fflush(stderr);
-    _exit(128 + sig);
+    static char buf[128];   /* 预分配静态缓冲：信号上下文禁 malloc */
+    size_t n = 0;
+
+/* 追加一串到 buf（越界即截断，绝不过写） */
+#define GW_APPEND(s) do { const char* _p = (s); \
+    while (*_p && n < sizeof(buf) - 1) buf[n++] = *_p++; } while (0)
+
+    GW_APPEND("\n[CRASH] 信号 ");
+    /* 十进制信号号手工拼：禁 snprintf/stdio */
+    { unsigned v = (unsigned)sig, tmp[16], i = sizeof(tmp);
+      do { tmp[--i] = v % 10; v /= 10; } while (v > 0);
+      while (i < sizeof(tmp) && n < sizeof(buf) - 1) buf[n++] = (char)('0' + tmp[i++]); }
+    GW_APPEND(" (");
+    GW_APPEND(sig == SIGSEGV ? "SIGSEGV" : sig == SIGABRT ? "SIGABRT" :
+              sig == SIGILL  ? "SIGILL"  : sig == SIGFPE ? "SIGFPE"  :
+              sig == SIGBUS  ? "SIGBUS"  : "?");
+    GW_APPEND(")\n");
+#undef GW_APPEND
+
+    buf[n] = '\0';
+    gw_safe_write_all(STDERR_FILENO, buf, n);
+    _exit(128 + sig);      /* 崩溃即终止，绝不 return 继续跑 */
 }
 
 int main(int argc, char* argv[]) {

@@ -178,10 +178,19 @@ static void dialog_topo_worker(void* arg) {
                     connected->node_id, node->node_id);
 
                 if (reasoning->chain_length < 10 && task->hop <= 3) {
-                    snprintf(reasoning->reasoning_chain[reasoning->chain_length],
-                             256, "%s -> %s",
-                             node->concept ? node->concept : "?",
-                             connected->concept ? connected->concept : "?");
+                    const char* src = node->concept ? node->concept : "?";
+                    const char* dst = connected->concept ? connected->concept : "?";
+                    int written = snprintf(reasoning->reasoning_chain[reasoning->chain_length],
+                                           PM_CONCEPT_NAME, "%.120s -> %.120s", src, dst);
+                    if (written >= PM_CONCEPT_NAME) {
+                        size_t last = PM_CONCEPT_NAME - 4;
+                        if (last > 0) {
+                            reasoning->reasoning_chain[reasoning->chain_length][last] = '.';
+                            reasoning->reasoning_chain[reasoning->chain_length][last+1] = '.';
+                            reasoning->reasoning_chain[reasoning->chain_length][last+2] = '.';
+                            reasoning->reasoning_chain[reasoning->chain_length][last+3] = '\0';
+                        }
+                    }
                     reasoning->chain_length++;
                 }
                 pthread_mutex_unlock(task->assoc_mutex);

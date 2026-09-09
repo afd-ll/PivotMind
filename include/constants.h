@@ -26,7 +26,7 @@
 #define PM_RESPONSE_BUF      2048  // 回复文本缓冲
 
 /* ========== 路径/边跟踪 ========== */
-#define PM_EDGE_TRACK        128   // 每节点被激活边跟踪上限
+#define PM_EDGE_TRACK        256   // 每节点被激活边跟踪上限
 #define PM_PATH_TRACK        128   // 路径节点/边跟踪数组大小
 #define PM_PATH_MAX_STEPS    32    // 单次走边最大步数
 
@@ -40,7 +40,7 @@
 /* ========== 学习参数 ========== */
 #define PM_AUTONOMIC_MAX_CONN        8000 // 自主学习单节点最大连接数
 #define PM_AUTONOMIC_SHARD           16   // 边更新分片数
-#define PM_ACTIVATED_PAIRS           4096 // 每轮最大激活节点对
+#define PM_ACTIVATED_PAIRS           8192 // 每轮最大激活节点对
 #define PM_PRUNE_BATCH_SIZE         500  // 剪枝每批处理节点数（减少持锁时间）
 #define PM_AUTONOMIC_FLUSH_THRESHOLD 50   // 自主学习刷盘阈值（累积更新次数）
 #define PM_AUTONOMIC_IDLE_FLUSH_SECS 30   // 自主学习空闲刷盘超时（秒）

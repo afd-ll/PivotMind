@@ -1,5 +1,25 @@
 # Changelog
 
+## v0.5.24 — 2026-09-06
+
+### Fixed
+- **存盘空批误判 OOM（根治）**：候选A 流式批化存盘主循环用 `if (!batch)` 一刀切判 OOM，把「空拓扑/空批」（情绪拓扑惰性初始化 node_count==0）误判成 OOM → break 放弃整轮，主状态文件自 9-03 起长期无法更新。改为「先以 cnt==0 判空批推进，再以 batch==NULL 判真 OOM」。
+- **锁内写路径饿死**：删除旧内存门卫（est+512MB 回退锁内写），主流程改流式批循环（每批 ≤100 节点短持锁深拷贝 + 锁外序列化追加写），磁盘 I/O 100% 在锁外。
+- **崩溃 handler 纯 async-signal-safe**：彻底删 backtrace 系列（内部走 dlopen/dladdr 会再入动态连接器与 malloc，堆损坏时自锁死锁），仅 write(2) 输出信号行后 _exit。
+
+### Changed
+- **激活记录 pthread_key 化**：__thread 线程局部存储改堆分配 + pthread_key，支持可重入。
+- **常量扩容**：PM_EDGE_TRACK 128→256、PM_ACTIVATED_PAIRS 4096→8192。
+- **concept 解析直查**：快照序列化目标 concept 从 concept_by_id 查表改为 net->nodes[id]->concept 直接查。
+
+### Quality
+- 编译 `-Wall -Wextra` 零警告；单测 topology 3/3、memory 4/4。
+- 实测：喂料 50 条节点 30167→30367、跨重启加载零丢失，OOM 报错归零。
+
+详见 [changelogs/068-streaming-batch-save-oom-fix.md](changelogs/068-streaming-batch-save-oom-fix.md)
+
+---
+
 ## v0.5.23 — 2026-08-19
 
 ### Added
