@@ -1,5 +1,34 @@
 # Changelog
 
+## v0.5.25 — 2026-09-09
+
+### Fixed
+- **线程池 destroy/超时路径 UAF 与串批隐患（P1-1）**：批次状态重置移入锁内（旧版无锁重置 + volatile 属 C11 数据竞争 UB）；`shutdown` 仅在「非批次进行中」才响应，destroy 恰逢批次进行时 worker 完成本批并上报 done，batch() 正常收尾；worker 用锁内快照 `batch_count` 窃取任务，防本批超时强退后慢 worker 串批执行下一批任务；等待完成不再"10s 超时强制结束返回成功"（会 UAF 栈上 tasks），超时改持续告警等待；batch 收尾广播 `cv_done`，destroy 不再干等 5s 超时。
+- **记忆种子截断即全损且无校验（P0-2）**：旧版 `fopen(path,"wb")` 直接覆盖，崩溃/断电写中途截断原文件无备份可回退；加载边读边 store，损坏文件被静默"部分加载"。改为 tmp+rename 原子写 + FNV-1a 64 哈希 footer（MAGIC `PMSEED2`），加载两遍解析先校验后提交，损坏拒绝加载，旧格式（无 footer）保持兼容。
+- **记忆种子哈希校验两端不对称（P0-3）**：保存端把 footer 魔数 `PMSEED2` 也喂进哈希后才落盘 hash，加载端只对记录区算哈希 → 保存端 `FNV(记录区‖MAGIC)` vs 加载端 `FNV(记录区)`，所有新格式种子文件校验恒失败、保存后即不可读。修复：魔数改裸 `fwrite` 不参与哈希，与加载端第一遍解析范围严格对齐。
+- **种子加载循环边界把 footer 当记录解析（P0-5）**：第一遍解析循环用 `while (pos + 16 <= sz)`，最后一条记录读完后剩余恰好 16 字节仍进循环，把 footer 魔数前 4 字节 `"PMSE"` 当 `key_len`（1163010384 > 4096）→ 恒判"记录截断"→ 新格式种子即使哈希正确也 100% 加载失败，空种子（16B 纯 footer）同样被拒。修复：条件改 `while (pos + 16 < sz)`。实测 3 条记录文件往返一致、空种子返回 0、篡改/截断文件仍被拒。
+- **学习 worker 无退出机制（P0-4）**：`g_learn_q.stop` 无任何置位点、worker 从未 join，`gw_system_shutdown` 直接销毁 brainstem/topology/perception 等，而 worker 仍在消费任务访问 `gw->topology`/`gw->perception` → 关闭时 use-after-free。新增 `learn_queue_shutdown()`（stop + broadcast + join 全部 worker + 防御性排空残留），并在 `gw_system_shutdown` 最前调用，早于任何 destroy。
+- **网关 token 比较时序侧信道（C1）**：strcmp 逐字节提前返回可被响应时间逐位爆破 → 全程遍历 + XOR 累积的常量时间比较（长度不等直接拒绝）。
+- **Content-Length 解析歧义**：只扫描 header 区间 `[0, header_end)`，防 body 内同名文本被误当头部；`atoi` → `strtol` 严格校验非法数字。
+
+### Changed
+- **网关每连接独立线程（P0-1）**：旧版单线程串行 accept→处理，慢上传/同步推理阻塞后续所有连接、/health 被拖死；改独立线程 + `g_conn_count` 原子计数限并发（`GW_MAX_CONN=64`），超限直接 503；退出有界等待在途连接线程（15s），避免 detached 线程访问已释放的 gw。
+- **token 打印脱敏**：启动日志不再整段明文打 token，仅显前 4 后 4，完整值存 GW_TOKEN_FILE（0600）。
+- **端口占用探测去重（P2-2）**：删 3 处重复 connect 预探测与重复 `/tmp/pivotmind.port` 写入；预探测只连 127.0.0.1 与实际 bind 地址不一致且存在 TOCTOU，改直接 bind 按 errno==EADDRINUSE 判定。
+- **日志线程安全 + 可落盘（P2-4）**：error.c 新增 `log_set_output(FILE*)`（NULL 恢复 stderr），日志整行加 pthread 互斥防并发写交错；`level >= LOG_WARNING` 即 fflush；gateway 支持 `PIVOTMIND_LOG_FILE=路径`，dup2 重定向 stdout/stderr（crash handler 直接 write(2) 同样落盘，fd 带 O_CLOEXEC）。
+- **错误码扩展（P2-3）**：`ErrorCode` 末尾追加 ERR_IO_ERROR/ERR_TIMEOUT/ERR_BUSY/ERR_UNAUTHORIZED/ERR_BAD_REQUEST/ERR_PARSE_FAILED/ERR_INVALID_STATE/ERR_CHECKSUM_MISMATCH，头文件注明"新增必须追加末尾禁中间插入"（错误码按数值持久化/对外引用）；error_string() 补齐。
+
+### Refactor
+- **gateway 单文件按模块拆分（P2-6）**：`demos/pivotmind_gateway.c`（~2200 行）拆为 6 文件——`gateway_internal.h`（共享类型/宏/跨模块原型 185 行）、`gateway_http.c`（JSON/HTTP 工具 + parse_request）、`gateway_system.c`（初始化/保存/关闭，gw_system_init 保持 static）、`gateway_learn.c`（LearnTask 队列与 worker，队列状态模块内 static）、`gateway_handlers.c`（11 个 REST handler）、主文件瘦身 ~590 行（token 生命周期/路由/P0-1 连接线程/crash/main）。handle_connection 只做路由分发，handler 逻辑零改动搬迁；导出面收敛为 23 个跨模块符号，模块内部辅助函数保持 static。Makefile 链接规则纳入 GATEWAY_OBJ。
+
+### Quality
+- CI 新增 `asan-ubsan` job（P2-7）：ASan/UBSan 全量编译 + 7 个核心单测（model/memory/topology/dialog/learner/causal/forgetting）跑 sanitizer，`halt_on_error=1`。
+- WSL gcc `-Wall -Wextra` 语法校验零告警（gateway 6 文件 + memory_system/thread_pool 等改动文件）；记忆种子保存/加载实测 20 项断言全通过（往返一致 / 哈希对称 / 篡改与截断拒绝 / 空种子）；符号完整性审计与 HEAD 38 个顶层函数逐一比对无缺失；YAML 合法；git diff 共 16 文件（含 4 新增拆分 .c + internal.h + Makefile）。
+
+详见 [changelogs/069-code-review-optimization-round.md](changelogs/069-code-review-optimization-round.md)
+
+---
+
 ## v0.5.24 — 2026-09-06
 
 ### Fixed

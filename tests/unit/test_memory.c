@@ -86,6 +86,72 @@ void test_memory_store_multiple(void) {
     TEST_END();
 }
 
+/* v0.5.25: 记忆种子原子写 + 完整性 footer 的 round-trip 验证。
+ * 核心验证 P0 修复：保存端哈希范围 = 加载端哈希范围（footer 魔数不参与哈希），
+ * 否则新格式种子保存后加载必报哈希校验失败。 */
+void test_seed_save_load_roundtrip(void) {
+    TEST_START("seed save/load roundtrip (v0.5.25 footer)");
+    const char* path = "/tmp/test_pmseed_roundtrip.dat";
+    remove(path);
+    remove("/tmp/test_pmseed_roundtrip.dat.tmp");
+
+    MemorySystem* m = memory_system_create(100, 200, 500);
+    ASSERT_NOT_NULL(m, "create failed");
+
+    /* 写几条种子（含中文 key、二进制 data，覆盖哈希边界）。
+     * 注意：confidence >= 0.6 才进永久记忆(permanent_memory)，save_seed
+     * 只序列化永久记忆，所以这里统一用 >= 0.6。 */
+    memory_store(m, "你好世界", "data_cn", 8, MEMORY_TYPE_STRING, 0.8f);
+    memory_store(m, "key2", "data_b", 7, MEMORY_TYPE_STRING, 0.7f);
+    unsigned char bin[4] = {0x00, 0xFF, 0x12, 0x34};
+    memory_store(m, "bin_key", bin, 4, MEMORY_TYPE_BINARY, 0.9f);
+
+    int saved = memory_save_seed(m, path);
+    ASSERT_TRUE(saved == 3, "save should return 3 entries");
+
+    /* 换一个空系统加载，验证能读回 */
+    MemorySystem* m2 = memory_system_create(100, 200, 500);
+    ASSERT_NOT_NULL(m2, "create m2 failed");
+    int loaded = memory_load_seed(m2, path);
+    ASSERT_TRUE(loaded == 3, "load should return 3 entries (hash must match)");
+
+    /* 验证内容一致 */
+    MemoryEntry* e1 = memory_retrieve(m2, "你好世界");
+    ASSERT_NOT_NULL(e1, "中文 key 未读回");
+    if (e1) ASSERT_TRUE(strcmp((char*)e1->data, "data_cn") == 0, "中文数据不一致");
+    MemoryEntry* e2 = memory_retrieve(m2, "bin_key");
+    ASSERT_NOT_NULL(e2, "二进制 key 未读回");
+    if (e2 && e2->data_size == 4) {
+        ASSERT_TRUE(memcmp(e2->data, bin, 4) == 0, "二进制数据不一致");
+    }
+
+    memory_system_destroy(m);
+    memory_system_destroy(m2);
+    remove(path);
+    TEST_END();
+}
+
+void test_seed_save_load_empty(void) {
+    TEST_START("seed save/load empty");
+    const char* path = "/tmp/test_pmseed_empty.dat";
+    remove(path);
+    remove("/tmp/test_pmseed_empty.dat.tmp");
+
+    MemorySystem* m = memory_system_create(100, 200, 500);
+    ASSERT_NOT_NULL(m, "create failed");
+    int saved = memory_save_seed(m, path);
+    ASSERT_TRUE(saved == 0, "empty save should return 0");
+
+    MemorySystem* m2 = memory_system_create(100, 200, 500);
+    int loaded = memory_load_seed(m2, path);
+    ASSERT_TRUE(loaded == 0, "empty load should return 0 (only footer)");
+
+    memory_system_destroy(m);
+    memory_system_destroy(m2);
+    remove(path);
+    TEST_END();
+}
+
 int main(void) {
     printf("\n=== PivotMind Memory System Unit Tests ===\n\n");
 
@@ -93,6 +159,8 @@ int main(void) {
     test_memory_store_and_retrieve();
     test_memory_retrieve_missing();
     test_memory_store_multiple();
+    test_seed_save_load_roundtrip();
+    test_seed_save_load_empty();
 
     printf("\n=== Results: %d run, %d passed, %d failed ===\n",
            tests_run, tests_passed, tests_failed);

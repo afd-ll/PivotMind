@@ -74,8 +74,10 @@ $(LIB_NAME): $(CORE_OBJ)
 $(BUILD_DIR)/digital_life: $(OBJ_DIR)/digital_life.o $(LIB_NAME)
 	TMPDIR=/tmp $(CC) $(CFLAGS) -o $@ $(OBJ_DIR)/digital_life.o -L. -lpivotmind $(LDFLAGS)
 
-$(BUILD_DIR)/pivotmind_gateway: $(OBJ_DIR)/pivotmind_gateway.o $(LIB_NAME)
-	TMPDIR=/tmp $(CC) $(CFLAGS) -o $@ $(OBJ_DIR)/pivotmind_gateway.o -L. -lpivotmind $(LDFLAGS)
+# v0.5.25 P2-6: gateway 已按模块拆分（gateway_http/system/learn/handlers + 主文件）
+GATEWAY_OBJ = $(OBJ_DIR)/pivotmind_gateway.o $(OBJ_DIR)/gateway_http.o $(OBJ_DIR)/gateway_system.o $(OBJ_DIR)/gateway_learn.o $(OBJ_DIR)/gateway_handlers.o
+$(BUILD_DIR)/pivotmind_gateway: $(GATEWAY_OBJ) $(LIB_NAME)
+	TMPDIR=/tmp $(CC) $(CFLAGS) -o $@ $(GATEWAY_OBJ) -L. -lpivotmind $(LDFLAGS)
 
 $(BUILD_DIR)/seed_builder: $(OBJ_DIR)/seed_builder.o $(LIB_NAME)
 	TMPDIR=/tmp $(CC) $(CFLAGS) -o $@ $(OBJ_DIR)/seed_builder.o -L. -lpivotmind $(LDFLAGS)

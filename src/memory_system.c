@@ -7,6 +7,7 @@
 #include <math.h>
 #include <stdint.h>
 #include <time.h>
+#include <errno.h>
 
 // ==================== 因果规则数据结构（统一声明）====================
 
@@ -1007,15 +1008,47 @@ MemoryLevel memory_get_causal_rule_level(MemorySystem* memory,
 
 // ==================== 记忆种子持久化 ====================
 
+/* v0.5.25: 原子写 + 完整性 footer（对齐 multi_topology/cross_edge_io 的
+ * tmp+rename 模式）。旧版直接 fopen(path,"wb") 覆盖：崩溃/断电/磁盘满发生
+ * 在写中途会截断原文件，长期记忆种子整体丢失且无备份可回退；且文件无完整性
+ * 校验，损坏文件会被静默"部分加载"。现改为：先写 "<path>.tmp"，边写边对载荷
+ * 计算 FNV-1a 64 哈希，末尾追加 16 字节 footer（MAGIC "PMSEED2" + hash）；
+ * fclose 成功后 rename 原子替换正式文件。失败清理 tmp 并保留原文件。 */
+static const unsigned char PMSEED_MAGIC[8] = {'P','M','S','E','E','D','2','\0'};
+#define PMSEED_FNV_OFFSET 14695981039346656037ULL
+#define PMSEED_FNV_PRIME  1099511628211ULL
+
+static uint64_t pmseed_hash_update(uint64_t h, const void* p, size_t n) {
+    const unsigned char* b = (const unsigned char*)p;
+    for (size_t i = 0; i < n; i++) {
+        h ^= b[i];
+        h *= PMSEED_FNV_PRIME;
+    }
+    return h;
+}
+
 int memory_save_seed(MemorySystem* memory, const char* filepath) {
     if (!memory || !filepath) return -1;
-    
-    FILE* fp = fopen(filepath, "wb");
+
+    char tmp_path[1024];
+    if (snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", filepath) >= (int)sizeof(tmp_path)) {
+        fprintf(stderr, "[记忆种子] 保存失败：路径过长 %s\n", filepath);
+        return -1;
+    }
+
+    FILE* fp = fopen(tmp_path, "wb");
     if (!fp) return -1;
     
     LongTermMemory* ltm = memory->permanent_memory;
     int count = 0;
-    
+    uint64_t h = PMSEED_FNV_OFFSET;
+
+#define WRITE_AND_HASH(ptr, sz, n) do { \
+        size_t _items = (size_t)(n); \
+        if (fwrite((ptr), (sz), _items, fp) != _items) goto write_err; \
+        h = pmseed_hash_update(h, (ptr), (size_t)(sz) * _items); \
+    } while (0)
+
     for (int i = 0; i < ltm->size; i++) {
         MemoryEntry* entry = ltm->entries[i];
         if (!entry || !entry->key) continue;
@@ -1023,75 +1056,222 @@ int memory_save_seed(MemorySystem* memory, const char* filepath) {
         int key_len = strlen(entry->key) + 1;
         /* size_t 在不同平台大小不同（32位=4, 64位=8），种子文件不跨平台 */
         uint32_t data_sz = (uint32_t)entry->data_size;
-#define WRITE_OR_FAIL(ptr, sz, n) do { if (fwrite(ptr, sz, n, fp) != (size_t)(n)) goto write_err; } while(0)
-        WRITE_OR_FAIL(&key_len, sizeof(int), 1);
-        WRITE_OR_FAIL(entry->key, 1, key_len);
-        WRITE_OR_FAIL(&data_sz, sizeof(uint32_t), 1);
-        WRITE_OR_FAIL(entry->data, 1, data_sz);
+        WRITE_AND_HASH(&key_len, sizeof(int), 1);
+        WRITE_AND_HASH(entry->key, 1, key_len);
+        WRITE_AND_HASH(&data_sz, sizeof(uint32_t), 1);
+        WRITE_AND_HASH(entry->data, 1, data_sz);
         int type = (int)entry->type;
-        WRITE_OR_FAIL(&type, sizeof(int), 1);
-        WRITE_OR_FAIL(&entry->importance, sizeof(float), 1);
-#undef WRITE_OR_FAIL
+        WRITE_AND_HASH(&type, sizeof(int), 1);
+        WRITE_AND_HASH(&entry->importance, sizeof(float), 1);
         count++;
     }
-    
-    fclose(fp);
-    printf("[记忆种子] 已保存 %d 条到 %s\n", count, filepath);
+
+    /* footer: 8 字节魔数 + 8 字节哈希，共 16 字节。
+     * P0 fix (v0.5.25): 魔数只是 footer 定界符，不参与哈希计算——此处必须用裸
+     * fwrite 而非 WRITE_AND_HASH。旧实现把魔数也喂进 h 再写 h，导致保存端
+     * hash = FNV(记录区 ‖ MAGIC)，而加载端第一遍只对记录区算哈希
+     * = FNV(记录区)，两端范围不对称 → 所有新格式种子文件校验恒失败被拒绝加载。
+     * 现哈希只覆盖记录区载荷，与加载端第一遍解析范围严格对齐。 */
+    if (fwrite(PMSEED_MAGIC, 1, sizeof(PMSEED_MAGIC), fp) != sizeof(PMSEED_MAGIC))
+        goto write_err;
+    if (fwrite(&h, sizeof(h), 1, fp) != 1) goto write_err;
+#undef WRITE_AND_HASH
+
+    if (fclose(fp) != 0) {
+        fp = NULL;
+        fprintf(stderr, "[记忆种子] 写入失败，文件可能损坏\n");
+        remove(tmp_path);
+        return -1;
+    }
+    fp = NULL;
+
+    /* 原子替换：tmp 写完后 rename 覆盖正式文件 */
+    if (rename(tmp_path, filepath) != 0) {
+        fprintf(stderr, "[记忆种子] 原子替换失败: %s → %s (%s)\n",
+                tmp_path, filepath, strerror(errno));
+        remove(tmp_path);
+        return -1;
+    }
+
+    printf("[记忆种子] 已保存 %d 条到 %s (hash=%016llx)\n", count, filepath,
+           (unsigned long long)h);
     return count;
 
 write_err:
-    fclose(fp);
+    if (fp) fclose(fp);
+    remove(tmp_path);
     fprintf(stderr, "[记忆种子] 写入失败，文件可能损坏\n");
     return -1;
 }
 
+/* v0.5.25: 加载改为"整文件读入 → 完整性校验通过 → 再 store"两遍解析。
+ * 旧版边读边 store：截断/损坏文件会静默"部分加载"一半种子。
+ * - 新格式（PMSEED2 footer）：校验 FNV 哈希，不匹配视为损坏，拒绝提交并返回 -1；
+ * - 旧格式（无 footer，v0.5.24 及更早保存）：正常解析，保持兼容；
+ * - 条目中途截断（剩余 1~15 字节）：明确报损坏，不再静默部分加载。 */
 int memory_load_seed(MemorySystem* memory, const char* filepath) {
     if (!memory || !filepath) return -1;
-    
+
     FILE* fp = fopen(filepath, "rb");
     if (!fp) return 0;
-    
-    int count = 0;
-    while (1) {
+
+    /* 种子文件通常很小，整体读入内存便于"先校验后提交" */
+    if (fseek(fp, 0, SEEK_END) != 0) { fclose(fp); return -1; }
+    long sz = ftell(fp);
+    if (sz < 0 || sz > 64 * 1024 * 1024) {  /* 64MB 上限防异常膨胀 */
+        fprintf(stderr, "[记忆种子] 文件大小异常 (%ld)，拒绝加载\n", sz);
+        fclose(fp);
+        return -1;
+    }
+    if (fseek(fp, 0, SEEK_SET) != 0) { fclose(fp); return -1; }
+    unsigned char* buf = (unsigned char*)malloc(sz > 0 ? (size_t)sz : 1);
+    if (!buf) { fclose(fp); return -1; }
+    if (sz > 0 && fread(buf, 1, (size_t)sz, fp) != (size_t)sz) {
+        free(buf);
+        fclose(fp);
+        return -1;
+    }
+    fclose(fp);
+    if (sz == 0) { free(buf); return 0; }
+
+    /* ---- 第一遍：边界解析 + footer 哈希校验 ---- */
+    size_t pos = 0;
+    uint64_t h = PMSEED_FNV_OFFSET;
+    int record_count = 0;
+    int truncated = 0;
+    int has_footer = 0;
+
+#define READ_AND_HASH(dst, n) do { \
+        if (pos + (n) > (size_t)sz) { truncated = 1; goto parse_done; } \
+        memcpy((dst), buf + pos, (n)); \
+        h = pmseed_hash_update(h, buf + pos, (n)); \
+        pos += (n); \
+    } while (0)
+
+    while (pos + 16 < (size_t)sz) {  /* 严格大于 footer（16B）才继续读记录：
+                                      * 用 <= 时，最后一条记录读完后剩余恰好 16 字节
+                                      * 仍进循环，会把 footer 的魔数当 key_len 解析
+                                      * （"PMSE" → 1163010384 > 4096）→ 恒判"记录截断"
+                                      * → 所有新格式种子文件加载必败。 */
         int key_len;
-        if (fread(&key_len, sizeof(int), 1, fp) != 1) break;
-        if (key_len <= 0 || key_len > 10000) break;
-        
-        char* key = (char*)malloc(key_len);
-        if (!key) break;
-        if (fread(key, 1, key_len, fp) != (size_t)key_len) { free(key); break; }
-        key[key_len - 1] = '\0';
-        
-        size_t data_size;
-        /* 读取 uint32_t 以兼容跨平台保存的种子文件 */
+        READ_AND_HASH(&key_len, sizeof(int));
+        if (key_len <= 0 || key_len > 4096) { truncated = 1; goto parse_done; }
+        /* key 内容跳过并计入哈希 */
+        if (pos + (size_t)key_len > (size_t)sz) { truncated = 1; goto parse_done; }
+        h = pmseed_hash_update(h, buf + pos, (size_t)key_len);
+        pos += (size_t)key_len;
+
         uint32_t data_sz32;
-        if (fread(&data_sz32, sizeof(uint32_t), 1, fp) != 1) { free(key); break; }
-        data_size = (size_t)data_sz32;
-        if (data_size <= 0 || data_size > 100000) { free(key); break; }
-        
+        READ_AND_HASH(&data_sz32, sizeof(uint32_t));
+        if (data_sz32 == 0 || data_sz32 > 100000) { truncated = 1; goto parse_done; }
+        if (pos + data_sz32 > (size_t)sz) { truncated = 1; goto parse_done; }
+        h = pmseed_hash_update(h, buf + pos, data_sz32);
+        pos += data_sz32;
+
+        int type;
+        READ_AND_HASH(&type, sizeof(int));
+        if (type < 0 || type > MEMORY_TYPE_CAUSAL_GRAPH) { truncated = 1; goto parse_done; }
+
+        float importance;
+        READ_AND_HASH(&importance, sizeof(float));
+        if (!isfinite(importance)) {
+            truncated = 1; goto parse_done;
+        }
+        if (importance < 0.0f || importance > 1.0f)
+            fprintf(stderr, "[记忆种子] 条目 #%d importance=%.3f 越界，加载时钳制到 [0,1]\n",
+                    record_count, importance);
+        record_count++;
+    }
+
+parse_done:
+    if (truncated) {
+        free(buf);
+        fprintf(stderr, "[记忆种子] %s 记录截断/字段非法，拒绝部分加载\n", filepath);
+        return -1;
+    }
+
+    /* 剩余字节判定 footer / 旧格式 / 损坏 */
+    if (pos + 16 == (size_t)sz) {
+        /* 校验 footer：魔数 + 载荷哈希 */
+        unsigned char magic[8];
+        memcpy(magic, buf + pos, 8);
+        uint64_t stored_h;
+        memcpy(&stored_h, buf + pos + 8, sizeof(stored_h));
+        if (memcmp(magic, PMSEED_MAGIC, 8) == 0) {
+            has_footer = 1;
+            if (stored_h != h) {
+                free(buf);
+                fprintf(stderr, "[记忆种子] %s 哈希校验失败 (stored=%016llx calc=%016llx)，"
+                        "文件可能损坏，拒绝加载\n", filepath,
+                        (unsigned long long)stored_h, (unsigned long long)h);
+                return -1;
+            }
+        } else {
+            free(buf);
+            fprintf(stderr, "[记忆种子] %s 尾部 16 字节既非 PMSEED2 footer 亦非合法记录，"
+                    "文件损坏，拒绝加载\n", filepath);
+            return -1;
+        }
+    } else if (pos != (size_t)sz) {
+        free(buf);
+        fprintf(stderr, "[记忆种子] %s 尾部残留 %zu 字节，文件损坏，拒绝加载\n",
+                filepath, (size_t)sz - pos);
+        return -1;
+    }
+
+#undef READ_AND_HASH
+
+    /* ---- 第二遍：解析并 store（footer 校验已通过） ---- */
+    /* 记录区结束位置：新格式文件末尾 16 字节是 footer，不得当记录解析
+     * （空种子文件 sz==16 只有 footer，误解析会把魔数当 key_len） */
+    size_t data_end = (size_t)sz - (has_footer ? 16 : 0);
+    int count = 0;
+    size_t p2 = 0;
+    int limit = record_count > 0 ? record_count : 4096;  /* 防御死循环 */
+    for (int i = 0; i < limit && p2 + sizeof(int) <= data_end; i++) {
+        int key_len;
+        memcpy(&key_len, buf + p2, sizeof(int));
+        p2 += sizeof(int);
+        char* key = (char*)malloc((size_t)key_len);
+        if (!key) break;
+        memcpy(key, buf + p2, (size_t)key_len);
+        key[key_len - 1] = '\0';
+        p2 += (size_t)key_len;
+
+        uint32_t data_sz32;
+        memcpy(&data_sz32, buf + p2, sizeof(uint32_t));
+        size_t data_size = (size_t)data_sz32;
+        p2 += sizeof(uint32_t);
         void* data = malloc(data_size);
         if (!data) { free(key); break; }
-        if (fread(data, 1, data_size, fp) != data_size) { free(key); free(data); break; }
-        
+        memcpy(data, buf + p2, data_size);
+        p2 += data_size;
+
         int type;
-        if (fread(&type, sizeof(int), 1, fp) != 1) { free(key); free(data); break; }
-        
+        memcpy(&type, buf + p2, sizeof(int));
+        p2 += sizeof(int);
+
         float importance;
-        if (fread(&importance, sizeof(float), 1, fp) != 1) { free(key); free(data); break; }
-        
+        memcpy(&importance, buf + p2, sizeof(float));
+        p2 += sizeof(float);
+        /* 历史文件可能存越界值（早期版本未钳制），此处按第一遍告警钳制 */
+        if (importance < 0.0f) importance = 0.0f;
+        else if (importance > 1.0f) importance = 1.0f;
+
         MemoryEntry* existing = memory_retrieve(memory, key);
         if (!existing) {
             memory_store(memory, key, data, data_size, (MemoryType)type, importance);
         }
-        
+
         free(key);
         free(data);
         count++;
     }
-    
-    fclose(fp);
+
+    free(buf);
     if (count > 0) {
-        printf("[记忆种子] 已加载 %d 条从 %s\n", count, filepath);
+        printf("[记忆种子] 已加载 %d 条从 %s%s\n", count, filepath,
+               has_footer ? " (完整性校验通过)" : " (旧格式无footer)");
     }
     return count;
 }

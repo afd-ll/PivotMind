@@ -1,0 +1,585 @@
+/**
+ * @file gateway_handlers.c
+ * @brief PivotMind HTTP Gateway — REST 请求处理 (handle_*)
+ *
+ * 由 demos/pivotmind_gateway.c 拆分而来（v0.5.25 P2-6）。
+ * 共享类型与原型见 gateway_internal.h。
+ */
+
+#include "gateway_internal.h"
+
+// ==================== 请求处理 ====================
+
+// POST /chat - 对话
+void handle_chat(GatewaySystem* gw, int fd, const char* body) {
+    char msg[2048] = {0};
+    if (!json_extract_string(body, "msg", msg, sizeof(msg)) || strlen(msg) == 0) {
+        http_json(fd, 400, "{\"error\":\"missing or empty 'msg' field\"}");
+        return;
+    }
+
+    /* ── v0.3 Phase 2: 复杂问题走 PFE 推理编排 ── */
+    int use_pfe = 0;
+    char* response = NULL;
+    if (gw->qa_memory) { const char* qa = qa_memory_query(gw->qa_memory, msg); if (qa) { response = strdup(qa); } }
+
+    /* v0.4.3: 对话中自动学习 — 将输入 token 注册到词汇拓扑
+     * 这是端到端对话质量最大的瓶颈：不学习新词则扩散引擎 active_count=0
+     * v0.5.20 B4: 改走学习队列（单 worker 消费）+ flush 等待，保当轮新词可用。 */
+    {
+        SubTopology* vocab = NULL;
+        for (int t = 0; t < gw->topology->sub_topo_count; t++) {
+            if (gw->topology->sub_topologies[t] &&
+                gw->topology->sub_topologies[t]->type == TOPO_VOCABULARY)
+                { vocab = gw->topology->sub_topologies[t]; break; }
+        }
+        if (vocab && vocab->net) {
+#if LEARN_ASYNC_CHAT
+            LearnTask* t = learn_queue_push(msg, "", 1);   /* 入队 + flush 等待 */
+            if (t) learn_task_wait(t);
+#else
+            EmergentPOS* ep = (gw->prefrontal && gw->prefrontal->controller)
+                              ? gw->prefrontal->controller->emergent_pos : NULL;
+            int prev_id = -1;
+            int learned = _learn_tokens(vocab, msg, &prev_id, ep);
+            if (learned > 0)
+                printf("[gateway] 对话中学习: +%d 个新词\n", learned);
+#endif
+        }
+    }
+
+    if (gw->pfe) {
+        int complexity = pfe_assess_complexity(gw->pfe, msg);
+        /* v0.6 测试：PFE 门槛恢复 >0 验证（diffusion 降级路径已话题化，
+         * PFE 的 answer_text 应随 diffusion 修复而修复） */
+        if (complexity > 0) {
+            /* 中高复杂度 → PFE 推理管线 */
+            char pfe_answer[GW_MAX_RESPONSE];
+            int pfe_ok = pfe_reason(gw->pfe, msg, pfe_answer, sizeof(pfe_answer));
+            if (pfe_ok == 0 && strlen(pfe_answer) > 10) {
+                response = strdup(pfe_answer);
+                use_pfe   = 1;
+                printf("[gateway] PFE推理完成 (复杂度=%d, 周期=%d, 满意度=%.2f)\n",
+                       complexity, pfe_cycle_count(gw->pfe),
+                       (double)pfe_avg_satisfaction(gw->pfe));
+            }
+        }
+    }
+
+    /* 回退到旧路径：简单问题或 PFE 失败
+     * v0.6: 禁用上一轮回复注入——历史串扰会让词锚定命中旧回复的
+     * 词（"衣服"回复拼进"历史"输入 → 输出"衣服历史"），话题性
+     * 阶段输入必须是纯当前话题。等上下文机制重做后再启用。 */
+    if (!response) {
+        response = prefrontal_chat(gw->prefrontal, msg);
+    }
+
+    /* 最终兜底：QA 记忆检索（扩散和联想推理都无产出） */
+    if (!response && gw->qa_memory) {
+        const char* qa_answer = qa_memory_query(gw->qa_memory, msg);
+        if (qa_answer) {
+            response = strdup(qa_answer);
+            printf("[gateway] QA记忆命中\n");
+        }
+    }
+
+    /* 语言一致性兜底（v0.6）：中文输入不应返回纯英文回复。
+     * PFE/graph 合成路径可能混入英文节点名，此处统一拦截，
+     * 丢弃后走 prefrontal_chat / 默认回复路径。 */
+    if (response) {
+        int msg_cjk = 0;
+        for (const char* p = msg; *p; p++)
+            if ((unsigned char)*p >= 0x80) { msg_cjk = 1; break; }
+        if (msg_cjk) {
+            int resp_cjk = 0;
+            for (const char* p = response; *p; p++)
+                if ((unsigned char)*p >= 0x80) { resp_cjk = 1; break; }
+            if (!resp_cjk) { free(response); response = NULL; }
+        }
+    }
+
+    /* 功能词兜底（v0.6）：回复若只有"很+X"类功能词组合（很大/很快）
+     * 或纯标点/单字重复 → 替换为礼貌默认。扩散组装在无实义词时
+     * 会选 ADJ 组合当主语，这是"很大。"泛滥的根源。 */
+    if (response) {
+        int cjk_cnt = 0, punct_cnt = 0;
+        for (const char* p = response; *p; p++) {
+            unsigned char c = (unsigned char)*p;
+            if (c >= 0x80) {
+                /* CJK 标点按 UTF-8 序列识别（。、，！）；不能用多字节字符常量
+                 * 与单字节 char 比较（恒为 false）。cjk_cnt 仍逐字节计数，
+                 * 除以 3 得汉字数（含标点容差），与旧逻辑一致。 */
+                if (strncmp(p, "。", 3) == 0 || strncmp(p, "、", 3) == 0 ||
+                    strncmp(p, "，", 3) == 0 || strncmp(p, "！", 3) == 0)
+                    punct_cnt++;
+                cjk_cnt++;
+            }
+            else if (c == ' ' || c == '.' || c == ',')
+                punct_cnt++;
+        }
+        int wordish = (cjk_cnt / 3);  /* 汉字数（含标点容差，如"很大。"=3） */
+        int is_void = (wordish <= 3) ||              /* ≤1 个实义词 */
+                      (strstr(response, "很大") && wordish <= 3) ||
+                      (strstr(response, "很快") && wordish <= 3) ||
+                      (strstr(response, "很好") && wordish <= 3) ||
+                      (strstr(response, "好的") && wordish <= 3) ||
+                      (strstr(response, "、") && wordish <= 3);
+        if (is_void) { free(response); response = strdup("好的。"); }
+    }
+
+    if (response) {
+        char escaped[GW_MAX_RESPONSE];
+        json_escape(response, escaped, sizeof(escaped));
+
+        int total_nodes = 0;
+        for (int t = 0; t < gw->topology->sub_topo_count; t++) {
+            if (gw->topology->sub_topologies[t] && gw->topology->sub_topologies[t]->net)
+                total_nodes += gw->topology->sub_topologies[t]->net->node_count;
+        }
+
+        char json[GW_MAX_RESPONSE];
+        snprintf(json, sizeof(json),
+            "{\"reply\":\"%s\",\"nodes\":%d,\"dialogs\":%lld%s}",
+            escaped, total_nodes, (long long)gw->total_dialogs + 1,
+            use_pfe ? ",\"reasoning\":\"pfe\"" : "");
+
+        http_json(fd, 200, json);
+        gw->total_dialogs++;
+
+        /* v0.4.3: 保存本轮回复到多轮对话上下文 */
+        if (response && response[0]) {
+            int alen = (int)strlen(response);
+            if (alen > 1023) alen = 1023;
+            memcpy(gw->last_answer, response, (size_t)alen);
+            gw->last_answer[alen] = '\0';
+            gw->dialog_context_ready = 1;
+        }
+
+        /* v0.4.3: AI回复也纳入词汇拓扑 — 双向在线学习
+         * v0.5.20 B4: fire-and-forget 入队（无当轮依赖）。 */
+        {
+            SubTopology* vocab = NULL;
+            for (int t = 0; t < gw->topology->sub_topo_count; t++) {
+                if (gw->topology->sub_topologies[t] &&
+                    gw->topology->sub_topologies[t]->type == TOPO_VOCABULARY)
+                    { vocab = gw->topology->sub_topologies[t]; break; }
+            }
+            if (vocab && vocab->net && response) {
+#if LEARN_ASYNC_CHAT
+                learn_queue_push(response, "", 0);   /* fire-and-forget，忽略返回值 */
+#else
+                EmergentPOS* ep = (gw->prefrontal && gw->prefrontal->controller)
+                                  ? gw->prefrontal->controller->emergent_pos : NULL;
+                int prev_id = -1;
+                int learned = _learn_tokens(vocab, response, &prev_id, ep);
+                if (learned > 0)
+                    printf("[gateway] 回复中学习: +%d 个新词\n", learned);
+#endif
+            }
+        }
+
+        /* 海马体记下这次对话 — 巩固时自动建 QA 连接 */
+        if (gw->hippocampus) hippocampus_log_dialog(gw->hippocampus, msg, response);
+
+        /* ── v0.3 Phase 2: IdeaArena 胜者反馈回流 ── */
+        if (use_pfe && gw->arena && gw->topology) {
+            arena_feedback_to_master(gw->arena, gw->topology);
+        }
+
+        /* 模板构建已由 Broca 自主 tick 调度（brainstem → broca_tick），
+         * 对话路径不再重复调用 */
+
+        free(response);
+    } else {
+        http_json(fd, 200, "{\"reply\":\"(无回应)\",\"nodes\":0}");
+    }
+}
+
+// POST /learn - 主动学习
+void handle_learn(GatewaySystem* gw, int fd, const char* body) {
+    char msg[2048] = {0};
+    if (!json_extract_string(body, "msg", msg, sizeof(msg)) || strlen(msg) == 0) {
+        http_json(fd, 400, "{\"error\":\"missing or empty 'msg' field\"}");
+        return;
+    }
+
+    /* 限流：每秒最多500次，burst=500 */
+    time_t now = time(NULL);
+    if (now == gw->last_learn_time) {
+        if (++gw->learn_burst > 500) {
+            http_json(fd, 429, "{\"error\":\"rate limit\"}");
+            return;
+        }
+    } else {
+        gw->last_learn_time = now;
+        gw->learn_burst = 0;
+    }
+
+    /* v0.5.9: 异步学习——入队（满丢最旧），固定 worker 消费。
+     * 不再每请求 spawn detached 线程（08-07 线程堆积雪崩实锤）。
+     * v0.5.20 B4: 入队逻辑抽出为 learn_queue_push（handle_chat 复用）。 */
+    char domain[64] = {0};
+    json_extract_string(body, "domain", domain, sizeof(domain));
+    LearnTask* task = learn_queue_push(msg, domain, 0);   /* fire-and-forget */
+    if (!task) { http_json(fd, 500, "{\"error\":\"oom\"}"); return; }
+
+    http_json(fd, 202, "{\"result\":\"accepted\"}");
+}
+
+// POST /feedback - 反馈
+void handle_feedback(GatewaySystem* gw, int fd, const char* body) {
+    char msg[2048] = {0};
+    char rating[64] = {0};
+
+    if (!json_extract_string(body, "msg", msg, sizeof(msg)) || strlen(msg) == 0) {
+        http_json(fd, 400, "{\"error\":\"missing 'msg' field\"}");
+        return;
+    }
+    if (!json_extract_string(body, "rating", rating, sizeof(rating)) || strlen(rating) == 0) {
+        http_json(fd, 400, "{\"error\":\"missing 'rating' field (correct/wrong)\"}");
+        return;
+    }
+
+    // 处理反馈
+    float confidence = 0.5f;
+    if (strcmp(rating, "correct") == 0 || strcmp(rating, "对") == 0) {
+        confidence = 0.95f;
+    } else if (strcmp(rating, "wrong") == 0 || strcmp(rating, "错") == 0) {
+        confidence = 0.2f;
+    } else {
+        http_json(fd, 400, "{\"error\":\"rating must be 'correct' or 'wrong'\"}");
+        return;
+    }
+
+    // 存入记忆
+    char key[512];
+    snprintf(key, sizeof(key), "feedback:%s", msg);
+    memory_store(gw->memory, key, (void*)rating, strlen(rating) + 1, MEMORY_TYPE_STRING, confidence);
+
+    http_json(fd, 200, "{\"result\":\"ok\"}");
+}
+
+// ==================== v0.5 多模态媒体投喂 API ====================
+
+// POST /media/feed - 入队视频文件到视觉皮层任务队列
+void handle_media_feed(GatewaySystem* gw, int fd, const char* body) {
+    char path[1024] = {0};
+    char mode[64] = "visual";  /* 默认: 视觉皮层对齐模式 */
+
+    if (!json_extract_string(body, "path", path, sizeof(path)) || strlen(path) == 0) {
+        http_json(fd, 400, "{\"error\":\"missing 'path' field\"}");
+        return;
+    }
+    json_extract_string(body, "mode", mode, sizeof(mode));
+
+    /* v0.5.1: 诊断模式 — 列出视频的所有轨道信息 */
+    if (strcmp(mode, "diagnose") == 0) {
+        if (!gw->visual_cortex) {
+            http_json(fd, 500, "{\"error\":\"visual cortex not initialized\"}");
+            return;
+        }
+        MediaReader* mr = visual_cortex_get_media_reader(gw->visual_cortex);
+        if (!mr) {
+            http_json(fd, 500, "{\"error\":\"media reader not available\"}");
+            return;
+        }
+        int tracks = media_diagnose_tracks(mr, path);
+        char resp[512];
+        snprintf(resp, sizeof(resp),
+                 "{\"result\":\"%s\",\"tracks\":%d,\"has_subtitle\":%s}",
+                 (tracks > 0) ? "ok" : "no_tracks",
+                 tracks,
+                 (tracks > 0) ? "check_server_stdout" : "none");
+        http_json(fd, 200, resp);
+        return;
+    }
+
+    if (!gw->visual_cortex) {
+        http_json(fd, 500, "{\"error\":\"visual cortex not initialized\"}");
+        return;
+    }
+
+    int enqueued = 0;
+
+    /* 检查是否为目录 */
+    struct stat st;
+    if (stat(path, &st) == 0 && S_ISDIR(st.st_mode)) {
+        char recursive[8] = "0";
+        int rec = 0;
+        if (json_extract_string(body, "recursive", recursive, sizeof(recursive))) {
+            rec = (strcmp(recursive, "1") == 0 || strcmp(recursive, "true") == 0) ? 1 : 0;
+        }
+        enqueued = visual_cortex_enqueue_directory(gw->visual_cortex, path, NULL, rec);
+    } else {
+        int ret = visual_cortex_enqueue(gw->visual_cortex, path, mode);
+        if (ret == 0) enqueued = 1;
+    }
+
+    int queue_size = visual_cortex_queue_size(gw->visual_cortex);
+
+    char resp[512];
+    snprintf(resp, sizeof(resp),
+             "{\"result\":\"enqueued\",\"mode\":\"%s\",\"enqueued\":%d,\"queue_size\":%d}",
+             mode, enqueued, queue_size);
+    http_json(fd, (enqueued > 0) ? 200 : 500, resp);
+}
+
+// GET /media/status - 查询多模态管道状态
+void handle_media_status(GatewaySystem* gw, int fd) {
+    char resp[1024];
+
+    int qsize = 0;
+    long vc_frames = 0;
+    int vc_vis = 0, vc_xmod = 0;
+    if (gw->visual_cortex)
+        visual_cortex_get_stats(gw->visual_cortex, &qsize, &vc_frames, &vc_vis, &vc_xmod);
+
+    /* 内部 MediaReader 统计 */
+    long mr_files = 0, mr_lines = 0, mr_words = 0;
+    if (gw->visual_cortex) {
+        MediaReader* mr = visual_cortex_get_media_reader(gw->visual_cortex);
+        if (mr) media_reader_get_stats(mr, &mr_files, &mr_lines, &mr_words);
+    }
+
+    /* 视觉拓扑统计 */
+    int vis_topo_nodes = 0;
+    SubTopology* vt = master_get_sub_topology_by_type(gw->topology, TOPO_VISUAL);
+    if (vt && vt->net) vis_topo_nodes = vt->net->node_count;
+
+    snprintf(resp, sizeof(resp),
+             "{\"queue_size\":%d,"
+             "\"media_reader\":{\"files\":%ld,\"lines\":%ld,\"words\":%ld},"
+             "\"visual_cortex\":{\"frames\":%ld,\"visual_nodes\":%d,\"cross_modal_edges\":%d,\"topo_visual_nodes\":%d}}",
+             qsize,
+             mr_files, mr_lines, mr_words,
+             vc_frames, vc_vis, vc_xmod, vis_topo_nodes);
+    http_json(fd, 200, resp);
+}
+
+// GET /status - 状态查询
+void handle_status(GatewaySystem* gw, int fd) {
+    int total_nodes = 0;
+    int template_nodes = 0;
+    for (int t = 0; t < gw->topology->sub_topo_count; t++) {
+        if (gw->topology->sub_topologies[t] && gw->topology->sub_topologies[t]->net)
+            total_nodes += gw->topology->sub_topologies[t]->net->node_count;
+    }
+    SubTopology* tpl = master_get_sub_topology_by_type(gw->topology, TOPO_TEMPLATE);
+    if (tpl && tpl->net) template_nodes = tpl->net->node_count;
+
+    long long uptime = (long long)(time(NULL) - gw->start_time);
+    char real_time_buf[32];
+    const char* real_time = "unknown";
+    if (gw->brainstem) {
+        real_time = brainstem_get_real_time(gw->brainstem, real_time_buf, sizeof(real_time_buf));
+    }
+    int clock_ticks = gw->brainstem ? brainstem_tick_count(gw->brainstem) : 0;
+    float circadian = gw->brainstem ? brainstem_get_circadian(gw->brainstem) : 0.5f;
+    const char* circadian_phase = gw->brainstem ? brainstem_get_circadian_phase(gw->brainstem) : "unknown";
+    long cache_frozen = gw->brain_cache ? gw->brain_cache->total_freezes : 0;
+    long cache_thawed = gw->brain_cache ? gw->brain_cache->total_thaws : 0;
+
+    char json[2048];
+    snprintf(json, sizeof(json),
+        "{"
+        "\"status\":\"running\","
+        "\"real_time\":\"%s\","
+        "\"uptime\":%lld,"
+        "\"clock_ticks\":%d,"
+        "\"circadian\":%.2f,"
+        "\"circadian_phase\":\"%s\","
+        "\"dialogs\":%lld,"
+        "\"learn_calls\":%lld,"
+        "\"total_nodes\":%d,"
+        "\"template_nodes\":%d,"
+        "\"template_voting\":%s,"
+        "\"brain_frozen\":%ld,"
+        "\"brain_thawed\":%ld,"
+        "\"topologies\":%d,"
+        "\"port\":%d,"
+        "\"version\":\"%s\""
+        "}",
+        real_time ? real_time : "unknown",
+        uptime,
+        clock_ticks,
+        (double)circadian,
+        circadian_phase,
+        (long long)gw->total_dialogs,
+        (long long)gw->total_learning_cycles,
+        total_nodes,
+        template_nodes,
+        gw->topology->use_template_voting ? "true" : "false",
+        cache_frozen,
+        cache_thawed,
+        gw->topology->sub_topo_count,
+        gw->port, PIVOTMIND_VERSION);
+
+    http_json(fd, 200, json);
+}
+
+// GET / - 仪表盘首页
+void handle_root(GatewaySystem* gw, int fd) {
+    (void)gw;
+    const char* html =
+        "<!DOCTYPE html><html lang=zh-CN><head><meta charset=utf-8><meta name=viewport content=\"width=device-width,initial-scale=1\"><title>玄枢 PivotMind</title><style>*{margin:0;padding:0;box-sizing:border-box}"
+        "body{background:#0c1220;color:#cbd5e1;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;padding:20px;min-height:100vh}"
+        "h1{font-size:20px;font-weight:400;color:#48dbfb;letter-spacing:3px;margin-bottom:2px}"
+        ".sub{color:#475569;font-size:12px;margin-bottom:28px;letter-spacing:1px}"
+        ".gw{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:16px}"
+        ".rw{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:16px}"
+        ".cd{background:#131d2e;border:1px solid #1e2d45;border-radius:8px;padding:14px}"
+        ".lb{font-size:10px;color:#475569;margin-bottom:5px;letter-spacing:1px;text-transform:uppercase}"
+        ".vl{font-size:22px;font-weight:600;color:#e2e8f0}"
+        ".gr{color:#22c55e}.cy{color:#22d3ee}.yw{color:#eab308}.bl{color:#60a5fa}"
+        ".dt{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:5px;background:#22c55e}"
+        ".tg{display:inline-block;padding:2px 10px;border-radius:14px;font-size:11px;background:#1e2d45;color:#48dbfb;border:1px solid #2a3f5a}"
+        ".br{height:3px;border-radius:2px;background:#1e2d45;margin:8px 0 5px;overflow:hidden}"
+        ".fl{height:100%;border-radius:2px;background:#48dbfb;transition:width .8s}"
+        ".sg{display:grid;grid-template-columns:1fr 1fr;gap:5px;margin-top:5px}"
+        ".si{text-align:center;padding:5px;background:rgba(0,0,0,.25);border-radius:5px}"
+        ".sn{font-size:16px;font-weight:600}"
+        ".sl{font-size:9px;color:#475569;margin-top:2px;letter-spacing:.5px}"
+        ".er{color:#ef4444;font-size:11px;text-align:center;margin-top:12px;word-break:break-all}"
+        "@media(max-width:640px){body{padding:10px}.rw{grid-template-columns:1fr}}</style></head><body>"
+        "<h1>玄枢</h1><div class=sub>PivotMind v" PIVOTMIND_VERSION "</div>"
+        "<div class=gw id=ca></div>"
+        "<div class=rw>"
+        "<div class=cd><div class=lb>学习调度器</div><div id=s><div class=cy vl>加载中...</div></div></div>"
+        "<div class=cd><div class=lb>训练模式</div><div id=t><div class=cy vl>未激活</div></div></div>"
+        "</div>"
+        "<div class=rw>"
+        "<div class=cd><div class=lb>脑区索引</div><div id=b><div class=cy vl>加载中...</div></div></div>"
+        "<div class=cd><div class=lb>知识拓扑</div><div id=p><div class=cy vl>加载中...</div></div></div>"
+        "</div>"
+        "<div id=er class=er></div>"
+        "<script>"
+        "var er=document.getElementById('er');"
+        "function $(i,h){var e=document.getElementById(i);if(e)e.innerHTML=h}"
+        "function L(){"
+        "fetch('/status').then(function(r){return r.json()}).then(function(s){"
+        "$('ca','<div class=cd><div class=lb>状态</div><div class=vl><span class=dt></span>'+s.status+'</div></div>'"
+        "+'<div class=cd><div class=lb>运行</div><div class=vl>'+Math.floor(s.uptime/3600)+'h '+Math.floor(s.uptime%3600/60)+'m</div></div>'"
+        "+'<div class=cd><div class=lb>节点</div><div class=\"vl gr\">'+s.total_nodes.toLocaleString()+'</div></div>'"
+        "+'<div class=cd><div class=lb>版本</div><div class=\"vl bl\">'+s.version+'</div></div>');"
+        "$('p','<div class=sg>'"
+        "+'<div class=si><div class=\"sn gr\">'+s.template_nodes+'</div><div class=sl>模板</div></div>'"
+        "+'<div class=si><div class=\"sn bl\">'+s.topologies+'</div><div class=sl>拓扑层</div></div>'"
+        "+'<div class=si><div class=\"sn cy\">'+s.brain_frozen+'</div><div class=sl>冷冻</div></div>'"
+        "+'<div class=si><div class=\"sn yw\">'+s.brain_thawed+'</div><div class=sl>解冻</div></div></div>');"
+        "$('er','');"
+        "}).catch(function(){});"
+        "fetch('/scheduler').then(function(r){return r.json()}).then(function(c){"
+        "var bw=c.self_learn_mods>0?100:10;"
+        "$('s','<span class=tg>'+(c.phase||'-')+'</span> <span style=font-size:11px;color:#475569>'+c.phase_elapsed_s+'s</span>'"
+        "+'<div class=br><div class=fl style=width:'+bw+'%></div></div>'"
+        "+'<div class=sg>'"
+        "+'<div class=si><div class=\"sn gr\">'+(c.total_loops||0)+'</div><div class=sl>闭环</div></div>'"
+        "+'<div class=si><div class=\"sn cy\">'+(c.self_learn_cycles||0)+'</div><div class=sl>周期</div></div>'"
+        "+'<div class=si><div class=\"sn yw\">'+(c.self_learn_mods||0)+'</div><div class=sl>修正</div></div>'"
+        "+'<div class=si><div class=\"sn bl\">'+(c.eval_freeze_candidates||0)+'</div><div class=sl>候选</div></div></div>');"
+        "}).catch(function(){});"
+        "fetch('/train/status').then(function(r){return r.json()}).then(function(t){"
+        "if(t.state==='idle'||t.state==='completed'){"
+        "$('t','<span class=tg>'+(t.state||'idle')+'</span> <span style=color:#475569;font-size:12px>已喂 '+(t.total_fed||0)+' 条</span>');"
+        "}else{"
+        "var pct=t.total_lines>0?Math.min(100,(t.current_line/t.total_lines*100)):0;"
+        "$('t','<span class=tg>'+(t.state||'?')+'</span> <span style=font-size:11px;color:#475569>第'+(t.current_round||0)+'/'+(t.total_rounds||1)+'轮</span>'"
+        "+'<div class=br><div class=fl style=width:'+pct+'%></div></div>'"
+        "+'<div style=font-size:18px;font-weight:600;color:#22c55e;margin:4px 0>'+pct+'%</div>'"
+        "+'<div class=sg>'"
+        "+'<div class=si><div class=\"sn gr\">'+(t.total_added_nodes||0)+'</div><div class=sl>新节点</div></div>'"
+        "+'<div class=si><div class=\"sn yw\">'+(t.total_added_edges||0)+'</div><div class=sl>新边</div></div></div>');"
+        "}}).catch(function(){});"
+        "fetch('/brain').then(function(r){return r.json()}).then(function(b){"
+        "if(b.error){$('b','<span style=color:#475569;font-size:13px>未激活</span>');}else{"
+        "$('b','<div class=sg>'"
+        "+'<div class=si><div class=\"sn gr\">'+(b.entries||0)+'</div><div class=sl>已分类</div></div>'"
+        "+'<div class=si><div class=\"sn cy\">'+(b.updates||0)+'</div><div class=sl>EMA</div></div>'"
+        "+'<div class=si><div class=\"sn yw\">'+(b.migrations||0)+'</div><div class=sl>迁移</div></div>'"
+        "+'<div class=si><div class=\"sn bl\">9+1</div><div class=sl>脑区</div></div></div>');"
+        "}}).catch(function(){});"
+        "setTimeout(L,5000)}"
+        "L()"
+        "</script></body></html>"
+    ;
+    http_send(fd, 200, "text/html; charset=utf-8", html);
+}
+
+// GET /scheduler - 学习调度器状态
+void handle_scheduler(GatewaySystem* gw, int fd) {
+    if (!gw->scheduler) {
+        http_json(fd, 404, "{\"error\":\"scheduler not initialized\"}");
+        return;
+    }
+
+    const char* phase_name = "idle";
+    int total_loops = 0;
+    int sel_cycles = 0, sel_mods = 0;
+    int batch_nodes = 0, batch_edges = 0;
+    int eval_candidates = 0;
+    long phase_elapsed = 0;
+
+    learning_scheduler_get_stats(gw->scheduler,
+        &total_loops, &sel_cycles, &sel_mods,
+        &batch_nodes, &batch_edges, &eval_candidates,
+        &phase_name, &phase_elapsed);
+
+    char json[1024];
+    snprintf(json, sizeof(json),
+        "{"
+        "\"phase\":\"%s\","
+        "\"phase_elapsed_s\":%ld,"
+        "\"total_loops\":%d,"
+        "\"self_learn_cycles\":%d,\"self_learn_mods\":%d,"
+        "\"batch_nodes\":%d,\"batch_edges\":%d,"
+        "\"eval_freeze_candidates\":%d"
+        "}",
+        phase_name, phase_elapsed,
+        total_loops, sel_cycles, sel_mods,
+        batch_nodes, batch_edges, eval_candidates);
+
+    http_json(fd, 200, json);
+}
+
+// GET /scheduler/stats - 自学习器详细统计
+void handle_scheduler_self_stats(GatewaySystem* gw, int fd) {
+    if (!gw->scheduler) {
+        http_json(fd, 404, "{\"error\":\"scheduler not initialized\"}");
+        return;
+    }
+
+    LearningPhase phase = learning_scheduler_get_phase(gw->scheduler);
+    (void)phase;
+
+    // 从 self_learner 获取统计
+    // （通过 scheduler_get_stats 已提供主要数据，此处为兼容更详细的未来扩展）
+    http_json(fd, 200, "{\"detail\":\"use /scheduler for summary\"}");
+}
+
+// GET /health - 健康检查
+void handle_health(GatewaySystem* gw, int fd) {
+    if (gw->engine_ready) {
+        http_json(fd, 200, "{\"status\":\"ok\"}");
+    } else {
+        http_json(fd, 503, "{\"status\":\"loading\",\"message\":\"engine initializing\"}");
+    }
+}
+
+void handle_qa(GatewaySystem* gw, int fd, const char* body) {
+    if (!gw->qa_memory) { gw->qa_memory = qa_memory_create(NULL, 500000); }
+    if (!gw->qa_memory) { http_json(fd, 500, "{\"error\":\"qa failed\"}"); return; }
+    int added = 0; const char* p = body;
+    while (p && *p) {
+        const char* qk = strstr(p, "\"q\""); if (!qk) break;
+        const char* qv = strchr(qk+3,':'); if(!qv)break; qv=strchr(qv,'"'); if(!qv)break; qv++;
+        const char* qe = strchr(qv,'"'); if(!qe)break;
+        const char* ak = strstr(qe,"\"a\""); if(!ak)break;
+        const char* av = strchr(ak+3,':'); if(!av)break; av=strchr(av,'"'); if(!av)break; av++;
+        const char* ae = strchr(av,'"'); if(!ae)break;
+        char q[1024]={0},a[1024]={0}; int ql=qe-qv,al=ae-av;
+        if(ql>0&&ql<1024&&al>0&&al<1024){memcpy(q,qv,ql);memcpy(a,av,al); if(qa_memory_add(gw->qa_memory,q,a)==0)added++;}
+        p=ae+1;
+    }
+    char rs[128]; snprintf(rs,128,"{\"result\":\"ok\",\"added\":%d,\"total\":%d}",added,qa_memory_count(gw->qa_memory));
+    http_json(fd,200,rs);
+}
