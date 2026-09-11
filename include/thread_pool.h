@@ -65,12 +65,20 @@ ThreadPool* thread_pool_create_with_size(int num_threads);
 void thread_pool_destroy(ThreadPool* pool);
 
 /**
- * 批量提交任务并等待全部完成
+ * 批量提交任务并等待全部完成（R3-1：契约收紧，语义与 batch2 方案一致，实现重写）
  * 主线程也参与任务窃取
+ *
+ * 完成语义（本函数返回 ⟺ 下列两条同时成立）：
+ *   (i) 本批 count 个任务**全部执行完**（函数指针已返回）；
+ *   (ii) 本池的 worker 没有一个还站在"本批之前的任务数组"上（无跨代串批）。
+ * 因此：调用方在本函数返回后释放 tasks/th_tasks 是安全的；
+ *       反向地，**本函数返回前调用方不得释放**（旧实现违反此契约 → use-after-free）。
+ * 池忙时本函数不执行任何任务，由调用方串行降级（见 THREAD_POOL_BUSY）。
  * @param pool 线程池
- * @param tasks 任务数组
+ * @param tasks 任务数组（调用方所有；返回后保证无 worker 再访问它）
  * @param count 任务数量
- * @return 已完成任务数，失败返回-1
+ * @return >=0 已完成任务数；-1 参数非法或池正在关闭；
+ *         THREAD_POOL_BUSY(-2) 池正忙（本次未执行任何任务，调用方须串行执行）
  */
 int thread_pool_batch(ThreadPool* pool, ThreadTask* tasks, int count);
 

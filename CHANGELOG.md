@@ -1,5 +1,56 @@
 # Changelog
 
+## v0.5.27 — 2026-09-11
+
+> 来源：**round 3 并发修复**（由 x86_64/TSan 复验驱动，承接 v0.5.26 登记的既有并发债：已知未修问题 A 的批次契约、B 的批内竞争）。commit `1e84755`，相对 v0.5.26 发布点 `49d8a69`，**20 个文件 `+944 / −126`**（分支另含一处 v0.5.26 文档补记提交 `d75eec1`，不计入本数）。三条主线：① R1 批次完成语义（`tasks_left` 任务账 + 每批 `batch_epoch` 代次握手）② 对话路径 worker 生命周期 + R2a/R2b 激活账本锁域 ③ TSan 复验后的三处收口。完整发布说明（含双平台验证数字、跨树对照与诚实边界、红线声明）见 [changelogs/071-round3-concurrency-activation-locks.md](changelogs/071-round3-concurrency-activation-locks.md)。
+
+### Fixed
+
+**① R1 批次完成语义（核心，`src/thread_pool.c`、`include/thread_pool.h`、`src/dialog_system.c`）**
+- **`thread_pool_batch` 完成屏障不成立**：旧实现用 `workers_done` 记“worker 跑完的趟数”却当作“人头数”用作完成判据——计数在上一批残留、或某 worker 多跑一趟即可提前凑满，使 `batch()` **在任务未全部执行完时就返回**；调用方（`dialog_reasoning_create`）据此 `free` 任务数组，而 worker 仍在解引用 → v0.5.26 记录的 `dialog_topo_worker` heap-use-after-free（老债）。
+- 现改为**任务账 `tasks_left`**（每完成一件原子减一，归零才是本批结束）+ **每批 `batch_epoch` 代次握手**（每个 worker 每批只“进入”一次，进入时校验代次），并按代次收尾完成广播；`workers_done` 的“趟数当人头”错误不再存在。
+- 索引分配（`next_index` 窃取）、任务数组快照、代次校验**全部收进同一把 `pool->mutex`**：worker 只在锁内认领“本批 + 本代”的任务，杜绝跨代串批。
+- 契约写入头文件（`include/thread_pool.h`）：`thread_pool_batch` 返回 ⟺ 本批 count 个任务全部执行完 **且** 无 worker 仍站在本批之前的任务数组上——调用方返回后释放 `tasks`/`th_tasks` 安全；反之返回前不得释放。
+- `dialog_system.c`：`hop_propagated` 由**非原子共享自增**（v0.5.26 已知问题 B 登记）改为 `__sync_fetch_and_add` 原子累加——它参与“本跳零传播即 break”的判据，非原子自增会让判据出错。
+
+**② 对话路径 worker 生命周期（`src/dialog_system.c`，共 6 处，含 `:692`）**
+- 对 `node->activation` 的**裸写**改为持 `node_locks[node_id & 255]`（`PM_NODE_LOCK_COUNT=256` 分片）的单锁临界区；与既有节点锁同域，不参与锁序、不可能 ABBA。
+
+**③ R2a 新锁域：master 激活账本分片锁（`include/multi_topology.h`、`src/multi_topology.c`、`src/cognitive_controller.c`）**
+- 新增 **`activation_locks[16]`**（`PM_TOPO_LOCK_COUNT=16`，`PM_TOPO_LOCK_IDX(topo_id)` 分片键），保护 master 的 `active_topo_id` / `active_node_ids[]` / `activation_levels[]` 及 `SubTopology` 的 `total_activations` / `recent_activation` / `avg_activation_value` / `last_used`。
+- 锁数组**追加在结构体末尾**，`MasterTopology` 已有字段偏移不变（二进制兼容）。
+- `master_activate_node` 拆成**两个不嵌套**的临界区（取锁—改账—放锁，再取下一把），满足“只允许单锁临界区”纪律：与 `node_locks`、与另一分片**永不同时持有** → 不参与锁序、不可能 ABBA。
+- `master_propagate_activation` **先释放源分片锁再调用** `activate_node`，避免“持源分片锁去取目标分片锁”的 ABBA 死锁。
+
+**④ R2b 读侧补锁（`src/nn/feature_learn.c`）**
+- `feature_learn_graph_smooth` 的**两条读路径**（单线程快路径 + OpenMP 并行路径）对 `node->edges[].weight/.confidence` 的读**按 `node_locks` 加锁**；其写侧（`boost_connection_weighted`）此前**已持** `net->node_locks[]`（`src/autonomic_learner.c` 仅补注释固化“写侧合规、缺的是读侧”），补齐后该站点两侧同步。
+
+**⑤ TSan 复验后的三处收口（`src/thread_pool.c`、`src/multi_topology.c`、`src/dialog_system.c`）**
+- `thread_pool.c`：屏障读改为 `__atomic_load_n(..., __ATOMIC_ACQUIRE)`。
+- `multi_topology.c`：`master->active_topo_id` 为全局单字段、被分片锁保护属**设计踩空**（单字段无法分片），改为原子访问。
+- `dialog_system.c:177`：补节点锁。
+
+### Changed
+- **新增门禁工具与探针（`tools/probe_batch_contract.c`、`tests/round3/`、`Makefile`）**：批次契约探针 `tools/probe_batch_contract.c` + `make probe-batch-contract`（**只编 `src/thread_pool.c`，不进 `libpivotmind.a`，不参与 `all`/`test`/`asan-test`**）；`tests/round3/` 存放 G-T1..G-T5 复验脚本（批次契约 / TSan / ASan / armbian 全量 / N17 账行不变量）与产物目录。探针的价值在于**独立于业务代码**地实测 `batch()` 完成契约：修复前在旧树上给出违约，修复后给出 HOLDS。
+
+### Quality
+- **批次契约探针（正控）**：修复后 **58/58 迭代全 HOLDS、0 违约**；**同一探针在旧树上 40 违约**（v0.5.26）／**38 违约**（基线）。
+- **N17 行为不变**：修复树编译的二进制与 **round 3 之前**编译的旧二进制，扩散账行输出**逐字节相同**（sha256 一致）；不变量脚本 `tests/round3/n17_ledger_invariants.py` 结果 `bad=0`。
+- **x86_64 / G15-WSL**（gcc 15.2、glibc 2.43）TSan **0 条报告**（两份日志均 0，去重后剩余清单为空）；**对照**：未修复树 **12 条**（OMP=20）/ **11 条**（OMP=1）、v0.5.26 树 **117 条**、基线 **41 条**。**覆盖度正控**（gcov 逐行）证明单线程与 OpenMP 两条路径**分别**被跑到；ASan 与 v0.5.26 **逐项一致、无新增帧**；旧的 `dialog_topo_worker` heap-use-after-free **消失**。
+- **aarch64 / armbian**：终态干净全量构建 `all` **0 warning / 0 error**；测试构建 **14 warning**（**全在 `tests/integration/test_integration.c`**，无新增）**0 error**；全套 **PASS=23 FAIL=0 TOTAL=23**。
+
+### Known Issues
+- **锁开销未实测**：读侧每节点多一次加/解锁，量级 `O(node_count)×3`，本次**未拿到耗时数据**（不宣称“无性能影响”）。
+- **TSan 退出期伪影**：日志末尾的 `nested bug in the same thread, aborting.` 是**退出期伪影**，新旧日志都有、rc 恒 66，**不是本版消除的东西**。
+- **`test_cognitive_controller` 几乎没有断言**（全文件 `assert` 数为 0，“通过”的说服力弱）——aarch64 的 23/23 不能作为该路径“没问题”的证据。
+- **TSan 采信边界**：运行中出现过 `WARNING: ThreadSanitizer: memory layout is incompatible, possibly due to high-entropy ASLR`，故“0”以 **ASan + 跨树对照 + 覆盖度正控** 三方交叉为准。
+
+### Notes
+- **红线声明（本版一律未动）**：所有限边 / 截断 / 周期性稀疏化 / 跨拓扑上限 / 队列满丢任务逻辑，按作者架构红线本版均未触碰。
+- 本批只做**同步与生命周期**修复，**未使用**降低并发度 / 缩小批量 / 休眠退避等掩盖竞争的手段。
+
+---
+
 ## v0.5.26 — 2026-09-10
 
 > 来源：**全量基线审查（19 P0 / 26 P1）+ 修复轮 2**。commit `5d6c9b1`，相对基线 `3eb2e6e`，35 个文件 `+1442 / −437`，按五批落地：① 数据保命 ② 并发与生命周期 ③ 门禁与诚实 ④ N17 扩散上限 ⑤ 验证期发现的既有缺陷。完整发布说明（含验证证据、红线声明、已知未修问题）见 [changelogs/070-review-round2-persistence-concurrency-gates.md](changelogs/070-review-round2-persistence-concurrency-gates.md)。
