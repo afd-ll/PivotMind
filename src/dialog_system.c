@@ -689,7 +689,16 @@ DialogReasoning* dialog_reason(DialogInput* input, MasterTopology* master,
             
             if (node) {
                 float init_activation = 0.9f;
-                node->activation = init_activation;
+
+                /* R3-2: node->activation 的权威锁 = node_locks[node_id & 255]
+                 * （与 :124/:854 读侧、master_activate_node 写侧、brainstem 衰减
+                 *   时钟同一域）。单锁临界区、进入前不持任何锁 → 不参与锁序。 */
+                {
+                    int nl = node->node_id & (PM_NODE_LOCK_COUNT - 1);
+                    pthread_mutex_lock(&sub->net->node_locks[nl]);
+                    node->activation = init_activation;
+                    pthread_mutex_unlock(&sub->net->node_locks[nl]);
+                }
                 
                 dialog_add_association(reasoning, 
                     node->concept, init_activation, sub->type, 0,
@@ -708,7 +717,15 @@ DialogReasoning* dialog_reason(DialogInput* input, MasterTopology* master,
                 if (new_id >= 0 && sub->node_hash) {
                     ReasoningNode* new_node = sub->net->nodes[sub->net->node_count - 1];
                     new_node->confidence = 0.45f;
-                    new_node->activation = 0.65f;
+                    /* R3-2: 新建节点已挂进 sub->net->nodes[]（会被 worker 的
+                     * node_count 扫描读到）→ 写 node->activation 同样走
+                     * node_locks 单锁临界区。 */
+                    {
+                        int nl = new_node->node_id & (PM_NODE_LOCK_COUNT - 1);
+                        pthread_mutex_lock(&sub->net->node_locks[nl]);
+                        new_node->activation = 0.65f;
+                        pthread_mutex_unlock(&sub->net->node_locks[nl]);
+                    }
                     node_hash_add(sub->node_hash, new_node);
                     
                     dialog_add_association(reasoning, 
@@ -1293,7 +1310,14 @@ static void dialog_activate_context(MasterTopology* master, DialogIntent intent)
         if (seed) { seed->confidence = 0.7f; node_hash_add(ctx->node_hash, seed); }
     }
     if (!seed) return;
-    seed->activation = 0.6f;
+    /* R3-2: 种子节点是共享节点（node_hash 命中即可能被 worker/衰减时钟读），
+     * 写 node->activation 必须持 node_locks 单锁临界区。 */
+    {
+        int nl = seed->node_id & (PM_NODE_LOCK_COUNT - 1);
+        pthread_mutex_lock(&ctx->net->node_locks[nl]);
+        seed->activation = 0.6f;
+        pthread_mutex_unlock(&ctx->net->node_locks[nl]);
+    }
     seed->heat = 1.0f;  /* 种子节点热度永不清除 */
 
     /* 2. 提取当前话题摘要（词汇拓扑 Top2 高激活概念） */
@@ -1347,7 +1371,13 @@ static void dialog_activate_context(MasterTopology* master, DialogIntent intent)
                 ReasoningNode* evict = ctx->net->nodes[evict_id];
                 if (evict && evict->concept) {
                     node_hash_remove(ctx->node_hash, evict->concept);
-                    evict->activation = 0.0f;
+                    /* R3-2: 同上，node_locks 单锁临界区。 */
+                    {
+                        int nl = evict->node_id & (PM_NODE_LOCK_COUNT - 1);
+                        pthread_mutex_lock(&ctx->net->node_locks[nl]);
+                        evict->activation = 0.0f;
+                        pthread_mutex_unlock(&ctx->net->node_locks[nl]);
+                    }
                     evict->heat = 0.0f;
                 }
             }
@@ -1390,7 +1420,14 @@ static void dialog_activate_context(MasterTopology* master, DialogIntent intent)
     }
 
     /* 5. 激活实例节点 */
-    inst->activation = 0.85f;
+    /* R3-2: 实例节点由 node_hash 持有、worker 会读到 → node_locks 单锁临界区
+     * （放锁后再调 :1396 的 master_activate_node，避免与 A2 嵌套）。 */
+    {
+        int nl = inst->node_id & (PM_NODE_LOCK_COUNT - 1);
+        pthread_mutex_lock(&ctx->net->node_locks[nl]);
+        inst->activation = 0.85f;
+        pthread_mutex_unlock(&ctx->net->node_locks[nl]);
+    }
     inst->heat = (inst->heat < 0.05f) ? 0.5f : fminf(1.0f, inst->heat + 0.1f);
     inst->selection_count++;
     master_activate_node(master, ctx->topo_id, inst->node_id, 0.85f);
@@ -1432,7 +1469,14 @@ static void dialog_activate_context(MasterTopology* master, DialogIntent intent)
         ReasoningNode* n = ctx->net->nodes[i];
         if (!n || n == seed || !n->concept || !strchr(n->concept, '#')) continue;
         n->heat *= 0.92f;
-        if (n->activation > 0.01f) n->activation *= 0.85f;
+        /* R3-2: read-modify-write 同一共享字段 → 整段进 node_locks 单锁临界区
+         * （与 :124/:854 读侧、brainstem 衰减时钟同域）。 */
+        {
+            int nl = n->node_id & (PM_NODE_LOCK_COUNT - 1);
+            pthread_mutex_lock(&ctx->net->node_locks[nl]);
+            if (n->activation > 0.01f) n->activation *= 0.85f;
+            pthread_mutex_unlock(&ctx->net->node_locks[nl]);
+        }
     }
 }
 
