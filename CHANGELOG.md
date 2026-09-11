@@ -1,5 +1,23 @@
 # Changelog
 
+## v0.5.26 — 2026-09-10
+
+### Fixed
+- **小矩阵乘法读未初始化内存（E-P0-1，数值正确性）**：`matrix_multiply_naive` 对 `tensor_create` 分配的未置零缓冲做 `+=` 累加；现于入口 `memset`，并补逐元素数值断言（`tests/unit/test_tensor.c`）。此前 `test_tensor` 只断言 shape/size，且历史上用"调小期望值"的方式让红灯变绿（见 v0.5.22 更正）。
+- **`_sample_negative` 均匀采样分支无循环上限（P2-4 复核）**：`vocab->size <= 5` 时 `sampled < 5` 恒真 → 死循环；另补 `vocab` 空指针守卫。报告中"`pretrain.c:240` 除零"经核对**不成立**（该函数入口已有 `vocab->size <= 5` 守卫，该行不可达）。
+- **`model_io.c` 加载畸形文件可致堆溢出（P2-1，32 位目标）**：`ndim` 补上界、`input*output*sizeof(float)` 补回绕守卫（权重与偏置两路）。
+- **`lr_reduce_on_plateau` 未过滤 NaN（P2-3）**：非有限 `val_loss` 现直接跳过平台期更新。
+
+### Quality
+- **CI 真的跑测试了（E-P1-A）**：原 "Run tests" step 调的 `make test-*`（Makefile:248-271）是**纯构建别名、从不执行**，15 个测试必挂也让 CI 变绿；现改为 `make test`（构建 + 执行 + 汇总 + 退出码门禁）。
+- **桩测试清出**：删除 8 行 Hello World `test_io.c`；`test_chinese.c` 改写为 UTF-8/CJK 真断言（不再需要 windows.h，CI 不再跳过）；`tests/scratch/test_tensor_broadcast.c` 移入 `tests/unit/` 并接线到 `make test`。
+- **测试目标集统一**：`test:` 前置与 `TEST_BINS` 逐项一致；`test-integration`/`test-semantic-growth`/`test-tensor-broadcast` 全部纳入，消除"定义了却没人跑"。
+- **ASan 门禁收敛（E-P1-12）**：旗标单一来源（Makefile），本地 `make asan-test` 与 CI 一致且覆盖 `-DHAS_OPENSSL` 出货代码路径；`detect_leaks=1`（此前为 0），与 changelogs/069 宣称一致。
+- **随机种子可复现（P2-2）**：新增 `init_random_seed()` / `init_random_from_env()`（`PIVOTMIND_SEED` 环境变量），既有调用点零改动。
+- ARM 交叉构建删除纯 C 项目无意义的 `-static-libstdc++`。
+
+---
+
 ## v0.5.25 — 2026-09-09
 
 ### Fixed
@@ -23,7 +41,9 @@
 
 ### Quality
 - CI 新增 `asan-ubsan` job（P2-7）：ASan/UBSan 全量编译 + 7 个核心单测（model/memory/topology/dialog/learner/causal/forgetting）跑 sanitizer，`halt_on_error=1`。
-- WSL gcc `-Wall -Wextra` 语法校验零告警（gateway 6 文件 + memory_system/thread_pool 等改动文件）；记忆种子保存/加载实测 20 项断言全通过（往返一致 / 哈希对称 / 篡改与截断拒绝 / 空种子）；符号完整性审计与 HEAD 38 个顶层函数逐一比对无缺失；YAML 合法；git diff 共 16 文件（含 4 新增拆分 .c + internal.h + Makefile）。
+- WSL gcc `-Wall -Wextra` **语法校验**零告警（gateway 6 文件 + memory_system/thread_pool 等改动文件）——注：语法校验 ≠ 构建验证 ≠ 运行验证。另有**仓内可复现**的构建验证：`make -j2 gateway` 在 aarch64 上 EXIT=0、0 warning。
+- 记忆种子保存/加载验证 20 项断言全通过（往返一致 / 哈希对称 / 篡改与截断拒绝 / 空种子）——**验证方式：WSL gcc 15 上的仓外临时测试程序（不入库、不可复现、不受 CI 保护）**，详见 changelogs/069「验证」章节的可复现性声明。
+- 符号完整性审计与 HEAD 38 个顶层函数逐一比对无缺失；YAML 合法；git diff 共 16 文件（含 4 新增拆分 .c + internal.h + Makefile）。
 
 详见 [changelogs/069-code-review-optimization-round.md](changelogs/069-code-review-optimization-round.md)
 
@@ -90,6 +110,7 @@
 
 ### Quality
 - **test_tensor 13/13**：3 处断言修复（reshape 3×5→{1,15}、matmul size 6→4、NULL 输入测试传参错误）。
+  - **⚠️ 更正（第三批「门禁与诚实」）**：其中 "**matmul size 6→4**" 是**把期望值改小以让红灯变绿**——该用例（2×3 乘 3×2）的正确结果尺寸本就是 4，真正的缺陷是**测试从不校验元素数值**，而 `matrix_multiply_naive`（小矩阵路径）用 `+=` 累加到 `tensor_create` 的**未初始化缓冲**（对照 `matrix_multiply_blocked` 有 `memset`）→ 堆一复用就产生随机错误结果。本批已修正：naive 路径入口补 `memset`，并补逐元素数值断言（期望值 `{9,12,9,12}`，注释中给出心算过程）。
 - **全仓编译警告清零**：20 条 -Wall -Wextra 全消（未用变量/未用参数/符号比较/多字节字符常量等）。
 
 详见 [changelogs/066-security-hardening-crash-fix.md](changelogs/066-security-hardening-crash-fix.md)

@@ -85,6 +85,7 @@ typedef struct {
     
     // ========== 异步刷盘线程 ==========
     pthread_t flush_thread;                // 后台刷盘线程
+    int flush_started;                     // 后台刷盘线程是否真的启动过（liveness 判据；勿用 initialized）
     pthread_mutex_t flush_mutex;           // 刷盘请求互斥锁 + 条件变量
     pthread_cond_t flush_cond;             // 刷盘条件变量
     volatile int flush_requested;          // 刷盘请求标志

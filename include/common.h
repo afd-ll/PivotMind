@@ -86,6 +86,23 @@ static inline void init_random() {
 }
 
 /**
+ * P2-2：可选固定种子入口（方案 B —— 纯新增，零行为改变；
+ * 既有 init_random() 与全部既有调用点均不改动）。
+ * 注意：须在任何 init_random() 之前调用，否则 init_random() 会用时间种子覆盖。
+ */
+static inline void init_random_seed(unsigned int seed) {
+    srand(seed);                      /* 显式固定种子：直接覆盖 */
+}
+
+/**
+ * P2-2：从环境变量 PIVOTMIND_SEED 读取固定种子（已设置且非空时生效）。
+ */
+static inline void init_random_from_env(void) {
+    const char* env = getenv("PIVOTMIND_SEED");
+    if (env && *env) srand((unsigned int)strtoul(env, NULL, 10));
+}
+
+/**
  * Maximum of two floats
  */
 static inline float max_f(float a, float b) {

@@ -34,6 +34,17 @@ typedef struct {
 typedef struct ThreadPool ThreadPool;
 
 /**
+ * thread_pool_batch() 的“池忙”返回码（C4 契约，对外可见）。
+ *
+ * 语义：池内同一时刻只允许一个批次在跑。若在已有批次执行中再次调用
+ *       thread_pool_batch()，池立即返回本值，且【未执行任何任务】——
+ *       调用方必须把手上的 tasks 串行跑掉（绝不能把同一批再提交第二次，
+ *       也不能当作“已完成”直接 free）。
+ * @return THREAD_POOL_BUSY（-2）表示池忙、未执行任务；调用方需串行降级。
+ */
+#define THREAD_POOL_BUSY  (-2)
+
+/**
  * 创建线程池
  * 自动检测CPU核心数作为worker数量
  * @return 线程池指针，失败返回NULL

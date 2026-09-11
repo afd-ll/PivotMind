@@ -46,6 +46,11 @@ HealthLevel health_get_level(HealthMonitor* hm) {
 static void _emergency_save(MasterTopology* master) {
     if (!master) return;
     LOG_WARNING("[内感受] 紧急存盘...");
+    /* A-P1-4 fix: 0 节点不覆盖已有主状态 */
+    if (master_count_total_nodes(master) == 0) {
+        LOG_ERROR("[内感受] 跳过紧急存盘：0 节点，拒绝覆盖有效状态");
+        return;
+    }
     int saved = master_save_state(master, "pivotmind_state.dat");
     if (saved >= 0) save_features(master, "features.bin");
     save_cross_edges(master, "cross_edges.bin");

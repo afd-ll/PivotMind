@@ -241,6 +241,18 @@ void test_matrix_multiply() {
         data2[i] = (float)(i + 1);
     }
 
+    /* E-P0-1：先用同样尺寸的缓冲污染堆再释放，使 tensor_create 极可能复用这块脏内存。
+     * 若 naive 路径漏了 memset，下面的数值断言必然失败（提高检出率，避免“恰好是零页”假阴性）。 */
+    {
+        size_t poison_shape[] = {2, 2};
+        Tensor* poison = tensor_create(DT_FLOAT32, 2, poison_shape);
+        if (poison) {
+            float* pd = (float*)poison->data;
+            for (size_t i = 0; i < 4; i++) pd[i] = 1.0e30f;
+            test_tensor_free(poison);
+        }
+    }
+
     Tensor* result = matrix_multiply(tensor1, tensor2);
     ASSERT_NOT_NULL(result, "matrix_multiply should return non-NULL");
     ASSERT_EQUAL(result->ndim, 2, "Result should have 2 dimensions");
@@ -248,10 +260,53 @@ void test_matrix_multiply() {
     ASSERT_EQUAL(result->shape[1], 2, "Result shape[1] should be 2");
     ASSERT_EQUAL(result->size, 4, "Result size should be 4");
 
+    /* 逐元素数值断言。输入可心算（行主序）：
+     *   A = [[1,1,1],          B = [[1,2],           A*B = [[1*1+1*3+1*5, 1*2+1*4+1*6],   = [[ 9, 12],
+     *        [1,1,1]]               [3,4],                  [1*1+1*3+1*5, 1*2+1*4+1*6]]      [ 9, 12]]
+     *                               [5,6]]
+     * 即期望值 {9, 12, 9, 12}（小矩阵 total=6+6=12 < 10000 → 走 naive 分支）。 */
+    float* rd = (float*)result->data;
+    ASSERT_TRUE_FLOAT(rd[0],  9.0f, 0.001f, "result[0][0] should be 9");
+    ASSERT_TRUE_FLOAT(rd[1], 12.0f, 0.001f, "result[0][1] should be 12");
+    ASSERT_TRUE_FLOAT(rd[2],  9.0f, 0.001f, "result[1][0] should be 9");
+    ASSERT_TRUE_FLOAT(rd[3], 12.0f, 0.001f, "result[1][1] should be 12");
+
     TEST_END();
     test_tensor_free(tensor1);
     test_tensor_free(tensor2);
     test_tensor_free(result);
+}
+
+/* E-P0-1 加强：naive 与 blocked 两条路径对同一输入必须给出相同结果。
+ * total=12 < 10000 时 matrix_multiply 走 naive；这里直接调两条实现对比。 */
+void test_matrix_multiply_paths_agree() {
+    TEST_START("Matrix multiply: naive vs blocked agree");
+
+    size_t shape_a[] = {2, 3};
+    size_t shape_b[] = {3, 2};
+    Tensor* a = tensor_create(DT_FLOAT32, 2, shape_a);
+    Tensor* b = tensor_create(DT_FLOAT32, 2, shape_b);
+    ASSERT_NOT_NULL(a, "a should not be NULL");
+    ASSERT_NOT_NULL(b, "b should not be NULL");
+    for (size_t i = 0; i < 6; i++) {
+        ((float*)a->data)[i] = (float)(i + 1);
+        ((float*)b->data)[i] = (float)((i % 3) - (int)(i / 3));
+    }
+
+    Tensor* rn = matrix_multiply_naive(a, b);
+    Tensor* rb = matrix_multiply_blocked(a, b, 2);
+    ASSERT_NOT_NULL(rn, "naive result should not be NULL");
+    ASSERT_NOT_NULL(rb, "blocked result should not be NULL");
+    for (size_t i = 0; i < rn->size; i++) {
+        ASSERT_TRUE_FLOAT(((float*)rn->data)[i], ((float*)rb->data)[i], 0.0001f,
+                          "naive and blocked must agree element-wise");
+    }
+
+    TEST_END();
+    test_tensor_free(a);
+    test_tensor_free(b);
+    test_tensor_free(rn);
+    test_tensor_free(rb);
 }
 
 void test_matrix_transpose() {
@@ -456,6 +511,7 @@ int main() {
     printf("\n=== Matrix Operations Tests ===\n");
     /* test_matrix_add_elementwise(); -- API removed */
     test_matrix_multiply();
+    test_matrix_multiply_paths_agree();
     test_matrix_transpose();
     /* test_matrix_dot_product(); -- API removed */
 

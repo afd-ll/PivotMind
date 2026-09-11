@@ -32,9 +32,13 @@ void test_memory_store_and_retrieve(void) {
     MemorySystem* m = memory_system_create(100, 200, 500);
     ASSERT_NOT_NULL(m, "create failed");
 
-    /* Store a string value */
+    /* Store a string value.
+     * memory_store 内部 create_memory_entry 会 malloc+memcpy 自持副本，
+     * 故该 strdup 的所有权仍在测试侧，用完立即释放（含失败提前 return 路径）。 */
     char* val = strdup("value_one");
     int rc = memory_store(m, "key1", val, strlen(val)+1, MEMORY_TYPE_STRING, 0.9f);
+    free(val);
+    val = NULL;
     ASSERT_TRUE(rc >= 0, "store returned error");
 
     /* Retrieve */
@@ -65,12 +69,17 @@ void test_memory_store_multiple(void) {
     MemorySystem* m = memory_system_create(100, 200, 500);
     ASSERT_NOT_NULL(m, "create failed");
 
-    /* Store several items */
-    char* vals[] = {strdup("a"), strdup("b"), strdup("c"), strdup("d"), strdup("e")};
+    /* Store several items。
+     * 每个 val 由测试自己 strdup，memory_store 内部自持副本，
+     * 因此每轮 store 后立即 free；strdup 移入循环内，失败提前 return 也不残留。 */
+    const char* seeds[] = {"a", "b", "c", "d", "e"};
     for (int i = 0; i < 5; i++) {
         char key[32];
         snprintf(key, sizeof(key), "key%d", i);
-        int rc = memory_store(m, key, vals[i], strlen(vals[i])+1, MEMORY_TYPE_STRING, 0.9f);
+        char* val = strdup(seeds[i]);
+        int rc = memory_store(m, key, val, strlen(val)+1, MEMORY_TYPE_STRING, 0.9f);
+        free(val);
+        val = NULL;
         ASSERT_TRUE(rc >= 0, "store failed");
     }
 

@@ -8,6 +8,9 @@
 #include <stdint.h>
 #include <time.h>
 #include <errno.h>
+#include <unistd.h>     /* getpid / fsync / access */
+#include <fcntl.h>      /* open / O_RDONLY / O_DIRECTORY（目录 fsync） */
+#include <sys/stat.h>   /* （预留）尺寸判定；本源文件只需 access，保留以备 */
 
 // ==================== 因果规则数据结构（统一声明）====================
 
@@ -356,15 +359,17 @@ int ltm_store(LongTermMemory* ltm, const char* key, void* data,
     ltm->entries[ltm->size] = create_memory_entry(key, data, data_size, type, importance);
     _ltm_hash_insert(ltm, key, ltm->size);
 
-    // 更新 index_map（保留兼容）
-    char* key_copy = strdup(key);
-    if (!key_copy) {
-        LOG_WARNING("ltm_store: strdup failed for key, index_map entry skipped");
-    } else {
-        ltm->index_map[ltm->index_size].key = key_copy;
-        ltm->index_map[ltm->index_size].entry_index = ltm->size;
-        ltm->index_size++;
-    }
+    /* D3 fix: index_map 在本仓"只写不读"（create/store/destroy 之外零引用，见 grep），
+     * 是死代码。旧实现每插一个新键就 index_size++，而驱逐路径（上方 342-352）
+     * 既不回收槽位也不 index_size--，累计插入超过 max_entries(5000) 后
+     * index_map[index_size] 堆越界写。
+     * 最稳妥方案 = 停止维护该冗余索引（恒空、index_size 恒 0，与实际占用一致）：
+     *   · 不改结构体布局、不动 header，合入面最小；
+     *   · 与 hash_table（已提供 O(1) 查找）零功能重叠，删之无损；
+     *   · 回避"驱逐时回收/重建"的再出错面（entries 压缩后旧 entry_index 本就会失效，
+     *     复用槽位仍需整体重建，复杂度远高于其价值）。
+     * 备选（不推荐）：驱逐时对 index_map 全量重建——仅在确有读方时才值得做。 */
+    ltm->index_size = 0;
 
     ltm->size++;
     return 0;
@@ -1018,6 +1023,14 @@ static const unsigned char PMSEED_MAGIC[8] = {'P','M','S','E','E','D','2','\0'};
 #define PMSEED_FNV_OFFSET 14695981039346656037ULL
 #define PMSEED_FNV_PRIME  1099511628211ULL
 
+/* A-P1-1 fix: save/load 两端共用的字段上限。此前写端无上限、读端用字面量
+ * 4096/100000 拒收 → 能写出自己读不回的种子（整份被拒）。
+ * 取值依据：沿用读端既有阈值（不改判据，只消除漂移）。100000 远大于当前
+ * 最大记录（FLOAT_ARRAY 特征块 ≈ feature_dim*sizeof(float)+4，实测量级几 KB），
+ * 留足余量；4096 覆盖常规 key（<512）。 */
+#define PMSEED_MAX_KEY_LEN    4096
+#define PMSEED_MAX_DATA_SIZE  100000
+
 static uint64_t pmseed_hash_update(uint64_t h, const void* p, size_t n) {
     const unsigned char* b = (const unsigned char*)p;
     for (size_t i = 0; i < n; i++) {
@@ -1031,7 +1044,16 @@ int memory_save_seed(MemorySystem* memory, const char* filepath) {
     if (!memory || !filepath) return -1;
 
     char tmp_path[1024];
-    if (snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", filepath) >= (int)sizeof(tmp_path)) {
+    char bak_path[1024];
+    if (snprintf(bak_path, sizeof(bak_path), "%s.bak", filepath) >= (int)sizeof(bak_path)) {
+        fprintf(stderr, "[记忆种子] 保存失败：路径过长 %s\n", filepath);
+        return -1;
+    }
+    /* A-P1-2 fix: 临时名加入 pid + 单调序号，避免并发/重入保存互踩同一 .tmp */
+    static unsigned long pmseed_seq = 0;
+    unsigned long seq = __sync_add_and_fetch(&pmseed_seq, 1);
+    if (snprintf(tmp_path, sizeof(tmp_path), "%s.tmp.%ld.%lu",
+                 filepath, (long)getpid(), seq) >= (int)sizeof(tmp_path)) {
         fprintf(stderr, "[记忆种子] 保存失败：路径过长 %s\n", filepath);
         return -1;
     }
@@ -1049,6 +1071,7 @@ int memory_save_seed(MemorySystem* memory, const char* filepath) {
         h = pmseed_hash_update(h, (ptr), (size_t)(sz) * _items); \
     } while (0)
 
+    int skipped = 0;   /* A-P1-1: 超 load 端上限的条目跳过，不让整份种子变"自读不回" */
     for (int i = 0; i < ltm->size; i++) {
         MemoryEntry* entry = ltm->entries[i];
         if (!entry || !entry->key) continue;
@@ -1056,6 +1079,15 @@ int memory_save_seed(MemorySystem* memory, const char* filepath) {
         int key_len = strlen(entry->key) + 1;
         /* size_t 在不同平台大小不同（32位=4, 64位=8），种子文件不跨平台 */
         uint32_t data_sz = (uint32_t)entry->data_size;
+        /* A-P1-1 fix: 与 load 端同一组常量。越限条目写出去也会被 load 整份拒收，
+         * 故保存端直接跳过并计数——宁可少这一条，也不能写出读不回的种子。 */
+        if (key_len <= 0 || key_len > PMSEED_MAX_KEY_LEN ||
+            data_sz == 0 || data_sz > PMSEED_MAX_DATA_SIZE) {
+            fprintf(stderr, "[记忆种子] 跳过越限条目 key=%s (key_len=%d, data_sz=%u)\n",
+                    entry->key, key_len, data_sz);
+            skipped++;
+            continue;
+        }
         WRITE_AND_HASH(&key_len, sizeof(int), 1);
         WRITE_AND_HASH(entry->key, 1, key_len);
         WRITE_AND_HASH(&data_sz, sizeof(uint32_t), 1);
@@ -1065,6 +1097,9 @@ int memory_save_seed(MemorySystem* memory, const char* filepath) {
         WRITE_AND_HASH(&entry->importance, sizeof(float), 1);
         count++;
     }
+    if (skipped > 0)
+        fprintf(stderr, "[记忆种子] 共跳过 %d 条越限条目 (key_len>%d 或 data_sz>%d)\n",
+                skipped, PMSEED_MAX_KEY_LEN, PMSEED_MAX_DATA_SIZE);
 
     /* footer: 8 字节魔数 + 8 字节哈希，共 16 字节。
      * P0 fix (v0.5.25): 魔数只是 footer 定界符，不参与哈希计算——此处必须用裸
@@ -1077,6 +1112,14 @@ int memory_save_seed(MemorySystem* memory, const char* filepath) {
     if (fwrite(&h, sizeof(h), 1, fp) != 1) goto write_err;
 #undef WRITE_AND_HASH
 
+    /* A-P1-2 fix: 先 fflush+fsync 内容落盘，再 fclose——否则断电时 rename 已生效
+     * 而内容仍为 0/半写（ext4 不保证 rename 与内容落盘的顺序）。 */
+    if (fflush(fp) != 0 || fsync(fileno(fp)) != 0) {
+        fp = NULL;
+        fprintf(stderr, "[记忆种子] fsync 失败: %s (%s)\n", tmp_path, strerror(errno));
+        remove(tmp_path);
+        return -1;
+    }
     if (fclose(fp) != 0) {
         fp = NULL;
         fprintf(stderr, "[记忆种子] 写入失败，文件可能损坏\n");
@@ -1085,12 +1128,34 @@ int memory_save_seed(MemorySystem* memory, const char* filepath) {
     }
     fp = NULL;
 
+    /* D1 备份策略：正式文件若存在，先滚动成 <file>.bak（同目录，不引入新目录依赖），
+     * 保住"上一版"；写失败时可回退。 */
+    if (access(filepath, F_OK) == 0) {
+        if (rename(filepath, bak_path) != 0) {
+            fprintf(stderr, "[记忆种子] 备份上一版失败（继续，不阻断存盘）: %s (%s)\n",
+                    bak_path, strerror(errno));
+        }
+    }
+
     /* 原子替换：tmp 写完后 rename 覆盖正式文件 */
     if (rename(tmp_path, filepath) != 0) {
         fprintf(stderr, "[记忆种子] 原子替换失败: %s → %s (%s)\n",
                 tmp_path, filepath, strerror(errno));
         remove(tmp_path);
+        /* 回滚：把上一版 .bak 换回正式名，避免只剩备份无处可用 */
+        if (access(bak_path, F_OK) == 0)
+            rename(bak_path, filepath);
         return -1;
+    }
+
+    /* A-P1-2 fix: 目录 fsync——确保 rename 后的目录项本身落盘 */
+    {
+        char dir_buf[1024];
+        snprintf(dir_buf, sizeof(dir_buf), "%s", filepath);
+        char* slash = strrchr(dir_buf, '/');
+        if (slash) *slash = '\0'; else strcpy(dir_buf, ".");
+        int dfd = open(dir_buf, O_RDONLY | O_DIRECTORY);
+        if (dfd >= 0) { fsync(dfd); close(dfd); }
     }
 
     printf("[记忆种子] 已保存 %d 条到 %s (hash=%016llx)\n", count, filepath,
@@ -1132,7 +1197,13 @@ int memory_load_seed(MemorySystem* memory, const char* filepath) {
         return -1;
     }
     fclose(fp);
-    if (sz == 0) { free(buf); return 0; }
+    if (sz == 0) {
+        /* D2 补：0 字节文件无法证明任何完整性。合法空种子应是 16 字节（仅 footer）。
+         * 明确返回 -1，使损坏可见（G2 据此拒绝对有内容的种子做覆盖）。 */
+        free(buf);
+        fprintf(stderr, "[记忆种子] %s 为 0 字节，无法校验完整性，拒绝加载\n", filepath);
+        return -1;
+    }
 
     /* ---- 第一遍：边界解析 + footer 哈希校验 ---- */
     size_t pos = 0;
@@ -1155,7 +1226,7 @@ int memory_load_seed(MemorySystem* memory, const char* filepath) {
                                       * → 所有新格式种子文件加载必败。 */
         int key_len;
         READ_AND_HASH(&key_len, sizeof(int));
-        if (key_len <= 0 || key_len > 4096) { truncated = 1; goto parse_done; }
+        if (key_len <= 0 || key_len > PMSEED_MAX_KEY_LEN) { truncated = 1; goto parse_done; }
         /* key 内容跳过并计入哈希 */
         if (pos + (size_t)key_len > (size_t)sz) { truncated = 1; goto parse_done; }
         h = pmseed_hash_update(h, buf + pos, (size_t)key_len);
@@ -1163,7 +1234,7 @@ int memory_load_seed(MemorySystem* memory, const char* filepath) {
 
         uint32_t data_sz32;
         READ_AND_HASH(&data_sz32, sizeof(uint32_t));
-        if (data_sz32 == 0 || data_sz32 > 100000) { truncated = 1; goto parse_done; }
+        if (data_sz32 == 0 || data_sz32 > PMSEED_MAX_DATA_SIZE) { truncated = 1; goto parse_done; }
         if (pos + data_sz32 > (size_t)sz) { truncated = 1; goto parse_done; }
         h = pmseed_hash_update(h, buf + pos, data_sz32);
         pos += data_sz32;
@@ -1190,32 +1261,52 @@ parse_done:
         return -1;
     }
 
-    /* 剩余字节判定 footer / 旧格式 / 损坏 */
-    if (pos + 16 == (size_t)sz) {
-        /* 校验 footer：魔数 + 载荷哈希 */
+    /* 剩余字节判定 —— 必须完备，不得留下"两分支都不命中 ⇒ 隐性接受"的空档。
+     * 到达此处：truncated==0（否则已 goto parse_done 返回 -1），且循环条件
+     * pos+16<sz 保证解析停在此刻，故 pos<=sz 且 tail = sz-pos ∈ {0..16}：
+     *   tail == 16 : 唯一合法的 PMSEED2 footer，必须魔数匹配 且 哈希相等才接受；
+     *   tail == 0  : 无 footer。**默认拒绝**——仅当显式设
+     *                PIVOTMIND_ALLOW_LEGACY_SEED=1 才按旧格式接受（无哈希可证）；
+     *   1..15      : 尾部残字节，损坏，拒绝。
+     * D2 修复要点：旧实现只判 `pos+16==sz` 与 `pos!=sz`，把末尾 16B 精确删掉后
+     * pos==sz 两分支都不命中 → 被当"旧格式无 footer"静默接受、哈希零校验。
+     * 现以 tail 完整判定：任何不能证明哈希合法的输入一律拒绝。 */
+    size_t tail = (size_t)sz - pos;
+    if (tail == 16) {
         unsigned char magic[8];
         memcpy(magic, buf + pos, 8);
         uint64_t stored_h;
         memcpy(&stored_h, buf + pos + 8, sizeof(stored_h));
-        if (memcmp(magic, PMSEED_MAGIC, 8) == 0) {
-            has_footer = 1;
-            if (stored_h != h) {
-                free(buf);
-                fprintf(stderr, "[记忆种子] %s 哈希校验失败 (stored=%016llx calc=%016llx)，"
-                        "文件可能损坏，拒绝加载\n", filepath,
-                        (unsigned long long)stored_h, (unsigned long long)h);
-                return -1;
-            }
-        } else {
+        if (memcmp(magic, PMSEED_MAGIC, 8) != 0) {
             free(buf);
-            fprintf(stderr, "[记忆种子] %s 尾部 16 字节既非 PMSEED2 footer 亦非合法记录，"
-                    "文件损坏，拒绝加载\n", filepath);
+            fprintf(stderr, "[记忆种子] %s 尾部 16 字节非 PMSEED2 footer，文件损坏，拒绝加载\n",
+                    filepath);
             return -1;
         }
-    } else if (pos != (size_t)sz) {
+        has_footer = 1;
+        if (stored_h != h) {
+            free(buf);
+            fprintf(stderr, "[记忆种子] %s 哈希校验失败 (stored=%016llx calc=%016llx)，"
+                    "文件可能损坏，拒绝加载\n", filepath,
+                    (unsigned long long)stored_h, (unsigned long long)h);
+            return -1;
+        }
+    } else if (tail == 0) {
+        const char* allow_legacy = getenv("PIVOTMIND_ALLOW_LEGACY_SEED");
+        if (!(allow_legacy && strcmp(allow_legacy, "1") == 0)) {
+            free(buf);
+            fprintf(stderr, "[记忆种子] %s 无 PMSEED2 footer（可能被截断 16 字节绕过校验），"
+                    "拒绝加载；确为 v0.5.24 及更早旧格式，请设 "
+                    "PIVOTMIND_ALLOW_LEGACY_SEED=1 后重试\n", filepath);
+            return -1;
+        }
+        has_footer = 0;
+        fprintf(stderr, "[记忆种子] %s 按旧格式加载（PIVOTMIND_ALLOW_LEGACY_SEED=1，"
+                "无完整性校验）\n", filepath);
+    } else {
         free(buf);
         fprintf(stderr, "[记忆种子] %s 尾部残留 %zu 字节，文件损坏，拒绝加载\n",
-                filepath, (size_t)sz - pos);
+                filepath, tail);
         return -1;
     }
 

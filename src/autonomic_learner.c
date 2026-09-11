@@ -172,13 +172,17 @@ void autonomic_state_init(AutonomicState* state) {
 
 void autonomic_state_destroy(AutonomicState* state) {
     if (!state) return;
-    // 安全停止：如果异步线程还在运行，先停掉
-    if (state->flush_master && !state->shutdown) {
+    // 安全停止：只有后台线程真的启动过才 join（判据同 stop，避免 pthread_join(0)）
+    if (state->flush_started) {
         state->shutdown = 1;
         pthread_mutex_lock(&state->flush_mutex);
         pthread_cond_signal(&state->flush_cond);
         pthread_mutex_unlock(&state->flush_mutex);
-        pthread_join(state->flush_thread, NULL);
+        int jret = pthread_join(state->flush_thread, NULL);
+        if (jret != 0) {
+            LOG_ERROR("[异步刷盘] destroy join 失败: %d", jret);
+        }
+        state->flush_started = 0;
     }
     for (int i = 0; i < AUTONOMIC_SHARD_COUNT; i++) {
         pthread_mutex_destroy(&state->shards[i].lock);
@@ -248,11 +252,16 @@ static void do_flush_work(AutonomicState* state, MasterTopology* master, time_t 
         snprintf(path, sizeof(path), "pivotmind_state.dat");
 
         // 持久化拓扑（单一文件，不备份）
-        int saved = master_save_state(master, path);
-        if (saved > 0) {
-            LOG_INFO("[自主学习刷盘] ✓ 已保存到 %s (%d 节点)", path, saved);
+        /* A-P1-4 fix: 0 节点不覆盖已有主状态 */
+        if (master_count_total_nodes(master) == 0) {
+            LOG_ERROR("[自主学习刷盘] 跳过存盘：0 节点，拒绝覆盖有效状态");
         } else {
-            LOG_ERROR("[自主学习刷盘] × 保存失败");
+            int saved = master_save_state(master, path);
+            if (saved > 0) {
+                LOG_INFO("[自主学习刷盘] ✓ 已保存到 %s (%d 节点)", path, saved);
+            } else {
+                LOG_ERROR("[自主学习刷盘] × 保存失败");
+            }
         }
 
         // 同时保存特征向量, 确保与拓扑状态同步
@@ -328,30 +337,43 @@ static void* flush_thread_worker(void* arg) {
 int autonomic_start_async_flush(AutonomicState* state, MasterTopology* master) {
     if (!state || !state->initialized || !master) return 0;
 
-    state->flush_master = master;
     state->shutdown = 0;
     state->flush_requested = 0;
     state->flush_running = 0;
+    state->flush_started = 0;
+
+    /* flush_master 必须在 pthread_create 之前落定：worker 入口（flush_thread_worker
+     * 首行）无锁读取 state->flush_master，若改到 create 之后写，worker 可能读到
+     * NULL 并在整个线程生命周期内不再刷盘。失败路径会把它回滚成 NULL，不留假象。 */
+    state->flush_master = master;
 
     int ret = pthread_create(&state->flush_thread, NULL, flush_thread_worker, state);
     if (ret != 0) {
         LOG_ERROR("[异步刷盘] 创建线程失败: %d", ret);
+        state->flush_master = NULL;      /* 失败不留"已启动"假象 */
+        state->flush_started = 0;
         return 0;
     }
+
+    state->flush_started = 1;            /* create 成功之后才置位（同 learning_scheduler thread_started） */
 
     LOG_INFO("[异步刷盘] 后台线程已启动");
     return 1;
 }
 
 void autonomic_stop_async_flush(AutonomicState* state) {
-    if (!state || !state->initialized) return;
+    if (!state || !state->flush_started) return;
 
     state->shutdown = 1;
     pthread_mutex_lock(&state->flush_mutex);
     pthread_cond_signal(&state->flush_cond);
     pthread_mutex_unlock(&state->flush_mutex);
 
-    pthread_join(state->flush_thread, NULL);
+    int jret = pthread_join(state->flush_thread, NULL);
+    if (jret != 0) {
+        LOG_ERROR("[异步刷盘] join 失败: %d", jret);
+    }
+    state->flush_started = 0;            /* 幂等：重复 stop（含 destroy 内部那次）直接返回 */
     LOG_INFO("[异步刷盘] 后台线程已停止");
 }
 

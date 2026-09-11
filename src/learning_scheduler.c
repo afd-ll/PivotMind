@@ -351,6 +351,7 @@ LearningScheduler* learning_scheduler_create(MasterTopology* master,
 
     pthread_mutex_init(&ls->lock, NULL);
     ls->phase = LS_IDLE;
+    ls->thread_started = 0;
 
     return ls;
 }
@@ -377,7 +378,11 @@ void learning_scheduler_destroy(LearningScheduler* ls) {
 int learning_scheduler_start(LearningScheduler* ls) {
     if (!ls) return -2;
 
-    if (ls->phase != LS_IDLE) return -1; // 已在运行
+    /* B-P1-2 前提: 用"线程句柄是否有效"判运行状态。
+     * 旧版看 ls->phase != LS_IDLE：pthread_create 返回后线程还没跑到第一次
+     * phase 赋值（scheduler_thread_func:282），窗口期内 phase 仍为 LS_IDLE；
+     * 线程正常跑完又会把 phase 置回 LS_IDLE（:315）。 */
+    if (ls->thread_started) return -1; // 已在运行
 
     ls->should_stop = 0;
     ls->total_loops = 0;
@@ -385,12 +390,16 @@ int learning_scheduler_start(LearningScheduler* ls) {
     if (pthread_create(&ls->thread, NULL, scheduler_thread_func, ls) != 0) {
         return -2;
     }
+    ls->thread_started = 1;
 
     return 0;
 }
 
 void learning_scheduler_stop(LearningScheduler* ls) {
-    if (!ls || ls->phase == LS_IDLE) return;
+    /* B-P1-2 前提: 旧版在 phase == LS_IDLE 时直接 return → 若 shutdown 落在
+     * "start 已返回但线程还没改 phase"的窗口（或线程已自行跑完一轮但句柄未 join），
+     * 这里会空转：线程仍在写拓扑，而调用方以为它停了。改为只认句柄。 */
+    if (!ls || !ls->thread_started) return;
 
     ls->should_stop = 1;
 
@@ -400,6 +409,7 @@ void learning_scheduler_stop(LearningScheduler* ls) {
     }
 
     pthread_join(ls->thread, NULL);
+    ls->thread_started = 0;   /* 幂等：重复 stop（含 destroy 内部那次）直接返回 */
 }
 
 LearningPhase learning_scheduler_get_phase(LearningScheduler* ls) {

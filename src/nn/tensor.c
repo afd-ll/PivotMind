@@ -12,11 +12,6 @@ static TensorPool* global_pool = NULL;
 static atomic_size_t total_mallocs = 0;
 static atomic_size_t total_frees = 0;
 
-// 基本函数声明（如果标准库不可用）
-#ifndef RAND_MAX
-#define RAND_MAX 32767
-#endif
-
 // 张量创建和销�?
 Tensor* tensor_create(DataType dtype, size_t ndim, const size_t* shape)
 {

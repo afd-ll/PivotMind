@@ -14,6 +14,9 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <pthread.h>
+#include <unistd.h>   /* getpid / fsync */
+#include <fcntl.h>    /* open / O_RDONLY / O_DIRECTORY */
+#include <errno.h>    /* strerror */
 
 /* 前向声明 (classify 函数中调用, 定义在文件后面) */
 int emergent_pos_try_emerge(EmergentPOS* ep);
@@ -766,43 +769,79 @@ int emergent_pos_save(EmergentPOS* ep, const char* filepath) {
     if (!ep) return -1;
     const char* path = filepath ? filepath : EMERGENT_POS_DEFAULT_FILE;
 
-    FILE* f = fopen(path, "wb");
+    /* A-P1-5 fix: tmp+rename 原子写 + fsync，杜绝半写文件；临时名带 pid+序号防互踩 */
+    char tmp_path[1024];
+    static unsigned long ep_seq = 0;
+    unsigned long seq = __sync_add_and_fetch(&ep_seq, 1);
+    if (snprintf(tmp_path, sizeof(tmp_path), "%s.tmp.%ld.%lu",
+                 path, (long)getpid(), seq) >= (int)sizeof(tmp_path)) {
+        fprintf(stderr, "[EmergentPOS] 保存失败：路径过长 %s\n", path);
+        return -1;
+    }
+    FILE* f = fopen(tmp_path, "wb");
     if (!f) { return -1; }
 
-    /* 写 magic + version */
+    /* A-P1-5 fix: 逐写检查返回值——磁盘满/写失败必须可感知，不再谎报"持久化完成" */
+#define EP_WRITE(ptr, sz, n) do { \
+        if (fwrite((ptr), (sz), (n), f) != (size_t)(n)) { \
+            fprintf(stderr, "[EmergentPOS] 写入失败: %s (%s)\n", tmp_path, strerror(errno)); \
+            fclose(f); remove(tmp_path); return -1; \
+        } \
+    } while (0)
+
     uint32_t magic = 0x504D4550; /* "PMEP" */
     uint32_t version = 1;
-    fwrite(&magic, sizeof(magic), 1, f);
-    fwrite(&version, sizeof(version), 1, f);
+    EP_WRITE(&magic, sizeof(magic), 1);
+    EP_WRITE(&version, sizeof(version), 1);
 
-    /* 统计: 激活的硬编码锚点数 */
     uint32_t active_count = 0;
     for (int tag = POS_NOUN; tag < POS_COUNT; tag++)
         if (ep->anchors[tag].is_active) active_count++;
-    fwrite(&active_count, sizeof(active_count), 1, f);
+    EP_WRITE(&active_count, sizeof(active_count), 1);
 
-    /* 逐个写入激活的硬编码锚点 */
     for (int tag = POS_NOUN; tag < POS_COUNT; tag++) {
         POSAnchor* anchor = &ep->anchors[tag];
         if (!anchor->is_active) continue;
-
-        fwrite(&tag, sizeof(int), 1, f);
-        fwrite(anchor->centroid, sizeof(float), PM_NODE_FEATURE_DIM, f);
-        fwrite(&anchor->member_count, sizeof(int), 1, f);
-        fwrite(&anchor->centroid_stability, sizeof(float), 1, f);
+        EP_WRITE(&tag, sizeof(int), 1);
+        EP_WRITE(anchor->centroid, sizeof(float), PM_NODE_FEATURE_DIM);
+        EP_WRITE(&anchor->member_count, sizeof(int), 1);
+        EP_WRITE(&anchor->centroid_stability, sizeof(float), 1);
     }
 
-    /* 额外词类 */
-    fwrite(&ep->extra_class_count, sizeof(int), 1, f);
+    EP_WRITE(&ep->extra_class_count, sizeof(int), 1);
     for (int ei = 0; ei < ep->extra_class_count; ei++) {
-        fwrite(&ep->extra_classes[ei].class_id, sizeof(int), 1, f);
-        fwrite(ep->extra_classes[ei].centroid, sizeof(float), PM_NODE_FEATURE_DIM, f);
-        fwrite(&ep->extra_classes[ei].member_count, sizeof(int), 1, f);
-        fwrite(&ep->extra_classes[ei].coherence, sizeof(float), 1, f);
-        fwrite(ep->extra_classes[ei].label_hint, sizeof(char), 32, f);
+        EP_WRITE(&ep->extra_classes[ei].class_id, sizeof(int), 1);
+        EP_WRITE(ep->extra_classes[ei].centroid, sizeof(float), PM_NODE_FEATURE_DIM);
+        EP_WRITE(&ep->extra_classes[ei].member_count, sizeof(int), 1);
+        EP_WRITE(&ep->extra_classes[ei].coherence, sizeof(float), 1);
+        EP_WRITE(ep->extra_classes[ei].label_hint, sizeof(char), 32);
+    }
+#undef EP_WRITE
+
+    if (fflush(f) != 0 || fsync(fileno(f)) != 0) {
+        fprintf(stderr, "[EmergentPOS] fsync 失败: %s (%s)\n", tmp_path, strerror(errno));
+        fclose(f); remove(tmp_path); return -1;
+    }
+    if (fclose(f) != 0) {
+        fprintf(stderr, "[EmergentPOS] 关闭失败: %s (%s)\n", tmp_path, strerror(errno));
+        remove(tmp_path); return -1;
     }
 
-    fclose(f);
+    if (rename(tmp_path, path) != 0) {
+        fprintf(stderr, "[EmergentPOS] 原子替换失败: %s → %s (%s)\n",
+                tmp_path, path, strerror(errno));
+        remove(tmp_path);
+        return -1;
+    }
+    {   /* 目录 fsync */
+        char dir_buf[1024];
+        snprintf(dir_buf, sizeof(dir_buf), "%s", path);
+        char* slash = strrchr(dir_buf, '/');
+        if (slash) *slash = '\0'; else strcpy(dir_buf, ".");
+        int dfd = open(dir_buf, O_RDONLY | O_DIRECTORY);
+        if (dfd >= 0) { fsync(dfd); close(dfd); }
+    }
+
     fprintf(stderr, "[EmergentPOS] 持久化完成: %d 硬编码锚点 + %d 额外词类 → %s\n",
             (int)active_count, ep->extra_class_count, path);
     return 0;
@@ -825,6 +864,8 @@ int emergent_pos_load(EmergentPOS* ep, const char* filepath) {
     uint32_t active_count = 0;
     if (fread(&active_count, sizeof(active_count), 1, f) != 1) goto fail;
 
+    /* A-P1-5 fix: 先清零再累加——此前只 ++ 不清零，重复 load 会累加越界写 */
+    ep->extra_class_count = 0;
     int loaded = 0;
     for (uint32_t i = 0; i < active_count; i++) {
         int tag = 0;
@@ -863,7 +904,9 @@ int emergent_pos_load(EmergentPOS* ep, const char* filepath) {
 
 fail:
     fclose(f);
-    return 0;
+    fprintf(stderr, "[EmergentPOS] 加载失败: %s 内容损坏/不完整，返回 -1"
+            "（区别于文件不存在的 0）\n", path);
+    return -1;
 }
 
 /* ================================================================

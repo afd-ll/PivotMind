@@ -99,12 +99,16 @@ struct LearnTask {
     char   domain[64];  /* "medical", "legal", "" = default vocab */
     int    flush;       /* 1 = 调用方 wait 并释放；0 = worker 处理后释放 */
     int    done;        /* 1 = worker 已处理完 _learn_tokens */
+    int    abandoned;   /* C3: 1 = 等待者已超时放弃 → 所有权交回 worker/队列 */
     pthread_mutex_t done_mutex;
     pthread_cond_t  done_cond;
 };
 
 /* v0.5.9: 学习队列——固定 worker 消费，防每请求一线程堆积（08-07 35线程实锤） */
 #define LEARN_QUEUE_CAP 256
+/* C3: flush 型等待上限（秒）。超时只影响"这一轮对话是否等新词"，不影响任务
+ * 最终是否被消费：任务所有权在超时后交回后台，绝不会挂死请求线程。 */
+#define LEARN_TASK_WAIT_MAX_S 30
 typedef struct {
     LearnTask* tasks[LEARN_QUEUE_CAP];
     int head, tail, count;
@@ -114,17 +118,35 @@ typedef struct {
 } LearnQueue;
 static LearnQueue g_learn_q;
 static pthread_t g_learn_workers[LEARN_WORKER_COUNT];
+/* B-P1-1: 每个 worker 槽是否真的创建成功（pthread_t 零值比较是未定义行为，
+ * 因此用独立标记数组决定 shutdown 时 join 哪些槽） */
+static int g_learn_worker_ok[LEARN_WORKER_COUNT];
 /* v0.5.25 fix: 队列/worker 是否已初始化——learn_queue_shutdown 据此守卫，
  * 防止未 init 就 shutdown（join 未创建的 pthread_t）或重复 shutdown（重复 join）。 */
 static int g_learn_inited = 0;
 
-/* B4 (v0.5.20): 标记任务完成并唤醒等待者（flush 型调用方在此继续）。 */
-static void learn_task_complete(LearnTask* task) {
+/* C3: 释放一个任务对象（msg/mutex/cond/结构体）。 */
+static void learn_task_free(LearnTask* task) {
     if (!task) return;
+    free(task->msg);
+    pthread_mutex_destroy(&task->done_mutex);
+    pthread_cond_destroy(&task->done_cond);
+    free(task);
+}
+
+/* C3: worker/队列侧收尾 —— "所有权判定 + done 置位"在同一个临界区内完成，
+ * 返回 1 表示本处负责释放 task。
+ * 必须两步同临界区，否则有 UAF 窗口：若先 complete()（置 done=1）再读
+ * abandoned，等待者可能已看到 done 并 free 掉 task，本处再读 → UAF。
+ * 反向（等待者超时先置 abandoned=1）则本处读到 1，由本处释放，不会泄漏。 */
+static int learn_task_finish(LearnTask* task) {
+    if (!task) return 0;
     pthread_mutex_lock(&task->done_mutex);
+    int owner = task->abandoned;
     task->done = 1;
     pthread_cond_broadcast(&task->done_cond);
     pthread_mutex_unlock(&task->done_mutex);
+    return owner;
 }
 
 /* B4 (v0.5.20): 丢弃任务（队列满丢最旧）——flush 型唤醒等待者由其释放，
@@ -132,16 +154,25 @@ static void learn_task_complete(LearnTask* task) {
 static void learn_task_abandon(LearnTask* task) {
     if (!task) return;
     if (task->flush) {
-        learn_task_complete(task);   /* 唤醒等待者，由等待者 free */
+        /* C3: 唤醒等待者；若等待者已超时放弃，则由本处释放（不能两边都放） */
+        if (learn_task_finish(task)) learn_task_free(task);
     } else {
-        free(task->msg);
-        free(task);
+        learn_task_free(task);
     }
 }
 
 /* B4 (v0.5.20): 可复用入队助手——原 handle_learn 内联入队逻辑抽出，供 handle_chat 复用。
  * flush=1 时返回 task 供调用方 wait；OOM 返回 NULL。队列满丢最旧。 */
 LearnTask* learn_queue_push(const char* msg, const char* domain, int flush) {
+    /* C3: 队列未初始化 / 已 shutdown 时必须拒收。
+     * 旧版没有任何守卫：worker 的退出判定是 "stop && count==0"（见 :195），
+     * 一旦 shutdown 后仍有连接线程入队，这条任务就再没有消费者 → LearnTask
+     * 与 msg 永久泄漏；flush 型（/chat 走的就是 flush=1）调用方还会在
+     * learn_task_wait 的 cond_wait 上永久挂死，连接 fd 与线程永不释放。
+     * 调用方已能处理 NULL（gateway_handlers.c 的 flush 分支与 fire-and-forget
+     * 分支；H4 会把 flush 分支补成"同步降级"）。 */
+    if (!g_learn_inited) return NULL;
+
     LearnTask* task = (LearnTask*)calloc(1, sizeof(LearnTask));
     if (!task) return NULL;
     task->msg = strdup(msg);
@@ -154,6 +185,11 @@ LearnTask* learn_queue_push(const char* msg, const char* domain, int flush) {
     pthread_cond_init(&task->done_cond, NULL);
 
     pthread_mutex_lock(&g_learn_q.mutex);
+    if (g_learn_q.stop) {          /* C3: 关闭已开始 —— 绝不再入队 */
+        pthread_mutex_unlock(&g_learn_q.mutex);
+        learn_task_free(task);
+        return NULL;
+    }
     if (g_learn_q.count >= LEARN_QUEUE_CAP) {
         /* 队列满：丢最旧（工作记忆丢弃策略——最近的学习请求优先） */
         LearnTask* old = g_learn_q.tasks[g_learn_q.head];
@@ -175,14 +211,32 @@ LearnTask* learn_queue_push(const char* msg, const char* domain, int flush) {
 void learn_task_wait(LearnTask* task) {
     if (!task) return;
     pthread_mutex_lock(&task->done_mutex);
-    while (!task->done)
-        pthread_cond_wait(&task->done_cond, &task->done_mutex);
+    /* C3: 有界等待 —— 旧版是无超时的 cond_wait：worker 若已退出（或队列被
+     * 排空后无人消费），请求线程会永久挂死，fd 与线程永不释放。
+     * 超时后**不能直接 free**：任务可能还在队列里/worker 手上，直接 free 就是
+     * use-after-free + 双重释放。改为把所有权交回（abandoned=1），由 worker 或
+     * 队列排空逻辑释放（见 learn_task_finish / learn_task_abandon）。 */
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    ts.tv_sec += LEARN_TASK_WAIT_MAX_S;
+    int timed_out = 0;
+    while (!task->done) {
+        int rc = pthread_cond_timedwait(&task->done_cond, &task->done_mutex, &ts);
+        if (rc == ETIMEDOUT && !task->done) {   /* 必须复检 done：可能恰好被唤醒 */
+            timed_out = 1;
+            break;
+        }
+    }
+    if (timed_out) {
+        task->abandoned = 1;                    /* 所有权移交，本线程不再触碰 */
+        fprintf(stderr, "[gateway] 警告：学习任务等待超时 %ds，放弃等待（已移交后台释放）\n",
+                LEARN_TASK_WAIT_MAX_S);
+    }
     pthread_mutex_unlock(&task->done_mutex);
-    /* task 已完成：本线程负责释放 */
-    free(task->msg);
-    pthread_mutex_destroy(&task->done_mutex);
-    pthread_cond_destroy(&task->done_cond);
-    free(task);
+    if (!timed_out) {
+        /* task 已完成：本线程负责释放 */
+        learn_task_free(task);
+    }
 }
 
 /* _learn_worker — 学习 worker 线程：循环消费队列（单 worker，B4 后 _learn_tokens 单消费者） */
@@ -203,8 +257,8 @@ static void* _learn_worker(void* arg) {
 
         if (!task) continue;
         if (!task->msg) {   /* 理论不可达：push 保证 msg 非 NULL，防御性处理 */
-            if (task->flush) learn_task_complete(task);
-            else free(task);
+            if (task->flush) { if (learn_task_finish(task)) learn_task_free(task); }
+            else learn_task_free(task);
             continue;
         }
         int is_flush = task->flush;   /* 提前读取：发 done 后 task 可能已被等待者释放 */
@@ -238,12 +292,13 @@ static void* _learn_worker(void* arg) {
             }
         }
         /* B4: _learn_tokens 等全部处理完再发 done（flush 型等待者据此唤醒并释放）。
+         * C3: 所有权判定与 done 置位在同一临界区完成 —— 若等待者已超时放弃
+         * （abandoned=1），由 worker 释放，否则由被唤醒的等待者释放。
          * 发完 done 后 worker 不得再触碰 task。 */
         if (is_flush) {
-            learn_task_complete(task);
+            if (learn_task_finish(task)) learn_task_free(task);
         } else {
-            free(task->msg);
-            free(task);
+            learn_task_free(task);
         }
     }
     return NULL;
@@ -254,12 +309,26 @@ static void* _learn_worker(void* arg) {
 void learn_queue_init(void) {
     if (g_learn_inited) return;
     memset(&g_learn_q, 0, sizeof(g_learn_q));
-    pthread_mutex_init(&g_learn_q.mutex, NULL);
+    if (pthread_mutex_init(&g_learn_q.mutex, NULL) != 0) {
+        fprintf(stderr, "[gateway] 学习队列 mutex 初始化失败，学习队列不可用\n");
+        return;                       /* g_learn_inited 保持 0 → push 一律拒收 */
+    }
     pthread_cond_init(&g_learn_q.cond, NULL);
     g_learn_q.stop = 0;
-    g_learn_inited = 1;   /* 先置位：create 失败的 worker 槽不会被误 join */
+    /* B-P1-1: 先置位是为了让 learn_queue_shutdown 走完整清理路径（即使 create
+     * 中途失败）。旧注释写"create 失败的 worker 槽不会被误 join"——与代码相反：
+     * 旧版 shutdown 只看 g_learn_inited 就无条件 join 全部槽，create 失败的槽
+     * 是零值 pthread_t，join(0) 属未定义行为。真正决定 join 哪些槽的是下面
+     * 的 g_learn_worker_ok[]。 */
+    g_learn_inited = 1;
     for (int i = 0; i < LEARN_WORKER_COUNT; i++) {
-        pthread_create(&g_learn_workers[i], NULL, _learn_worker, NULL);
+        g_learn_worker_ok[i] = 0;
+        if (pthread_create(&g_learn_workers[i], NULL, _learn_worker, NULL) == 0) {
+            g_learn_worker_ok[i] = 1;
+        } else {
+            fprintf(stderr, "[gateway] 警告：学习 worker %d 创建失败"
+                            "（学习任务将无消费者，已置不可用标记）\n", i);
+        }
     }
     fprintf(stderr, "[gateway]   学习队列就绪 (%d worker, 容量 %d)\n", LEARN_WORKER_COUNT, LEARN_QUEUE_CAP);
 }
@@ -280,9 +349,14 @@ void learn_queue_shutdown(void) {
     pthread_cond_broadcast(&g_learn_q.cond);
     pthread_mutex_unlock(&g_learn_q.mutex);
 
-    /* 2. join 所有 worker：返回即代表无 worker 再触碰 gw 资源 */
+    /* 2. join 全部**创建成功**的 worker：返回即代表无 worker 再触碰 gw 资源。
+     * B-P1-1: 旧版无条件 join 全部槽，create 失败时 join 的是零值 pthread_t
+     * （未定义行为，glibc 给 ESRCH，其它实现可能崩）。 */
     for (int i = 0; i < LEARN_WORKER_COUNT; i++) {
-        pthread_join(g_learn_workers[i], NULL);
+        if (g_learn_worker_ok[i]) {
+            pthread_join(g_learn_workers[i], NULL);
+            g_learn_worker_ok[i] = 0;
+        }
     }
 
     /* 3. 排空残留（防御性：worker 退出前已排空队列，此处理论不可达）：
@@ -300,5 +374,6 @@ void learn_queue_shutdown(void) {
     pthread_mutex_unlock(&g_learn_q.mutex);
 
     g_learn_inited = 0;
+    memset(g_learn_worker_ok, 0, sizeof(g_learn_worker_ok));
     fprintf(stderr, "[gateway]   学习队列已停止 (%d worker 已退出)\n", LEARN_WORKER_COUNT);
 }

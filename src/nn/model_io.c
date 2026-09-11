@@ -8,6 +8,17 @@
 #include "error.h"
 #include "layer.h"
 
+/* P2-1：文件驱动的张量维数/尺寸守卫。
+ * 注意：这是**损坏/恶意文件防护**，不是容量策略——不限制有效模型的规模。 */
+#define PM_NDIM_MAX_LOCAL 8
+
+/* 安全乘法：a*b*c 是否放得下 size_t（用除法避免回绕误判）。 */
+static int pm_mul_ok3(size_t a, size_t b, size_t elem) {
+    if (a == 0 || b == 0) return 1;
+    if (a > (SIZE_MAX / elem) / b) return 0;
+    return 1;
+}
+
 // 魔数常量
 #define MODEL_MAGIC 0x4D4F444C // 'MODL'
 
@@ -301,12 +312,12 @@ Model* model_load(const char* filepath) {
                     goto cleanup;
                 }
 
-                if (ndim < 2) {
+                if (ndim < 2 || ndim > PM_NDIM_MAX_LOCAL) {
                     LOG_ERROR("Invalid weight dimensions: %d for layer %d", ndim, i);
                     goto cleanup;
                 }
 
-                shape_weights = malloc(ndim * sizeof(size_t));
+                shape_weights = malloc((size_t)ndim * sizeof(size_t));
                 if (!shape_weights) {
                     LOG_ERROR("Failed to allocate memory for weights shape");
                     goto cleanup;
@@ -323,6 +334,12 @@ Model* model_load(const char* filepath) {
                 shape_weights = NULL;
 
                 // 读取权重数据（紧跟 shape 之后）
+                // P2-1：input_size/output_size 来自文件内容（不可信）。32 位目标下
+                // input*output*sizeof(float) 可回绕成小值 → fread 堆溢出。
+                if (!pm_mul_ok3(input_size, output_size, sizeof(float))) {
+                    LOG_ERROR("Weight shape overflow: %zu x %zu for layer %d", input_size, output_size, i);
+                    goto cleanup;
+                }
                 size_t weight_size = input_size * output_size;
                 weight_data = malloc(weight_size * sizeof(float));
                 if (!weight_data) {
@@ -347,8 +364,12 @@ Model* model_load(const char* filepath) {
                     LOG_ERROR("Failed to read bias ndim for layer %d", i);
                     goto cleanup;
                 }
+                if (ndim < 1 || ndim > PM_NDIM_MAX_LOCAL) {
+                    LOG_ERROR("Invalid bias dimensions: %d for layer %d", ndim, i);
+                    goto cleanup;
+                }
 
-                shape_bias = malloc(ndim * sizeof(size_t));
+                shape_bias = malloc((size_t)ndim * sizeof(size_t));
                 if (!shape_bias) {
                     LOG_ERROR("Failed to allocate memory for bias shape");
                     goto cleanup;
@@ -362,6 +383,12 @@ Model* model_load(const char* filepath) {
                 size_t bias_size = shape_bias[0];
                 free(shape_bias);
                 shape_bias = NULL;
+
+                // P2-1：bias_size 来自文件，同样做回绕守卫。
+                if (bias_size > SIZE_MAX / sizeof(float)) {
+                    LOG_ERROR("Bias size overflow: %zu for layer %d", bias_size, i);
+                    goto cleanup;
+                }
 
                 // 读取偏置数据（紧跟 shape 之后）
                 bias_data = malloc(bias_size * sizeof(float));

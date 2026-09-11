@@ -248,6 +248,10 @@ int _sample_negative(PretrainState* state, int exclude_id, int* out_ids, int cou
     if (!state || !out_ids || count <= 0) return -1;
 
     Vocab* vocab = state->vocab;
+    if (!vocab || vocab->size <= 0) {
+        LOG_ERROR("_sample_negative: empty vocab (size=%d)", vocab ? vocab->size : -1);
+        return -1;
+    }
     for (int i = 0; i < count; i++) {
         if (state->unigram_table && state->unigram_table_size > 0) {
             // 基于词频的采样
@@ -261,11 +265,18 @@ int _sample_negative(PretrainState* state, int exclude_id, int* out_ids, int cou
             }
             out_ids[i] = sampled;
         } else {
-            // 均匀采样
-            int sampled;
-            do {
+            // 均匀采样（P2-4：补循环上限，防 vocab->size<=5 时 sampled<5 恒真导致死循环；
+            // vocab->size 已在函数入口保证 > 0，除零 UB 已消除）
+            int sampled = rand() % vocab->size;
+            int tries = 0;
+            while ((sampled == exclude_id || sampled < 5) && tries < 100) {
                 sampled = rand() % vocab->size;
-            } while (sampled == exclude_id || sampled < 5);
+                tries++;
+            }
+            if (tries >= 100) {
+                // 尝试 100 次仍不满足：小词表兜底，取本次结果（或 0 号词）
+                sampled = (sampled < vocab->size) ? sampled : 0;
+            }
             out_ids[i] = sampled;
         }
     }

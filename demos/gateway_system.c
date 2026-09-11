@@ -7,6 +7,18 @@
  */
 
 #include "gateway_internal.h"
+#include <sys/stat.h>   /* stat：判定既有种子是否有内容 */
+
+/* D1: 记忆种子加载状态。加载失败后，任何"用空内存覆盖有效种子"的存盘都要被拦下。
+ * 这两个文件级静态量在 gw_system_init 写、gw_system_shutdown 读，均为主线程路径。 */
+static int g_memory_seed_load_ok   = 1;   /* 1=加载成功/无异常；0=加载失败 */
+static int g_memory_seed_had_data  = 0;   /* 1=既有种子含记录（>16B 即不止 footer） */
+
+static long gw_file_size_or_neg1(const char* path) {
+    struct stat st;
+    if (stat(path, &st) != 0) return -1;   /* 不存在 */
+    return (long)st.st_size;
+}
 
 // ==================== 系统初始化 (复用 digital_life 逻辑) ====================
 
@@ -107,6 +119,16 @@ static int gw_system_init(GatewaySystem* gw) {
     if (!gw->perception) { fprintf(stderr, "[gateway] 感觉皮层创建失败\n"); return -1; }
     /* g_perception 已由 perception_create 自动设置 */
     fprintf(stderr, "[gateway]   感觉皮层就绪\n");
+
+    /* C2 配套: 初始化期间收到退出信号就提前收手。此时 gw 上已建对象全部由
+     * gw_system_shutdown 逐项判 NULL 统一销毁，不会泄漏；好处是 H2 的
+     * pthread_join(init_thread) 立刻返回，不必等完整加载流程跑完。
+     * 尤其重要：绝不能让 learn_queue_init() 发生在 learn_queue_shutdown()
+     * 之后（旧代码会因此重建 worker，而没人再 join 它们）。 */
+    if (gw->shutdown_requested) {
+        fprintf(stderr, "[gateway] 初始化被取消（收到退出信号），提前结束\n");
+        return -1;
+    }
 
     /* v0.5.9: 学习队列初始化（2 个 worker 消费 /learn 任务） */
     learn_queue_init();
@@ -232,8 +254,21 @@ static int gw_system_init(GatewaySystem* gw) {
             gw->topology->cross_link_count);
 
     fprintf(stderr, "[gateway]   加载记忆种子...\n");
-    memory_load_seed(gw->memory, "memory_seed.dat");
-    fprintf(stderr, "[gateway]   记忆种子就绪\n");
+    /* D1 fix: 必须消费返回值——绝不用"加载失败后的空内存"覆盖有效种子。
+     * 同时记录既有文件尺寸：只有"确实有内容可能被毁"时才禁止存盘；
+     * 不存在或 0 字节的种子允许本次正常写入（无害且可自愈）。 */
+    {
+        long seed_sz = gw_file_size_or_neg1("memory_seed.dat");
+        int loaded = memory_load_seed(gw->memory, "memory_seed.dat");
+        g_memory_seed_load_ok  = (loaded >= 0) ? 1 : 0;
+        g_memory_seed_had_data = (seed_sz > 16);   /* 16B = 仅 footer 的空种子 */
+        if (loaded < 0) {
+            fprintf(stderr, "[gateway]   ⚠ 记忆种子加载失败(返回 %d)，本次退出将"
+                    "拒绝覆盖 memory_seed.dat（防止空状态永久覆盖有效种子）\n", loaded);
+        } else {
+            fprintf(stderr, "[gateway]   记忆种子就绪 (%d 条)\n", loaded);
+        }
+    }
 
     // 模板拓扑 (懒加载：启动时不全量构建，边用边积累)
     SubTopology* tpl = master_get_sub_topology_by_type(gw->topology, TOPO_TEMPLATE);
@@ -361,6 +396,12 @@ static int gw_system_init(GatewaySystem* gw) {
         }
     }
 
+    /* C2 配套: 启动脑干前再查一次取消标志（这一步之后才开始有后台线程写拓扑） */
+    if (gw->shutdown_requested) {
+        fprintf(stderr, "[gateway] 初始化被取消（收到退出信号），提前结束\n");
+        return -1;
+    }
+
     /* 学习已由脑干统一调度 */
     brainstem_start(gw->brainstem);
 
@@ -442,6 +483,26 @@ void gw_system_shutdown(GatewaySystem* gw) {
     // 1. 停止脑干 → 冻结所有活性节点 → 确保状态完整
     if (gw->brainstem) brainstem_stop(gw->brainstem);
 
+    /* 1b. P1-2: 存盘之前必须停掉**所有仍在写拓扑的后台线程**。
+     * 旧版只停了学习 worker 与脑干，把调度器线程（learning_scheduler.c:385）
+     * 和感知 worker（perception.c:271）留到存盘之后才 destroy →
+     * master_save_state 遍历子拓扑期间 node_count/activation/边表被并发修改，
+     * 存盘内容撕裂甚至越界（节点在遍历途中被回收）。
+     * 前置条件：本函数此时不能有连接线程在跑（H2 已逐槽 join，见其自检）。 */
+    if (gw->scheduler) {
+        printf("[gateway]   停止学习调度器 (存盘前)...\n");
+        learning_scheduler_stop(gw->scheduler);   /* 只停线程 + join，不销毁对象 */
+    }
+    if (gw->perception) {
+        /* perception 只有 perception_destroy 内部才有"置停+join"（perception.c:283-294），
+         * 所以这里提前销毁并置 NULL：后面第 6 步的 perception_destroy 会因 NULL 跳过，
+         * 不会二次销毁。附带好处：destroy 尾部的 article_flush 会把这一批新词写进
+         * 拓扑，正好被紧随其后的存盘保存下来。 */
+        printf("[gateway]   停止感觉皮层 worker (存盘前)...\n");
+        perception_destroy(gw->perception);
+        gw->perception = NULL;
+    }
+
     // 2. 保存完整状态到主文件（空启动保护：总节点 < 20 时跳过，防止覆盖有效存盘）
     if (gw->topology) {
         int total = master_count_total_nodes(gw->topology);
@@ -457,17 +518,35 @@ void gw_system_shutdown(GatewaySystem* gw) {
         }
     }
     if (gw->memory) {
-        int saved = memory_save_seed(gw->memory, "memory_seed.dat");
-        if (saved >= 0) printf("[gateway]   保存记忆种子: %d 条\n", saved);
+        /* D1 门卫：与拓扑 total>=20 门卫对等。种子真正的"内容"是 LTM 条目数，
+         * 故门卫不看字节、看条数（阈值 MEMORY_SEED_MIN_ENTRIES=1，见下）：
+         *   ① 本次加载失败 且 既有文件有记录 → 绝不覆盖（核心保命线）；
+         *   ② 本次 0 条 且 既有文件有记录   → 绝不覆盖（空状态不得顶掉有效种子）。
+         * 其余情况（首次启动 / 既有文件本无数据 / 正常有内容）照常保存。 */
+        int ltm_count = gw->memory->permanent_memory
+                        ? gw->memory->permanent_memory->size : 0;
+        const int MEMORY_SEED_MIN_ENTRIES = 1;   /* 门卫下限：条目数 < 此值即视为空状态 */
+        int would_destroy = g_memory_seed_had_data &&
+                            (g_memory_seed_load_ok == 0 ||
+                             ltm_count < MEMORY_SEED_MIN_ENTRIES);
+        if (would_destroy) {
+            fprintf(stderr, "[gateway]   ⚠ 跳过保存记忆种子: 加载失败或仅 %d 条，"
+                    "拒绝覆盖既有有效种子\n", ltm_count);
+        } else {
+            int saved = memory_save_seed(gw->memory, "memory_seed.dat");
+            if (saved >= 0) printf("[gateway]   保存记忆种子: %d 条\n", saved);
+            else fprintf(stderr, "[gateway]   ⚠ 保存记忆种子失败 (返回 %d)\n", saved);
+        }
     }
 
     // 3. 删除临时状态文件（brain_state.dat 只是脑干运行缓存，主状态已在上面保存）
     remove("brain_state.dat");
     printf("[gateway]   清理临时状态文件\n");
 
-    // 4. 停止学习调度器
+    // 4. 销毁学习调度器（线程已在 1b 停掉并 join，这里只释放对象；
+    //    destroy 内部会再调一次 stop，已由 H7 改成幂等）
     if (gw->scheduler) {
-        printf("[gateway]   停止学习调度器...\n");
+        printf("[gateway]   销毁学习调度器...\n");
         learning_scheduler_destroy(gw->scheduler);
         gw->scheduler = NULL;
     }
@@ -483,24 +562,28 @@ void gw_system_shutdown(GatewaySystem* gw) {
     if (gw->visual_cortex)  { visual_cortex_destroy(gw->visual_cortex); gw->visual_cortex = NULL; }
     if (gw->brain_cache) { node_cache_destroy(gw->brain_cache); gw->brain_cache = NULL; }
     if (gw->self_learner) { self_learner_destroy(gw->self_learner); gw->self_learner = NULL; }
-    if (gw->amygdala)    amygdala_destroy(gw->amygdala);
-    if (gw->hippocampus) hippocampus_destroy(gw->hippocampus);
-    if (gw->cerebellum)  cerebellum_destroy(gw->cerebellum);
-    if (gw->qa_memory)   qa_memory_destroy(gw->qa_memory);
-    if (gw->thalamus)     thalamus_destroy(gw->thalamus);
-    if (gw->perception)   perception_destroy(gw->perception);
+    /* P2-7: 每一项销毁后立刻置 NULL —— 旧版大部分保留野指针，一旦
+     * gw_system_shutdown 被调用第二次（或与仍在跑的 init 线程交错）就是
+     * 双重释放。置 NULL 后二次调用是安全的空操作。 */
+    if (gw->amygdala)    { amygdala_destroy(gw->amygdala);       gw->amygdala = NULL; }
+    if (gw->hippocampus) { hippocampus_destroy(gw->hippocampus); gw->hippocampus = NULL; }
+    if (gw->cerebellum)  { cerebellum_destroy(gw->cerebellum);   gw->cerebellum = NULL; }
+    if (gw->qa_memory)   { qa_memory_destroy(gw->qa_memory);     gw->qa_memory = NULL; }
+    if (gw->thalamus)    { thalamus_destroy(gw->thalamus);       gw->thalamus = NULL; }
+    if (gw->perception)  { perception_destroy(gw->perception);   gw->perception = NULL; }
     web_fetch_destroy();  /* 爬虫框架 */
-    if (gw->brainstem)    brainstem_destroy(gw->brainstem);
-    if (gw->pfe)         pfe_destroy(gw->pfe);              /* v0.3 */
-    if (gw->arena)       idea_arena_destroy(gw->arena);          /* v0.3 */
-    if (gw->hypothalamus) hypothalamus_destroy(gw->hypothalamus); /* v0.4 */
-    if (gw->broca)       broca_destroy(gw->broca);               /* v0.4 */
-    if (gw->learner)     active_learner_destroy(gw->learner);
-    if (gw->prefrontal)  prefrontal_destroy(gw->prefrontal);
-    if (gw->causal_graph) causal_graph_destroy(gw->causal_graph);
-    if (gw->topology)    master_topology_destroy(gw->topology);
-    if (gw->memory)      memory_system_destroy(gw->memory);
-    if (gw->config)      config_destroy(gw->config);
+    if (gw->brainstem)   { brainstem_destroy(gw->brainstem);     gw->brainstem = NULL; }
+    if (gw->pfe)         { pfe_destroy(gw->pfe);                 gw->pfe = NULL; }       /* v0.3 */
+    if (gw->arena)       { idea_arena_destroy(gw->arena);        gw->arena = NULL; }     /* v0.3 */
+    if (gw->hypothalamus){ hypothalamus_destroy(gw->hypothalamus); gw->hypothalamus = NULL; } /* v0.4 */
+    if (gw->broca)       { broca_destroy(gw->broca);             gw->broca = NULL; }     /* v0.4 */
+    if (gw->learner)     { active_learner_destroy(gw->learner);  gw->learner = NULL; }
+    if (gw->prefrontal)  { prefrontal_destroy(gw->prefrontal);   gw->prefrontal = NULL; }
+    gw->dialog = NULL;        /* 别名（prefrontal->dialog），已随 prefrontal 释放 */
+    if (gw->causal_graph){ causal_graph_destroy(gw->causal_graph); gw->causal_graph = NULL; }
+    if (gw->topology)    { master_topology_destroy(gw->topology); gw->topology = NULL; }
+    if (gw->memory)      { memory_system_destroy(gw->memory);     gw->memory = NULL; }
+    if (gw->config)      { config_destroy(gw->config);            gw->config = NULL; }
 
     printf("[gateway] 已关闭 (运行 %lld 秒, 对话 %lld 轮)\n",
            (long long)(time(NULL) - gw->start_time), (long long)gw->total_dialogs);

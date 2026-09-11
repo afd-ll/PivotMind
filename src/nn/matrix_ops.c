@@ -52,6 +52,11 @@ Tensor* matrix_multiply_naive(Tensor* a, Tensor* b) {
     float* b_data = (float*)b->data;
     float* c_data = (float*)result->data;
 
+    // 结果缓冲由 tensor_create 分配（tensor_alloc_data 是裸 malloc，不置零），
+    // 而本函数用 "+=" 累加 → 必须先清零，否则小矩阵路径会累加到未初始化内存。
+    // 对照 matrix_multiply_blocked（本文件 :99 已有同样的 memset）。
+    memset(c_data, 0, M * N * sizeof(float));
+
     // 优化循环顺序: i-k-j (缓存友好)
     for (size_t i = 0; i < M; i++) {
         for (size_t k = 0; k < K; k++) {

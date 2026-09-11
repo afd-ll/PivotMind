@@ -103,6 +103,12 @@ static float lr_warmup_cosine(LRScheduler* s) {
 
 // ReduceOnPlateau:基于验证损失动态调整
 static void lr_reduce_on_plateau(LRScheduler* s, float val_loss) {
+    // P2-3：NaN 与所有比较恒为 false，会走 else 分支当作"没有进步"，
+    // 把一次数值爆炸误判成平台期并触发降 lr；-Inf/NaN 的 best_loss 也会被写坏。
+    if (!isfinite(val_loss)) {
+        LOG_WARNING("Non-finite val_loss (%g); skipping plateau update", (double)val_loss);
+        return;
+    }
     if (val_loss < s->best_loss - s->config.threshold) {
         s->best_loss = val_loss;
         s->num_bad_epochs = 0;

@@ -28,11 +28,17 @@
 
 #include "gateway_internal.h"
 
-/* P0-1: 在途连接线程计数（GCC __sync 原子操作维护），连接处理与 main 使用 */
-static volatile int g_conn_count = 0;
-
-/* 全局网关实例：learn worker 等跨模块访问（见 gateway_internal.h extern） */
+/* 全局网关实例：learn worker 等跨模块访问（见 gateway_internal.h extern）。
+ * C1/P1-3: 它指向 main 里堆上的 GatewaySystem；关闭拆解完成后必须置 NULL
+ * （旧版永不置 NULL，main 返回后悬垂，学习 worker / 信号处理仍可能解引用）。 */
 GatewaySystem* g_gw = NULL;
+
+/* C1: 在途连接线程登记表——旧版只有原子计数 + pthread_detach：关闭时无处可
+ * join，只能"轮询计数 15s 然后强拆 main 栈上的 gw"，慢连接线程接着访问已
+ * 释放的 gw->topology 等（use-after-free）。
+ * 现在每个连接线程占一个槽：线程退出时自己清 used；主循环每轮回收已结束的槽；
+ * 关闭时对 ever==1 的槽逐个 join，join 返回即代表该线程彻底离开 gw。
+ * 定义放在 GW_MAX_CONN 之后（见下方）。 */
 
 // ==================== API token 鉴权 (C1 修复) ====================
 
@@ -116,20 +122,75 @@ static void handle_connection(GatewaySystem* gw, int client_fd);  /* P0-1: gw_co
  * 当前架构下不新增额外风险。 */
 #define GW_MAX_CONN 64
 
+/* C1: 连接线程登记表（全部读写都在 g_conn_mutex 内）
+ * used = 正在运行、槽被占用（线程退出时清 0 → 槽可被后续连接复用）
+ * ever = 该槽当前句柄是否尚未 join（回收器/关闭路径据此 join，join 后清 0） */
+static pthread_mutex_t g_conn_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_t       g_conn_slots[GW_MAX_CONN];
+static unsigned char   g_conn_slot_used[GW_MAX_CONN];
+static unsigned char   g_conn_slot_ever[GW_MAX_CONN];
+static int             g_conn_count = 0;
+
 typedef struct {
     GatewaySystem* gw;
     int client_fd;
+    int slot;            /* C1: 本线程占用的槽号 */
 } ConnArg;
+
+/* C1: 主循环里的机会式回收——把已结束但尚未 join 的连接线程收掉。
+ * 必须在不持 g_conn_mutex 的情况下 join：线程退出路径要拿同一把锁清 used,
+ * 持锁 join 会死锁。先复制 tid、清 ever（记账在锁内完成），再锁外 join。 */
+static void gw_reap_conn_threads(void) {
+    for (int s = 0; s < GW_MAX_CONN; s++) {
+        pthread_t tid = 0;
+        int need = 0;
+        pthread_mutex_lock(&g_conn_mutex);
+        if (g_conn_slot_ever[s] && !g_conn_slot_used[s]) {
+            g_conn_slot_ever[s] = 0;
+            tid = g_conn_slots[s];
+            need = 1;
+        }
+        pthread_mutex_unlock(&g_conn_mutex);
+        if (need) pthread_join(tid, NULL);
+    }
+}
 
 static void* gw_conn_thread(void* arg) {
     ConnArg* ca = (ConnArg*)arg;
-    handle_connection(ca->gw, ca->client_fd);
+    GatewaySystem* gw = ca->gw;      /* C1: 先把内容取出来，ca 立刻释放 */
+    int client_fd = ca->client_fd;
+    int slot = ca->slot;
     free(ca);
-    __sync_fetch_and_sub(&g_conn_count, 1);
+
+    handle_connection(gw, client_fd);
+
+    /* C1: 退槽 —— 关闭路径按槽 join，所以只能在线程真正结束时清标记 */
+    pthread_mutex_lock(&g_conn_mutex);
+    g_conn_slot_used[slot] = 0;
+    g_conn_count--;
+    pthread_mutex_unlock(&g_conn_mutex);
     return NULL;
 }
 
+/* P1-4: 原 handle_connection 的实体（req 改为由包装函数传入的堆对象） */
+static void handle_connection_inner(GatewaySystem* gw, int client_fd, HttpRequest* req);
+
+/* P1-4: 包装——HttpRequest 含 64KB body，旧版直接开在连接线程栈上：
+ * GW_MAX_CONN=64 时 64×64KB ≈ 4MB 常驻栈（同一线程内 parse_request 还有
+ * 另一份 64KB，见 gateway_http.c）。这里整对象 calloc 到堆，处理完即释放，
+ * 每个连接线程栈上不再有这两个大缓冲。 */
 static void handle_connection(GatewaySystem* gw, int client_fd) {
+    HttpRequest* req = (HttpRequest*)calloc(1, sizeof(HttpRequest));
+    if (!req) {
+        http_json(client_fd, 500, "{\"error\":\"out of memory\"}");
+        close(client_fd);
+        return;
+    }
+    handle_connection_inner(gw, client_fd, req);
+    free(req);
+}
+
+static void handle_connection_inner(GatewaySystem* gw, int client_fd, HttpRequest* req) {
     /* 加固: TCP keepalive 检测死连接 */
     int ka = 1;
     setsockopt(client_fd, SOL_SOCKET, SO_KEEPALIVE, &ka, sizeof(ka));
@@ -137,15 +198,14 @@ static void handle_connection(GatewaySystem* gw, int client_fd) {
     struct timeval stv = { .tv_sec = 10, .tv_usec = 0 };
     setsockopt(client_fd, SOL_SOCKET, SO_SNDTIMEO, &stv, sizeof(stv));
 
-    HttpRequest req;
-    if (parse_request(client_fd, &req) < 0) {
+    if (parse_request(client_fd, req) < 0) {
         http_json(client_fd, 400, "{\"error\":\"bad request\"}");
         close(client_fd);
         return;
     }
 
     // CORS preflight
-    if (strcmp(req.method, "OPTIONS") == 0) {
+    if (strcmp(req->method, "OPTIONS") == 0) {
         http_send(client_fd, 200, "text/plain", "");
         close(client_fd);
         return;
@@ -154,31 +214,33 @@ static void handle_connection(GatewaySystem* gw, int client_fd) {
     /* 安全加固: 鉴权扩展到所有非健康检查端点 — 除 /health(/healthz) 外，
      * 所有端点必须携带有效 X-Pivot-Token（与现有 /media 端点同一机制，兼容现有调用方）。
      * 只保留 /health 匿名，供负载均衡/监控/启动探测。token 为空则拒绝（安全默认）。 */
-    int is_health = (strcmp(req.path, "/health") == 0 ||
-                     strcmp(req.path, "/healthz") == 0);
+    int is_health = (strcmp(req->path, "/health") == 0 ||
+                     strcmp(req->path, "/healthz") == 0);
     if (!is_health &&
-        (gw->api_token[0] == '\0' || !gw_token_equal(req.token, gw->api_token))) {
+        (gw->api_token[0] == '\0' || !gw_token_equal(req->token, gw->api_token))) {
         http_json(client_fd, 401, "{\"error\":\"unauthorized: missing or invalid X-Pivot-Token\"}");
         close(client_fd);
         return;
     }
 
     // 路由
-    if (strcmp(req.method, "GET") == 0) {
-        if (strcmp(req.path, "/") == 0 || strcmp(req.path, "/dashboard") == 0) {
+    if (strcmp(req->method, "GET") == 0) {
+        if (strcmp(req->path, "/") == 0 || strcmp(req->path, "/dashboard") == 0) {
             handle_root(gw, client_fd);
-        } else if (strcmp(req.path, "/health") == 0) {
+        } else if (is_health) {   /* P2-1: /healthz 已被鉴权豁免（见上面 is_health），
+                                   * 旧版这里只匹配 "/health" → /healthz 落到 404，
+                                   * K8s/systemd 探针配 /healthz 永远拿 404 */
             handle_health(gw, client_fd);
-        } else if (strcmp(req.path, "/qa") == 0) {
+        } else if (strcmp(req->path, "/qa") == 0) {
             char rs[64]; snprintf(rs, 64, "{\"count\":%d}", gw->qa_memory ? qa_memory_count(gw->qa_memory) : 0);
             http_json(client_fd, 200, rs);
-        } else if (strcmp(req.path, "/status") == 0) {
+        } else if (strcmp(req->path, "/status") == 0) {
             if (!gw->engine_ready) {
                 http_json(client_fd, 503, "{\"status\":\"loading\"}");
             } else {
                 handle_status(gw, client_fd);
             }
-        } else if (strcmp(req.path, "/train/status") == 0) {
+        } else if (strcmp(req->path, "/train/status") == 0) {
             if (!gw->train_mode) {
                 http_json(client_fd, 404, "{\"error\":\"train mode not enabled\"}");
             } else {
@@ -190,11 +252,11 @@ static void handle_connection(GatewaySystem* gw, int client_fd) {
                     p.total_fed, p.total_added_nodes, p.total_added_edges);
                 http_json(client_fd, 200, tr);
             }
-        } else if (strcmp(req.path, "/scheduler") == 0) {
+        } else if (strcmp(req->path, "/scheduler") == 0) {
             handle_scheduler(gw, client_fd);
-        } else if (strcmp(req.path, "/scheduler/stats") == 0) {
+        } else if (strcmp(req->path, "/scheduler/stats") == 0) {
             handle_scheduler_self_stats(gw, client_fd);
-        } else if (strcmp(req.path, "/brain") == 0) {
+        } else if (strcmp(req->path, "/brain") == 0) {
             if (gw->topo_brain) {
                 int entries, updates, migrations;
                 topobrain_get_stats(gw->topo_brain, &entries, &updates, &migrations);
@@ -205,9 +267,9 @@ static void handle_connection(GatewaySystem* gw, int client_fd) {
             } else {
                 http_json(client_fd, 404, "{\"error\":\"brain not initialized\"}");
             }
-        } else if (strcmp(req.path, "/media/status") == 0) {
+        } else if (strcmp(req->path, "/media/status") == 0) {
             handle_media_status(gw, client_fd);
-        } else if (strcmp(req.path, "/debug") == 0) {
+        } else if (strcmp(req->path, "/debug") == 0) {
             /* 调试端点 */
             SubTopology* vocab = NULL;
             for (int t = 0; t < gw->topology->sub_topo_count; t++) {
@@ -231,7 +293,7 @@ static void handle_connection(GatewaySystem* gw, int client_fd) {
                 "\"total_nodes\":%d,\"template_nodes\":%d,\"sub_topos\":%d}",
                 vnodes, fentries, total, tnodes, gw->topology->sub_topo_count);
             http_json(client_fd, 200, dbg);
-        } else if (strcmp(req.path, "/force_templates") == 0) {
+        } else if (strcmp(req->path, "/force_templates") == 0) {
             int built = broca_build_templates(gw->topology, 10, 4);
             char rsp[128];
             snprintf(rsp, sizeof(rsp), "{\"built\":%d}", built);
@@ -240,23 +302,23 @@ static void handle_connection(GatewaySystem* gw, int client_fd) {
         } else {
             http_json(client_fd, 404, "{\"error\":\"not found\"}");
         }
-    } else if (strcmp(req.method, "POST") == 0) {
+    } else if (strcmp(req->method, "POST") == 0) {
         if (!gw->engine_ready) {
             http_json(client_fd, 503, "{\"status\":\"loading\",\"message\":\"engine initializing\"}");
-        } else if (strcmp(req.path, "/chat") == 0) {
-            handle_chat(gw, client_fd, req.body);
-        } else if (strcmp(req.path, "/qa") == 0) {
-            handle_qa(gw, client_fd, req.body);
-        } else if (strcmp(req.path, "/learn") == 0) {
-            handle_learn(gw, client_fd, req.body);
-        } else if (strcmp(req.path, "/feedback") == 0) {
-            handle_feedback(gw, client_fd, req.body);
-        } else if (strcmp(req.path, "/media/feed") == 0) {
-            handle_media_feed(gw, client_fd, req.body);
-        } else if (strncmp(req.path, "/train/", 7) == 0) {
+        } else if (strcmp(req->path, "/chat") == 0) {
+            handle_chat(gw, client_fd, req->body);
+        } else if (strcmp(req->path, "/qa") == 0) {
+            handle_qa(gw, client_fd, req->body);
+        } else if (strcmp(req->path, "/learn") == 0) {
+            handle_learn(gw, client_fd, req->body);
+        } else if (strcmp(req->path, "/feedback") == 0) {
+            handle_feedback(gw, client_fd, req->body);
+        } else if (strcmp(req->path, "/media/feed") == 0) {
+            handle_media_feed(gw, client_fd, req->body);
+        } else if (strncmp(req->path, "/train/", 7) == 0) {
             if (!gw->train_mode) {
                 http_json(client_fd, 404, "{\"error\":\"train mode not enabled\"}");
-            } else if (strcmp(req.path, "/train/status") == 0) {
+            } else if (strcmp(req->path, "/train/status") == 0) {
                 TrainProgress p = train_mode_get_progress(gw->train_mode);
                 const char* st = p.state==TRAIN_RUNNING?"running":p.state==TRAIN_PAUSED?"paused":p.state==TRAIN_COMPLETED?"completed":"idle";
                 char tr[512];
@@ -264,16 +326,16 @@ static void handle_connection(GatewaySystem* gw, int client_fd) {
                     st, p.current_round, p.total_rounds, p.current_line, p.total_lines,
                     p.total_fed, p.total_added_nodes, p.total_added_edges);
                 http_json(client_fd, 200, tr);
-            } else if (strcmp(req.path, "/train/pause") == 0) {
+            } else if (strcmp(req->path, "/train/pause") == 0) {
                 train_mode_pause(gw->train_mode);
                 http_json(client_fd, 200, "{\"result\":\"paused\"}");
-            } else if (strcmp(req.path, "/train/resume") == 0) {
+            } else if (strcmp(req->path, "/train/resume") == 0) {
                 train_mode_resume(gw->train_mode);
                 http_json(client_fd, 200, "{\"result\":\"resumed\"}");
-            } else if (strcmp(req.path, "/train/stop") == 0) {
+            } else if (strcmp(req->path, "/train/stop") == 0) {
                 train_mode_stop(gw->train_mode);
                 http_json(client_fd, 200, "{\"result\":\"stopped\"}");
-            } else if (strcmp(req.path, "/train/start") == 0) {
+            } else if (strcmp(req->path, "/train/start") == 0) {
                 TrainProgress p = train_mode_get_progress(gw->train_mode);
                 if (p.state == TRAIN_RUNNING) {
                     http_json(client_fd, 400, "{\"error\":\"already running\"}");
@@ -420,35 +482,39 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    // 创建系统
-    GatewaySystem gw = {0};
-    gw.train_mode_flag = train_mode_flag;
-    gw.train_config = train_config;
-    g_gw = &gw;
-    gw.port = port;
-    strncpy(gw.workdir, workdir, sizeof(gw.workdir) - 1);
+    /* C1: GatewaySystem 放到堆上（旧版是 main 的栈对象，连接线程、学习 worker、
+     * 初始化线程三方同时持有它的地址，关闭期一拆就是 use-after-free）。
+     * 上堆之后生命周期仍由"连接线程 join + init 线程 join"保证，
+     * 全部 join 完才允许 free（见函数末尾）。 */
+    GatewaySystem* gw = (GatewaySystem*)calloc(1, sizeof(GatewaySystem));
+    if (!gw) { fprintf(stderr, "[gateway] 内存不足，无法创建系统\n"); return 1; }
+    gw->train_mode_flag = train_mode_flag;
+    gw->train_config = train_config;
+    g_gw = gw;
+    gw->port = port;
+    strncpy(gw->workdir, workdir, sizeof(gw->workdir) - 1);
 
     /* C1: 生成 API token 并打印到日志（媒体端点鉴权）
      * C1+ 持久化: 优先复用 GW_TOKEN_FILE 中的有效 token（跨重启不变，黑匣子/feed
      * 脚本无需跟随变化）；文件不存在/内容非法则随机生成并写入 (0600)。 */
-    if (!gw_token_file_load(gw.api_token, sizeof(gw.api_token))) {
-        gw_generate_token(gw.api_token, sizeof(gw.api_token));
-        gw_token_file_save(gw.api_token);
+    if (!gw_token_file_load(gw->api_token, sizeof(gw->api_token))) {
+        gw_generate_token(gw->api_token, sizeof(gw->api_token));
+        gw_token_file_save(gw->api_token);
     }
     /* C1: 打印脱敏 token（仅前 4 后 4），完整值存于 GW_TOKEN_FILE(0600)。
      * 旧版整段明文打印到 stdout，日志若被旁路读取即泄露完整凭据。 */
-    size_t tlen = strlen(gw.api_token);
+    size_t tlen = strlen(gw->api_token);
     if (tlen > 8) {
         printf("[gateway] API token: %.4s...%s (完整 token 见 %s, 权限 0600)\n",
-               gw.api_token, gw.api_token + tlen - 4, GW_TOKEN_FILE);
+               gw->api_token, gw->api_token + tlen - 4, GW_TOKEN_FILE);
     } else {
         printf("[gateway] API token: %.4s%s (完整 token 见 %s, 权限 0600)\n",
-               gw.api_token, tlen > 4 ? "..." : "", GW_TOKEN_FILE);
+               gw->api_token, tlen > 4 ? "..." : "", GW_TOKEN_FILE);
     }
     printf("[gateway] 除 /health 外所有端点需要请求头 X-Pivot-Token 才能访问\n");
 
     /* load runtime config (optional; defaults if file missing) */
-    gw.config = config_load(NULL);
+    gw->config = config_load(NULL);
 
     // 信号处理
     signal(SIGINT, gw_signal_handler);
@@ -511,15 +577,19 @@ int main(int argc, char* argv[]) {
 
     // 后台线程初始化引擎 (避免阻塞主循环，加载期间仍可响应 /health)
     pthread_t init_thread;
-    if (pthread_create(&init_thread, NULL, gw_system_init_thread, &gw) != 0) {
+    if (pthread_create(&init_thread, NULL, gw_system_init_thread, gw) != 0) {
         fprintf(stderr, "[gateway] 无法创建初始化线程\n");
         close(server_fd);
         return 1;
     }
-    pthread_detach(init_thread);
+    /* C2: 不 detach —— 关闭时必须能 join 初始化线程。旧版 detach 后永远无法
+     * 等待它结束，于是 gw_system_shutdown 会与仍在跑 gw_system_init 的线程
+     * 并发销毁/创建同一批对象（含 shutdown 之后又 learn_queue_init 重建
+     * worker）→ use-after-free + 双重释放。 */
 
     // 主循环 (引擎初始化期间 /health 返回 loading，初始化完成后正常服务)
-    while (!gw.shutdown_requested) {
+    while (!gw->shutdown_requested) {
+        gw_reap_conn_threads();   /* C1: 收掉上一轮已结束的连接线程（避免僵尸线程堆积） */
         // 用非阻塞 accept + 短超时，避免初始化卡住时无法响应信号
         struct timeval tv = { .tv_sec = 1, .tv_usec = 0 };
         setsockopt(server_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
@@ -529,62 +599,93 @@ int main(int argc, char* argv[]) {
         int client_fd = accept(server_fd, (struct sockaddr*)&client_addr, &client_len);
 
         if (client_fd < 0) {
-            if (errno == EINTR || gw.shutdown_requested) break;
+            if (errno == EINTR || gw->shutdown_requested) break;
             if (errno == EAGAIN || errno == EWOULDBLOCK) continue;
             // 可能是超时，继续循环
             continue;
         }
 
-        /* P0-1: 连接处理移交独立线程，主循环立即回到 accept。
-         * 并发满时直接 503 拒绝并关闭，避免排队堆积。 */
-        if (__sync_fetch_and_add(&g_conn_count, 1) >= GW_MAX_CONN) {
-            __sync_fetch_and_sub(&g_conn_count, 1);
-            http_json(client_fd, 503, "{\"error\":\"busy: too many connections\"}");
-            close(client_fd);
-            continue;
-        }
+        /* C1: 连接处理移交独立线程，主循环立即回到 accept。
+         * 并发满时直接 503 拒绝并关闭，避免排队堆积。
+         * 与旧版的区别：槽位预约 + 句柄登记（可 join），不再 detach。 */
         ConnArg* ca = (ConnArg*)malloc(sizeof(ConnArg));
         if (!ca) {
-            __sync_fetch_and_sub(&g_conn_count, 1);
             http_json(client_fd, 500, "{\"error\":\"out of memory\"}");
             close(client_fd);
             continue;
         }
-        ca->gw = &gw;
+        ca->gw = gw;
         ca->client_fd = client_fd;
-        pthread_t ct;
-        if (pthread_create(&ct, NULL, gw_conn_thread, ca) != 0) {
-            __sync_fetch_and_sub(&g_conn_count, 1);
-            http_json(client_fd, 500, "{\"error\":\"thread create failed\"}");
+
+        int slot = -1;
+        pthread_mutex_lock(&g_conn_mutex);
+        if (g_conn_count < GW_MAX_CONN) {
+            for (int s = 0; s < GW_MAX_CONN; s++)
+                if (!g_conn_slot_used[s]) { slot = s; break; }
+        }
+        if (slot >= 0) {
+            ca->slot = slot;
+            g_conn_slot_used[slot] = 1;
+            g_conn_slot_ever[slot] = 1;
+            /* 先占位再加计数：子线程退出时只做减法，若先 create 再 ++，
+             * 快退的子线程可能把计数减到 0（少算一个在途连接）。 */
+            g_conn_count++;
+            if (pthread_create(&g_conn_slots[slot], NULL, gw_conn_thread, ca) != 0) {
+                g_conn_slot_used[slot] = 0;
+                g_conn_slot_ever[slot] = 0;
+                g_conn_count--;
+                slot = -1;
+            }
+        }
+        pthread_mutex_unlock(&g_conn_mutex);
+        if (slot < 0) {
+            http_json(client_fd, 503, "{\"error\":\"busy: too many connections\"}");
             close(client_fd);
             free(ca);
             continue;
         }
-        pthread_detach(ct);
     }
 
-    // 等待引擎初始化线程结束 (如果还在跑)
-    while (!gw.engine_ready && !gw.shutdown_requested) {
-        usleep(100000); // 100ms
-    }
+    /* C2: 等初始化线程彻底结束（不再 detach，见 pthread_create 处）。
+     * 旧代码 while (!engine_ready && !shutdown_requested)：收到信号后
+     * shutdown_requested==1 使循环立刻退出，随后 gw_system_shutdown 与仍在跑
+     * gw_system_init 的线程并发拆/建同一批对象 → UAF + 双重释放。
+     * 现在无条件 join：返回 == init 线程已离开 gw。
+     * （配套 H4：gw_system_init 内部检查 gw->shutdown_requested 提前收手。） */
+    fprintf(stderr, "[gateway] 等待初始化线程结束...\n");
+    pthread_join(init_thread, NULL);
 
     // 清理
     close(server_fd);
+    remove("/tmp/pivotmind.port");   /* P2: 旧版只写不删，外部脚本会读到过期端口 */
 
-    /* P0-1: 有界等待在途连接线程结束，避免 main 栈上 gw 被释放后
-     * 连接线程仍在访问（detached 线程不 join，只能轮询计数）。
-     * 上限 15s：慢连接 recv 超时 10s + 处理余量。 */
-    for (int w = 0; w < 150 && __sync_fetch_and_add(&g_conn_count, 0) > 0; w++)
-        usleep(100000);  // 100ms × 150
-
-    // 停止训练模式
-    if (gw.train_mode) {
-        // train_mode_destroy 内部会调 train_mode_stop，不重复调
-        train_mode_destroy(gw.train_mode);
-        gw.train_mode = NULL;
+    /* C1: 逐槽 join 在途连接线程（不再"轮询 15s 后强拆"）。
+     * 此刻 accept 循环已退出、监听 socket 已 close → 不会再有新连接占槽，
+     * 因此 ever 快照稳定。join 返回即代表该线程彻底离开 gw，之后才允许
+     * destroy/free gw。代价：关闭时长 = 最慢的那个在途请求。 */
+    fprintf(stderr, "[gateway] 等待在途连接结束 (%d)...\n", g_conn_count);
+    for (int s = 0; s < GW_MAX_CONN; s++) {
+        pthread_t tid;
+        int ever;
+        pthread_mutex_lock(&g_conn_mutex);
+        ever = g_conn_slot_ever[s];
+        tid  = g_conn_slots[s];
+        pthread_mutex_unlock(&g_conn_mutex);
+        if (ever) pthread_join(tid, NULL);
     }
 
-    gw_system_shutdown(&gw);
+    // 停止训练模式
+    if (gw->train_mode) {
+        // train_mode_destroy 内部会调 train_mode_stop，不重复调
+        train_mode_destroy(gw->train_mode);
+        gw->train_mode = NULL;
+    }
+
+    gw_system_shutdown(gw);
+
+    /* C1/P1-3: 拆完立刻断开全局指针，任何迟到线程都不会再解引用已释放的 gw */
+    g_gw = NULL;
+    free(gw);
 
     printf("[gateway] 再见!\n");
     return 0;

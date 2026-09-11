@@ -102,6 +102,7 @@ typedef struct LearningScheduler {
 
     // 后台线程
     pthread_t        thread;
+    int              thread_started;  /* B-P1-2 前提: 句柄是否有效（决定 stop 能否 join） */
     pthread_mutex_t  lock;
 } LearningScheduler;
 

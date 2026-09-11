@@ -1002,6 +1002,12 @@ static void train_do_auto_save(TrainMode* tm, const char* workdir) {
     (void)workdir;
     if (!tm->topology) return;
     printf("[训练] 强制存盘 (已喂%ld条)...\n", tm->progress.total_fed);
+    /* A-P1-4 fix: 0 节点门卫——不得用空状态覆盖已有主状态
+     * （master_save_state 内有绝对下限兜底，此处为调用点显式早退 + 明确日志） */
+    if (master_count_total_nodes(tm->topology) == 0) {
+        printf("[训练]   跳过存盘 (0 节点，避免覆盖有效状态)\n");
+        return;
+    }
     int saved = master_save_state(tm->topology, "pivotmind_state.dat");
     if (saved > 0) printf("[训练]   已保存 %d 节点\n", saved);
 }

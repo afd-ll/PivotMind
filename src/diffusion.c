@@ -975,6 +975,142 @@ static int word_prio_add(const char** word_prio, int* count, const char* w,
     return 1;
 }
 
+/* ================================================================
+ *  (N17) 扩散前沿：强度竞争取代计数上限
+ *  旧实现用 #define SPREAD_MAX_EXTRA 256 + 栈数组 spread1_ids[256] 限制
+ *  "每步最多点亮几个节点"——那是节奏的配额，不是拓扑的约束，且是先到先得
+ *  （遍历顺序即命运）。此处改为：每一跳先收齐候选邻居并**累加**其入边贡献，
+ *  再用"本跳最强贡献的一个相对带宽"作闸门裁决：够强的点亮，够不着的落选。
+ *  点亮数是闸门的输出，不是任何计数器的输入。
+ * ================================================================ */
+
+#define LANG_BOOST_SAME  1.3f   /* 同语言邻居激活增强（原 :1177，上移供 _lang_mult 复用） */
+#define LANG_BOOST_CROSS 0.4f   /* 跨语言邻居激活衰减（原 :1178） */
+/* 判断节点的语言类型 */
+#define NODE_IS_CJK(n) ((n) && (n)->concept && (unsigned char)(n)->concept[0] >= 0x80)
+
+/* 竞争前沿/候选池条目：节点 + 它在本跳拿到的累计强度 */
+typedef struct { int node_id; float strength; } SpreadEntry;
+
+/* 语言偏好乘子（原 :1226-1230 与 :1267-1270 两处逐字重复，此处合一，行为逐字等价） */
+static float _lang_mult(const ReasoningNode* nb, int lang_dom) {
+    if (lang_dom == 0 || !nb) return 1.0f;
+    if (NODE_IS_CJK(nb))
+        return (lang_dom > 0) ? LANG_BOOST_SAME : LANG_BOOST_CROSS;
+    return (lang_dom < 0) ? LANG_BOOST_SAME : LANG_BOOST_CROSS;
+}
+
+/* 记账开关：默认开（与 :1316 的 [扩散] 调试打印同一档次噪声）；PM_SPREAD_LEDGER=0 关闭 */
+static int _spread_ledger_on(void) {
+    static int cached = -1;
+    if (cached < 0) {
+        const char* e = getenv("PM_SPREAD_LEDGER");
+        cached = (e && e[0] == '0') ? 0 : 1;
+    }
+    return cached;
+}
+
+/* 前沿/候选池的按需增长（几何扩张：256 → ×2 → …）。
+ * limit 传 node_count：数组里最多只可能各装一次全图节点，故容量有**天然**上界
+ * （"同一节点不可能出现两次"的算术结果，不是人为配额）。
+ * 返回槽位下标(>=0)；-1 = 分配失败或已达 limit（调用方记账后放弃该候选）。 */
+static int _spread_push(SpreadEntry** arr, int* count, int* cap, int limit,
+                        int nid, float strength) {
+    if (*count >= *cap) {
+        int ncap = (*cap > 0) ? (*cap * 2) : 256;
+        if (ncap > limit) ncap = limit;
+        if (ncap <= *count) return -1;          /* 不可能再容纳 → 不越界写入 */
+        SpreadEntry* na = (SpreadEntry*)realloc(*arr, (size_t)ncap * sizeof(SpreadEntry));
+        if (!na) return -1;                     /* 真 OOM：指针保持原值，原数组仍有效 */
+        *arr = na;
+        *cap = ncap;
+    }
+    (*arr)[*count].node_id  = nid;
+    (*arr)[*count].strength = strength;
+    (*count)++;
+    return *count - 1;
+}
+
+/* 第 1 段·收候选：把 src 的**全部**出边贡献收进候选池（无数量上限、不提前退出）。
+ * 同一候选被多条边指到时**累加** —— 它该不该被点亮只取决于拿到的总强度，与遍历顺序无关。
+ * seen[] 三态：0=未触及 / k+1>0=已点亮(前沿槽 k) / -(c+1)<0=本跳候选池槽 c。
+ * 返回新收录候选数；*fail_out 累计 push 失败（OOM 或 limit 封顶），不静默吞掉。 */
+static int _spread_collect(ReasoningNode* src,
+                           SpreadEntry** pool, int* pool_count, int* pool_cap,
+                           int* seen, int limit, int lang_dom, float hop_weight,
+                           int* fail_out) {
+    if (!src || !src->edges || !seen) return 0;
+    int added = 0;
+    for (int e = 0; e < src->edge_count; e++) {
+        ReasoningNode* nb = src->edges[e].target;
+        if (!nb || nb->node_id == src->node_id) continue;   /* 自环跳过（原逻辑） */
+        int nid = nb->node_id;
+        if (nid < 0 || nid >= limit) continue;
+        int st = seen[nid];
+        if (st > 0) continue;                               /* 已在输入集/已点亮集：不重复点 */
+        float contrib = hop_weight * src->edges[e].weight * _lang_mult(nb, lang_dom);
+        if (st < 0) {                                       /* 本跳已收录：累加 */
+            int slot = -st - 1;
+            if (slot < *pool_count) (*pool)[slot].strength += contrib;
+            continue;
+        }
+        if (_spread_push(pool, pool_count, pool_cap, limit, nid, contrib) < 0) {
+            (*fail_out)++;                                  /* 记失败，不静默 */
+            continue;
+        }
+        seen[nid] = -(*pool_count);                         /* 负编码待裁决；槽位 = *pool_count-1 */
+        added++;
+    }
+    return added;
+}
+
+/* 第 2 段·竞争裁决：θ = max(显著性下限, 带宽 × 本跳峰值)。
+ * 达闸者点亮：写回前沿 + node->activation += 累计强度 + seen 记槽位（>0）；
+ * 未达闸者落选：seen 归还 0 —— 不计激活、不进 Jaccard 重加权、不做两跳源。
+ * 返回点亮数（= 闸门的输出）；dropped_out/peak_out/theta_out 供记账。 */
+static int _spread_compete(SpreadEntry* pool, int pool_count,
+                           SpreadEntry** front, int* front_count, int* front_cap,
+                           int limit, ReasoningNode** nodes, int* seen,
+                           float band, float floor_,
+                           int* dropped_out, float* peak_out, float* theta_out,
+                           int* fail_out) {
+    float peak = 0.0f;
+    for (int i = 0; i < pool_count; i++)
+        if (pool[i].strength > peak) peak = pool[i].strength;
+    float theta = peak * band;
+    if (theta < floor_) theta = floor_;
+    int lit = 0, dropped = 0;
+    for (int i = 0; i < pool_count; i++) {
+        int nid = pool[i].node_id;
+        if (!seen || nid < 0 || nid >= limit) { dropped++; continue; }
+        if (pool[i].strength >= theta) {                    /* 竞争胜出 */
+            int slot = _spread_push(front, front_count, front_cap, limit,
+                                    nid, pool[i].strength);
+            if (slot < 0) { seen[nid] = 0; (*fail_out)++; dropped++; continue; }
+            seen[nid] = slot + 1;                           /* 已点亮标记（当前只当布尔用） */
+            if (nodes[nid]) nodes[nid]->activation += pool[i].strength;
+            lit++;
+        } else {                                            /* 竞争落选 */
+            seen[nid] = 0;                                  /* 归还标记：不点亮、不参与后续 */
+            dropped++;
+        }
+    }
+    *dropped_out = dropped;
+    *peak_out    = peak;
+    *theta_out   = theta;
+    return lit;
+}
+
+/* (N17-fix) diffusion_generate 扩散段堆分配的**唯一**释放出口。
+ * 本批分配（seen 去重/槽位表、front 前沿、pool 候选池）只在此释放；
+ * 函数内自扩散段声明点起的每条控制流（正常收尾 / 早退）都必须经过它。
+ * 指针置 NULL 后幂等 —— 重复调用是安全的空操作。 */
+static void _spread_release(int** seen, SpreadEntry** front, SpreadEntry** pool) {
+    free(*seen);   *seen  = NULL;
+    free(*front);  *front = NULL;
+    free(*pool);   *pool  = NULL;
+}
+
 int diffusion_generate(DiffusionCtx* ctx,
                         const char* input,
                         const char** output_words,
@@ -1155,7 +1291,14 @@ int diffusion_generate(DiffusionCtx* ctx,
         }
         if (active_count > 0) break;  /* 长匹配优先 */
     }
-    if (active_count == 0) return 0;
+    /* (N17-fix) 本批扩散堆分配在此提前声明：使 active_count==0 等**早退**也
+     * 能走统一释放出口（此前释放写在函数中段，早退路径会绕过它）。 */
+    int*         seen      = NULL;   /* 去重 + 候选槽位三态表（语义见下方大注释） */
+    SpreadEntry* front     = NULL;   /* 已点亮前沿（一跳在前、两跳接后；跨跳复用） */
+    int          front_cap = 0;      /* 前沿容量（几何扩张，天然封顶 node_count） */
+    SpreadEntry* pool      = NULL;   /* 本跳候选池（按跳复用，容量跨跳保留） */
+    int          pool_cap  = 0;
+    if (active_count == 0) { _spread_release(&seen, &front, &pool); return 0; }
 
     /* ── 输入主导语言检测 ── */
     /* 统计激活节点中 CJK (>0x80) vs ASCII 的比例，决定扩散偏好 */
@@ -1173,29 +1316,42 @@ int diffusion_generate(DiffusionCtx* ctx,
     /* "苹果"激活 → "红色""水果"一跳 → "颜色""好吃"两跳 */
     #define SPREAD_1HOP 1.0f
     #define SPREAD_2HOP 0.4f
-    #define SPREAD_MAX_EXTRA 256
-    #define LANG_BOOST_SAME  1.3f   /* 同语言邻居激活增强 */
-    #define LANG_BOOST_CROSS 0.4f   /* 跨语言邻居激活衰减 */
-    /* 判断节点的语言类型 */
-    #define NODE_IS_CJK(n) ((n) && (n)->concept && (unsigned char)(n)->concept[0] >= 0x80)
+    /* (N17) 删除 SPREAD_MAX_EXTRA=256 与栈数组 spread1_ids[256]：
+     * 每步点亮多少改由本步激活强度竞争裁决（_spread_compete），
+     * 前沿改为堆上按需增长的 SpreadEntry 数组（_spread_push）。
+     * LANG_BOOST_SAME/CROSS、NODE_IS_CJK 已上移到 _lang_mult 上方复用。 */
+    #define SPREAD_COMPETE_BAND   0.15f   /* 竞争带宽：相对本跳最强贡献的比例。无量纲 → 与图规模/权重绝对值无关 */
+    #define SPREAD_SALIENCE_FLOOR 0.001f  /* 显著性下限：仅排除数值死值；与 :1413 的 0.01f / :1434 的 0.001f 两处既有门槛同量级 */
 
-    int spread1_ids[SPREAD_MAX_EXTRA];
-    int spread1_count = 0;
+    /* (N17-fix) front / pool / front_cap / pool_cap 已上移到本扩散段入口统一
+     * 声明（见 active_count==0 早退处），使所有出口共享同一释放点。 */
+    int          ledger_fail = 0;    /* push 失败累计（OOM / 容量自然封顶），进记账 */
 
-    /* opt(任务2): 邻居去重 O(n²) 线性扫 → bitmap O(1)。
-     * seen[] 生命周期覆盖整个 spread(一跳+两跳+Jaccard)，一轮只分配一次；
-     * 本库约定 node_id == 数组索引，seen[nid] 即"nid 已激活/已扩散"标记。
-     * calloc 失败(极端)回退原线性扫逻辑，行为不变。 */
+    /* opt(任务2): 邻居去重 O(n²) 线性扫 → 直接索引 O(1)。
+     * (N17) seen 由 0/1 位图升级为「去重 + 候选槽位」三态表（int）：
+     *   0        = 未触及
+     *   k+1 > 0  = 已点亮/已在输入集（跨跳判重与 Jaccard 统计仍只当布尔用）
+     *   -(c+1)<0 = 本跳候选池槽 c（待裁决）
+     * 生命周期覆盖整个 spread(一跳+两跳+Jaccard)，一轮只分配一次。
+     * 分配失败不再退化为线性扫（那会把成本炸成 O(候选×边)）：直接跳过本次
+     * 扩散并记账——上游 dialog 已有"扩散无结果"的降级路径。 */
     int diffusion_ncount = ctx->vocab->net->node_count;
-    uint8_t* seen = (uint8_t*)calloc((size_t)diffusion_ncount, 1);
-    if (seen) {
-        for (int a = 0; a < active_count; a++) {
-            int aid = active_ids[a];
-            if (aid >= 0 && aid < diffusion_ncount) seen[aid] = 1;
-        }
+    seen = (int*)calloc((size_t)diffusion_ncount, sizeof(int));
+    if (!seen) {
+        fprintf(stderr, "[扩散前沿] 记账: 去重索引分配失败 (N=%d, %zu B)，本次扩散跳过\n",
+                diffusion_ncount, (size_t)diffusion_ncount * sizeof(int));
+        _spread_release(&seen, &front, &pool);   /* (N17-fix) 早退必经统一出口 */
+        return 0;
+    }
+    for (int a = 0; a < active_count; a++) {
+        int aid = active_ids[a];
+        if (aid >= 0 && aid < diffusion_ncount) seen[aid] = 1;
     }
 
-    /* 一跳：直接匹配节点的邻居 */
+    /* ── 一跳：直接匹配节点的邻居 — 收候选 → 强度竞争 → 点亮 ──
+     * (N17) 不再有 `spread1_count < SPREAD_MAX_EXTRA` 的提前退出：
+     * 全量收齐候选，让强度而不是遍历位置决定谁亮。 */
+    int spread1_cand = 0;            /* 一跳候选数（裁决前 = 候选池条目数） */
     for (int a = 0; a < active_count; a++) {
         ReasoningNode* src = ctx->vocab->net->nodes[active_ids[a]];
         if (!src) continue;
@@ -1206,38 +1362,28 @@ int diffusion_generate(DiffusionCtx* ctx,
             node_cache_thaw((NodeCache*)ctx->master->node_cache,
                             ctx->vocab->net, src, 0);
         }
-        for (int e = 0; e < src->edge_count && spread1_count < SPREAD_MAX_EXTRA; e++) {
-            ReasoningNode* nb = src->edges[e].target;
-            if (!nb || nb->node_id == src->node_id) continue;
-            int nid = nb->node_id;
-            if (seen && (nid < 0 || nid >= diffusion_ncount)) continue;
-            int dup = 0;
-            if (seen) {
-                dup = seen[nid];
-                if (!dup) seen[nid] = 1;
-            } else {
-                for (int d = 0; d < active_count; d++)
-                    if (active_ids[d] == nid) { dup = 1; break; }
-                for (int d = 0; d < spread1_count; d++)
-                    if (spread1_ids[d] == nid) { dup = 1; break; }
-            }
-            if (!dup) {
-                float lang_mult = 1.0f;
-                if (lang_dom != 0 && NODE_IS_CJK(nb)) {
-                    lang_mult = (lang_dom > 0) ? LANG_BOOST_SAME : LANG_BOOST_CROSS;
-                } else if (lang_dom != 0) {
-                    lang_mult = (lang_dom < 0) ? LANG_BOOST_SAME : LANG_BOOST_CROSS;
-                }
-                nb->activation += SPREAD_1HOP * src->edges[e].weight * lang_mult;
-                spread1_ids[spread1_count++] = nid;
-            }
-        }
+        _spread_collect(src, &pool, &spread1_cand, &pool_cap,
+                        seen, diffusion_ncount, lang_dom, SPREAD_1HOP, &ledger_fail);
     }
+    /* 一跳裁决：点亮数 = 过闸候选数（输出），不是配额 */
+    int   front_count  = 0;          /* 前沿总数（已点亮节点数） */
+    int   spread1_drop = 0;
+    float spread1_peak = 0.0f, spread1_theta = 0.0f;
+    int   spread1_count = _spread_compete(pool, spread1_cand,
+                                          &front, &front_count, &front_cap,
+                                          diffusion_ncount, ctx->vocab->net->nodes,
+                                          seen, SPREAD_COMPETE_BAND, SPREAD_SALIENCE_FLOOR,
+                                          &spread1_drop, &spread1_peak, &spread1_theta,
+                                          &ledger_fail);
 
-    /* 两跳：一跳邻居的邻居 — 衰减系数 SPREAD_2HOP */
-    int spread2_count = 0;
-    for (int s = 0; s < spread1_count && spread1_count + spread2_count < SPREAD_MAX_EXTRA; s++) {
-        ReasoningNode* src = ctx->vocab->net->nodes[spread1_ids[s]];
+    /* ── 两跳：一跳竞胜者的邻居 — 同一套收候选+裁决（衰减 SPREAD_2HOP）──
+     * (N17) 只有赢了竞争的节点才配继续向外扩散；旧实现让"先到的 256 个"
+     * 当两跳源，同样是把顺序写进认知结果。
+     * 注意：本循环按 h 下标读 front[h]，front 只在 _spread_compete 里增长
+     * （候选收进的是 pool），故循环期间 front 不会被 realloc。 */
+    int spread2_cand = 0;            /* 候选池按跳复用：容量保留，条目清零 */
+    for (int h = 0; h < spread1_count; h++) {
+        ReasoningNode* src = ctx->vocab->net->nodes[front[h].node_id];
         if (!src) continue;
         /* v0.5.13 fix: 两跳同样先解冻 */
         if (src->is_cooled && ctx->master->node_cache &&
@@ -1245,42 +1391,24 @@ int diffusion_generate(DiffusionCtx* ctx,
             node_cache_thaw((NodeCache*)ctx->master->node_cache,
                             ctx->vocab->net, src, 0);
         }
-        for (int e = 0; e < src->edge_count; e++) {
-            ReasoningNode* nb = src->edges[e].target;
-            if (!nb || nb->node_id == src->node_id) continue;
-            int nid = nb->node_id;
-            if (seen && (nid < 0 || nid >= diffusion_ncount)) continue;
-            int dup = 0;
-            if (seen) {
-                dup = seen[nid];
-                if (!dup) seen[nid] = 1;
-            } else {
-                for (int d = 0; d < active_count; d++)
-                    if (active_ids[d] == nid) { dup = 1; break; }
-                for (int d = 0; d < spread1_count; d++)
-                    if (spread1_ids[d] == nid) { dup = 1; break; }
-                for (int d = 0; d < spread2_count; d++)
-                    if (spread1_ids[spread1_count + d] == nid) { dup = 1; break; }
-            }
-            if (!dup) {
-                float lm2 = 1.0f;
-                if (lang_dom != 0 && NODE_IS_CJK(nb))
-                    lm2 = (lang_dom > 0) ? LANG_BOOST_SAME : LANG_BOOST_CROSS;
-                else if (lang_dom != 0)
-                    lm2 = (lang_dom < 0) ? LANG_BOOST_SAME : LANG_BOOST_CROSS;
-                nb->activation += SPREAD_2HOP * src->edges[e].weight * lm2;
-                spread1_ids[spread1_count + spread2_count] = nid;
-                spread2_count++;
-            }
-        }
+        _spread_collect(src, &pool, &spread2_cand, &pool_cap,
+                        seen, diffusion_ncount, lang_dom, SPREAD_2HOP, &ledger_fail);
     }
-    /* (spread1/2 共享 spread1_ids 数组，不释放；仅用于去重) */
+    int   spread2_drop = 0;
+    float spread2_peak = 0.0f, spread2_theta = 0.0f;
+    int   spread2_count = _spread_compete(pool, spread2_cand,
+                                          &front, &front_count, &front_cap,
+                                          diffusion_ncount, ctx->vocab->net->nodes,
+                                          seen, SPREAD_COMPETE_BAND, SPREAD_SALIENCE_FLOOR,
+                                          &spread2_drop, &spread2_peak, &spread2_theta,
+                                          &ledger_fail);
+    /* (前沿 front 由 _spread_push 按需增长并跨跳复用，由 _spread_release 统一释放) */
 
     /* ── Jaccard 邻接相似度激活重加权 ── */
     /* 对被激活的节点，计算其与输入锚点集的邻居重叠率，提升语义精准度 */
     int total_spread = spread1_count + spread2_count;
     for (int si = 0; si < total_spread; si++) {
-        int nid = spread1_ids[si];
+        int nid = front[si].node_id;   /* (N17) 前沿改为 SpreadEntry 数组 */
         if (nid < 0 || nid >= ctx->vocab->net->node_count) continue;
         ReasoningNode* node = ctx->vocab->net->nodes[nid];
         if (!node || node->edge_count == 0) continue;
@@ -1294,22 +1422,44 @@ int diffusion_generate(DiffusionCtx* ctx,
         for (int e = 0; e < node->edge_count; e++) {
             int tgt = node->edges[e].target ? node->edges[e].target->node_id : -1;
             if (tgt < 0) continue;
-            if (seen) {
-                if (tgt < diffusion_ncount && seen[tgt]) shared++;
-                continue;
-            }
-            for (int a = 0; a < active_count; a++)
-                if (active_ids[a] == tgt) { shared++; break; }
-            if (shared > 0) continue; /* 只统计一次 */
-            for (int s = 0; s < total_spread && s < SPREAD_MAX_EXTRA; s++)
-                if (spread1_ids[s] == tgt) { shared++; break; }
+            /* (N17) seen 恒非 NULL（分配失败已在 :1196 附近提前返回），
+             * 原"线性扫降级"分支（含最后一处 SPREAD_MAX_EXTRA 引用）删除。
+             * 语义不变：seen[tgt]!=0 ⇔ tgt 在输入集/已点亮前沿里。 */
+            if (tgt < diffusion_ncount && seen[tgt]) shared++;
         }
         /* Jaccard ≈ shared / node->edge_count，映射到 [0.5, 1.5] 乘数 */
         float jac = (node->edge_count > 0) ? (float)shared / (float)node->edge_count : 0.0f;
         float boost = 0.5f + jac;  /* jac=0→0.5x, jac=1.0→1.5x */
         node->activation *= boost;
     }
-    free(seen);  /* opt(任务2): bitmap 生命周期结束，释放 */
+    /* (N17-fix) 统一出口：本批扩散堆分配（seen/front/pool）在此一次性释放。
+     * 本行之后的所有 return（评分数组分配失败等）都在释放之后，故同样无泄漏；
+     * 那些 return 也冗余调用 _spread_release（幂等），保持"每条控制流都释放"。 */
+    _spread_release(&seen, &front, &pool);
+
+    /* ── (N17) 记账：让"它为什么只点亮这么多"可观测 ──
+     * 一跳/两跳各自: 候选数 / 点亮数 / 强度落选数 / 闸门θ / 本跳峰值；
+     * 另有前沿容量、push 失败数、进程累计。默认开，PM_SPREAD_LEDGER=0 关。 */
+    {
+        static long g_calls = 0, g_cand1 = 0, g_lit1 = 0, g_drop1 = 0,
+                    g_cand2 = 0, g_lit2 = 0, g_drop2 = 0, g_fail = 0;
+        g_calls++; g_cand1 += spread1_cand; g_lit1 += spread1_count;
+        g_drop1 += spread1_drop;            g_cand2 += spread2_cand;
+        g_lit2  += spread2_count;           g_drop2 += spread2_drop;
+        g_fail  += ledger_fail;
+        if (_spread_ledger_on()) {
+            fprintf(stderr,
+                "[扩散前沿] 锚%d | 一跳: 候选%d 点亮%d 强度落选%d θ=%.4f(峰%.4f) | "
+                "两跳: 候选%d 点亮%d 强度落选%d θ=%.4f(峰%.4f) | "
+                "前沿%d/容量%d push失败%d | "
+                "累计[候选%ld 点亮%ld 落选%ld 调用%ld push失败%ld]\n",
+                active_count,
+                spread1_cand, spread1_count, spread1_drop, spread1_theta, spread1_peak,
+                spread2_cand, spread2_count, spread2_drop, spread2_theta, spread2_peak,
+                total_spread, front_cap, ledger_fail,
+                g_cand1 + g_cand2, g_lit1 + g_lit2, g_drop1 + g_drop2, g_calls, g_fail);
+        }
+    }
 
     /* 调试: 打印输入激活的词和其邻居 */
     {
@@ -1336,14 +1486,14 @@ int diffusion_generate(DiffusionCtx* ctx,
     if (!ctx->_vocab_scores || ctx->_vocab_cap < vn) {
         free(ctx->_vocab_scores);
         ctx->_vocab_scores = (float*)calloc(vn, sizeof(float));
-        if (!ctx->_vocab_scores) return -1;
+        if (!ctx->_vocab_scores) { _spread_release(&seen, &front, &pool); return -1; }
         ctx->_vocab_cap = vn;
     }
     /* 语义层 */
     if (sn > 0 && (!ctx->_sem_scores || ctx->_sem_cap < sn)) {
         free(ctx->_sem_scores);
         ctx->_sem_scores = (float*)calloc(sn, sizeof(float));
-        if (!ctx->_sem_scores) return -1;
+        if (!ctx->_sem_scores) { _spread_release(&seen, &front, &pool); return -1; }
         ctx->_sem_cap = sn;
     } else if (sn == 0) {
         ctx->_sem_scores = NULL;  /* 无语义层时清零 */
@@ -1352,7 +1502,7 @@ int diffusion_generate(DiffusionCtx* ctx,
     if (tn > 0 && (!ctx->_tpl_scores || ctx->_tpl_cap < tn)) {
         free(ctx->_tpl_scores);
         ctx->_tpl_scores = (float*)calloc(tn, sizeof(float));
-        if (!ctx->_tpl_scores) return -1;
+        if (!ctx->_tpl_scores) { _spread_release(&seen, &front, &pool); return -1; }
         ctx->_tpl_cap = tn;
     } else if (tn == 0) {
         ctx->_tpl_scores = NULL;
@@ -1361,7 +1511,7 @@ int diffusion_generate(DiffusionCtx* ctx,
     if (en > 0 && (!ctx->_emo_scores || ctx->_emo_cap < en)) {
         free(ctx->_emo_scores);
         ctx->_emo_scores = (float*)calloc(en, sizeof(float));
-        if (!ctx->_emo_scores) return -1;
+        if (!ctx->_emo_scores) { _spread_release(&seen, &front, &pool); return -1; }
         ctx->_emo_cap = en;
     } else if (en == 0) {
         ctx->_emo_scores = NULL;

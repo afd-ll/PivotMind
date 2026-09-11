@@ -78,6 +78,9 @@ CognitiveController* cognitive_controller_create(MasterTopology* master,
         int loaded = emergent_pos_load(cc->emergent_pos, NULL);
         if (loaded > 0) {
             LOG_INFO("[认知调度] 涌现词类系统: 已从磁盘恢复 %d 个锚点", loaded);
+        } else if (loaded < 0) {
+            /* A-P1-5 fix: 损坏不再静默——区分"文件不存在(0)"与"文件损坏(-1)" */
+            LOG_ERROR("[认知调度] 涌现词类文件损坏，已忽略并从种子重建 (返回 %d)", loaded);
         } else {
             LOG_INFO("[认知调度] 涌现词类系统已创建 (待懒初始化中心向量)");
         }

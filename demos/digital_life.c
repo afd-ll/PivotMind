@@ -85,7 +85,12 @@ static void trigger_learning_cycle(ActiveLearner* learner) {
 void signal_handler(int signum) {
     (void)signum;
     if (g_system) {
-        write(STDOUT_FILENO, "\n[系统] 收到退出信号，正在关闭...\n", 40);
+        /* P2-5: 旧版硬编码 40 字节，而该字面量 UTF-8 实际 47 字节（已实测
+         * `printf '%s' 该串 | wc -c` = 47）→ write 只写了前 40 字节，正好切在
+         * 多字节字符中间（输出半个"闭"字），且丢掉结尾换行。
+         * 用 sizeof-1 是编译期常量，async-signal-safe（不需要 strlen）。 */
+        static const char msg[] = "\n[系统] 收到退出信号，正在关闭...\n";
+        (void)!write(STDOUT_FILENO, msg, sizeof(msg) - 1);
         g_system->shutdown_requested = 1;
     }
 }

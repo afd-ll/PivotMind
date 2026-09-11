@@ -80,7 +80,9 @@
 
 ### P2-7 CI 增 ASan/UBSan 门禁（.github/workflows/ci.yml）
 
-- 新增 `asan-ubsan` job：`-fsanitize=address,undefined -fno-omit-frame-pointer -g -O1` 全量编译 + 7 个核心单测（model/memory/topology/dialog/learner/causal/forgetting）在 sanitizer 下运行，`halt_on_error=1`，内存错误与未定义行为直接红。
+- 新增 `asan-ubsan` job：`-fsanitize=address,undefined -fno-omit-frame-pointer -g -O1` 编译 + 核心单测在 sanitizer 下运行，`halt_on_error=1`。
+  - **更正（第三批）**：原实现把 ASan 旗标在 CI 里**另写了一份**、与 `Makefile` 的 `ASAN_CFLAGS` 不一致（CI 有 `-DHAS_OPENSSL`/`-lssl -lcrypto -lz`，本地 `make asan` 没有，而默认出货构建有）→ "CI 绿 ≠ 本地 asan 绿"。已收敛为单一来源（`Makefile` 的 `ASAN_CFLAGS`/`ASAN_LDFLAGS` + 新增 `make asan-test`），CI 只调 `make asan-test`。
+  - **更正（第三批）**：原 `ASAN_OPTIONS` 含 **`detect_leaks=0`**，**关闭了 LeakSanitizer**，与本条"内存错误…直接红"的宣称不符（nn 层满是大块 `malloc`，恰是最该开的地方）。已改为 `detect_leaks=1`。故本条的准确表述应为：**内存错误（含泄漏）与未定义行为直接红**。
 
 ### P2-6 gateway 单文件按模块拆分（demos/pivotmind_gateway.c → 6 文件）
 
@@ -97,13 +99,16 @@
 
 ## 验证
 
-- WSL gcc `-Wall -Wextra` 语法校验零告警（5 个 gateway 文件 + internal.h）。
+- WSL gcc `-Wall -Wextra` 语法校验零告警（5 个 gateway 文件 + internal.h）。**注意：这是"语法/编译级"校验，不是构建产物验证，也不是运行验证。**
+- **【可复现的编译验证（仓内，任何人可重跑）】**：`make -j2 gateway` 在 aarch64 上 EXIT=0、`-Wall -Wextra` 下 0 warning / 0 error，产出 `libpivotmind.a`(≈4.85 MB) 与 `build/bin/pivotmind_gateway`(≈498 KB, ELF aarch64)。此条由 2026-09-10 的独立审查（`E-nn-build-tests.md` 构建实录）在 `/tmp` 副本上实测复现。
 - 符号完整性审计：拆分后函数集合与 HEAD 38 个顶层函数逐一比对无缺失；P0-1（GW_MAX_CONN/g_conn_count 原子计数）、P0-2（memory_seed 原子落盘）改动均保留在拆分模块内。
 - git diff 共 16 文件变更（含 4 新增 .c + 1 internal.h + Makefile）；CHANGELOG 同步。
 - 记忆种子新旧格式兼容路径与哈希校验路径经代码审查核对。
 - 复审追补修复后重跑 WSL gcc `-Wall -Wextra` 语法校验（src/memory_system.c、src/thread_pool.c、demos/gateway_learn.c、demos/gateway_system.c、demos/gateway_internal.h、gateway_http.c、gateway_handlers.c、pivotmind_gateway.c）零告警。
 - 种子哈希对称性核对：保存端哈希输入 = 记录区（key_len/key/data_sz/data/type/importance 逐项），加载端第一遍哈希输入 = 同序列；footer 8 字节魔数 + 8 字节 hash 均不参与哈希，两端范围一致。
-- 种子保存/加载实测（WSL gcc 15 编译 memory_system.c + 独立测试程序，20 项断言全通过）：3 条记录（FLOAT/STRING/BINARY，134 字节）保存后重新载入返回 3，逐条数据/类型/重要性一致；落盘 hash == `FNV(记录区)` 且 != `FNV(记录区‖MAGIC)`；篡改 1 字节 → 返回 -1 且未部分加载；空种子（16 字节纯 footer）往返返回 0；截断文件 → 返回 -1。
+- 种子保存/加载验证：3 条记录（FLOAT/STRING/BINARY，134 字节）保存后重新载入返回 3，逐条数据/类型/重要性一致；落盘 hash == `FNV(记录区)` 且 != `FNV(记录区‖MAGIC)`；篡改 1 字节 → 返回 -1 且未部分加载；空种子（16 字节纯 footer）往返返回 0；截断文件 → 返回 -1。
+  - **⚠️ 验证方式与可复现性（如实声明）**：以上结论来自 **WSL gcc 15 上编译 `memory_system.c` 并运行一个仓外临时测试程序（20 项断言）**。该程序**不在本仓库中**（`tests/` 下无对应文件），因此**不可复现、不受 CI 保护**，也不会在后续改动中自动回归。
+  - **待办（归属第三批 I 组）**：把这些断言固化为仓内测试，本报告第 E-P1-11 条与本轮"门禁与诚实批"已记录该缺口。
 - 学习 worker 生命周期核对：`learn_queue_shutdown` 为唯一 stop 置位点与 join 点，调用点是 `gw_system_shutdown` 第一步，早于全部 destroy。
 
 ## 修改文件

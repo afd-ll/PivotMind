@@ -19,8 +19,11 @@ MAKEFLAGS += -j$(JOBS)
 CFLAGS = -pipe -Wall -Wextra -O2 -Iinclude -Iinclude/nn -Isrc/nn -I. -Ilibs -std=gnu99 -fopenmp -pthread -MD -MP -D_USE_MATH_DEFINES -D_FORTIFY_SOURCE=2 -flto=auto -DHAS_OPENSSL
 LDFLAGS = -lm -lssl -lcrypto -lcurl -lz -flto=auto
 DEBUG_CFLAGS = -Wall -Wextra -g -O0 -Iinclude -Iinclude/nn -Isrc/nn -I. -Ilibs -std=gnu99 -fopenmp -pthread -MD -MP -DDEBUG -D_FORTIFY_SOURCE=2
-ASAN_CFLAGS = -fsanitize=address,undefined -fno-omit-frame-pointer -g -O1 -Iinclude -Iinclude/nn -Isrc/nn -I. -Ilibs -std=gnu99 -fopenmp -pthread -MD -MP -DDEBUG
-ASAN_LDFLAGS = -fsanitize=address,undefined -lm -lcurl
+# ASan 旗标唯一权威来源（CI 不得再内联一份，见 ci.yml asan-ubsan job）。
+# 与默认出货构建（本文件 :19 CFLAGS 带 -DHAS_OPENSSL、:20 LDFLAGS 带 -lssl -lcrypto -lz）
+# 对齐，否则本地 `make asan` 覆盖不到 web_fetch.c 的 OpenSSL 代码路径。
+ASAN_CFLAGS = -fsanitize=address,undefined -fno-omit-frame-pointer -g -O1 -Iinclude -Iinclude/nn -Isrc/nn -I. -Ilibs -std=gnu99 -fopenmp -pthread -MD -MP -DDEBUG -DHAS_OPENSSL
+ASAN_LDFLAGS = -fsanitize=address,undefined -lm -lcurl -lssl -lcrypto -lz
 
 # 输出目录
 BUILD_DIR = build/bin
@@ -137,6 +140,29 @@ asan:
 	$(MAKE) clean
 	$(MAKE) CFLAGS="$(ASAN_CFLAGS)" LDFLAGS="$(ASAN_LDFLAGS)" all
 
+# ASan/UBSan 下运行核心单测（不依赖网络/终端的子集）。
+# 泄漏检测：CI 通过 ASAN_OPTIONS=detect_leaks=1 打开（本配方不写死，保持本地默认）；
+# Linux 下 ASan 默认 detect_leaks=1，故本地 `make asan-test` 同样会查泄漏。
+ASAN_TEST_TARGETS = test-tensor test-tensor-broadcast test-model test-metrics test-memory-unit test-topology-unit test-dialog-unit test-learner-unit test-causal-unit test-forgetting-unit
+ASAN_TEST_BINS = $(BUILD_DIR)/test_tensor $(BUILD_DIR)/test_tensor_broadcast $(BUILD_DIR)/test_model $(BUILD_DIR)/test_metrics $(BUILD_DIR)/test_memory_unit $(BUILD_DIR)/test_topology_unit $(BUILD_DIR)/test_dialog_unit $(BUILD_DIR)/test_learner_unit $(BUILD_DIR)/test_causal_unit $(BUILD_DIR)/test_forgetting_unit
+
+asan-test:
+	$(MAKE) clean
+	$(MAKE) CFLAGS="$(ASAN_CFLAGS)" LDFLAGS="$(ASAN_LDFLAGS)" $(ASAN_TEST_TARGETS)
+	@echo ""
+	@echo "== 运行 ASan/UBSan 单测 =="
+	@FAILED=0; \
+	for t in $(ASAN_TEST_BINS); do \
+		name=$$(basename $$t); \
+		if [ -x "$$t" ] && timeout 120 $$t > /dev/null 2>&1; then \
+			echo "  PASS  $$name"; \
+		else \
+			echo "  FAIL  $$name"; FAILED=$$((FAILED+1)); \
+		fi; \
+	done; \
+	echo ""; \
+	[ $$FAILED -eq 0 ]
+
 # 各个可执行文�?
 digital-life: $(BUILD_DIR)/digital_life
 gateway: $(BUILD_DIR)/pivotmind_gateway
@@ -187,8 +213,8 @@ $(BUILD_DIR)/test_trainer: tests/unit/test_trainer.c $(LIB_NAME)
 $(BUILD_DIR)/test_chinese: tests/unit/test_chinese.c $(LIB_NAME)
 	$(CC) $(CFLAGS) -I. -o $@ tests/unit/test_chinese.c -L. -lpivotmind $(LDFLAGS)
 
-$(BUILD_DIR)/test_io: tests/unit/test_io.c $(LIB_NAME)
-	$(CC) $(CFLAGS) -I. -o $@ tests/unit/test_io.c -L. -lpivotmind $(LDFLAGS)
+$(BUILD_DIR)/test_tensor_broadcast: tests/unit/test_tensor_broadcast.c $(LIB_NAME)
+	$(CC) $(CFLAGS) -I. -o $@ tests/unit/test_tensor_broadcast.c -L. -lpivotmind $(LDFLAGS)
 
 $(BUILD_DIR)/test_web_fetch: tests/unit/test_web_fetch.c $(LIB_NAME)
 	$(CC) $(CFLAGS) -I. -o $@ tests/unit/test_web_fetch.c -L. -lpivotmind $(LDFLAGS)
@@ -250,7 +276,7 @@ test-model: $(BUILD_DIR)/test_model
 test-metrics: $(BUILD_DIR)/test_metrics
 test-trainer: $(BUILD_DIR)/test_trainer
 test-chinese: $(BUILD_DIR)/test_chinese
-test-io: $(BUILD_DIR)/test_io
+test-tensor-broadcast: $(BUILD_DIR)/test_tensor_broadcast
 test-web-fetch: $(BUILD_DIR)/test_web_fetch
 test-dialog-unit: $(BUILD_DIR)/test_dialog_unit
 test-diffusion-unit: $(BUILD_DIR)/test_diffusion_unit
@@ -278,10 +304,14 @@ test-runner: $(BUILD_DIR)/test_runner
 
 # 运行所有测试（编译 + 执行 + 汇总）
 # 每个测试二进制退出码 0=通过, 非0=失败
-TEST_BINS = $(BUILD_DIR)/test_tensor $(BUILD_DIR)/test_model $(BUILD_DIR)/test_metrics $(BUILD_DIR)/test_trainer $(BUILD_DIR)/test_chinese $(BUILD_DIR)/test_io $(BUILD_DIR)/test_web_fetch $(BUILD_DIR)/test_dialog_unit $(BUILD_DIR)/test_diffusion_unit $(BUILD_DIR)/test_topology_unit $(BUILD_DIR)/test_memory_unit $(BUILD_DIR)/test_learner_unit $(BUILD_DIR)/test_causal_unit $(BUILD_DIR)/test_forgetting_unit $(BUILD_DIR)/test_media_reader $(BUILD_DIR)/test_visual_cortex $(BUILD_DIR)/test_pure $(BUILD_DIR)/test_search $(BUILD_DIR)/test_pfe_unit $(BUILD_DIR)/test_regression $(BUILD_DIR)/test_cognitive_controller
-TEST_FAST_BINS = $(BUILD_DIR)/test_model $(BUILD_DIR)/test_metrics $(BUILD_DIR)/test_visual_cortex $(BUILD_DIR)/test_dialog_unit $(BUILD_DIR)/test_diffusion_unit $(BUILD_DIR)/test_topology_unit $(BUILD_DIR)/test_memory_unit $(BUILD_DIR)/test_learner_unit $(BUILD_DIR)/test_causal_unit $(BUILD_DIR)/test_forgetting_unit $(BUILD_DIR)/test_media_reader $(BUILD_DIR)/test_pure $(BUILD_DIR)/test_search $(BUILD_DIR)/test_pfe_unit $(BUILD_DIR)/test_regression
+# 说明（P2-6）：TEST_BINS 是 test: 的执行清单，必须与 test: 的构建前置逐项一致；
+# TEST_FAST_BINS 刻意是它的子集（排除 test_chinese 控制台 smoke、test_trainer、
+# test_web_fetch、test_tensor、test_cc、test_tensor_broadcast、test_semantic_growth、
+# test_integration 等较慢/依赖终端或网络的项）。两列表口径显式维护，禁止有“定义了却没人跑”的目标。
+TEST_BINS = $(BUILD_DIR)/test_tensor $(BUILD_DIR)/test_tensor_broadcast $(BUILD_DIR)/test_model $(BUILD_DIR)/test_metrics $(BUILD_DIR)/test_trainer $(BUILD_DIR)/test_chinese $(BUILD_DIR)/test_web_fetch $(BUILD_DIR)/test_dialog_unit $(BUILD_DIR)/test_diffusion_unit $(BUILD_DIR)/test_topology_unit $(BUILD_DIR)/test_memory_unit $(BUILD_DIR)/test_learner_unit $(BUILD_DIR)/test_causal_unit $(BUILD_DIR)/test_forgetting_unit $(BUILD_DIR)/test_media_reader $(BUILD_DIR)/test_visual_cortex $(BUILD_DIR)/test_pure $(BUILD_DIR)/test_search $(BUILD_DIR)/test_pfe_unit $(BUILD_DIR)/test_regression $(BUILD_DIR)/test_semantic_growth $(BUILD_DIR)/test_integration $(BUILD_DIR)/test_cognitive_controller
+TEST_FAST_BINS = $(BUILD_DIR)/test_model $(BUILD_DIR)/test_metrics $(BUILD_DIR)/test_visual_cortex $(BUILD_DIR)/test_dialog_unit $(BUILD_DIR)/test_diffusion_unit $(BUILD_DIR)/test_topology_unit $(BUILD_DIR)/test_memory_unit $(BUILD_DIR)/test_learner_unit $(BUILD_DIR)/test_causal_unit $(BUILD_DIR)/test_tensor_broadcast $(BUILD_DIR)/test_forgetting_unit $(BUILD_DIR)/test_media_reader $(BUILD_DIR)/test_pure $(BUILD_DIR)/test_search $(BUILD_DIR)/test_pfe_unit $(BUILD_DIR)/test_regression
 
-test: test-tensor test-model test-metrics test-trainer test-chinese test-io test-web-fetch test-dialog-unit test-diffusion-unit test-topology-unit test-memory-unit test-learner-unit test-causal-unit test-forgetting-unit test-media-reader test-visual-cortex test-pure test-search test-pfe-unit test-regression test-cc
+test: test-tensor test-tensor-broadcast test-model test-metrics test-trainer test-chinese test-web-fetch test-dialog-unit test-diffusion-unit test-topology-unit test-memory-unit test-learner-unit test-causal-unit test-forgetting-unit test-media-reader test-visual-cortex test-pure test-search test-pfe-unit test-regression test-semantic-growth test-integration test-cc
 	@echo ""
 	@echo "╔══════════════════════════════════════╗"
 	@echo "║  运行单元测试...                     ║"
@@ -307,7 +337,7 @@ test: test-tensor test-model test-metrics test-trainer test-chinese test-io test
 	[ $$FAILED -eq 0 ]
 
 # 快速测试（跳过慢速/网络测试）
-test-fast: test-model test-metrics test-visual-cortex test-dialog-unit test-diffusion-unit test-topology-unit test-memory-unit test-learner-unit test-causal-unit test-forgetting-unit test-media-reader test-pure test-search test-pfe-unit test-regression
+test-fast: test-model test-metrics test-visual-cortex test-dialog-unit test-diffusion-unit test-topology-unit test-memory-unit test-learner-unit test-causal-unit test-tensor-broadcast test-forgetting-unit test-media-reader test-pure test-search test-pfe-unit test-regression
 	@echo ""
 	@echo "╔══════════════════════════════════════╗"
 	@echo "║  运行快速测试...                     ║"
@@ -332,4 +362,4 @@ test-fast: test-model test-metrics test-visual-cortex test-dialog-unit test-diff
 	echo "╚══════════════════════════════════════╝"; \
 	[ $$FAILED -eq 0 ]
 
-.PHONY: all linux debug asan digital-life gateway seed-builder debug-seed test-dialog corpus-train batch-learn batch-learn-lowmem template-build path-analyze compare-templates eval-templates qa-crawler run clean install test test-fast test-tensor test-model test-metrics test-trainer test-chinese test-io test-web-fetch test-dialog-unit test-diffusion-unit test-topology-unit test-memory-unit test-learner-unit test-causal-unit test-forgetting-unit test-media-reader test-visual-cortex test-pure test-search test-pfe-unit test-regression test-integration test-cc test-cc-full test-runner
+.PHONY: all linux debug asan asan-test digital-life gateway seed-builder debug-seed test-dialog corpus-train batch-learn batch-learn-lowmem template-build path-analyze compare-templates eval-templates qa-crawler run clean install test test-fast test-tensor test-model test-metrics test-trainer test-chinese test-tensor-broadcast test-web-fetch test-dialog-unit test-diffusion-unit test-topology-unit test-memory-unit test-learner-unit test-causal-unit test-forgetting-unit test-media-reader test-visual-cortex test-pure test-search test-pfe-unit test-regression test-semantic-growth test-integration test-cc test-cc-full test-runner

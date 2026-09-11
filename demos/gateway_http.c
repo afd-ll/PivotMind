@@ -188,7 +188,10 @@ int parse_request(int fd, HttpRequest* req) {
     memset(req, 0, sizeof(HttpRequest));
 
     // 读取请求 (chunked read, 每轮 4KB)
-    char buf[GW_MAX_REQUEST];
+    /* P1-4: 64KB 读缓冲从连接线程栈搬到堆（与 H2 把 HttpRequest 上堆配套，
+     * 两处合起来彻底清掉每连接 ~128KB 的栈占用）。 */
+    char* buf = (char*)malloc(GW_MAX_REQUEST);
+    if (!buf) return -1;
     int total = 0;
     int header_end = -1;
 
@@ -196,8 +199,8 @@ int parse_request(int fd, HttpRequest* req) {
     struct timeval tv = { .tv_sec = GW_READ_TIMEOUT_S, .tv_usec = 0 };
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
-    while (total < (int)sizeof(buf) - 1) {
-        int chunk = (int)sizeof(buf) - 1 - total;
+    while (total < GW_MAX_REQUEST - 1) {
+        int chunk = GW_MAX_REQUEST - 1 - total;
         if (chunk > 4096) chunk = 4096;  /* 一次读 4KB, 非逐字节 */
         int n = recv(fd, buf + total, chunk, 0);
         if (n <= 0) break;
@@ -228,7 +231,7 @@ int parse_request(int fd, HttpRequest* req) {
                 char* endp = NULL;
                 long content_length = strtol(num, &endp, 10);
                 if (endp == num) content_length = -1;  /* 非法数字头 */
-                if (content_length > GW_MAX_REQUEST - 4096) return -1; /* 保护: 留出 header 空间 */
+                if (content_length > GW_MAX_REQUEST - 4096) { free(buf); return -1; } /* 保护: 留出 header 空间 */
                 if (content_length >= 0 && body_received >= content_length) break; // body 完整
                 /* content_length < 0（非法头）时继续收完剩余缓冲后按无 body 处理 */
             } else {
@@ -237,7 +240,7 @@ int parse_request(int fd, HttpRequest* req) {
         }
     }
 
-    if (total == 0 || header_end < 0) return -1;
+    if (total == 0 || header_end < 0) { free(buf); return -1; }
 
     // 解析方法
     char* p = buf;
@@ -258,7 +261,7 @@ int parse_request(int fd, HttpRequest* req) {
         memcpy(req->body, buf + header_size, req->body_len);
         req->body[req->body_len] = '\0';
     } else if (req->body_len >= (int)sizeof(req->body)) {
-        return -1;  /* body 溢出 */
+        free(buf); return -1;  /* body 溢出 */
     }
 
     /* C1: 提取 X-Pivot-Token 请求头（只在 header 段找，防 body 伪造） */
@@ -272,5 +275,6 @@ int parse_request(int fd, HttpRequest* req) {
         req->token[ti] = '\0';
     }
 
+    free(buf);
     return 0;
 }

@@ -15,8 +15,8 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libsqlite3-dev libssl-dev libcurl4-openssl-dev zlib1g-dev
       - name: Build (x86_64, OpenMP)
         run: make linux
-      - name: Run tests (skip test-chinese — needs windows.h)
-        run: make test-tensor test-model test-metrics test-trainer test-io test-cc test-web-fetch test-dialog-unit test-diffusion-unit test-topology-unit test-memory-unit test-learner-unit test-causal-unit test-forgetting-unit test-integration
+      - name: Run tests
+        run: make test
       - name: Show binaries
         run: file build/bin/*
 
@@ -86,7 +86,7 @@ jobs:
           make linux \
             CC=aarch64-linux-gnu-gcc \
             CFLAGS="-Wall -Wextra -O2 -Iinclude -Iinclude/nn -Isrc/nn -I. -Ilibs -I/tmp/openssl-arm/include -I/tmp/curl-arm/include -I/tmp/zlib-arm/include -std=gnu99 -fopenmp -pthread -MD -MP -DHAS_OPENSSL" \
-            LDFLAGS="-L/tmp/openssl-arm/lib -L/tmp/curl-arm/lib -L/tmp/zlib-arm/lib -lm -lcurl -lssl -lcrypto -lz -pthread -static-libstdc++"
+            LDFLAGS="-L/tmp/openssl-arm/lib -L/tmp/curl-arm/lib -L/tmp/zlib-arm/lib -lm -lcurl -lssl -lcrypto -lz -pthread"
 
       - name: Verify ARM64 ELF
         run: |
@@ -98,9 +98,9 @@ jobs:
   asan-ubsan:
     runs-on: ubuntu-latest
     env:
-      ASAN_CFLAGS: "-fsanitize=address,undefined -fno-omit-frame-pointer -g -O1 -Iinclude -Iinclude/nn -Isrc/nn -I. -Ilibs -std=gnu99 -fopenmp -pthread -MD -MP -DDEBUG -DHAS_OPENSSL"
-      ASAN_LDFLAGS: "-fsanitize=address,undefined -lm -lcurl -lssl -lcrypto -lz"
-      ASAN_OPTIONS: "detect_leaks=0:halt_on_error=1:abort_on_error=1"
+      # 旗标不在 CI 内联：唯一来源是 Makefile 的 ASAN_CFLAGS/ASAN_LDFLAGS（make asan-test）。
+      # detect_leaks=1：与 changelogs/069 “内存错误与未定义行为直接红”的宣称一致。
+      ASAN_OPTIONS: "detect_leaks=1:halt_on_error=1:abort_on_error=1"
       UBSAN_OPTIONS: "halt_on_error=1:print_stacktrace=1"
     steps:
       - uses: actions/checkout@v4
@@ -108,25 +108,5 @@ jobs:
       - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libsqlite3-dev libssl-dev libcurl4-openssl-dev zlib1g-dev
 
-      - name: Build all with ASan/UBSan
-        run: |
-          make clean
-          make CFLAGS="$ASAN_CFLAGS" LDFLAGS="$ASAN_LDFLAGS" all
-
-      - name: Build core unit tests with sanitizers
-        run: make CFLAGS="$ASAN_CFLAGS" LDFLAGS="$ASAN_LDFLAGS" test-model test-memory-unit test-topology-unit test-dialog-unit test-learner-unit test-causal-unit test-forgetting-unit
-
-      - name: Run core unit tests under sanitizers
-        run: |
-          set -e
-          for t in \
-            build/bin/test_model \
-            build/bin/test_memory_unit \
-            build/bin/test_topology_unit \
-            build/bin/test_dialog_unit \
-            build/bin/test_learner_unit \
-            build/bin/test_causal_unit \
-            build/bin/test_forgetting_unit; do
-            echo "== $t"
-            timeout 120 "$t"
-          done
+      - name: Build + run core unit tests under ASan/UBSan
+        run: make asan-test

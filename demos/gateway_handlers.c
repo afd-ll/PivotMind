@@ -36,7 +36,21 @@ void handle_chat(GatewaySystem* gw, int fd, const char* body) {
         if (vocab && vocab->net) {
 #if LEARN_ASYNC_CHAT
             LearnTask* t = learn_queue_push(msg, "", 1);   /* 入队 + flush 等待 */
-            if (t) learn_task_wait(t);
+            if (t) {
+                learn_task_wait(t);
+            } else {
+                /* C3 配套: 队列未初始化/已关闭时 push 返回 NULL。旧版此处直接
+                 * 静默跳过，这一轮的学习（当轮新词可用性）就丢了。退化为同步
+                 * 学习，语义与 LEARN_ASYNC_CHAT=0 分支一致。
+                 * 安全性：本路径能跑起来说明连接线程尚未 join，即 gw_system_shutdown
+                 * 还没开始拆拓扑（关闭顺序：先 join 连接线程，再 shutdown）。 */
+                EmergentPOS* ep = (gw->prefrontal && gw->prefrontal->controller)
+                                  ? gw->prefrontal->controller->emergent_pos : NULL;
+                int prev_id = -1;
+                int learned = _learn_tokens(vocab, msg, &prev_id, ep);
+                if (learned > 0)
+                    printf("[gateway] 对话中学习(同步降级): +%d 个新词\n", learned);
+            }
 #else
             EmergentPOS* ep = (gw->prefrontal && gw->prefrontal->controller)
                               ? gw->prefrontal->controller->emergent_pos : NULL;
@@ -137,14 +151,18 @@ void handle_chat(GatewaySystem* gw, int fd, const char* body) {
                 total_nodes += gw->topology->sub_topologies[t]->net->node_count;
         }
 
+        /* P1-3: total_dialogs 是 64 个连接线程共享的计数器，旧版"读出来 +1
+         * 写进 JSON"再 `gw->total_dialogs++` 两处都非原子 → 统计丢失/重复。
+         * 用 __sync 一次原子取号（对照 gateway_learn.c:231 的用法）。 */
+        long dialog_no = (long)__sync_add_and_fetch(&gw->total_dialogs, 1);
+
         char json[GW_MAX_RESPONSE];
         snprintf(json, sizeof(json),
             "{\"reply\":\"%s\",\"nodes\":%d,\"dialogs\":%lld%s}",
-            escaped, total_nodes, (long long)gw->total_dialogs + 1,
+            escaped, total_nodes, (long long)dialog_no,
             use_pfe ? ",\"reasoning\":\"pfe\"" : "");
 
         http_json(fd, 200, json);
-        gw->total_dialogs++;
 
         /* v0.4.3: 保存本轮回复到多轮对话上下文 */
         if (response && response[0]) {
@@ -195,6 +213,11 @@ void handle_chat(GatewaySystem* gw, int fd, const char* body) {
     }
 }
 
+/* P1-3: 网关层共享可变状态的互斥——限流计数（last_learn_time/learn_burst）
+ * 与 qa_memory 懒初始化都由 64 个连接线程并发触碰，旧版全无保护。
+ * 文件级 static 即可：进程内只有一个 GatewaySystem（g_gw）。 */
+static pthread_mutex_t g_gw_mutex = PTHREAD_MUTEX_INITIALIZER;
+
 // POST /learn - 主动学习
 void handle_learn(GatewaySystem* gw, int fd, const char* body) {
     char msg[2048] = {0};
@@ -203,16 +226,22 @@ void handle_learn(GatewaySystem* gw, int fd, const char* body) {
         return;
     }
 
-    /* 限流：每秒最多500次，burst=500 */
+    /* P1-3: 限流状态是 gw 上的共享可变字段，/learn 可被 64 个连接线程并发
+     * 进入；旧版 "读 + 改 + 写" 无锁 → 计数丢失、限流形同虚设。
+     * 整个判定与更新放在一把互斥内，判定结果在锁内算出、锁外应答。 */
+    int over_limit = 0;
+    pthread_mutex_lock(&g_gw_mutex);
     time_t now = time(NULL);
     if (now == gw->last_learn_time) {
-        if (++gw->learn_burst > 500) {
-            http_json(fd, 429, "{\"error\":\"rate limit\"}");
-            return;
-        }
+        over_limit = (++gw->learn_burst > 500);
     } else {
         gw->last_learn_time = now;
         gw->learn_burst = 0;
+    }
+    pthread_mutex_unlock(&g_gw_mutex);
+    if (over_limit) {
+        http_json(fd, 429, "{\"error\":\"rate limit\"}");
+        return;
     }
 
     /* v0.5.9: 异步学习——入队（满丢最旧），固定 worker 消费。
@@ -566,8 +595,14 @@ void handle_health(GatewaySystem* gw, int fd) {
 }
 
 void handle_qa(GatewaySystem* gw, int fd, const char* body) {
-    if (!gw->qa_memory) { gw->qa_memory = qa_memory_create(NULL, 500000); }
-    if (!gw->qa_memory) { http_json(fd, 500, "{\"error\":\"qa failed\"}"); return; }
+    /* P1-3: 旧版无锁懒初始化 —— 两个并发 /qa 会各建一个 qa_memory，一个指针
+     * 被覆盖并永久泄漏（qa_memory_destroy 只释放后一个）。整个"检查+创建+
+     * 取用"放进互斥；本轮请求一律用本地快照 qam，不再二次解引用 gw->qa_memory。 */
+    pthread_mutex_lock(&g_gw_mutex);
+    if (!gw->qa_memory) gw->qa_memory = qa_memory_create(NULL, 500000);
+    QAMemory* qam = gw->qa_memory;
+    pthread_mutex_unlock(&g_gw_mutex);
+    if (!qam) { http_json(fd, 500, "{\"error\":\"qa failed\"}"); return; }
     int added = 0; const char* p = body;
     while (p && *p) {
         const char* qk = strstr(p, "\"q\""); if (!qk) break;
@@ -577,9 +612,9 @@ void handle_qa(GatewaySystem* gw, int fd, const char* body) {
         const char* av = strchr(ak+3,':'); if(!av)break; av=strchr(av,'"'); if(!av)break; av++;
         const char* ae = strchr(av,'"'); if(!ae)break;
         char q[1024]={0},a[1024]={0}; int ql=qe-qv,al=ae-av;
-        if(ql>0&&ql<1024&&al>0&&al<1024){memcpy(q,qv,ql);memcpy(a,av,al); if(qa_memory_add(gw->qa_memory,q,a)==0)added++;}
+        if(ql>0&&ql<1024&&al>0&&al<1024){memcpy(q,qv,ql);memcpy(a,av,al); if(qa_memory_add(qam,q,a)==0)added++;}
         p=ae+1;
     }
-    char rs[128]; snprintf(rs,128,"{\"result\":\"ok\",\"added\":%d,\"total\":%d}",added,qa_memory_count(gw->qa_memory));
+    char rs[128]; snprintf(rs,128,"{\"result\":\"ok\",\"added\":%d,\"total\":%d}",added,qa_memory_count(qam));
     http_json(fd,200,rs);
 }

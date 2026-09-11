@@ -798,11 +798,15 @@ DialogReasoning* dialog_reason(DialogInput* input, MasterTopology* master,
         }
 
         // 3. 提交到线程池（拓扑间并行传播）
+        /* C4: 池正忙时 batch() 返回 THREAD_POOL_BUSY(-2) 且未执行任何任务；
+         * 本线程必须自己把整批串行跑掉（下方 else 分支就是现成的串行路径）。 */
         ThreadPool* pool = master_get_thread_pool(master);
+        int batch_ok = 0;
         if (pool && active_topos > 1) {
-            thread_pool_batch(pool, th_tasks, active_topos);
-        } else {
-            // 单拓扑或线程池不可用：串行回退
+            batch_ok = (thread_pool_batch(pool, th_tasks, active_topos) >= 0);
+        }
+        if (!batch_ok) {
+            // 单拓扑 / 线程池不可用 / 池正忙：串行回退
             for (int i = 0; i < active_topos; i++)
                 dialog_topo_worker(&tasks[i]);
         }

@@ -26,6 +26,7 @@
 #else
 #include <pthread.h>
 #include <unistd.h>
+#include <fcntl.h>      /* P1-2 fix: open / O_RDONLY / O_DIRECTORY（目录 fsync） */
 #endif
 
 // ==================== 常量定义 ====================
@@ -57,7 +58,21 @@ MasterTopology* master_topology_create(int max_sub_topos) {
     
     MasterTopology* master = (MasterTopology*)malloc(sizeof(MasterTopology));
     if (!master) return NULL;
-    
+
+    /* 运行时注入型指针必须显式初始化：malloc 不置零，字段里是脏内存，而所有使用点
+     * 都写成 `if (master->X)` 的守卫形式——非 NULL 的垃圾值会让守卫失效，直接解引用
+     * 野指针（ASan 下 diffusion.c 解引用 node_cache->auto_thaw_ok 已实测 SEGV）。
+     * 这三个字段均由外部按需注入，初值必须是 NULL：
+     *   node_cache          ← demos/gateway_system.c（脑缓存注入；全仓唯一赋值点）
+     *   ext_dict            ← tools/quick_chat.c / tools/feed_cli.c / tools/batch_learn.c
+     *   cognitive_state_ptr ← demos/gateway_system.c（认知状态注入）
+     * 另外 _pad_parallel_mode 是保留 int（全仓无任何读取点），一并置零，
+     * 使本结构由本函数创建后不再存在任何未初始化字段。 */
+    master->node_cache = NULL;
+    master->ext_dict = NULL;
+    master->cognitive_state_ptr = NULL;
+    master->_pad_parallel_mode = 0;
+
     int capacity = (max_sub_topos > 0) ? max_sub_topos : INITIAL_SUB_TOPO_CAPACITY;
     
     // 创建字符串池
@@ -1159,13 +1174,20 @@ static void topo_propagate_worker(void* arg) {
     task->propagated_count = count;
 }
 
+/* C4: 懒创建互斥。旧版是无锁 check-then-act：两个连接线程同时首次调用会
+ * 各建一个池，其中一个指针被覆盖并泄漏（连同它的 num_workers 个线程）。 */
+static pthread_mutex_t g_pool_create_mutex = PTHREAD_MUTEX_INITIALIZER;
+
 /** 获取或创建线程池（懒创建，自动检测CPU核数） */
 ThreadPool* master_get_thread_pool(MasterTopology* master) {
     if (!master) return NULL;
+    pthread_mutex_lock(&g_pool_create_mutex);
     if (!master->thread_pool) {
         master->thread_pool = thread_pool_create();
     }
-    return master->thread_pool;
+    ThreadPool* pool = master->thread_pool;
+    pthread_mutex_unlock(&g_pool_create_mutex);
+    return pool;
 }
 
 /**
@@ -1237,7 +1259,14 @@ int master_propagate_parallel_topology(MasterTopology* master, float threshold) 
     if (task_idx == 0) return 0;
 
     // 4. 批量提交 — 主线程 + workers 并行窃取执行
-    thread_pool_batch(pool, th_tasks, task_idx);
+    /* C4: 单例池同一时刻只允许一个批次；忙时 batch() 返回 THREAD_POOL_BUSY(-2)
+     * 且**没有执行任何任务**，必须由本线程串行跑完整批。
+     * 旧版忽略返回值 = 这一批拓扑传播静默丢失（并行传播路径下所有活跃拓扑
+     * 都不再传播，表现是"回复变差"而不是报错）。 */
+    if (thread_pool_batch(pool, th_tasks, task_idx) < 0) {
+        for (int i = 0; i < task_idx; i++)
+            topo_propagate_worker(&tasks[i]);
+    }
 
     // 5. 汇总结果
     int total = 0;
@@ -1870,6 +1899,16 @@ static int topology_walk_greedy_impl(SubTopology* sub, int start_node_id,
     float mean_features[NODE_FEATURE_DIM] = {0};
     int has_mean = 0;
 
+    /* 路径回溯权重缓存：循环外单次分配，循环内每步 memset 复位。
+     * 原先在循环体内每步 calloc、并在循环体末尾 free；但循环内有多个 break
+     * 退出点（剪枝 2173 / 语义场休止 / 候选耗尽），一旦从 break 退出就跳过
+     * 循环尾部的 free → 每次泄漏 node_count*sizeof(float) 字节。
+     * 改为「分配 + 释放在同一层、且与循环同生共死」：唯一的 free 位于循环之后
+     * 的函数唯一返回路径上，任何 break 都只离开循环、无法绕过 free。
+     * 每步语义不变：原来每次 calloc 都是同样大小且需要全零起点，
+     * 这里用每步 memset 复位等价替代 calloc 的置零。 */
+    float* path_target_weights = (float*)calloc(node_count, sizeof(float));
+
     // 贪心走边循环
     while (path_len < max_len) {
         ReasoningNode* current = net->nodes[current_id];
@@ -1890,8 +1929,9 @@ static int topology_walk_greedy_impl(SubTopology* sub, int start_node_id,
             if (prune_threshold > PM_WALK_PRUNE_CEIL) prune_threshold = PM_WALK_PRUNE_CEIL;
         }
 
-        // 预计算路径回溯权重缓存（每步一次，替代每候选 O(path_len×avg_degree)）
-        float* path_target_weights = (float*)calloc(node_count, sizeof(float));
+        // 预计算路径回溯权重缓存（每步复位一次，替代每候选 O(path_len×avg_degree)）
+        if (path_target_weights)
+            memset(path_target_weights, 0, (size_t)node_count * sizeof(float));
         if (path_target_weights) {
             for (int pi = 0; pi < path_len; pi++) {
                 int pid = path_out[pi];
@@ -2251,9 +2291,11 @@ static int topology_walk_greedy_impl(SubTopology* sub, int start_node_id,
         // 更新情感基调（EMA，α=0.3）
         if (cont_node)
             context_valence = context_valence * 0.7f + cont_node->valence * 0.3f;
-        free(path_target_weights);
+        /* 注意：path_target_weights 不在此处释放（原实现在此 free，会被上面的
+         * break 退出路径跳过，造成每步泄漏）。统一到循环之后的唯一返回路径释放。 */
     }
 
+    free(path_target_weights);   /* 与循环外那次 calloc 配对；free(NULL) 亦安全 */
     if (local_visited) free(local_visited);
     return path_len;
 }
@@ -4197,6 +4239,11 @@ static int master_save_state_locked(MasterTopology* master, const char* file_pat
 
     /* v0.5.12 防呆：坏状态不进主文件 */
     int cur_nodes = master_count_total_nodes(master);
+    /* A-P1-4 fix: 与快照路径同款的绝对下限（见 master_save_state 内注释）。 */
+    if (cur_nodes <= 0 && access(file_path, F_OK) == 0) {
+        LOG_ERROR("[状态持久化] 绝对下限防呆(locked): 0 节点且 %s 已存在，拒绝覆盖", file_path);
+        return -1;
+    }
     if (g_last_saved_nodes > 0 && cur_nodes < g_last_saved_nodes * 3 / 5) {
         snprintf(suspect_path, sizeof(suspect_path), "%s.suspect", file_path);
         fprintf(stderr, "[状态持久化] ⚠️ 防呆触发: 本次 %d 节点 < 基准 %d×60%%，"
@@ -4211,7 +4258,11 @@ static int master_save_state_locked(MasterTopology* master, const char* file_pat
      * → 重启加载失败"数据不完整" → 62,105 链接全丢（08-09 今早只剩 791）。
      * 写 .tmp 被杀只毁 tmp，rename 是原子的，正式文件永远完整。 */
     char tmp_path[1024];
-    snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", file_path);
+    /* A-P1-2 fix: tmp 名加 pid+序号（与快照路径一致） */
+    static unsigned long msl_seq = 0;
+    unsigned long msl_n = __sync_add_and_fetch(&msl_seq, 1);
+    snprintf(tmp_path, sizeof(tmp_path), "%s.tmp.%ld.%lu",
+             file_path, (long)getpid(), msl_n);
     FILE* fp = fopen(tmp_path, "wb");
     if (!fp) {
         LOG_ERROR("[状态持久化] 无法创建临时文件: %s", tmp_path);
@@ -4431,13 +4482,32 @@ static int master_save_state_locked(MasterTopology* master, const char* file_pat
         fwrite(&master->cross_hit_round, sizeof(int), 1, fp);
     }
     
+    /* A-P1-2 fix: fflush+fsync 内容落盘再解锁+fclose；失败弃 tmp */
+    if (fflush(fp) != 0 || fsync(fileno(fp)) != 0) {
+        LOG_ERROR("[状态持久化] fsync 失败: %s", tmp_path);
+        fclose(fp);
+        pthread_rwlock_unlock(&master->rwlock);
+        unlink(tmp_path);
+        return -1;
+    }
     fclose(fp);
     pthread_rwlock_unlock(&master->rwlock);
 
     /* v0.5.10: 原子替换——tmp 写完后 rename 覆盖正式文件 */
     if (rename(tmp_path, file_path) != 0) {
         LOG_ERROR("[状态持久化] 原子替换失败: %s → %s", tmp_path, file_path);
+        unlink(tmp_path);
         return -1;
+    }
+
+    /* A-P1-2 fix: 目录 fsync */
+    {
+        char dir_buf[1024];
+        snprintf(dir_buf, sizeof(dir_buf), "%s", file_path);
+        char* slash = strrchr(dir_buf, '/');
+        if (slash) *slash = '\0'; else strcpy(dir_buf, ".");
+        int dfd = open(dir_buf, O_RDONLY | O_DIRECTORY);
+        if (dfd >= 0) { fsync(dfd); close(dfd); }
     }
 
     LOG_INFO("[状态持久化] 已保存到 %s (节点=%d, 链接=%d)", 
@@ -4477,6 +4547,16 @@ int master_save_state(MasterTopology* master, const char* file_path) {
     int cur_total = master_count_persistable_nodes(master);
     char suspect_path[1100];
     const char* target_path = file_path;
+
+    /* A-P1-4 fix: 绝对下限——当前无可持久化节点且主状态文件已存在时，绝不用空状态
+     * 覆盖有效文件。此前防呆条件是 g_last_saved_nodes>0，而它进程启动即 0，
+     * 主状态加载失败后基线保持 0 → 防呆恒短路 → 空状态可覆盖主文件。
+     * 现把"启动即 0"的短路补成完备判定：无论比例防呆是否可用，0 节点都不得覆盖。 */
+    if (cur_total <= 0 && access(file_path, F_OK) == 0) {
+        LOG_ERROR("[状态持久化] 绝对下限防呆: 当前 0 可持久化节点且 %s 已存在，"
+                  "拒绝覆盖（保留最后好状态）", file_path);
+        return -1;
+    }
     if (g_last_saved_nodes > 0 && cur_total < g_last_saved_nodes * 3 / 5) {
         snprintf(suspect_path, sizeof(suspect_path), "%s.suspect", file_path);
         fprintf(stderr, "[状态持久化] ⚠️ 防呆触发: 本次 %d 节点 < 基准 %d×60%%，"
@@ -4486,7 +4566,11 @@ int master_save_state(MasterTopology* master, const char* file_path) {
     }
 
     char tmp_path[1024];
-    snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", target_path);
+    /* A-P1-2 fix: tmp 名加 pid+序号，避免并发/重入互踩同一 .tmp */
+    static unsigned long mss_seq = 0;
+    unsigned long mss_n = __sync_add_and_fetch(&mss_seq, 1);
+    snprintf(tmp_path, sizeof(tmp_path), "%s.tmp.%ld.%lu",
+             target_path, (long)getpid(), mss_n);
 
     FILE* fp = fopen(tmp_path, "wb");
     if (!fp) {
@@ -4580,12 +4664,30 @@ int master_save_state(MasterTopology* master, const char* file_path) {
         return -1;
     }
 
+    /* A-P1-2 fix: fflush+fsync 内容落盘再 fclose；失败弃 tmp，绝不 rename */
+    if (fflush(fp) != 0 || fsync(fileno(fp)) != 0) {
+        LOG_ERROR("[状态持久化] fsync 失败: %s", tmp_path);
+        fclose(fp);
+        unlink(tmp_path);
+        return -1;
+    }
     fclose(fp);
 
     /* v0.5.10: 原子替换——tmp 写完后 rename 覆盖正式文件 */
     if (rename(tmp_path, target_path) != 0) {
         LOG_ERROR("[状态持久化] 原子替换失败: %s → %s", tmp_path, target_path);
+        unlink(tmp_path);
         return -1;
+    }
+
+    /* A-P1-2 fix: 目录 fsync——保证 rename 目录项本身落盘 */
+    {
+        char dir_buf[1024];
+        snprintf(dir_buf, sizeof(dir_buf), "%s", target_path);
+        char* slash = strrchr(dir_buf, '/');
+        if (slash) *slash = '\0'; else strcpy(dir_buf, ".");
+        int dfd = open(dir_buf, O_RDONLY | O_DIRECTORY);
+        if (dfd >= 0) { fsync(dfd); close(dfd); }
     }
 
     LOG_INFO("[状态持久化] 已保存到 %s (节点=%d, 链接=%d)",
