@@ -40,8 +40,13 @@ struct ThreadPool {
     // 当前批次
     ThreadTask* tasks;            // 任务数组（外部引用，不拥有）
     int task_count;               // 任务总数
-    volatile int next_index;      // 下一个待窃取的任务索引（原子递增）
-    volatile int workers_done;    // 已完成窃取的 worker 数
+    volatile int next_index;      // 下一个待窃取的任务索引（**只在 mutex 内读写**，见下）
+    /* R3-1: 本批尚未执行完的任务数（原子递减；0 == 本批所有 func 已返回）。
+     * 取代旧的 workers_done——后者记的是"worker 跑完的趟数"：同一 worker 出列后
+     * 因 running 仍为 1 会立刻再进一轮"空转趟"并再记一笔，于是 num_workers 次
+     * 记数能由远少于 num_workers 个 worker 攒齐 → batch() 提前返回。 */
+    volatile int tasks_left;
+    int batch_epoch;              // R3-1: 批次代次，submit 时 +1（受 mutex 保护）
 
     // 同步
     pthread_mutex_t mutex;
@@ -86,52 +91,60 @@ static int detect_cpu_count(void) {
 
 static void* worker_loop(void* arg) {
     ThreadPool* pool = (ThreadPool*)arg;
+    /* R3-1: 本 worker 已认领的批次代次。0 = 尚未认领任何批次
+     * （batch_epoch 初值 0，故创建后 worker 一律先睡在 cv_batch 上）。 */
+    int my_epoch = 0;
 
     while (1) {
-        // 等待批次或退出
+        /* R3-1: 代次握手 —— 一个 worker 对同一代**只进窃取循环一次**。
+         * 旧闸门只判 running，而批内 running 恒为 1，worker 出列后立刻再进一轮
+         * "空转趟"（一件活不干）并给 workers_done 多记一笔——这就是屏障被提前
+         * 凑满、batch() 提前返回、调用方 free 与 worker 解引用重叠的根源。
+         * 现在：只有池里确实推进了代次（有新批次）才准进；无活可干就睡在真实
+         * 批次信号上（不是休眠/退避，只是不再空转白烧 CPU）。 */
         pthread_mutex_lock(&pool->mutex);
-        while (!pool->running && !pool->shutdown) {
+        while (pool->batch_epoch == my_epoch && !pool->shutdown) {
             pthread_cond_wait(&pool->cv_batch, &pool->mutex);
         }
-        /* 仅在「非批次进行中」时才响应 shutdown：若 destroy 恰逢批次进行
-         * (running=1)，worker 应完成本批任务并上报 done，让 batch() 正常收尾，
-         * 而不是中途退出导致 workers_done 永远凑不齐、destroy 只能等超时。 */
-        if (pool->shutdown && !pool->running) {
+        if (pool->shutdown) {
+            /* 本 worker 退出前，它对已认领代次的任务要么已执行完、要么已在上方
+             * 递减 tasks_left；且它此刻不在窃取循环里（不会再去碰任务数组），
+             * 因此 batch() 的完成账不受影响，destroy() 可安全 join。 */
             pthread_mutex_unlock(&pool->mutex);
             return NULL;
         }
-        /* 锁内快照本批任务数：防止本批超时强退后，下一批重置 next_index/
-         * task_count 导致慢 worker 串批执行新批次任务（跨代干扰）。
-         * ⚠ 安全前提（P1-1 修复后新增，勿改回超时逻辑）：thread_pool_batch()
-         * 已废弃"10s 超时强制结束并返回成功"，超时只告警并继续等待——即
-         * "batch 返回 == 本批任务全部执行完"是 API 契约。本快照只能防"串批"，
-         * 挡不住"提前返回"：一旦有人恢复超时提前返回，调用方会按 batch 已返回
-         * 释放栈上 tasks（dialog_system/multi_topology 均为栈数组），而慢 worker
-         * 仍在按本快照窃取执行 → 立刻复现 use-after-free。 */
-        int batch_count = pool->task_count;
-        /* C4: 任务数组指针必须和计数在同一个临界区里快照。
-         * 旧版在窃取循环里读 pool->tasks：一旦有人并发提交第二个批次，
-         * 这里读到的就是**别人的数组**（执行错批次任务），且调用方此后
-         * free 自己的数组时本 worker 仍在写 → use-after-free。 */
-        ThreadTask* batch_tasks = pool->tasks;
+        my_epoch = pool->batch_epoch;
         pthread_mutex_unlock(&pool->mutex);
 
-        // 任务窃取：原子取下一个未分配的任务（用本地快照计数与快照数组）
+        /* R3-1: 任务窃取。索引分配、数组快照、代次校验**同处一个临界区**：
+         *  worker 因此绝不可能拿"上一代的数组"去执行"下一代的索引"
+         *  （旧版 TSan 报的 thread_pool.c:270↔:121 与跨代串批，源头即此）。
+         *  临界区只有几条指令，不含任务体；并行度一点没减（红线：不加麻药）。 */
         while (1) {
-            int idx = __sync_fetch_and_add(&pool->next_index, 1);
-            if (idx >= batch_count) break;
-            batch_tasks[idx].func(batch_tasks[idx].arg);
-            __sync_fetch_and_add(&pool->total_tasks_executed, 1);
-        }
+            pthread_mutex_lock(&pool->mutex);
+            if (pool->batch_epoch != my_epoch) {   /* batch() 已收尾/换批 → 退出本代 */
+                pthread_mutex_unlock(&pool->mutex);
+                break;
+            }
+            int idx = pool->next_index++;
+            ThreadTask* bt = pool->tasks;
+            int bc = pool->task_count;
+            pthread_mutex_unlock(&pool->mutex);
 
-        // 报告完成
-        pthread_mutex_lock(&pool->mutex);
-        pool->workers_done++;
-        if (pool->workers_done >= pool->num_workers) {
-            // 所有 worker 完成，通知主线程
-            pthread_cond_signal(&pool->cv_done);
+            if (idx >= bc) break;                  /* 本代无活了 */
+            bt[idx].func(bt[idx].arg);
+            __sync_fetch_and_add(&pool->total_tasks_executed, 1);
+
+            /* R3-1: 本任务已执行完（func 已返回）→ 递减未完成账；
+             * 减到 0 的那个线程负责唤醒 batch() 的等待者。
+             * 注意：此递减发生在 func 返回**之后**，所以 tasks_left==0
+             *  ⟹ 所有 func 都已返回 ⟹ 调用方 free 安全。 */
+            if (__sync_sub_and_fetch(&pool->tasks_left, 1) == 0) {
+                pthread_mutex_lock(&pool->mutex);
+                pthread_cond_broadcast(&pool->cv_done);
+                pthread_mutex_unlock(&pool->mutex);
+            }
         }
-        pthread_mutex_unlock(&pool->mutex);
     }
     return NULL;
 }
@@ -157,7 +170,8 @@ ThreadPool* thread_pool_create_with_size(int num_threads) {
     pool->in_batch = 0;      /* C4: 批次闸门初始空闲 */
     pool->shutdown = 0;
     pool->next_index = 0;
-    pool->workers_done = 0;
+    pool->tasks_left = 0;    /* R3-1: 完成账（无在飞批次） */
+    pool->batch_epoch = 0;   /* R3-1: 代次 0 = 尚无批次（worker 的 my_epoch 初值同为 0） */
     pool->total_batches = 0;
     pool->total_tasks_executed = 0;
 
@@ -248,11 +262,11 @@ void thread_pool_destroy(ThreadPool* pool) {
 int thread_pool_batch(ThreadPool* pool, ThreadTask* tasks, int count) {
     if (!pool || !tasks || count <= 0) return -1;
 
-    /* 设置批次（必须在锁内完成：与 worker 的"上报完成"临界区互斥）。
+    /* 设置批次（必须在锁内完成：与 worker 的"代次握手/窃取"临界区互斥）。
      * C4: 批次闸门 —— 池内同一时刻只允许一个批次。
      * 旧版无此守卫：两个连接线程并发进入后，后进者会把 tasks/task_count/
-     * next_index/workers_done 全改成自己的批次 → 先进者的 worker 执行错批次
-     * 任务、先进者可能提前返回并 free(tasks)，而慢 worker 仍在写该数组（UAF）。
+     * next_index 全改成自己的批次 → 先进者的 worker 执行错批次任务、
+     * 先进者可能提前返回并 free(tasks)，而慢 worker 仍在写该数组（UAF）。
      * 这里不做阻塞等待：忙时立即返回 THREAD_POOL_BUSY，由调用方串行降级
      * （不引入新的阻塞点，关闭路径不会因此挂住）。 */
     pthread_mutex_lock(&pool->mutex);
@@ -268,44 +282,56 @@ int thread_pool_batch(ThreadPool* pool, ThreadTask* tasks, int count) {
     pool->tasks = tasks;
     pool->task_count = count;
     pool->next_index = 0;
-    pool->workers_done = 0;
+    /* R3-1: 完成账 = 任务数（不是 worker 趟数）。谁跑完一个任务谁减一，
+     * 减到 0 即"本批全部执行完"。 */
+    pool->tasks_left = count;
+    pool->batch_epoch++;                    /* R3-1: 推进代次 → 唤醒 worker 认领本批 */
     pool->running = 1;
     pool->total_batches++;
     pthread_cond_broadcast(&pool->cv_batch);
     pthread_mutex_unlock(&pool->mutex);
 
-    // 主线程也参与任务窃取
+    // 主线程也参与任务窃取（与 worker 同一把锁分配索引：索引复位与所有窃取严格有序）
     int local_executed = 0;
     while (1) {
-        int idx = __sync_fetch_and_add(&pool->next_index, 1);
-        if (idx >= count) break;
-        tasks[idx].func(tasks[idx].arg);
+        pthread_mutex_lock(&pool->mutex);
+        int idx = pool->next_index++;
+        ThreadTask* bt = pool->tasks;
+        int bc = pool->task_count;
+        pthread_mutex_unlock(&pool->mutex);
+        if (idx >= bc) break;
+        bt[idx].func(bt[idx].arg);
         local_executed++;
+        if (__sync_sub_and_fetch(&pool->tasks_left, 1) == 0) {
+            pthread_mutex_lock(&pool->mutex);
+            pthread_cond_broadcast(&pool->cv_done);
+            pthread_mutex_unlock(&pool->mutex);
+        }
     }
     __sync_fetch_and_add(&pool->total_tasks_executed, local_executed);
 
-    // 等待所有 worker 完成窃取
-    // P1-1: 旧版等待 10s 超时后"强制结束"并返回成功——若 worker 仍在执行
-    // 剩余任务，调用方按"batch 已返回"释放 tasks（dialog_system/multi_topology
-    // 均为栈数组）→ use-after-free。batch 返回 == 本批全部执行完是 API 契约，
-    // 因此超时只能告警、不能提前返回。worker 若真死循环属任务自身 bug，会让
-    // 本调用卡住，但不会把崩溃转成更隐蔽的 UAF。
+    /* P1-1 + R3-1: 屏障。旧判据是 workers_done（趟数，可被同一 worker 重复记账），
+     * 于是 batch() 会在任务刚开跑时返回 —— 调用方随即 free(tasks)（dialog_system.c:814、
+     * multi_topology.c:1275 均为堆数组），而仍在 dialog_topo_worker 里的 worker 继续
+     * 按任务指针解引用 → use-after-free（ASan: dialog_system.c:149）。
+     * 现在唯一判据是 tasks_left：它只在 func **返回之后** 递减，故
+     * "batch 返回 == 本批全部执行完"成为真契约。超时仍只告警、绝不提前返回。 */
     pthread_mutex_lock(&pool->mutex);
     int warn_count = 0;
-    while (pool->workers_done < pool->num_workers) {
+    while (pool->tasks_left > 0) {
         int rc = cond_timedwait_sec(&pool->cv_done, &pool->mutex, 10);
         if (rc == ETIMEDOUT) {
             warn_count++;
-            /* P2-2: 旧版 "%d0s" 把 warn_count 拼成分钟数（1 → "10s"，10 → "100s"）。
-             * 这里显式算秒数。 */
+            /* P2-2: 旧版 "%d0s" 把 warn_count 拼成分钟数（1 → "10s"，10 → "100s"）。 */
             fprintf(stderr, "[线程池] 警告：等待 worker 完成超过 %ds (第 %d 次告警，继续等待)\n",
                     warn_count * 10, warn_count);
         }
     }
     pool->running = 0;
     pool->in_batch = 0;      /* C4: 释放闸门 —— 之后才允许下一批进入 */
-    /* 唤醒可能在 destroy() 中等待批次结束的线程（旧版 batch 收尾不广播
-     * cv_done，destroy 只能干等 5s 超时兜底） */
+    /* 唤醒可能在 destroy() 中等待批次结束的线程（旧版 batch 收尾不广播）
+     * 以及所有已出列、正睡在 cv_batch 上的 worker（它们会看到代次未变而继续睡，
+     * 这是预期的：下一批进来时 cv_batch 的广播才会把它们唤醒）。 */
     pthread_cond_broadcast(&pool->cv_done);
     pthread_mutex_unlock(&pool->mutex);
 

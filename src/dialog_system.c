@@ -96,6 +96,13 @@ typedef struct {
 } DialogTopoTask;
 
 /** Worker：在指定子拓扑内执行一跳传播 */
+/*
+ * R3-1 生命周期契约（一句话）：dialog_topo_worker 的执行区间 ⊆
+ * [thread_pool_batch 提交, thread_pool_batch 返回]。调用方在 batch() 返回后释放
+ * tasks/th_tasks、离开 assoc_mutex/hop_propagated 的作用域，都是安全的；在返回前
+ * 一律不安全。worker 不得缓存任何指向任务结构的指针跨批使用，也不得跨批执行任务
+ * （R3-1 用代次握手保证）。
+ */
 static void dialog_topo_worker(void* arg) {
     DialogTopoTask* task = (DialogTopoTask*)arg;
     MasterTopology* master = task->master;
@@ -109,8 +116,16 @@ static void dialog_topo_worker(void* arg) {
     if (active_ids) {
         for (int n = 0; n < sub->net->node_count; n++) {
             ReasoningNode* node = sub->net->nodes[n];
-            if (node && node->activation >= 0.15f &&
-                !(task->hop > 1 && node->is_visited)) {
+            if (!node) continue;
+            /* R3-2: activation/is_visited 是节点字段 → 与 master_activate_node（跨拓扑写
+             * 入本拓扑）和本文件的写侧（:169-172）共用 node_locks 同一分片。
+             * 只持 1 把锁、临界区只有两次读 → 不引入锁序，也不会 ABBA。 */
+            int nl = node->node_id & (PM_NODE_LOCK_COUNT - 1);
+            pthread_mutex_lock(&sub->net->node_locks[nl]);
+            float act = node->activation;
+            int visited = node->is_visited;
+            pthread_mutex_unlock(&sub->net->node_locks[nl]);
+            if (act >= 0.15f && !(task->hop > 1 && visited)) {
                 active_ids[active_count++] = n;
             }
         }
@@ -121,7 +136,15 @@ static void dialog_topo_worker(void* arg) {
         ReasoningNode* node = sub->net->nodes[n];
         if (!node) continue;
 
-        node->is_visited = 1;  // 安全：每个 worker 处理唯一的子拓扑（topo_id 不重叠）
+        /* R3-2: 旧注释"每个 worker 处理唯一子拓扑"只覆盖"同拓扑不并行"，覆盖不了
+         * 跨拓扑写入（master_activate_node 会写别的拓扑的节点）与 :826 的复位。
+         * 与 :169-172 的写侧同域（同一把锁），单锁临界区。 */
+        {
+            int nl = node->node_id & (PM_NODE_LOCK_COUNT - 1);
+            pthread_mutex_lock(&sub->net->node_locks[nl]);
+            node->is_visited = 1;
+            pthread_mutex_unlock(&sub->net->node_locks[nl]);
+        }
 
         for (int c = 0; c < node->edge_count; c++) {
             ReasoningNode* connected = node->edges[c].target;
@@ -195,7 +218,7 @@ static void dialog_topo_worker(void* arg) {
                 }
                 pthread_mutex_unlock(task->assoc_mutex);
 
-                (*task->hop_propagated)++;
+                __sync_fetch_and_add(task->hop_propagated, 1);
             }
         }
         master_propagate_activation(master, sub->topo_id, n);
@@ -780,7 +803,10 @@ DialogReasoning* dialog_reason(DialogInput* input, MasterTopology* master,
 
         // 2. 构建并行任务（动态分配，匹配 active_topos）
         pthread_mutex_t assoc_mutex = PTHREAD_MUTEX_INITIALIZER;
-        int hop_propagated = 0;
+        /* R3-2: 本跳传播计数被同一批内多个 worker 并发 +1（每个拓扑一个任务），
+         * 旧写法 (*p)++ 是普通 RMW → 数据竞争，且会少记 → 下方 :817 的
+         * "本跳零传播就 break"判据可能被误触发。改原子自增。 */
+        volatile int hop_propagated = 0;
 
         DialogTopoTask* tasks = (DialogTopoTask*)calloc((size_t)active_topos, sizeof(DialogTopoTask));
         ThreadTask* th_tasks = (ThreadTask*)calloc((size_t)active_topos, sizeof(ThreadTask));
@@ -822,9 +848,12 @@ DialogReasoning* dialog_reason(DialogInput* input, MasterTopology* master,
         SubTopology* sub = master->sub_topologies[t];
         if (!sub || !sub->net) continue;
         for (int n = 0; n < sub->net->node_count; n++) {
-            if (sub->net->nodes[n]) {
-                sub->net->nodes[n]->is_visited = 0;
-            }
+            ReasoningNode* rn = sub->net->nodes[n];
+            if (!rn) continue;
+            int nl = rn->node_id & (PM_NODE_LOCK_COUNT - 1);
+            pthread_mutex_lock(&sub->net->node_locks[nl]);
+            rn->is_visited = 0;
+            pthread_mutex_unlock(&sub->net->node_locks[nl]);
         }
     }
     

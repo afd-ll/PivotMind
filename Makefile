@@ -362,4 +362,20 @@ test-fast: test-model test-metrics test-visual-cortex test-dialog-unit test-diff
 	echo "╚══════════════════════════════════════╝"; \
 	[ $$FAILED -eq 0 ]
 
-.PHONY: all linux debug asan asan-test digital-life gateway seed-builder debug-seed test-dialog corpus-train batch-learn batch-learn-lowmem template-build path-analyze compare-templates eval-templates qa-crawler run clean install test test-fast test-tensor test-model test-metrics test-trainer test-chinese test-tensor-broadcast test-web-fetch test-dialog-unit test-diffusion-unit test-topology-unit test-memory-unit test-learner-unit test-causal-unit test-forgetting-unit test-media-reader test-visual-cortex test-pure test-search test-pfe-unit test-regression test-semantic-growth test-integration test-cc test-cc-full test-runner
+# ========== R3 · G-T1 批次契约探针（round 3 门禁接线）==========
+# 交付物 tools/probe_batch_contract.c（方案附录 A）只编 src/thread_pool.c，
+# **不进 libpivotmind.a**，不参与 all / test / asan-test。
+# 🔴 构建坑（本仓已踩）：Makefile:61 的编译配方硬编码了 -MF，而 -MD -MP 在 CFLAGS 里；
+#    任何 CFLAGS 覆盖都必须原样带上 -MD -MP，否则
+#    cc1: error: to generate dependencies you must specify either '-M' or '-MM' 全盘失败。
+#    本目标**刻意不覆盖 CFLAGS**，只用显式旗标且不生成 .d，从构造上规避该坑。
+# 干跑（只打印命令、不构建）：make -n probe-batch-contract
+# 实测（G-T1）：bash tests/round3/run_g_t1_probe.sh
+PROBE_BATCH_CONTRACT = $(BUILD_DIR)/probe_batch_contract
+
+$(PROBE_BATCH_CONTRACT): tools/probe_batch_contract.c src/thread_pool.c include/thread_pool.h
+	$(CC) -O1 -g -pthread -fopenmp -Iinclude -o $@ tools/probe_batch_contract.c src/thread_pool.c -lm -lcurl -lssl -lcrypto -lz
+
+probe-batch-contract: $(PROBE_BATCH_CONTRACT)
+
+.PHONY: all linux debug asan asan-test digital-life gateway seed-builder debug-seed test-dialog corpus-train batch-learn batch-learn-lowmem template-build path-analyze compare-templates eval-templates qa-crawler run clean install test test-fast test-tensor test-model test-metrics test-trainer test-chinese test-tensor-broadcast test-web-fetch test-dialog-unit test-diffusion-unit test-topology-unit test-memory-unit test-learner-unit test-causal-unit test-forgetting-unit test-media-reader test-visual-cortex test-pure test-search test-pfe-unit test-regression test-semantic-growth test-integration test-cc test-cc-full test-runner probe-batch-contract
