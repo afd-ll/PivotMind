@@ -2,19 +2,56 @@
 
 ## v0.5.26 — 2026-09-10
 
+> 来源：**全量基线审查（19 P0 / 26 P1）+ 修复轮 2**。commit `5d6c9b1`，相对基线 `3eb2e6e`，35 个文件 `+1442 / −437`，按五批落地：① 数据保命 ② 并发与生命周期 ③ 门禁与诚实 ④ N17 扩散上限 ⑤ 验证期发现的既有缺陷。完整发布说明（含验证证据、红线声明、已知未修问题）见 [changelogs/070-review-round2-persistence-concurrency-gates.md](changelogs/070-review-round2-persistence-concurrency-gates.md)。
+
 ### Fixed
+
+**数值与解析**
 - **小矩阵乘法读未初始化内存（E-P0-1，数值正确性）**：`matrix_multiply_naive` 对 `tensor_create` 分配的未置零缓冲做 `+=` 累加；现于入口 `memset`，并补逐元素数值断言（`tests/unit/test_tensor.c`）。此前 `test_tensor` 只断言 shape/size，且历史上用"调小期望值"的方式让红灯变绿（见 v0.5.22 更正）。
 - **`_sample_negative` 均匀采样分支无循环上限（P2-4 复核）**：`vocab->size <= 5` 时 `sampled < 5` 恒真 → 死循环；另补 `vocab` 空指针守卫。报告中"`pretrain.c:240` 除零"经核对**不成立**（该函数入口已有 `vocab->size <= 5` 守卫，该行不可达）。
 - **`model_io.c` 加载畸形文件可致堆溢出（P2-1，32 位目标）**：`ndim` 补上界、`input*output*sizeof(float)` 补回绕守卫（权重与偏置两路）。
 - **`lr_reduce_on_plateau` 未过滤 NaN（P2-3）**：非有限 `val_loss` 现直接跳过平台期更新。
 
+**① 数据保命（第一批）**
+- **种子加载失败不再被空状态覆盖（G2）**：加载失败原会继续走空状态初始化并回写覆盖原文件，等于"读不出就抹掉"；现加载失败即拒绝回写，保留原种子文件。
+- **种子 footer 完整性校验——缺 footer 默认拒绝（D2）**：0 字节文件、尾部 1~15 残字节、16 字节非 `PMSEED2` footer 一律拒绝加载；无 footer 的旧格式**默认拒绝**，须显式 `PIVOTMIND_ALLOW_LEGACY_SEED=1` 才按旧格式一次性迁移接受。
+- **死索引 `index_map` 停用（D3）**：全仓"只写不读"（create/store/destroy 之外零引用），且驱逐路径存在 `index_map[index_size]` 堆越界写；现停止维护该冗余索引（恒空、`index_size` 恒 0，与实际占用一致）。
+- **`fsync(file) + fsync(dir)` + 唯一 tmp 名（A-P1-2）**：临时名加 pid + 单调序号防并发/重入互踩；先 `fflush + fsync(file)` 再 `fclose` 再 `rename`，并对目录 fd 补 `fsync`，确保目录项本身落盘（`memory_system.c`）。
+- **`emergent_pos` 原子写（A-P1-5）**：同样 tmp+rename + `fsync(file)/fsync(dir)`；逐写检查返回值，磁盘满/写失败不再谎报"持久化完成"（`src/emergent_pos.c`）。
+- **四处"0 节点存盘"门卫（D1）**：与既有"拓扑 total>=20"门卫对等，种子内容按 LTM 条目数判定（下限 `MEMORY_SEED_MIN_ENTRIES=1`），空状态不回写覆盖。
+
+**② 并发与生命周期（第二批）**
+- **关闭期 UAF：网关连接线程槽表 + join（C1）**：旧版无法 join 连接线程，只能"轮询计数 15s 后强拆 main 栈上的 `gw`"，慢连接线程随后访问已释放内存；新增连接线程登记槽表（`g_conn_mutex` 保护，`used`/`ever` 双标记）+ 主循环机会式回收，关闭时对 `ever==1` 的槽逐个 join。
+- **init 线程 join（H2）**：初始化线程此前无人 join，关闭时可能仍在加载并重建 worker；现关闭路径显式 join init 线程，join 返回即代表加载流程已停。
+- **learn 队列生命周期守卫（C3）**：关闭已开始（`stop` 置位）后绝不再入队；`learn_queue_shutdown` 只 join "创建成功"的 worker 槽（原实现无条件 join 全部槽，`pthread_create` 失败时 join 的是零值 `pthread_t`，属未定义行为）。
+- **共享线程池批次闸门（C4）**：单例池同一时刻只允许一个批次；池忙时 `batch()` 立即返回 `THREAD_POOL_BUSY(-2)` 且不执行任何任务，调用方（`dialog_system.c` / `multi_topology.c`）据此串行降级，消除两处并发提交互串批次。
+- **线程池 shutdown 守卫 + 共享状态加锁**：批次进行中不响应 `shutdown`，worker 完成本批后由 `batch()` 正常收尾；批次状态重置移入锁内。
+- **`learning_scheduler` 引入 `thread_started` 旗标（B-P1-2）**：以旗标而非对象地址判定句柄是否有效，决定 `stop` 能否 join；`stop` 幂等（含 destroy 内部那次重复 stop 直接返回），避免 `join(0)`。
+
+**⑤ 验证期发现的既有缺陷（第五批，多为基线自带）**
+- **`autonomic_stop_async_flush` 用 `state->initialized` 当存活判据 → `pthread_join(0)`**：`initialized` 并不代表 flush 线程句柄有效，导致 `join(0)` ——glibc 2.43 下 SIGSEGV、glibc 2.39 下静默返回 `ESRCH`。该缺陷**基线自带**（`ab1f79e`，2026-06-04 引入）。改用 create 成功之后才置位的 `flush_started` 旗标判定。
+- **`master_topology_create` 从不初始化 `master->node_cache`**：`malloc` 不置零，字段是脏指针而全仓使用点都写成 `if (master->node_cache)` 守卫形式 → 非 NULL 垃圾值绕过守卫解引用野指针（ASan 下 `diffusion.c` 解引用 `node_cache->auto_thaw_ok` 已实测 SEGV）。现显式初始化 `node_cache`/`ext_dict`/`cognitive_state_ptr`/`_pad_parallel_mode`。
+- **`multi_topology.c` 每步 `calloc` 被剪枝 `break` 跳过 `free`**：`path_target_weights` 在循环体内每步 `calloc`、循环体末尾 `free`，但循环内多个 `break` 退出点（剪枝 / 语义场休止 / 候选耗尽）会跳过释放 → 库侧泄漏。现上提到循环外单次分配，每步 `memset` 复位（语义等价），在函数唯一返回路径释放。
+- **`tests/unit/test_memory.c` 自身 `strdup` 未释放**：测试内的泄漏，已补 `free`。
+
+### Changed
+- **N17 扩散上限（第四批）**：删除 `src/diffusion.c` 的 `SPREAD_MAX_EXTRA=256` 与栈数组上限；改为**每跳累加全部入边贡献后按强度闸门裁决**（θ = max(0.001, 0.15×本跳峰值)），消除"首边独占、顺序即命运"。实测：候选 2000 = 点亮 1000 + 落选 1000，点亮数不再被 256 卡住，且把边顺序整体对调后账行**逐字节相同**。
+
 ### Quality
 - **CI 真的跑测试了（E-P1-A）**：原 "Run tests" step 调的 `make test-*`（Makefile:248-271）是**纯构建别名、从不执行**，15 个测试必挂也让 CI 变绿；现改为 `make test`（构建 + 执行 + 汇总 + 退出码门禁）。
-- **桩测试清出**：删除 8 行 Hello World `test_io.c`；`test_chinese.c` 改写为 UTF-8/CJK 真断言（不再需要 windows.h，CI 不再跳过）；`tests/scratch/test_tensor_broadcast.c` 移入 `tests/unit/` 并接线到 `make test`。
+- **桩测试清出**：删除 8 行 Hello World `test_io.c`；`test_chinese.c` 改写为 UTF-8/CJK 真断言（不再需要 windows.h，CI 不再跳过）；`tests/scratch/test_tensor_broadcast.c` 移入 `tests/unit/` 并接线到 `make test`（即此前闲置的广播测试接进 CI）。
 - **测试目标集统一**：`test:` 前置与 `TEST_BINS` 逐项一致；`test-integration`/`test-semantic-growth`/`test-tensor-broadcast` 全部纳入，消除"定义了却没人跑"。
 - **ASan 门禁收敛（E-P1-12）**：旗标单一来源（Makefile），本地 `make asan-test` 与 CI 一致且覆盖 `-DHAS_OPENSSL` 出货代码路径；`detect_leaks=1`（此前为 0），与 changelogs/069 宣称一致。
 - **随机种子可复现（P2-2）**：新增 `init_random_seed()` / `init_random_from_env()`（`PIVOTMIND_SEED` 环境变量），既有调用点零改动。
 - ARM 交叉构建删除纯 C 项目无意义的 `-static-libstdc++`。
+- **文档措辞如实化（第三批）**：把"验证过"的表述标注为"**仓外临时程序、不可复现、不受 CI 保护**"（同步 changelogs/069 的验证章节）。
+- **验证状态（如实）**：**aarch64 / armbian**（glibc 2.39）`make -j2 all` exit 0、全套 **23/23 通过**、ASan（`detect_leaks=1`）**5/5 干净、零泄漏**；**x86_64 / G15-WSL**（gcc 15.2、glibc 2.43）ASan **5/5 干净**、全量 **22/23**——`test_cognitive_controller` 崩溃，已定位为上述 `autonomic_stop_async_flush` 的 `pthread_join(0)`，**本版已修**。
+
+### Known Issues
+- **未修（基线自带 `heap-use-after-free`）**：`src/dialog_system.c:149` `dialog_topo_worker` —— 主线程 `dialog_reasoning_create` 释放批次任务时 worker 仍在读。**本版未修**，正在做下一批（round 3）方案。此处如实记录，不作"已修"或含糊表述。
+
+### Notes
+- **红线声明（本版一律未动）**：所有限边 / 截断 / 周期性稀疏化 / 跨拓扑上限 / 队列满丢任务逻辑，按作者架构红线本版均未触碰。
 
 ---
 
