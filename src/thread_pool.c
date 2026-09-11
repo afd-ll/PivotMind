@@ -318,7 +318,16 @@ int thread_pool_batch(ThreadPool* pool, ThreadTask* tasks, int count) {
      * "batch 返回 == 本批全部执行完"成为真契约。超时仍只告警、绝不提前返回。 */
     pthread_mutex_lock(&pool->mutex);
     int warn_count = 0;
-    while (pool->tasks_left > 0) {
+    /* R3-3: 读侧也必须是原子访问。tasks_left 在 worker 侧（:142）与本函数的主线程
+     * 窃取侧（:305）都由 __sync_sub_and_fetch 原子递减；此处若做普通读，就是
+     * "原子 RMW vs 非原子读"的**混杂访问**（TSan 原始报：thread_pool.c:142
+     * "Atomic write of size 4" ↔ thread_pool.c:321 "Previous read of size 4"，
+     * 且 mutex 只在本侧 → 与 worker 的原子 RMW 不构成 happens-before）。
+     * __atomic_load_n(..., __ATOMIC_ACQUIRE) 是**纯原子读**（带 acquire 栅栏），
+     * 与 __sync_sub_and_fetch 的 release-RMW 在同一原子对象上同步；
+     * 语义完全不变（判据仍是 tasks_left 归零 = 本批 func 全返回）；
+     * 不加锁、不休眠/退避（红线：不加麻药）。 */
+    while (__atomic_load_n(&pool->tasks_left, __ATOMIC_ACQUIRE) > 0) {
         int rc = cond_timedwait_sec(&pool->cv_done, &pool->mutex, 10);
         if (rc == ETIMEDOUT) {
             warn_count++;

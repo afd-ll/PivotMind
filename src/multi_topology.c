@@ -96,7 +96,10 @@ MasterTopology* master_topology_create(int max_sub_topos) {
     master->cross_link_count = 0;
     master->cross_link_capacity = INITIAL_CROSS_LINK_CAPACITY;
     
-    master->active_topo_id = -1;
+    /* R3-3: active_topo_id 的唯一另一处访问点在 :851（激活账本分片临界区内）。
+     * 该字段统一为**原子访问**（修法 (b)，见 :851 处注释）；此处单线程、对象尚未
+     * 发布给任何 worker，RELAXED 足够，仅为保证"同一字段全部访问点同一方案"。 */
+    __atomic_store_n(&master->active_topo_id, -1, __ATOMIC_RELAXED);
     master->active_node_ids = (int*)calloc(capacity, sizeof(int));
     master->activation_levels = (float*)calloc(capacity, sizeof(float));
     
@@ -848,7 +851,17 @@ int master_activate_node(MasterTopology* master,
             sub->avg_activation_value = final_activation;
         }
 
-        master->active_topo_id = topo_id;
+        /* R3-3: active_topo_id 是 master 上的**全局单字段**，而本临界区的锁是按
+         * topo_id 分片的 activation_locks[PM_TOPO_LOCK_IDX(topo_id)] —— 两个不同
+         * 拓扑的传播者会持**不同**的 mutex 写同一地址，互斥等于没上。
+         * TSan 原始报：multi_topology.c:851，T12 持 M0 vs T11 持 M1（同一地址
+         * 0x72c000000040，两条栈都是 master_propagate_activation → activate_node）。
+         * 修法 (b)：改为**原子访问**。理由：它是纯 32 位标量、全仓无读点、无
+         * "读-改-写"语义，原子存取即可清零竞争，且**不新增任何锁** —— 因此不产生
+         * 新的持锁嵌套，与"只允许单锁临界区、分片之间永不嵌套"的锁序纪律
+         * （方案 §3.0.1 / §3.5）完全相容。RELEASE：将来若出现读侧，须配
+         * __atomic_load_n(..., __ATOMIC_ACQUIRE)（本字段全部访问点见 §报告③）。 */
+        __atomic_store_n(&master->active_topo_id, topo_id, __ATOMIC_RELEASE);
         master->active_node_ids[topo_id] = node_id;
         master->activation_levels[topo_id] = final_activation;
 

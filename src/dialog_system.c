@@ -173,8 +173,23 @@ static void dialog_topo_worker(void* arg) {
             else if (task->hop == 2)  adaptive_decay = 0.80f;
             else                      adaptive_decay = 0.65f;
 
+            /* R3-3: node->activation 是**节点字段** → 权威锁 = 所属
+             * net->node_locks[node->node_id & (PM_NODE_LOCK_COUNT-1)]
+             * （与 master_activate_node 写侧 multi_topology.c:821 同一域）。
+             * TSan 原始报：multi_topology.c:821 "Write of size 4" ↔ 本行
+             * "Previous read of size 4"（读侧未持锁）。只持 1 把锁、临界区内只有
+             * 1 次读，且与前一段（node->is_visited）和后一段（connected）的临界区
+             * 互不嵌套（各自先放锁）→ 不参与锁序、不可能 ABBA。 */
+            float node_activation;
+            {
+                int nl = node->node_id & (PM_NODE_LOCK_COUNT - 1);
+                pthread_mutex_lock(&sub->net->node_locks[nl]);
+                node_activation = node->activation;
+                pthread_mutex_unlock(&sub->net->node_locks[nl]);
+            }
+
             float new_activation = node->edges[c].weight *
-                                  node->activation *
+                                  node_activation *
                                   confidence_factor *
                                   activation_multiplier *
                                   embed_factor *
