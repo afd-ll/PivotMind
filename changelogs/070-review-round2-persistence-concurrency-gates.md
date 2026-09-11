@@ -147,9 +147,19 @@
 
 ### x86_64 / G15-WSL（gcc 15.2、glibc 2.43）
 
+> 本节是 2026-09-10 夜 ~ 09-11 上午**首次在 x86_64 上**对本代码跑 sanitizer 与 TSan 的硬证据（此前本说明只基于 aarch64 的验证）。
+
 - ASan **5/5 干净**。
 - 全量测试 **22/23**：`test_cognitive_controller` 崩溃。
   - 已定位为 `autonomic_stop_async_flush` 的 `pthread_join(0)`（见第五批）——**本版已修**。
+- **TSan**：抓到 `dialog_topo_worker` 的 `heap-use-after-free`（修复树）与**基线 `3eb2e6e` 同型**的 `heap-use-after-free`（原始报告行见"已知未修问题" A）；另抓到若干独立并发站点（同节 B）。
+  - 修复树 TSan 全程未跑完：OpenMP 区域（`feature_learn_graph_smooth._omp_fn.*`）的报告洪水把进程拖住（`halt_on_error=0` 下 TSan 与 OpenMP 不兼容，属工具限制）；上述 UAF 报告在运行首分钟内即已落盘。基线 TSan 用抑制文件（`race:feature_learn*`、`race:libgomp*`）后才跑完。
+
+#### 验证边界的诚实声明（须连同结论一并采信）
+
+1. **TSan 运行中出现过** `WARNING: ThreadSanitizer: memory layout is incompatible, possibly due to high-entropy ASLR` —— 这类警告下 TSan 报告**需谨慎采信**；本版对上述 UAF 的判定以 **ASan 复现 + 基线对照 + 树外探针（`batch()` 契约实测）** 三方交叉为准，TSan 原文仅作佐证（其 `free` vs `read` 被报为 `data race` 而非 UAF，因被释放的 432B 已被下一跳 `calloc` 复用）。
+2. `test_cognitive_controller` **几乎没有任何断言** —— 即使传播结果被串批污染也没有断言能把它变成失败；故它在 **aarch64 上的"通过"说服力很弱**（它恰好是 x86_64 下崩的那一支），aarch64 的 23/23 不能作为该路径"没问题"的证据。
+3. **基线 ASan 端到端 UAF 未能直接观测**：基线自带 `node_cache.c:511` 的 SEGV（即本版第五批已修的 `master->node_cache` 脏指针）在更早的刷盘路径抢先终止进程，故基线结论依据 TSan 的两条原始 `heap-use-after-free`。
 
 ### 待办与可复现性（如实声明）
 
@@ -170,8 +180,30 @@
 
 ## 已知未修问题
 
-- **`heap-use-after-free`（基线自带）**：`src/dialog_system.c:149` `dialog_topo_worker` —— 主线程 `dialog_reasoning_create` 释放批次任务时，worker 仍在读该批任务。
-- **本版未修**。正在做下一批（**round 3**）方案。
+本节的证据来自 2026-09-10 夜 ~ 09-11 上午在 **x86_64 / G15-WSL（gcc 15.2、glibc 2.43）** 上首次运行的 sanitizer 与 TSan；原始报告全文见 `uaf-dialog-topoworker.md`（树外产物，未入库）。下列并发债**本版一律未修**。
+
+### A. `dialog_topo_worker` 的 heap-use-after-free —— 基线自带（老债），本版未修
+
+- **修复树 TSan 原始报告**（`-fsanitize=thread -fno-omit-frame-pointer -g -O1`）：
+  - `Write of size 8 by main thread: free ← dialog_reasoning_create src/dialog_system.c:814 ← dialog_process:1605`
+  - `Previous read of size 8 by thread T6: dialog_topo_worker src/dialog_system.c:101 ← worker_loop src/thread_pool.c:123`
+  - `SUMMARY: ThreadSanitizer: data race src/dialog_system.c:814 in dialog_reasoning_create`
+  - 同一次运行另有对 `th_tasks` 的同型报告：`SUMMARY: ThreadSanitizer: data race src/dialog_system.c:815 in dialog_reasoning_create`。
+- **ASan 复现**：`SUMMARY: AddressSanitizer: heap-use-after-free src/dialog_system.c:149 in dialog_topo_worker`（越界点 `tasks[1].hop`；432B 任务数组由 `:785` `calloc`、`:814` 释放，worker 仍在 `:149`/`:101`/`:162` 解引用）。
+- **基线对照（`3eb2e6e`）**：同一支测试报出**同型**的 heap-use-after-free —— 访问点 `dialog_system.c:149` 与 `:162`（`dialog_topo_worker`），释放者为基线 `:810`（`dialog_reasoning_create`）。逐项同型、差异仅为行号偏移 → **本版未引入，属既有债**。
+- **推论（值得写明）**：`thread_pool_batch` 那句"返回时本批已全部执行完"的**契约不成立**——树外探针实测 `batch()` 返回瞬间仅完成 1/9~8/9 件任务；病灶是 `workers_done` 记的是 worker 跑完的**趟数**却被当**人头数**用作完成屏障。本版新增的 `in_batch` 闸门**只堵"并发第二批次"**（两批互踩 `pool->tasks`），**堵不住"单批次内部提前返回"这条**（ASan 是在**加了闸门之后**的树上抓到的）。
+
+### B. 同一轮的独立并发缺口（也是既有债）
+
+- `master_activate_node`（`src/multi_topology.c:789-828`）与 `master_propagate_activation`（`:900-985`）：**同一批内部**的 worker ↔ 主线程竞争（主线程在 `thread_pool_batch:282` 参与任务窃取执行另一个 topo 的任务），因此**修好批次屏障也不会自动消失**，须独立加锁。
+- `boost_connection_weighted`（`src/autonomic_learner.c:486-507`）：对手方是 **OpenMP 刷盘线程**（`src/nn/feature_learn.c:180`）；写侧**已持** `net->node_locks[]`，**缺的是读侧**——刷盘读路径（`feature_learn.c:179-181`）一把锁都不拿。
+- `dialog_system.c:112`（读 `node->activation`）/`:124`（写 `node->is_visited`）/`:826`（复位）同属**批内**竞争；`hop_propagated`（`:198` 的 `(*task->hop_propagated)++`）是**非原子共享自增**，会让"本跳零传播即 break"（`:817`）的判据出错。
+
+### C. 未修状态与去向
+
+- 上述并发债**本版一律未修**（本版只修了第五批列出的既有缺陷）。
+- 修复方案已完成：`/home/cx/hermes-workspace/pivotmind-review/fix-plans/round3-concurrency.md`——选 **(a) 强化批次完成语义**（`tasks_left` 任务账 + 代次握手 + 锁内索引分配），**驳回**"把任务数组交给池释放"（调用方在 `batch()` 返回后仍读任务结构体的结果字段，且任务数组可能是栈数组，池释放不可实现）。
+- 实施在分支 `fix/round3-concurrency` 上进行，**与本版发布无关**。
 - 本条如实记录，**不作"已修"，也不含糊带过**。
 
 ## 修改文件

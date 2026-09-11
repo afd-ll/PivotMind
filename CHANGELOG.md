@@ -46,9 +46,10 @@
 - ARM 交叉构建删除纯 C 项目无意义的 `-static-libstdc++`。
 - **文档措辞如实化（第三批）**：把"验证过"的表述标注为"**仓外临时程序、不可复现、不受 CI 保护**"（同步 changelogs/069 的验证章节）。
 - **验证状态（如实）**：**aarch64 / armbian**（glibc 2.39）`make -j2 all` exit 0、全套 **23/23 通过**、ASan（`detect_leaks=1`）**5/5 干净、零泄漏**；**x86_64 / G15-WSL**（gcc 15.2、glibc 2.43）ASan **5/5 干净**、全量 **22/23**——`test_cognitive_controller` 崩溃，已定位为上述 `autonomic_stop_async_flush` 的 `pthread_join(0)`，**本版已修**。
+- **x86_64/TSan（首次在 x86_64 上跑并发检测）**：抓到 `dialog_topo_worker` 的 heap-use-after-free（与基线 `3eb2e6e` 同型，见 Known Issues）及若干独立并发站点；**两条须连同结论一并采信的边界**：(1) TSan 运行中出现过 `WARNING: ThreadSanitizer: memory layout is incompatible, possibly due to high-entropy ASLR`，此类警告下报告需谨慎采信；(2) `test_cognitive_controller` **几乎没有任何断言**，其在 aarch64 上的"通过"说服力很弱（它恰是 x86_64 下崩的那一支）。另：修复树 TSan 因 OpenMP 报告洪水未跑完（工具限制），UAF 报告在首分钟内取得。
 
 ### Known Issues
-- **未修（基线自带 `heap-use-after-free`）**：`src/dialog_system.c:149` `dialog_topo_worker` —— 主线程 `dialog_reasoning_create` 释放批次任务时 worker 仍在读。**本版未修**，正在做下一批（round 3）方案。此处如实记录，不作"已修"或含糊表述。
+- **未修（基线自带 `heap-use-after-free`）**：`src/dialog_system.c:149` `dialog_topo_worker`——主线程 `dialog_reasoning_create` 用完批次任务即 `free`（本版 `:814`／基线 `:810`）而 worker 仍在读，基线 `3eb2e6e` 报出**同型** UAF（`:149`/`:162`）故属**既有债**；本版新增的 `in_batch` 批量闸门（C4）只堵"并发第二批次"、**不覆盖该路径**（根因是 `thread_pool_batch` 的完成屏障本身不成立——`workers_done` 记的是"趟数"却被当"人头数"用），**本版未修**，round 3 方案在修（分支 `fix/round3-concurrency`）。此处如实记录，不作"已修"或含糊表述。
 
 ### Notes
 - **红线声明（本版一律未动）**：所有限边 / 截断 / 周期性稀疏化 / 跨拓扑上限 / 队列满丢任务逻辑，按作者架构红线本版均未触碰。
