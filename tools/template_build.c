@@ -132,9 +132,9 @@ int main(int argc, char** argv) {
     int rk = 0;
     for (int i = 0; i < node_count; i++) {
         ReasoningNode* nd = net->nodes[i];
-        if (!nd || nd->connection_count <= 0) continue;
+        if (!nd || nd->edge_count <= 0) continue;
         ranks[rk].node_id = i;
-        ranks[rk].conn_count = nd->connection_count;
+        ranks[rk].conn_count = nd->edge_count;
         rk++;
     }
     qsort(ranks, rk, sizeof(NodeRank), rank_cmp_desc);

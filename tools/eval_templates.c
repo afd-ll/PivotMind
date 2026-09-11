@@ -186,9 +186,9 @@ int main(int argc, char** argv) {
     int rk = 0;
     for (int i = 0; i < nc; i++) {
         ReasoningNode* nd = vocab->net->nodes[i];
-        if (nd && nd->connection_count > 0) {
+        if (nd && nd->edge_count > 0) {
             ranks[rk].id = i;
-            ranks[rk].conn = nd->connection_count;
+            ranks[rk].conn = nd->edge_count;
             rk++;
         }
     }

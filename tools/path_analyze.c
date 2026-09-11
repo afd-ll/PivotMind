@@ -129,9 +129,9 @@ int main(int argc, char** argv) {
     int rank_count = 0;
     for (int i = 0; i < node_count; i++) {
         ReasoningNode* node = net->nodes[i];
-        if (!node || node->connection_count <= 0) continue;
+        if (!node || node->edge_count <= 0) continue;
         ranks[rank_count].node_id    = i;
-        ranks[rank_count].conn_count = node->connection_count;
+        ranks[rank_count].conn_count = node->edge_count;
         rank_count++;
     }
 

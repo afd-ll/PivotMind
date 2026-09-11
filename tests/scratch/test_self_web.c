@@ -36,7 +36,7 @@ int main() {
     isolated->confidence = 0.1f;  /* 低置信度 */
     
     int before = vocab->net->node_count;
-    int before_conn = isolated->connection_count;
+    int before_conn = isolated->edge_count;
     printf("创建前: %d节点, 孤立节点连接数=%d\n", before, before_conn);
     
     /* 创建SelfLearner并运行 */
@@ -51,7 +51,7 @@ int main() {
     int mods = self_learner_cycle(sl);
     
     int after = vocab->net->node_count;
-    int after_conn = isolated->connection_count;
+    int after_conn = isolated->edge_count;
     printf("\n结果: %d处修改, %d节点(前) → %d节点(后)\n", mods, before, after);
     printf("孤立节点 '%s' 连接数: %d(前) → %d(后)\n", 
            isolated->concept, before_conn, after_conn);
@@ -66,9 +66,9 @@ int main() {
     
     /* 显示所有连接 */
     printf("\n'%s' 的连接:\n", isolated->concept);
-    for (int c = 0; c < isolated->connection_count && c < 10; c++) {
-        ReasoningNode* cn = isolated->connections[c];
-        float w = isolated->connection_weights ? isolated->connection_weights[c] : 0;
+    for (int c = 0; c < isolated->edge_count && c < 10; c++) {
+        ReasoningNode* cn = isolated->edges[c].target;
+        float w = isolated->edges ? isolated->edges[c].weight : 0;
         printf("  → %s (w=%.2f)\n", cn ? cn->concept : "?", w);
     }
     

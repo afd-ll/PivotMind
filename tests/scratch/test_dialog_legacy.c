@@ -195,11 +195,11 @@ static void build_edges_from_qa(MasterTopology* master, const char* qa_path, int
                     int to_id = out_nodes[rj]->node_id;
                     // 先查是否已有边，有则累加权重，无则新建
                     int found = 0;
-                    for (int e = 0; e < in_nodes[ci]->connection_count; e++) {
-                        if (in_nodes[ci]->connections[e] == out_nodes[rj]) {
-                            in_nodes[ci]->connection_weights[e] += 0.3f;
-                            if (in_nodes[ci]->connection_weights[e] > 5.0f)
-                                in_nodes[ci]->connection_weights[e] = 5.0f;
+                    for (int e = 0; e < in_nodes[ci]->edge_count; e++) {
+                        if (in_nodes[ci]->edges[e].target == out_nodes[rj]) {
+                            in_nodes[ci]->edges[e].weight += 0.3f;
+                            if (in_nodes[ci]->edges[e].weight > 5.0f)
+                                in_nodes[ci]->edges[e].weight = 5.0f;
                             found = 1;
                             break;
                         }
@@ -209,11 +209,11 @@ static void build_edges_from_qa(MasterTopology* master, const char* qa_path, int
                     }
                     // 反向边同理
                     found = 0;
-                    for (int e = 0; e < out_nodes[rj]->connection_count; e++) {
-                        if (out_nodes[rj]->connections[e] == in_nodes[ci]) {
-                            out_nodes[rj]->connection_weights[e] += 0.2f;
-                            if (out_nodes[rj]->connection_weights[e] > 5.0f)
-                                out_nodes[rj]->connection_weights[e] = 5.0f;
+                    for (int e = 0; e < out_nodes[rj]->edge_count; e++) {
+                        if (out_nodes[rj]->edges[e].target == in_nodes[ci]) {
+                            out_nodes[rj]->edges[e].weight += 0.2f;
+                            if (out_nodes[rj]->edges[e].weight > 5.0f)
+                                out_nodes[rj]->edges[e].weight = 5.0f;
                             found = 1;
                             break;
                         }
@@ -352,7 +352,7 @@ int main(int argc, char* argv[]) {
         total_nodes += sub->net->node_count;
         for (int n = 0; n < sub->net->node_count; n++) {
             ReasoningNode* node = sub->net->nodes[n];
-            if (node) total_edges += node->connection_count;
+            if (node) total_edges += node->edge_count;
         }
     }
     printf("统计: %d 节点, %d 内部边, %d 跨连接\n",

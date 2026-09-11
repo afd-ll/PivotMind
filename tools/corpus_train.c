@@ -70,18 +70,18 @@ static void add_or_strengthen(HuarongTopologyNet* net, ReasoningNode* from, Reas
                                float add_weight, float max_weight) {
     if (!from || !to || from == to) return;
     // 查已有边 → 累加权重 + 置信度 + 动机偏差
-    for (int e = 0; e < from->connection_count; e++) {
-        if (from->connections[e] == to) {
-            from->connection_weights[e] += add_weight;
-            if (from->connection_weights[e] > max_weight)
-                from->connection_weights[e] = max_weight;
+    for (int e = 0; e < from->edge_count; e++) {
+        if (from->edges[e].target == to) {
+            from->edges[e].weight += add_weight;
+            if (from->edges[e].weight > max_weight)
+                from->edges[e].weight = max_weight;
             // 共现学习：权重每涨一次，置信度和偏差也微涨
-            from->connection_confidences[e] += 0.02f;
-            if (from->connection_confidences[e] > 1.0f)
-                from->connection_confidences[e] = 1.0f;
-            from->connection_motivational_bias[e] += 0.01f;
-            if (from->connection_motivational_bias[e] > 1.0f)
-                from->connection_motivational_bias[e] = 1.0f;
+            from->edges[e].confidence += 0.02f;
+            if (from->edges[e].confidence > 1.0f)
+                from->edges[e].confidence = 1.0f;
+            from->edges[e].motivational_bias += 0.01f;
+            if (from->edges[e].motivational_bias > 1.0f)
+                from->edges[e].motivational_bias = 1.0f;
             return;
         }
     }
@@ -486,7 +486,7 @@ int main(int argc, char* argv[]) {
         total_nodes += sub->net->node_count;
         for (int n = 0; n < sub->net->node_count; n++) {
             ReasoningNode* node = sub->net->nodes[n];
-            if (node) total_edges += node->connection_count;
+            if (node) total_edges += node->edge_count;
         }
     }
 

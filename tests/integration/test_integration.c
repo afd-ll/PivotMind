@@ -104,7 +104,7 @@ void create_classification_dataset(size_t num_samples, size_t input_size, size_t
         size_t target_shape[] = {num_classes};
         (*targets)[i] = tensor_create(DT_FLOAT32, 1, target_shape);
         float* target_data = (float*)(*targets)[i]->data;
-        int label = i % num_classes;
+        size_t label = i % num_classes;
         for (size_t j = 0; j < num_classes; j++) {
             target_data[j] = (j == label) ? 1.0f : 0.0f;
         }
@@ -150,15 +150,12 @@ void test_complete_training_pipeline() {
     ASSERT_NOT_NULL(trainer, "trainer_create() returned NULL");
 
     // Step 4: Train for multiple epochs
-    float initial_loss = 0.0f;
     float final_loss = 0.0f;
 
-    for (int epoch = 0; epoch < config.epochs; epoch++) {
+    for (size_t epoch = 0; epoch < config.epochs; epoch++) {
         float epoch_loss = trainer_train_epoch(trainer, train_inputs, train_targets, num_train);
 
-        if (epoch == 0) {
-            initial_loss = epoch_loss;
-        } else if (epoch == config.epochs - 1) {
+        if (epoch == config.epochs - 1) {
             final_loss = epoch_loss;
         }
     }
@@ -225,7 +222,7 @@ void test_inference_pipeline() {
     };
 
     Trainer* trainer = trainer_create(model, config);
-    for (int i = 0; i < config.epochs; i++) {
+    for (size_t i = 0; i < config.epochs; i++) {
         trainer_train_epoch(trainer, train_inputs, train_targets, num_train);
     }
 
@@ -244,7 +241,6 @@ void test_inference_pipeline() {
 
     float* output_data = (float*)output->data;
     float predicted_value = output_data[0];
-    float expected_value = 15.0f; // 5 + 10
 
     // The prediction should be in reasonable range (check for NaN)
     ASSERT_TRUE(predicted_value == predicted_value && predicted_value != INFINITY,
@@ -325,7 +321,7 @@ void test_model_save_load() {
     };
 
     Trainer* trainer = trainer_create(original_model, config);
-    for (int i = 0; i < config.epochs; i++) {
+    for (size_t i = 0; i < config.epochs; i++) {
         trainer_train_epoch(trainer, train_inputs, train_targets, num_train);
     }
 
@@ -424,9 +420,9 @@ void test_end_to_end_workflow() {
     int patience = 3;
     int no_improve = 0;
 
-    for (int epoch = 0; epoch < config.epochs; epoch++) {
+    for (size_t epoch = 0; epoch < config.epochs; epoch++) {
         // Train on training set
-        float train_loss = trainer_train_epoch(trainer, inputs, targets, num_train);
+        trainer_train_epoch(trainer, inputs, targets, num_train);
 
         // Validate on validation set
         float val_loss = 0.0f;
@@ -463,6 +459,7 @@ void test_end_to_end_workflow() {
         tensor_destroy(output);
     }
     float avg_error = final_error / num_samples;
+    (void)avg_error; // 诊断量，当前无断言依赖
 
     // Step 7: Test on new unseen data
     size_t test_shape[] = {1, 2};
@@ -475,7 +472,6 @@ void test_end_to_end_workflow() {
     ASSERT_NOT_NULL(test_output, "Test inference should succeed");
 
     float* test_pred = (float*)test_output->data;
-    float expected_value = 300.0f; // 100 + 200
 
     // Prediction should be in reasonable range (check for NaN)
     ASSERT_TRUE(test_pred[0] == test_pred[0] && test_pred[0] != INFINITY,
@@ -581,7 +577,7 @@ void test_metrics_integration() {
     // Track metrics during training
     float* epoch_losses = (float*)malloc(config.epochs * sizeof(float));
 
-    for (int epoch = 0; epoch < config.epochs; epoch++) {
+    for (size_t epoch = 0; epoch < config.epochs; epoch++) {
         epoch_losses[epoch] = trainer_train_epoch(trainer, inputs, targets, num_samples);
     }
 
@@ -658,9 +654,9 @@ void test_deep_network_training() {
     Trainer* trainer = trainer_create(model, config);
     ASSERT_NOT_NULL(trainer, "Trainer creation should succeed");
 
-    float initial_loss = trainer_train_epoch(trainer, inputs, targets, num_samples);
+    (void)trainer_train_epoch(trainer, inputs, targets, num_samples); // 首轮训练，损失值不参与断言
 
-    for (int epoch = 1; epoch < config.epochs; epoch++) {
+    for (size_t epoch = 1; epoch < config.epochs; epoch++) {
         trainer_train_epoch(trainer, inputs, targets, num_samples);
     }
 

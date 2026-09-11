@@ -25,6 +25,12 @@ DEBUG_CFLAGS = -Wall -Wextra -g -O0 -Iinclude -Iinclude/nn -Isrc/nn -I. -Ilibs -
 ASAN_CFLAGS = -fsanitize=address,undefined -fno-omit-frame-pointer -g -O1 -Iinclude -Iinclude/nn -Isrc/nn -I. -Ilibs -std=gnu99 -fopenmp -pthread -MD -MP -DDEBUG -DHAS_OPENSSL
 ASAN_LDFLAGS = -fsanitize=address,undefined -lm -lcurl -lssl -lcrypto -lz
 
+# 依赖生成收成一处（-MF 脐支点）：默认/DEBUG/ASAN 的 CFLAGS 均已带 -MD -MP，
+# 此时 DEPFLAGS 只补 -MF，编译命令行与改动前逐字一致；
+# 若调用者覆盖 CFLAGS 却漏了 -MD -MP，这里自动补上，
+# 避免 cc1: error: to generate dependencies you must specify either '-M' or '-MM'。
+DEPFLAGS = $(if $(findstring -MD,$(CFLAGS)),,-MD -MP )-MF $(DEP_DIR)/$*.d
+
 # 输出目录
 BUILD_DIR = build/bin
 OBJ_DIR = build/obj
@@ -58,15 +64,15 @@ LIB_NAME = libpivotmind.a
 # 核心�?.c �?.o（依赖文件写�?dep/ 目录�?
 $(OBJ_DIR)/%.o: src/%.c
 	@mkdir -p $(dir $(OBJ_DIR)/$*) $(dir $(DEP_DIR)/$*)
-	$(CC) $(CFLAGS) -MF $(DEP_DIR)/$*.d -c $< -o $@
+	$(CC) $(CFLAGS) $(DEPFLAGS) -c $< -o $@
 
 # 工具 .c �?.o
 $(OBJ_DIR)/%.o: tools/%.c
-	$(CC) $(CFLAGS) -MF $(DEP_DIR)/$*.d -c $< -o $@
+	$(CC) $(CFLAGS) $(DEPFLAGS) -c $< -o $@
 
 # 演示 .c �?.o
 $(OBJ_DIR)/%.o: demos/%.c
-	$(CC) $(CFLAGS) -MF $(DEP_DIR)/$*.d -c $< -o $@
+	$(CC) $(CFLAGS) $(DEPFLAGS) -c $< -o $@
 
 # 静态库
 $(LIB_NAME): $(CORE_OBJ)
@@ -308,10 +314,10 @@ test-runner: $(BUILD_DIR)/test_runner
 # TEST_FAST_BINS 刻意是它的子集（排除 test_chinese 控制台 smoke、test_trainer、
 # test_web_fetch、test_tensor、test_cc、test_tensor_broadcast、test_semantic_growth、
 # test_integration 等较慢/依赖终端或网络的项）。两列表口径显式维护，禁止有“定义了却没人跑”的目标。
-TEST_BINS = $(BUILD_DIR)/test_tensor $(BUILD_DIR)/test_tensor_broadcast $(BUILD_DIR)/test_model $(BUILD_DIR)/test_metrics $(BUILD_DIR)/test_trainer $(BUILD_DIR)/test_chinese $(BUILD_DIR)/test_web_fetch $(BUILD_DIR)/test_dialog_unit $(BUILD_DIR)/test_diffusion_unit $(BUILD_DIR)/test_topology_unit $(BUILD_DIR)/test_memory_unit $(BUILD_DIR)/test_learner_unit $(BUILD_DIR)/test_causal_unit $(BUILD_DIR)/test_forgetting_unit $(BUILD_DIR)/test_media_reader $(BUILD_DIR)/test_visual_cortex $(BUILD_DIR)/test_pure $(BUILD_DIR)/test_search $(BUILD_DIR)/test_pfe_unit $(BUILD_DIR)/test_regression $(BUILD_DIR)/test_semantic_growth $(BUILD_DIR)/test_integration $(BUILD_DIR)/test_cognitive_controller
+TEST_BINS = $(BUILD_DIR)/test_tensor $(BUILD_DIR)/test_tensor_broadcast $(BUILD_DIR)/test_model $(BUILD_DIR)/test_metrics $(BUILD_DIR)/test_trainer $(BUILD_DIR)/test_chinese $(BUILD_DIR)/test_web_fetch $(BUILD_DIR)/test_dialog_unit $(BUILD_DIR)/test_diffusion_unit $(BUILD_DIR)/test_topology_unit $(BUILD_DIR)/test_memory_unit $(BUILD_DIR)/test_learner_unit $(BUILD_DIR)/test_causal_unit $(BUILD_DIR)/test_forgetting_unit $(BUILD_DIR)/test_media_reader $(BUILD_DIR)/test_visual_cortex $(BUILD_DIR)/test_pure $(BUILD_DIR)/test_search $(BUILD_DIR)/test_pfe_unit $(BUILD_DIR)/test_regression $(BUILD_DIR)/test_semantic_growth $(BUILD_DIR)/test_integration $(BUILD_DIR)/test_cognitive_controller $(BUILD_DIR)/test_cognitive_full
 TEST_FAST_BINS = $(BUILD_DIR)/test_model $(BUILD_DIR)/test_metrics $(BUILD_DIR)/test_visual_cortex $(BUILD_DIR)/test_dialog_unit $(BUILD_DIR)/test_diffusion_unit $(BUILD_DIR)/test_topology_unit $(BUILD_DIR)/test_memory_unit $(BUILD_DIR)/test_learner_unit $(BUILD_DIR)/test_causal_unit $(BUILD_DIR)/test_tensor_broadcast $(BUILD_DIR)/test_forgetting_unit $(BUILD_DIR)/test_media_reader $(BUILD_DIR)/test_pure $(BUILD_DIR)/test_search $(BUILD_DIR)/test_pfe_unit $(BUILD_DIR)/test_regression
 
-test: test-tensor test-tensor-broadcast test-model test-metrics test-trainer test-chinese test-web-fetch test-dialog-unit test-diffusion-unit test-topology-unit test-memory-unit test-learner-unit test-causal-unit test-forgetting-unit test-media-reader test-visual-cortex test-pure test-search test-pfe-unit test-regression test-semantic-growth test-integration test-cc
+test: test-cc-full test-tensor test-tensor-broadcast test-model test-metrics test-trainer test-chinese test-web-fetch test-dialog-unit test-diffusion-unit test-topology-unit test-memory-unit test-learner-unit test-causal-unit test-forgetting-unit test-media-reader test-visual-cortex test-pure test-search test-pfe-unit test-regression test-semantic-growth test-integration test-cc
 	@echo ""
 	@echo "╔══════════════════════════════════════╗"
 	@echo "║  运行单元测试...                     ║"

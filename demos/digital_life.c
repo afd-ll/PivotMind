@@ -308,7 +308,7 @@ DigitalLifeSystem* digital_life_create() {
                 int bms = (nc + 7) / 8;
                 for (int s = 0; s < ns; s++) {
                     ReasoningNode* sn = vocab->net->nodes[s];
-                    if (!sn || sn->connection_count <= 0) continue;
+                    if (!sn || sn->edge_count <= 0) continue;
                     float saved = sn->activation;
                     sn->activation = 0.8f;
                     unsigned char* vis = (unsigned char*)calloc((size_t)bms, 1);

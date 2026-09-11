@@ -67,11 +67,11 @@ int main(int argc, char** argv) {
             ReasoningNode* node = net->nodes[n];
             if (!node) continue;
             sum_act += node->activation;
-            if (node->connection_count > 0) {
-                total_edges += node->connection_count;
-                if (node->connection_confidences) {
-                    for (int c = 0; c < node->connection_count; c++) {
-                        float cf = node->connection_confidences[c];
+            if (node->edge_count > 0) {
+                total_edges += node->edge_count;
+                if (node->edges) {
+                    for (int c = 0; c < node->edge_count; c++) {
+                        float cf = node->edges[c].confidence;
                         sum_conf += cf;
                         if (cf > 0.7f) high_conf++;
                         conf_count++;
@@ -109,9 +109,9 @@ int main(int argc, char** argv) {
         if (!sub || !sub->net) continue;
         for (int n = 0; n < sub->net->node_count; n++) {
             ReasoningNode* node = sub->net->nodes[n];
-            if (!node || !node->connection_confidences) continue;
-            for (int c = 0; c < node->connection_count; c++) {
-                int b = (int)(node->connection_confidences[c] * 10);
+            if (!node || !node->edges) continue;
+            for (int c = 0; c < node->edge_count; c++) {
+                int b = (int)(node->edges[c].confidence * 10);
                 if (b < 0) b = 0; if (b > 9) b = 9;
                 bins[b]++;
                 total_conf_samples++;

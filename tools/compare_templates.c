@@ -91,7 +91,7 @@ int main(int argc, char** argv) {
     int rk = 0;
     for (int i = 0; i < nc; i++) {
         ReasoningNode* nd = vocab->net->nodes[i];
-        if (nd && nd->connection_count > 0) { ranks[rk].node_id = i; ranks[rk].conn_count = nd->connection_count; rk++; }
+        if (nd && nd->edge_count > 0) { ranks[rk].node_id = i; ranks[rk].conn_count = nd->edge_count; rk++; }
     }
     qsort(ranks, rk, sizeof(NodeRank), rank_cmp_desc);
     int ns = (100 < rk) ? 100 : rk;

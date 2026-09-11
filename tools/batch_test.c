@@ -76,7 +76,7 @@ int main(int argc, char* argv[]) {
         total_nodes += sub->net->node_count;
         for (int n = 0; n < sub->net->node_count; n++) {
             ReasoningNode* node = sub->net->nodes[n];
-            if (node) total_edges += node->connection_count;
+            if (node) total_edges += node->edge_count;
         }
     }
     printf("=== 统计: %d 节点, %d 边, %d 跨连接 ===\n",
