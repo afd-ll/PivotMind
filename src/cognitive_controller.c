@@ -217,7 +217,13 @@ static void calc_novelty_factors(CognitiveController* cc,
         SubTopology* sub = cc->master->sub_topologies[t];
         if (!sub) continue;
 
+        /* R3-2: recent_activation 的写方是 master_activate_node（同一批内的 worker/
+         * 主线程任务），权威锁 = master->activation_locks[PM_TOPO_LOCK_IDX(topo_id)]。
+         * 单锁临界区，只包住一次读。 */
+        int tl = PM_TOPO_LOCK_IDX(t);
+        pthread_mutex_lock(&cc->master->activation_locks[tl]);
         float recent = sub->recent_activation;
+        pthread_mutex_unlock(&cc->master->activation_locks[tl]);
         novelty_factors[t] = 1.0f / (1.0f + 10.0f * recent);
     }
 
@@ -243,7 +249,13 @@ void cognitive_controller_decay_novelty(CognitiveController* cc) {
     for (int t = 0; t < cc->master->sub_topo_count && t < MAX_SUBTOPOS; t++) {
         SubTopology* sub = cc->master->sub_topologies[t];
         if (!sub) continue;
+        /* R3-2: 与 master_activate_node 的 recent_activation 更新同域（分片锁）。
+         * 注意：:239 的 "需持有 master->rwlock" 并不能与对话热路径互斥——
+         * master_activate_node 从不持 rwlock；本分片锁才是权威锁。 */
+        int tl = PM_TOPO_LOCK_IDX(t);
+        pthread_mutex_lock(&cc->master->activation_locks[tl]);
         sub->recent_activation *= 0.8f;
+        pthread_mutex_unlock(&cc->master->activation_locks[tl]);
     }
 }
 

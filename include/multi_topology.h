@@ -121,6 +121,14 @@ typedef struct {
     int is_used;                  // 1 = 有效条目
 } CrossTopoHitRecord;
 
+/* R3-2: master「激活账本」分片锁的片数（2 的幂）。
+ * 账本 = master->activation_levels[] / active_node_ids[] / active_topo_id
+ *        + SubTopology 的 total_activations / recent_activation /
+ *          avg_activation_value / last_used（都按 topo_id 归属）。
+ * 分片键：PM_TOPO_LOCK_IDX(topo_id)。 */
+#define PM_TOPO_LOCK_COUNT   16
+#define PM_TOPO_LOCK_IDX(topo_id)  ((topo_id) & (PM_TOPO_LOCK_COUNT - 1))
+
 /**
  * 主拓扑结构
  *
@@ -131,6 +139,9 @@ typedef struct {
  *   Level 2: HuarongTopologyNet.mutex — 网络级互斥锁
  *   Level 3: HuarongTopologyNet.node_locks[] — 节点级锁池
  *      多节点加锁时按 node_id 升序（见 lock_two_nodes_by_id）
+ *   Level 1.5: MasterTopology.activation_locks[] — master 级「激活账本」分片锁
+ *       （R3-2 新增。纪律：**只允许单锁临界区** —— 它与 node_locks 之间
+ *        永不同时持有；分片之间也永不同时持有。故不参与锁序、不可能 ABBA。）
  *
  * 禁止反向加锁（如持节点锁后再请求网络锁）！
  *
@@ -217,6 +228,17 @@ typedef struct MasterTopology {
     // 已迁移至 InferenceContext.last_context_node（每会话独立，多线程安全）
     // 保留字段用于二进制兼容，不再直接使用
     int _legacy_context_node;
+
+    // ========== R3-2: master 级「激活账本」分片锁 ==========
+    // 保护：master->active_topo_id / active_node_ids[] / activation_levels[]，
+    //      以及 SubTopology 的 total_activations / recent_activation /
+    //      avg_activation_value / last_used。
+    // 需求来源（TSan 一手证据 tsan_fix_run2.log:2316-2383）：同一批内的多个
+    // dialog_topo_worker 任务（worker 线程 + 主线程在 thread_pool_batch 里偷到的
+    // 任务）并发调用 master_activate_node / master_propagate_activation，
+    // 写的是同一批账。这不是"批次互踩"—— 批次屏障修好也不会消失。
+    // 纪律：本数组只做单锁临界区，绝不与 node_locks 或另一分片同时持有。
+    pthread_mutex_t activation_locks[PM_TOPO_LOCK_COUNT];
 } MasterTopology;
 
 /* 是否在加载保护期内（按时间，不受 tick 速率影响）。

@@ -495,6 +495,13 @@ static void boost_connection_weighted(SubTopology* topo, ReasoningNode* a, Reaso
     /* 节点级条纹锁：hash(node_id) & (PM_NODE_LOCK_COUNT - 1) 选锁
      * 20线程 × 分散到256把锁 → 对撞率 <8%，无撞零等待
      * 注意：node_conn_find 在锁外执行，锁内 double-check 防御 TOCTOU */
+    /* R3-2（R2b，注释级核对）：本函数是 node->edges[].weight/.confidence 的**写方**，
+     * 下方两段临界区已各自持 1 把 node_locks 分片（:510 持 li_a、:528 持 li_b），
+     * 且两段互不嵌套（:524 先放锁）→ **写侧合规，本文件无需加锁改动**。
+     * 与之相对的**读侧**缺锁在 src/nn/feature_learn.c 的 feature_learn_graph_smooth
+     * —— 它在 OpenMP 并行区里零锁读 node->edges[].weight/.confidence，调用方是
+     * do_flush_work（本文件 :220）的 OpenMP 刷盘团队。该读侧已在本批按节点补同一
+     * 分片锁（读侧只持 1 把锁，故不参与锁序、不可能 ABBA）。 */
     int li_a = (a && net) ? (a->node_id & (PM_NODE_LOCK_COUNT - 1)) : -1;
     int li_b = (b && net) ? (b->node_id & (PM_NODE_LOCK_COUNT - 1)) : -1;
 

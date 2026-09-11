@@ -134,6 +134,13 @@ int feature_learn_graph_smooth(HuarongTopologyNet* net, int iterations) {
                 ReasoningNode* node = net->nodes[i];
                 if (!node || !node->features || node->edge_count <= 0) continue;
                 float* src_feat = node->features;
+                /* R3-2: node->edges[].weight/.confidence 的写方（boost_connection_weighted、
+                 * brainstem、idea_arena）一律在 node_locks[node_id & 255] 内（autonomic_learner.c:510，
+                 * TSan 报告里就是持着这把锁写的）。本函数此前零锁读同一内存 → data race。
+                 * 按**节点**加一次锁（不是按边），临界区只含读 + 线程本地累加；
+                 * 只持 1 把 → 不参与锁序。 */
+                int nl = (node->node_id) & (PM_NODE_LOCK_COUNT - 1);
+                pthread_mutex_lock(&net->node_locks[nl]);
                 for (int c = 0; c < node->edge_count; c++) {
                     ReasoningNode* nb = node->edges[c].target;
                     if (!nb || !nb->features || nb->node_id < 0 || nb->node_id >= total_nodes) continue;
@@ -153,6 +160,7 @@ int feature_learn_graph_smooth(HuarongTopologyNet* net, int iterations) {
                         dst_i[d]  += tw * nbf[d];
                     }
                 }
+                pthread_mutex_unlock(&net->node_locks[nl]);
             }
         } else {
             /* 多线程: 清零局部缓冲区 */
@@ -162,7 +170,7 @@ int feature_learn_graph_smooth(HuarongTopologyNet* net, int iterations) {
                 memset(thread_ws[t], 0, ws_bytes);
             }
 
-            /* 并行累积: 每线程写入自己的缓冲区，零锁 */
+            /* 并行累积: 每线程写入自己的缓冲区（线程本地，无需锁）；但读 node->edges[] 需持该节点的 node_locks 分片锁（R3-2） */
             #pragma omp parallel for schedule(dynamic, 50)
             for (int i = 0; i < total_nodes; i++) {
                 int tid = omp_get_thread_num();
@@ -171,6 +179,10 @@ int feature_learn_graph_smooth(HuarongTopologyNet* net, int iterations) {
                 float* src_feat = node->features;
                 float* loc_f = thread_feats[tid];
                 float* loc_w = thread_ws[tid];
+                /* R3-2: 同单线程路径 —— 把“读 node->edges[]”的整段包进该节点的分片锁；
+                 * loc_f/loc_w 是**线程本地**，无需锁；只持 1 把 → 不参与锁序。 */
+                int nl = (node->node_id) & (PM_NODE_LOCK_COUNT - 1);
+                pthread_mutex_lock(&net->node_locks[nl]);
 
                 for (int c = 0; c < node->edge_count; c++) {
                     ReasoningNode* nb = node->edges[c].target;
@@ -192,6 +204,7 @@ int feature_learn_graph_smooth(HuarongTopologyNet* net, int iterations) {
                         dst_i[d]  += tw * nbf[d];
                     }
                 }
+                pthread_mutex_unlock(&net->node_locks[nl]);
             }
 
             /* 并行合并: 每个节点由一线程归并所有线程的贡献 */

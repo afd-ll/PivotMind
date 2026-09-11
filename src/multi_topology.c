@@ -145,6 +145,11 @@ MasterTopology* master_topology_create(int max_sub_topos) {
 
     pthread_rwlock_init(&master->rwlock, NULL);
 
+    /* R3-2: master 激活账本分片锁（放在 rwlock 之后 —— 上面的 cross_adj 早退路径
+     * (:125-134) 在本行之前返回，故那条路径无需 destroy 它们）。 */
+    for (int i = 0; i < PM_TOPO_LOCK_COUNT; i++)
+        pthread_mutex_init(&master->activation_locks[i], NULL);
+
     return master;
 }
 
@@ -192,6 +197,12 @@ void master_topology_destroy(MasterTopology* master) {
 
     free(master->active_node_ids);
     free(master->activation_levels);
+
+    /* R3-2: 销毁激活账本分片锁（保持与 create 对称；此处已在 rwlock 写锁内、
+     * 且 thread_pool 尚未销毁 —— 但 destroy 的调用方必须保证停止对话线程
+     * 后才调用本函数，否则 master 被 free 后仍是 UAF，与本批无关）。 */
+    for (int i = 0; i < PM_TOPO_LOCK_COUNT; i++)
+        pthread_mutex_destroy(&master->activation_locks[i]);
 
     // 销毁线程池
     if (master->thread_pool) {
@@ -794,37 +805,56 @@ int master_activate_node(MasterTopology* master,
     // 激活节点
     ReasoningNode* node = sub->net->nodes[node_id];
     if (!node) return -1;
-    
-    // ==================== 使用新参数计算激活 ====================
-    // 带效价的激活: base * (1 + valence * 0.5)
-    float valence_factor = 1.0f + node->valence * 0.5f;
-    float final_activation = activation_value * valence_factor;
-    final_activation = clamp_float(final_activation, 0.0f, 1.0f);
-    
-    node->activation = final_activation;
-    
+
+    float final_activation;
+
+    /* ---- R3-2 临界区 ①：节点字段 ----
+     * node->activation / node->valence 的权威锁 = node_locks[node_id & 255]
+     * （与 dialog_system.c:112/:124/:169-172、brainstem.c:226/266/404、
+     *   idea_arena.c:605/665 同一域）。只持 1 把 → 不参与锁序。 */
+    {
+        int nl = node->node_id & (PM_NODE_LOCK_COUNT - 1);
+        pthread_mutex_lock(&sub->net->node_locks[nl]);
+        // 带效价的激活: base * (1 + valence * 0.5)
+        float valence_factor = 1.0f + node->valence * 0.5f;
+        final_activation = clamp_float(activation_value * valence_factor, 0.0f, 1.0f);
+        node->activation = final_activation;
+        pthread_mutex_unlock(&sub->net->node_locks[nl]);
+    }
+
     // 注意：置信度不应该在这里直接更新
     // 置信度应该通过 learn_from_feedback 从用户反馈中学习
     // 这里只更新基础的 activation 值
-    
-    sub->total_activations++;
-    sub->recent_activation += 0.2f;
-    if (sub->recent_activation > 1.0f) sub->recent_activation = 1.0f;
-    sub->last_used = time(NULL);
-    
-    // 更新统计
-    if (sub->total_activations > 0) {
-        sub->avg_activation_value = 
-            (sub->avg_activation_value * (sub->total_activations - 1) + final_activation) 
-            / sub->total_activations;
-    } else {
-        sub->avg_activation_value = final_activation;
+
+    /* ---- R3-2 临界区 ②：本拓扑的激活账本 ----
+     * 与临界区 ① **不嵌套**（① 已放锁）→ 与 node_locks 之间永不同时持有 →
+     * 不存在 A2→L3 或 L3→A2 的锁序问题，ABBA 面为零。
+     * 分片后：写不同拓扑账的传播者彼此不阻塞（并发度不减）。 */
+    {
+        int tl = PM_TOPO_LOCK_IDX(topo_id);
+        pthread_mutex_lock(&master->activation_locks[tl]);
+
+        sub->total_activations++;
+        sub->recent_activation += 0.2f;
+        if (sub->recent_activation > 1.0f) sub->recent_activation = 1.0f;
+        sub->last_used = time(NULL);
+
+        // 更新统计
+        if (sub->total_activations > 0) {
+            sub->avg_activation_value =
+                (sub->avg_activation_value * (sub->total_activations - 1) + final_activation)
+                / sub->total_activations;
+        } else {
+            sub->avg_activation_value = final_activation;
+        }
+
+        master->active_topo_id = topo_id;
+        master->active_node_ids[topo_id] = node_id;
+        master->activation_levels[topo_id] = final_activation;
+
+        pthread_mutex_unlock(&master->activation_locks[tl]);
     }
-    
-    master->active_topo_id = topo_id;
-    master->active_node_ids[topo_id] = node_id;
-    master->activation_levels[topo_id] = final_activation;
-    
+
     return 0;
 }
 
@@ -901,7 +931,14 @@ int master_propagate_activation(MasterTopology* master,
     float source_valence = 0.0f;
     if (source_topo && source_topo->net && source_node_id < source_topo->net->node_count) {
         source_node = source_topo->net->nodes[source_node_id];
-        source_valence = source_node->valence;
+        if (source_node) {
+            /* R3-2: valence 是节点字段 → node_locks 同域读（与 master_activate_node
+             * 临界区 ① 同一把锁）。单锁临界区，不嵌套。 */
+            int nl = source_node->node_id & (PM_NODE_LOCK_COUNT - 1);
+            pthread_mutex_lock(&source_topo->net->node_locks[nl]);
+            source_valence = source_node->valence;
+            pthread_mutex_unlock(&source_topo->net->node_locks[nl]);
+        }
     }
 
     // 使用 O(1) 邻接表索引查找（替代 O(N) 遍历）
@@ -914,35 +951,50 @@ int master_propagate_activation(MasterTopology* master,
     while (entry) {
         CrossTopologyLink* link = master->cross_links[entry->link_index];
         if (link) {
-            float source_activation = master->activation_levels[source_topo_id];
-            
-            // ==================== 动态权重学习 ====================
-            link->use_count++;
-            if (link->use_count > min_weight_count) {
-                if (link->weight < 0.95f) {
-                    link->weight = link->weight * weight_boost_factor;
-                    if (link->weight > 0.95f) link->weight = 0.95f;
+            float transferred_activation = 0.0f;
+
+            /* ---- R3-2 临界区：源拓扑账本 + 跨链自身记账 ----
+             * 分片键 = source_topo_id：跨链是从「源拓扑的邻接表」引出的，同一
+             * source_topo_id 在对话路径上只有一个任务在跑（一个拓扑一个任务），
+             * 所以本分片对该任务的 link->use_count / link->weight 是独占的。
+             * 必须在 master_activate_node 之前放锁：那样目标拓扑的账本锁（另一
+             * 分片）会在无锁状态下获取 → 分片之间永不同时持有 → 无 ABBA。 */
+            {
+                int tl = PM_TOPO_LOCK_IDX(source_topo_id);
+                pthread_mutex_lock(&master->activation_locks[tl]);
+
+                float source_activation = master->activation_levels[source_topo_id];
+
+                // ==================== 动态权重学习 ====================
+                link->use_count++;
+                if (link->use_count > min_weight_count) {
+                    if (link->weight < 0.95f) {
+                        link->weight = link->weight * weight_boost_factor;
+                        if (link->weight > 0.95f) link->weight = 0.95f;
+                    }
                 }
-            }
-            
-            // ==================== 使用新参数计算激活 ====================
-            // 激活 = 输入 × 逻辑权重 × 动机倾向 × (1 + 效价因子)
-            // 从节点的 connection_motivational_bias 读取真实的动机倾向
-            float motivation_factor = 0.5f;
-            if (source_node && source_node->edges && 
-                source_node->edge_count > 0) {
-                int conn_idx = link->to_node_id % source_node->edge_count;
-                motivation_factor = source_node->edges[conn_idx].motivational_bias;
-            }
-            
-            float valence_factor = 1.0f + source_valence * 0.5f;
-            
-            float transferred_activation = source_activation *
+
+                // ==================== 使用新参数计算激活 ====================
+                // 激活 = 输入 × 逻辑权重 × 动机倾向 × (1 + 效价因子)
+                float motivation_factor = 0.5f;
+                if (source_node && source_node->edges &&
+                    source_node->edge_count > 0) {
+                    int conn_idx = link->to_node_id % source_node->edge_count;
+                    motivation_factor = source_node->edges[conn_idx].motivational_bias;
+                }
+
+                float valence_factor = 1.0f + source_valence * 0.5f;
+
+                transferred_activation = source_activation *
                                          link->weight *
                                          link->transfer_rate *
                                          motivation_factor *
                                          valence_factor;
 
+                pthread_mutex_unlock(&master->activation_locks[tl]);
+            }
+
+            /* 目标节点/目标账本由 master_activate_node 自己加锁；此处已不持任何锁 */
             master_activate_node(master,
                                link->to_topo_id,
                                link->to_node_id,
