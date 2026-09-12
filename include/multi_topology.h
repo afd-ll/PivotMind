@@ -642,6 +642,18 @@ void master_clear_cross_links(MasterTopology* master);
 int master_prune_cross_links(MasterTopology* master, float min_weight, int min_use_count);
 
 /**
+ * TAIL-XLINK-HYGIENE: 压缩 cross_links[]（消除 NULL 洞）
+ * 一趟完成：① 非 NULL 前移（保持原顺序）；② cross_links[i]->link_id = i；
+ * ③ 扫 cross_adj[] 按 old→new 映射改写 entry->link_index（只改值，不动链表结构；
+ *    指向已删链接的陈旧条目失效化为 INT_MAX）；④ cross_link_count = 存活数。
+ * ⚠️ 调用方必须已持 master->rwlock **写锁**（本函数不取锁）。
+ * 幂等：无洞时 O(1) 早退、零改动。不丢链（存活数 / 顺序不变）。
+ * 已接入两个产洞口：master_prune_cross_links 与 master_prune_dead_nodes_nolock。
+ * @return 消除的 NULL 洞数（0 = 本来就没有洞）
+ */
+int master_compact_cross_links_nolock(MasterTopology* master);
+
+/**
  * 跨拓扑连接重评估：周期性更新 transfer_rate
  * 基于 use_count 和 weight 动态调整传导效率。
  * @param expected_use 期望使用次数（用于归一化 use_count）

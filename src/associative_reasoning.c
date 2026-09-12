@@ -186,7 +186,12 @@ void propagate_association(AssociativeEngine* engine,
     if (adj_idx < engine->topology->cross_adj_count) {
         CrossTopoAdjEntry* entry = engine->topology->cross_adj[adj_idx];
         while (entry) {
-            CrossTopologyLink* link = engine->topology->cross_links[entry->link_index];
+            /* TAIL-XLINK-HYGIENE: link_index 可能是压缩时失效化的陈旧条目
+             * （XLINK_ADJ_INVALID）—— 这里原先直接索引、无界内判定，必须先判界，
+             * 否则压缩后这一处会越界读。 */
+            CrossTopologyLink* link = (entry->link_index >= 0 &&
+                                       entry->link_index < engine->topology->cross_link_count)
+                                      ? engine->topology->cross_links[entry->link_index] : NULL;
             if (link) {
                 float new_activation = activation * link->weight * link->transfer_rate;
                 propagate_association(engine,

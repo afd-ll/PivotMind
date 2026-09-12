@@ -17,6 +17,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <limits.h>     /* TAIL-XLINK-HYGIENE: INT_MAX —— 失效化 adj 条目的哨兵值 */
 #include <math.h>
 #include <time.h>
 
@@ -545,6 +546,96 @@ void master_clear_cross_links(MasterTopology* master) {
     pthread_rwlock_unlock(&master->rwlock);
 }
 
+/* ── TAIL-XLINK-HYGIENE: cross_links[] 压缩（消除 NULL 洞）──
+ *
+ * 为什么必须压：
+ *   ① master_add_cross_link_nolock 满容量就「翻倍 + append」（:390-399），**从不复用 NULL 洞**
+ *      ⇒ master_prune_cross_links / xlink_remap_topo 丢弃跨链时留下的洞是**永久泄漏的槽位**，
+ *      长跑里数组只涨不缩（内存 / 迭代 / 存盘快照全跟着 churn 走）。
+ *   ② `link_id` **不是身份，它就是数组下标**：:405 `link->link_id = master->cross_link_count;`
+ *      与 :440 `entry->link_index = link->link_id;` ⇒ cross_adj[] 把 link_id 当**原始下标**存，
+ *      6 个消费点（:489 / :965 / :1662 / :2087 / :3146 / causal_reasoning.c:2382）都做
+ *      `cross_links[entry->link_index]` ⇒ **压缩时 link_id 必须一起重编**，否则它们会静默
+ *      指向**另一条跨链**（不报错、不丢数，只是全在走错路）。
+ *   ③ 存盘路径本来就在压缩（master_capture_tail :4398-4408：先数非 NULL 得 actual，再稠密
+ *      拷入 tail 快照），加载侧又走 master_add_cross_link（link_id 由 count 重赋）
+ *      ⇒ **文件格式与加载侧不需要改**。
+ *
+ * 一趟做完四件事（调用方必须已持 master->rwlock **写锁**；本函数不取锁）：
+ *   ① 非 NULL 前移（**保持原有顺序**，稳定压缩）；
+ *   ② cross_links[i]->link_id = i（维持「id 即下标」的既有契约）；
+ *   ③ 扫 cross_adj[]，用 old→new 映射改写每个 entry->link_index（**只改值，不动链表结构**）；
+ *   ④ cross_link_count = 存活数。
+ *
+ * 关于「陈旧 adj 条目」（entry 指向一条**已被删除**的链接，old 下标在 remap 里是 -1）：
+ *   它的语义务必是「跳过」，所以改写为 XLINK_ADJ_INVALID(INT_MAX) —— 这样所有
+ *   `< cross_link_count` 的消费点天然跳过它，而且**永远**不会因为后续 append 增长而
+ *   重新落回合法区间。⛔ 不能拿「压缩后的新 count」当哨兵：下一次 add 恰好就 append 在
+ *   index == count 上，陈旧条目会立刻改指到那条新链（静默指错）。
+ *   ⚠️ 因此两处**没有**界内判定的消费点（本文件 :965、associative_reasoning.c:189）必须补判界，
+ *   否则会越界读。
+ *
+ * 返回：消除的 NULL 洞数（0 = 无洞，未做任何改动 ⇒ 幂等）。
+ * **不丢链**：存活数不变、相对顺序不变，只改下标与 link_id。
+ * 注：不改文件格式 / cross_adj 结构 / 判据触发；不改 `link_id` 的「等于下标」契约
+ *     （把字段改名 link_id→link_index 是另一件事，本任务不做）。 */
+#define XLINK_ADJ_INVALID INT_MAX
+int master_compact_cross_links_nolock(MasterTopology* master) {
+    if (!master || !master->cross_links) return 0;
+    int old_n = master->cross_link_count;
+    if (old_n <= 0) return 0;
+
+    /* old→new 映射表：remap[旧下标] = 新下标；-1 = 该槽位是洞（链接已删）。
+     * 用 malloc + 显式填 -1 而非 calloc：**新下标 0 是合法值**，不能与「无效」混淆。 */
+    int* remap = (int*)malloc((size_t)old_n * sizeof(int));
+    if (!remap) return 0;          /* OOM：宁可留洞也不丢链，留给下一轮 */
+
+    /* ① + ②：稳定前移 + 重编 link_id */
+    int w = 0;
+    for (int i = 0; i < old_n; i++) {
+        CrossTopologyLink* l = master->cross_links[i];
+        if (!l) { remap[i] = -1; continue; }
+        if (w != i) master->cross_links[w] = l;
+        l->link_id = w;
+        remap[i] = w;
+        w++;
+    }
+    int holes = old_n - w;
+    if (holes == 0) { free(remap); return 0; }   /* 无洞 = no-op（幂等；不做多余的 adj 全扫） */
+
+    for (int i = w; i < old_n; i++) master->cross_links[i] = NULL;  /* 清尾，数组内不留重复指针 */
+    master->cross_link_count = w;
+
+    /* ③ 重建 cross_adj[].link_index —— 只改值，绝不增删链表节点 */
+    int rewritten = 0, invalidated = 0;
+    if (master->cross_adj) {
+        for (int i = 0; i < master->cross_adj_count; i++) {
+            CrossTopoAdjEntry* entry = master->cross_adj[i];
+            while (entry) {
+                int old = entry->link_index;
+                if (old >= 0 && old < old_n) {          /* 只处理「本轮改动前」的合法下标 */
+                    if (remap[old] >= 0) {
+                        if (entry->link_index != remap[old]) {
+                            entry->link_index = remap[old];
+                            rewritten++;
+                        }
+                    } else {                            /* 指向已删除链接的陈旧条目 ⇒ 失效化 */
+                        entry->link_index = XLINK_ADJ_INVALID;
+                        invalidated++;
+                    }
+                }
+                entry = entry->next;                    /* 已是 XLINK_ADJ_INVALID / 越界：原样保留 */
+            }
+        }
+    }
+    free(remap);
+
+    LOG_INFO("[跨链压缩] cross_links 消除 %d 个 NULL 洞: %d → %d 条；"
+             "重建 adj.link_index %d 处，失效化陈旧 adj 条目 %d 处",
+             holes, old_n, w, rewritten, invalidated);
+    return holes;
+}
+
 int master_prune_cross_links(MasterTopology* master, float min_weight, int min_use_count) {
     if (!master || !master->cross_links) return 0;
     
@@ -561,6 +652,11 @@ int master_prune_cross_links(MasterTopology* master, float min_weight, int min_u
             pruned++;
         }
     }
+
+    /* TAIL-XLINK-HYGIENE: 丢弃留下的 NULL 洞必须立刻压掉。只置 NULL 不压缩 = 永久
+     * 泄漏的槽位，且 link_id ↔ 数组下标的契约被打破。**就在写锁内做**，否则洞会
+     * 暴露给并发读者。放在 prune 循环之后（而不是每个 free 之后）：一趟完成。 */
+    master_compact_cross_links_nolock(master);
 
     pthread_rwlock_unlock(&master->rwlock);
     
@@ -962,7 +1058,12 @@ int master_propagate_activation(MasterTopology* master,
 
     CrossTopoAdjEntry* entry = master->cross_adj[adj_idx];
     while (entry) {
-        CrossTopologyLink* link = master->cross_links[entry->link_index];
+        /* TAIL-XLINK-HYGIENE: link_index 可能是压缩时**失效化**的陈旧条目
+         * （XLINK_ADJ_INVALID）—— 这里原先直接索引、无界内判定，必须先判界，
+         * 否则压缩后这一处会越界读。 */
+        CrossTopologyLink* link = (entry->link_index >= 0 &&
+                                   entry->link_index < master->cross_link_count)
+                                  ? master->cross_links[entry->link_index] : NULL;
         if (link) {
             float transferred_activation = 0.0f;
 
@@ -3922,6 +4023,13 @@ int master_prune_dead_nodes_nolock(MasterTopology* master) {
             }
         }
     }
+    /* TAIL-XLINK-HYGIENE: 本轮 xlink_remap_topo 的**两条**分支都会丢跨链留洞 ——
+     *   · dead_count == 0 分支：恒等清扫（丢历史悬垂端点）
+     *   · 重编号分支：remap 后丢「端点已删/无法映射」的跨链
+     * ⇒ 统一在此（per-topology 循环之外）压一次。压缩与拓扑无关、洞是全局的；
+     *   空转（无洞）时函数内 O(1) 早退，代价可忽略。只堵一个分支 = 洞还会从另一条路漏出来。 */
+    master_compact_cross_links_nolock(master);
+
     for (int t = 0; t < master->sub_topo_count; t++) free(has_ref[t]);
     free(has_ref);
     return removed;
