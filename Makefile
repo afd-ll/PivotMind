@@ -16,6 +16,30 @@ endif
 JOBS ?= 2
 MAKEFLAGS += -j$(JOBS)
 
+# ========== 路径 SSOT：平台化缺省数据根（PM_HOME_DEFAULT）====================
+# 语义：pm_home() 第 3 级（$PIVOTMIND_HOME、$HOME/pivotmind 都不成立时）的**编译期缺省位置**。
+# 🔴 默认值里【绝不许出现 $HOME】：$HOME 是【构建期】变量，写进去等于把构建机的家目录钉进
+#    二进制 —— CI/打包/换用户全错（作者定稿，别顺手“优化”）。
+# 判定：$(PREFIX) 含 com.termux ⇒ Termux/Android；否则 uname -s 含 Android ⇒ 同样；
+#       其余 Linux ⇒ /var/lib/pivotmind。
+# 覆盖：make PM_HOME_DEFAULT=/some/where ...（命令行/环境变量优先，?= 不覆盖已定义值）
+UNAME_S := $(shell uname -s)
+ifeq ($(strip $(findstring com.termux,$(PREFIX))$(findstring Android,$(UNAME_S))),)
+  PM_HOME_DEFAULT ?= /var/lib/pivotmind
+else
+  PM_HOME_DEFAULT ?= /data/data/com.termux/files/usr/var/pivotmind
+endif
+PM_HOME_CFLAGS = -DPM_HOME_DEFAULT='"'$(PM_HOME_DEFAULT)'"'
+# 硬门（主门）：PM_HOME_DEFAULT 必须是绝对路径（不许相对、不许 $HOME）。
+# 依据：C 里字符串字面量的下标不是整型常量表达式（那是 C++ 的规则）
+# ⇒ 编译期断言只能落在构建系统这一层（C 侧另有一道 GCC __attribute__((error)) 的次门）。
+ifeq ($(filter /%,$(PM_HOME_DEFAULT)),)
+$(error PM_HOME_DEFAULT 必须是绝对路径（当前值: '$(PM_HOME_DEFAULT)'）)
+endif
+
+# ⛔ 下面这一行是**原样保留**的原 CFLAGS 赋值行（它不是被替换掉的，
+#    追加 PM_HOME_DEFAULT 一律走下面的 `CFLAGS +=`，绝不动这一行 —— 本仓在册坑：
+#    覆盖式改 CFLAGS 会把 -Iinclude / -MD -MP 一起冲掉）。
 CFLAGS = -pipe -Wall -Wextra -O2 -Iinclude -Iinclude/nn -Isrc/nn -I. -Ilibs -std=gnu99 -fopenmp -pthread -MD -MP -D_USE_MATH_DEFINES -D_FORTIFY_SOURCE=2 -flto=auto -DHAS_OPENSSL
 LDFLAGS = -lm -lssl -lcrypto -lcurl -lz -flto=auto
 DEBUG_CFLAGS = -Wall -Wextra -g -O0 -Iinclude -Iinclude/nn -Isrc/nn -I. -Ilibs -std=gnu99 -fopenmp -pthread -MD -MP -DDEBUG -D_FORTIFY_SOURCE=2
@@ -24,6 +48,11 @@ DEBUG_CFLAGS = -Wall -Wextra -g -O0 -Iinclude -Iinclude/nn -Isrc/nn -I. -Ilibs -
 # 对齐，否则本地 `make asan` 覆盖不到 web_fetch.c 的 OpenSSL 代码路径。
 ASAN_CFLAGS = -fsanitize=address,undefined -fno-omit-frame-pointer -g -O1 -Iinclude -Iinclude/nn -Isrc/nn -I. -Ilibs -std=gnu99 -fopenmp -pthread -MD -MP -DDEBUG -DHAS_OPENSSL
 ASAN_LDFLAGS = -fsanitize=address,undefined -lm -lcurl -lssl -lcrypto -lz
+# 路径 SSOT 缺省值：默认 / DEBUG / ASAN 三套旗标同源（追加式，见上方平台化定义）——
+# 任何一套漏掉 PM_HOME_DEFAULT，都会让那一套构建出来的 pivotmind_paths 少了第 3 级。
+CFLAGS += $(PM_HOME_CFLAGS)
+DEBUG_CFLAGS += $(PM_HOME_CFLAGS)
+ASAN_CFLAGS += $(PM_HOME_CFLAGS)
 
 # 依赖生成收成一处（-MF 脐支点）：默认/DEBUG/ASAN 的 CFLAGS 均已带 -MD -MP，
 # 此时 DEPFLAGS 只补 -MF，编译命令行与改动前逐字一致；
@@ -40,6 +69,8 @@ $(shell mkdir -p $(BUILD_DIR) $(OBJ_DIR) $(DEP_DIR))
 export TMPDIR = /tmp
 
 # 源文件（通配自动发现�?
+# ⇒ 新增 src/pivotmind_paths.c（路径 SSOT）由 $(wildcard src/*.c) 自动进入
+#    CORE_SRC/CORE_OBJ，**无需手工登记**；核验：make -n libpivotmind.a | grep pivotmind_paths
 CORE_SRC = $(wildcard src/*.c) $(wildcard src/nn/*.c)
 TOOL_SRC = $(wildcard tools/*.c demos/*.c)
 
@@ -149,8 +180,8 @@ asan:
 # ASan/UBSan 下运行核心单测（不依赖网络/终端的子集）。
 # 泄漏检测：CI 通过 ASAN_OPTIONS=detect_leaks=1 打开（本配方不写死，保持本地默认）；
 # Linux 下 ASan 默认 detect_leaks=1，故本地 `make asan-test` 同样会查泄漏。
-ASAN_TEST_TARGETS = test-tensor test-tensor-broadcast test-model test-metrics test-memory-unit test-topology-unit test-dialog-unit test-learner-unit test-causal-unit test-forgetting-unit
-ASAN_TEST_BINS = $(BUILD_DIR)/test_tensor $(BUILD_DIR)/test_tensor_broadcast $(BUILD_DIR)/test_model $(BUILD_DIR)/test_metrics $(BUILD_DIR)/test_memory_unit $(BUILD_DIR)/test_topology_unit $(BUILD_DIR)/test_dialog_unit $(BUILD_DIR)/test_learner_unit $(BUILD_DIR)/test_causal_unit $(BUILD_DIR)/test_forgetting_unit
+ASAN_TEST_TARGETS = test-tensor test-tensor-broadcast test-model test-metrics test-memory-unit test-topology-unit test-dialog-unit test-learner-unit test-causal-unit test-forgetting-unit test-paths-unit
+ASAN_TEST_BINS = $(BUILD_DIR)/test_tensor $(BUILD_DIR)/test_tensor_broadcast $(BUILD_DIR)/test_model $(BUILD_DIR)/test_metrics $(BUILD_DIR)/test_memory_unit $(BUILD_DIR)/test_topology_unit $(BUILD_DIR)/test_dialog_unit $(BUILD_DIR)/test_learner_unit $(BUILD_DIR)/test_causal_unit $(BUILD_DIR)/test_forgetting_unit $(BUILD_DIR)/test_paths_unit
 
 asan-test:
 	$(MAKE) clean
@@ -246,6 +277,9 @@ $(BUILD_DIR)/test_causal_unit: tests/unit/test_causal.c $(LIB_NAME)
 $(BUILD_DIR)/test_forgetting_unit: tests/unit/test_forgetting.c $(LIB_NAME)
 	$(CC) $(CFLAGS) -I. -o $@ tests/unit/test_forgetting.c -L. -lpivotmind $(LDFLAGS)
 
+$(BUILD_DIR)/test_paths_unit: tests/unit/test_paths_unit.c $(LIB_NAME)
+	$(CC) $(CFLAGS) -I. -o $@ tests/unit/test_paths_unit.c -L. -lpivotmind $(LDFLAGS)
+
 $(BUILD_DIR)/test_media_reader: tests/unit/test_media_reader.c $(LIB_NAME)
 	$(CC) $(CFLAGS) -I. -o $@ tests/unit/test_media_reader.c -L. -lpivotmind $(LDFLAGS)
 
@@ -291,6 +325,7 @@ test-memory-unit: $(BUILD_DIR)/test_memory_unit
 test-learner-unit: $(BUILD_DIR)/test_learner_unit
 test-causal-unit: $(BUILD_DIR)/test_causal_unit
 test-forgetting-unit: $(BUILD_DIR)/test_forgetting_unit
+test-paths-unit: $(BUILD_DIR)/test_paths_unit                # 路径 SSOT 契约单测（第 27 支）
 test-media-reader: $(BUILD_DIR)/test_media_reader        # v0.5
 test-visual-cortex: $(BUILD_DIR)/test_visual_cortex       # v0.5
 test-pure: $(BUILD_DIR)/test_pure                           # 纯函数单元测试
@@ -314,10 +349,10 @@ test-runner: $(BUILD_DIR)/test_runner
 # TEST_FAST_BINS 刻意是它的子集（排除 test_chinese 控制台 smoke、test_trainer、
 # test_web_fetch、test_tensor、test_cc、test_tensor_broadcast、test_semantic_growth、
 # test_integration 等较慢/依赖终端或网络的项）。两列表口径显式维护，禁止有“定义了却没人跑”的目标。
-TEST_BINS = $(BUILD_DIR)/test_tensor $(BUILD_DIR)/test_tensor_broadcast $(BUILD_DIR)/test_model $(BUILD_DIR)/test_metrics $(BUILD_DIR)/test_trainer $(BUILD_DIR)/test_chinese $(BUILD_DIR)/test_web_fetch $(BUILD_DIR)/test_dialog_unit $(BUILD_DIR)/test_diffusion_unit $(BUILD_DIR)/test_topology_unit $(BUILD_DIR)/test_memory_unit $(BUILD_DIR)/test_learner_unit $(BUILD_DIR)/test_causal_unit $(BUILD_DIR)/test_forgetting_unit $(BUILD_DIR)/test_media_reader $(BUILD_DIR)/test_visual_cortex $(BUILD_DIR)/test_pure $(BUILD_DIR)/test_search $(BUILD_DIR)/test_pfe_unit $(BUILD_DIR)/test_regression $(BUILD_DIR)/test_semantic_growth $(BUILD_DIR)/test_integration $(BUILD_DIR)/test_cognitive_controller $(BUILD_DIR)/test_cognitive_full
+TEST_BINS = $(BUILD_DIR)/test_tensor $(BUILD_DIR)/test_tensor_broadcast $(BUILD_DIR)/test_model $(BUILD_DIR)/test_metrics $(BUILD_DIR)/test_trainer $(BUILD_DIR)/test_chinese $(BUILD_DIR)/test_web_fetch $(BUILD_DIR)/test_dialog_unit $(BUILD_DIR)/test_diffusion_unit $(BUILD_DIR)/test_topology_unit $(BUILD_DIR)/test_memory_unit $(BUILD_DIR)/test_learner_unit $(BUILD_DIR)/test_causal_unit $(BUILD_DIR)/test_forgetting_unit $(BUILD_DIR)/test_media_reader $(BUILD_DIR)/test_visual_cortex $(BUILD_DIR)/test_pure $(BUILD_DIR)/test_search $(BUILD_DIR)/test_pfe_unit $(BUILD_DIR)/test_regression $(BUILD_DIR)/test_semantic_growth $(BUILD_DIR)/test_integration $(BUILD_DIR)/test_cognitive_controller $(BUILD_DIR)/test_cognitive_full $(BUILD_DIR)/test_paths_unit
 TEST_FAST_BINS = $(BUILD_DIR)/test_model $(BUILD_DIR)/test_metrics $(BUILD_DIR)/test_visual_cortex $(BUILD_DIR)/test_dialog_unit $(BUILD_DIR)/test_diffusion_unit $(BUILD_DIR)/test_topology_unit $(BUILD_DIR)/test_memory_unit $(BUILD_DIR)/test_learner_unit $(BUILD_DIR)/test_causal_unit $(BUILD_DIR)/test_tensor_broadcast $(BUILD_DIR)/test_forgetting_unit $(BUILD_DIR)/test_media_reader $(BUILD_DIR)/test_pure $(BUILD_DIR)/test_search $(BUILD_DIR)/test_pfe_unit $(BUILD_DIR)/test_regression
 
-test: test-cc-full test-tensor test-tensor-broadcast test-model test-metrics test-trainer test-chinese test-web-fetch test-dialog-unit test-diffusion-unit test-topology-unit test-memory-unit test-learner-unit test-causal-unit test-forgetting-unit test-media-reader test-visual-cortex test-pure test-search test-pfe-unit test-regression test-semantic-growth test-integration test-cc
+test: test-cc-full test-tensor test-tensor-broadcast test-model test-metrics test-trainer test-chinese test-web-fetch test-dialog-unit test-diffusion-unit test-topology-unit test-memory-unit test-learner-unit test-causal-unit test-forgetting-unit test-media-reader test-visual-cortex test-pure test-search test-pfe-unit test-regression test-semantic-growth test-integration test-cc test-paths-unit
 	@echo ""
 	@echo "╔══════════════════════════════════════╗"
 	@echo "║  运行单元测试...                     ║"
@@ -432,4 +467,4 @@ $(PROBE_BATCH_CONTRACT): tools/probe_batch_contract.c src/thread_pool.c include/
 
 probe-batch-contract: $(PROBE_BATCH_CONTRACT)
 
-.PHONY: all linux debug asan asan-test digital-life gateway seed-builder debug-seed test-dialog corpus-train batch-learn batch-learn-lowmem template-build path-analyze compare-templates eval-templates qa-crawler run clean install test test-fast test-tensor test-model test-metrics test-trainer test-chinese test-tensor-broadcast test-web-fetch test-dialog-unit test-diffusion-unit test-topology-unit test-memory-unit test-learner-unit test-causal-unit test-forgetting-unit test-media-reader test-visual-cortex test-pure test-search test-pfe-unit test-regression test-semantic-growth test-integration test-cc test-cc-full test-runner probe-batch-contract check-locks sync-version check-version longrun
+.PHONY: all linux debug asan asan-test digital-life gateway seed-builder debug-seed test-dialog corpus-train batch-learn batch-learn-lowmem template-build path-analyze compare-templates eval-templates qa-crawler run clean install test test-fast test-tensor test-model test-metrics test-trainer test-chinese test-tensor-broadcast test-web-fetch test-dialog-unit test-diffusion-unit test-topology-unit test-memory-unit test-learner-unit test-causal-unit test-forgetting-unit test-media-reader test-visual-cortex test-pure test-search test-pfe-unit test-regression test-semantic-growth test-integration test-cc test-cc-full test-runner probe-batch-contract check-locks sync-version check-version longrun test-paths-unit
