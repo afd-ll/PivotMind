@@ -997,37 +997,6 @@ int insert_cross_topology_link(MasterTopology* master,
                                  to_topo_id, to_node_id, weight, relation);
 }
 
-int remove_cross_topology_link(MasterTopology* master,
-                              int from_topo_id, int from_node_id,
-                              int to_topo_id, int to_node_id) {
-    if (!master) return -1;
-
-    pthread_rwlock_wrlock(&master->rwlock);
-
-    // 查找跨拓扑链接
-    for (int i = 0; i < master->cross_link_count; i++) {
-        CrossTopologyLink* link = master->cross_links[i];
-        if (link && 
-            link->from_topo_id == from_topo_id &&
-            link->from_node_id == from_node_id &&
-            link->to_topo_id == to_topo_id &&
-            link->to_node_id == to_node_id) {
-            
-            // 找到，移除
-            free(link);
-            for (int j = i; j < master->cross_link_count - 1; j++) {
-                master->cross_links[j] = master->cross_links[j + 1];
-            }
-            master->cross_link_count--;
-            pthread_rwlock_unlock(&master->rwlock);
-            return 0;
-        }
-    }
-
-    pthread_rwlock_unlock(&master->rwlock);
-    return -1;  // 未找到
-}
-
 // ==================== 统计与监控 ====================
 
 const GrowthStats* topology_growth_get_stats(MasterTopology* master) {

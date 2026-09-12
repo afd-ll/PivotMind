@@ -315,19 +315,6 @@ int insert_cross_topology_link(MasterTopology* master,
                              int to_topo_id, int to_node_id,
                              float weight, const char* relation);
 
-/**
- * 动态移除跨拓扑链接
- * @param master 主拓扑
- * @param from_topo_id 源拓扑ID
- * @param from_node_id 源节点ID
- * @param to_topo_id 目标拓扑ID
- * @param to_node_id 目标节点ID
- * @return 0 成功, -1 失败
- */
-int remove_cross_topology_link(MasterTopology* master,
-                              int from_topo_id, int from_node_id,
-                              int to_topo_id, int to_node_id);
-
 // ========== 统计与监控 ==========
 
 /**
