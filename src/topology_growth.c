@@ -987,16 +987,6 @@ float connection_strength_decay(MasterTopology* master, int topo_id,
 
 // ==================== 跨拓扑动态操作 ====================
 
-int insert_cross_topology_link(MasterTopology* master,
-                             int from_topo_id, int from_node_id,
-                             int to_topo_id, int to_node_id,
-                             float weight, const char* relation) {
-    if (!master) return -1;
-
-    return master_add_cross_link(master, from_topo_id, from_node_id,
-                                 to_topo_id, to_node_id, weight, relation);
-}
-
 // ==================== 统计与监控 ====================
 
 const GrowthStats* topology_growth_get_stats(MasterTopology* master) {

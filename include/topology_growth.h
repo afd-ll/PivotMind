@@ -299,22 +299,6 @@ float connection_strength_decay(MasterTopology* master, int topo_id,
 
 // ========== 跨拓扑动态操作 ==========
 
-/**
- * 动态添加跨拓扑链接
- * @param master 主拓扑
- * @param from_topo_id 源拓扑ID
- * @param from_node_id 源节点ID
- * @param to_topo_id 目标拓扑ID
- * @param to_node_id 目标节点ID
- * @param weight 权重
- * @param relation 关系类型
- * @return 0 成功, -1 失败
- */
-int insert_cross_topology_link(MasterTopology* master,
-                             int from_topo_id, int from_node_id,
-                             int to_topo_id, int to_node_id,
-                             float weight, const char* relation);
-
 // ========== 统计与监控 ==========
 
 /**
