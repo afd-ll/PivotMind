@@ -9,6 +9,7 @@
 [English](README.md) · [简体中文](README.zh-CN.md)
 
 [![版本](https://img.shields.io/badge/version-v0.5.29-blue.svg)](changelogs/)
+[![CI](https://github.com/afd-ll/PivotMind/actions/workflows/ci.yml/badge.svg)](https://github.com/afd-ll/PivotMind/actions/workflows/ci.yml)
 [![许可证](https://img.shields.io/badge/license-Apache%202.0-green.svg)](LICENSE)
 [![语言](https://img.shields.io/badge/C-99%2B-orange.svg)](https://en.wikipedia.org/wiki/C99)
 [![平台](https://img.shields.io/badge/ARM-RK3399%20%7C%20x86__64-lightgrey.svg)](#快速开始)
