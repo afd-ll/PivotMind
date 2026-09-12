@@ -23,11 +23,8 @@
 #include <sys/types.h>
 #include <unistd.h>
 
-/* 正常由 Makefile 的 -DPM_HOME_DEFAULT 提供（平台化：Linux / Termux）。
-   这里留一份同值缺省，只为「不通过 Makefile 单独编译本文件」时仍能链接。 */
-#ifndef PM_HOME_DEFAULT
-#  define PM_HOME_DEFAULT "/var/lib/pivotmind"
-#endif
+/* 编译期缺省 PM_HOME_DEFAULT 的定义已上移到 include/pivotmind_paths.h：
+ * 所有消费者（含测试 TU）必须看到同一个字符串宏，否则第 3 级回退无从验证。 */
 
 /* 编译期事实：PM_HOME_DEFAULT 必须是绝对路径（不许相对、不许运行期兜底）。
    ⛔ C 语言没有编译期字符串自省：字符串字面量的下标**不是**整型常量表达式（那是 C++ 的规则），

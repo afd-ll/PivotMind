@@ -29,7 +29,10 @@ ifeq ($(strip $(findstring com.termux,$(PREFIX))$(findstring Android,$(UNAME_S))
 else
   PM_HOME_DEFAULT ?= /data/data/com.termux/files/usr/var/pivotmind
 endif
-PM_HOME_CFLAGS = -DPM_HOME_DEFAULT='"'$(PM_HOME_DEFAULT)'"'
+# 传【裸 token】而不是字符串字面量：引号交给 C 的字符串化（PM_STR）。
+# 理由：make 的引号在不同配方里被 shell 剥的层数不同（普通构建 vs `make CFLAGS="$(ASAN_CFLAGS)"`
+# 的嵌套 make），写成字面量必然在某一层被剥掉 ⇒ 编译期报 "expected expression before '/' "。
+PM_HOME_CFLAGS = -DPM_HOME_DEFAULT_PATH=$(PM_HOME_DEFAULT)
 # 硬门（主门）：PM_HOME_DEFAULT 必须是绝对路径（不许相对、不许 $HOME）。
 # 依据：C 里字符串字面量的下标不是整型常量表达式（那是 C++ 的规则）
 # ⇒ 编译期断言只能落在构建系统这一层（C 侧另有一道 GCC __attribute__((error)) 的次门）。

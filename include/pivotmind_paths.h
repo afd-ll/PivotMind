@@ -43,6 +43,20 @@ extern "C" {
 /* 单个路径缓冲上限（容量由调用方按 size_t n 给出，含 '\0'） */
 #define PM_PATH_MAX 4096
 
+/* 编译期缺省数据根（第 3 级回退的目标）。
+ * Makefile 传的是【裸 token】（-DPM_HOME_DEFAULT_PATH=/var/lib/pivotmind），
+ * 引号在这里由 C 补齐 ⇒ 无论经过几层 shell，PM_HOME_DEFAULT 都是字符串字面量。
+ * 定义放在【头文件】而不是 .c：测试 TU 等所有消费者都要看到同一个值（见契约单测第 3 条）。 */
+#ifndef PM_HOME_DEFAULT
+#  ifdef PM_HOME_DEFAULT_PATH
+#    define PM_PATHS_STR_(x) #x
+#    define PM_PATHS_STR(x) PM_PATHS_STR_(x)
+#    define PM_HOME_DEFAULT PM_PATHS_STR(PM_HOME_DEFAULT_PATH)
+#  else
+#    define PM_HOME_DEFAULT "/var/lib/pivotmind"
+#  endif
+#endif
+
 /* 目录位掩码（pm_ensure_dirs 返回值 = 未能就绪的位；0 = 全部就绪） */
 #define PM_DIR_HOME    (1u << 0)
 #define PM_DIR_DATA    (1u << 1)   /* $PM_HOME/data */
