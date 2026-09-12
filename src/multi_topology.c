@@ -5678,6 +5678,11 @@ int master_load_state(MasterTopology* master, const char* file_path) {
      *                        （>0 即证明"位移真实存在且已被纠正"）*/
     int xlink_mapped_ok = 0;
     int xlink_idmap_hits = 0;
+    /* TAIL-EDGE-1（重复引用记账半）: master_add_cross_link 命中 cross_link_exists 时
+     * 返回已存在链的 link_id（>=0）而**不新增** cross_links 条目 ⇒ 加载侧落地计数
+     * （xlink_mapped_ok / loaded_links）会比 cross_link_count 多出「被静默吸收」的条数。
+     * 原路径无任何输出 = 静默吸收 ⇒ 按「丢弃必须记账」补计数 + INFO 记账行。*/
+    int xlink_dup_absorbed = 0;
     /* TAIL-EDGE-1（自洽性校验半）Step 2: 把原 xlink_oob_unmapped 拆成 A/B/C，
      * 并新增 D/E —— 互斥、穷尽，判据见 edge-consistency-batch-plan.md §2.2 R1–R4：
      *   A = R1/R2: from 端不存在 且 to 端不存在
@@ -5717,6 +5722,7 @@ int master_load_state(MasterTopology* master, const char* file_path) {
     }
 
     int from_topo = 0, from_node = 0, to_topo = 0, to_node = 0;
+    int xlink_raw_from = 0, xlink_raw_to = 0;   /* TAIL-EDGE-1: 文件原始 id（记账行用）*/
     while (1) {
         float weight;
         int use_count;
@@ -5756,8 +5762,8 @@ int master_load_state(MasterTopology* master, const char* file_path) {
              * 不换算直接落地的话：界内引用会静默指到**另一个概念**（错位），
              * 界外引用被丢。映射表查不到 = 文件里没有该 id 的节点记录（真悬垂），
              * 仍按原行为丢弃（只记账，不改成拒绝加载）。 */
-            const int xlink_raw_from = from_node;
-            const int xlink_raw_to   = to_node;
+            xlink_raw_from = from_node;
+            xlink_raw_to   = to_node;
             from_node = xlink_idmap_get(xlink_f2m, xlink_f2m_cap,
                                         from_topo, xlink_raw_from);
             to_node   = xlink_idmap_get(xlink_f2m, xlink_f2m_cap,
@@ -5814,9 +5820,23 @@ int master_load_state(MasterTopology* master, const char* file_path) {
             xlink_mapped_ok++;
         }
 
+        /* TAIL-EDGE-1（重复引用记账半）: add 返回 >=0 只说明"链已存在"，不代表"新增"。
+         * 记 cross_link_count 增量来区分「新增」与「被吸收」——见上方声明处注释。*/
+        const int xlink_cl_before = master->cross_link_count;
         int link_result = master_add_cross_link(master, from_topo, from_node,
                                                        to_topo, to_node,
                                                        weight, "seed");
+        const int xlink_absorbed =
+            (link_result >= 0 && master->cross_link_count == xlink_cl_before) ? 1 : 0;
+        if (xlink_absorbed) {
+            xlink_dup_absorbed++;
+            if (xlink_dup_absorbed <= 10) {
+                LOG_INFO("[跨链重映射] 重复引用被吸收 #%d: from(topo=%d id=%d→%d) "
+                         "-> to(topo=%d id=%d→%d) weight=%.4f（等价链已存在, 未新增）",
+                         xlink_dup_absorbed, from_topo, xlink_raw_from, from_node,
+                         to_topo, xlink_raw_to, to_node, weight);
+            }
+        }
         if (link_result >= 0) {
             for (int i = 0; i < master->cross_link_count; i++) {
                 CrossTopologyLink* link = master->cross_links[i];
@@ -5995,6 +6015,14 @@ int master_load_state(MasterTopology* master, const char* file_path) {
         LOG_WARNING("[状态持久化] 跨链孤儿 (from,to) 拓扑对分布: %s(共 %d 对%s)",
                     xlink_pair_buf, xlink_oob_pair_n,
                     xlink_oob_pair_other > 0 ? "；另有溢出对未展开" : "");
+    }
+    /* TAIL-EDGE-1（重复引用记账半）收尾汇总：吸收数 >0 才打（健康文件完全安静）。*/
+    if (xlink_dup_absorbed > 0) {
+        LOG_INFO("[跨链重映射] 加载期重复引用吸收 %d 条: 落地计数 %d = 新增 %d + 吸收 %d "
+                 "（cross_link_count=%d）",
+                 xlink_dup_absorbed, xlink_mapped_ok,
+                 xlink_mapped_ok - xlink_dup_absorbed, xlink_dup_absorbed,
+                 master->cross_link_count);
     }
     fprintf(stderr, "[状态加载] 完成: %d 节点, %d 链接, 耗时 %ld 秒\n",
             loaded_nodes, loaded_links, (long)(t1 - t0));
