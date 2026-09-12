@@ -5080,6 +5080,20 @@ int master_load_state(MasterTopology* master, const char* file_path) {
         xlink_f2m_cap[_i] = 0;
     }
 
+    /* TAIL-EDGE-1（自洽性校验半）: 文件节点记录段台账（键 = 拓扑下标，与
+     * xlink_f2m 同口径）。file_nodes[t] = Pass 1 在拓扑 t 读到的节点记录条数；
+     * file_maxid[t] = 这些记录里 node_id 的最大值。
+     * 用途：① R2（上界规则）的 O(1) 廉价前置；② 运行期断言
+     * file_maxid[t]+1 == file_nodes[t]（实测物证「每拓扑 id 完全连续、缺号数 0」，
+     * 不等即说明文件形态变了）。判定的权威规则仍是 R1（xlink_idmap_get == -1），
+     * R2 只作前置；二者不一致时以 R1 为准。 */
+    int file_nodes[XLINK_IDMAP_SLOTS];
+    int file_maxid[XLINK_IDMAP_SLOTS];
+    for (int _i = 0; _i < XLINK_IDMAP_SLOTS; _i++) {
+        file_nodes[_i] = 0;
+        file_maxid[_i] = -1;
+    }
+
     /* === 节点加载循环 (Pass 1: 创建所有节点，跳过边数据) === */
     const uint8_t* node_section_start = p;
     while (1) {
@@ -5205,6 +5219,15 @@ int master_load_state(MasterTopology* master, const char* file_path) {
              * 口径一致（都是 master->sub_topologies[] 的下标）。 */
             xlink_idmap_set(xlink_f2m, xlink_f2m_cap,
                             target_topo->topo_id, node_id, node->node_id);
+            /* TAIL-EDGE-1（自洽性校验半）: 同步该拓扑的文件记录段台账
+             * （与写映射表同一处，不新增遍历、不新增分支行为）。 */
+            {
+                const int _t = target_topo->topo_id;
+                if (_t >= 0 && _t < XLINK_IDMAP_SLOTS) {
+                    file_nodes[_t]++;
+                    if (node_id > file_maxid[_t]) file_maxid[_t] = node_id;
+                }
+            }
         }
 
         // 连接数据：Pass 1 全部跳过，Pass 2 统一恢复
@@ -5394,14 +5417,36 @@ int master_load_state(MasterTopology* master, const char* file_path) {
     int xlink_oob_total = 0;     /* 越界丢弃累计（= 分子 N）*/
     int xlink_oob_detail = 0;    /* 已打印明细条数（上限 10）*/
     /* TAIL-EDGE-1（结构半）新增分类/效果计数（仍只观测，不改控制流）：
-     *   xlink_oob_unmapped — 越界记录中"文件里压根没有该 id 的节点记录"的条数
-     *                        （真悬垂：目标早已被剪枝/从未落盘，加载期无从救回）
      *   xlink_mapped_ok    — 经 id 映射换算后成功落地的条数
      *   xlink_idmap_hits   — 映射表命中且 **内存 id != 文件 id** 的次数
      *                        （>0 即证明"位移真实存在且已被纠正"）*/
-    int xlink_oob_unmapped = 0;
     int xlink_mapped_ok = 0;
     int xlink_idmap_hits = 0;
+    /* TAIL-EDGE-1（自洽性校验半）Step 2: 把原 xlink_oob_unmapped 拆成 A/B/C，
+     * 并新增 D/E —— 互斥、穷尽，判据见 edge-consistency-batch-plan.md §2.2 R1–R4：
+     *   A = R1/R2: from 端不存在 且 to 端不存在
+     *   B = R1/R2: 仅 to 端不存在
+     *   C = R1/R2: 仅 from 端不存在
+     *       ⚠️ C 在本控制流下**不可达**：from 端缺席时 xlink_idmap_get 返回 -1，
+     *       紧接的范围判据立刻命中 continue ⇒ from_sub->net 从不被解引用。
+     *       故 C 恒为 0 属**预期**（规格 §2.2 期望值亦为 0），不是 bug，勿"修"。
+     *   D = R3: 两端都存在（换算后内存 id >= 0）但越界 = 映射表内部不变量违例，
+     *       预期恒 0；>0 必须当 bug 信号报出，不得当普通孤儿。
+     *   E = R4: 段提前终止（拓扑下标非法 ⇒ 既有 break）。
+     * 分类只自增，不改控制流：孤儿仍按原逻辑 continue 丢弃（§2.3 铁律 1）。
+     * 分类互斥穷尽 ⇒ A+B+C+D 恒 == xlink_oob_total。*/
+    int xlink_orphan_a = 0, xlink_orphan_b = 0, xlink_orphan_c = 0;
+    int xlink_orphan_d = 0, xlink_orphan_e = 0;
+    /* (from,to) 拓扑对孤儿分布（§6.1 V6 验收：state_after 期望 (0,1)=955 /
+     * (8,1)=435 / (8,0)=21，三项相加 = 孤儿合计 1411）。键 = **拓扑下标对**；
+     * 凡打印 id 一律用**文件原始 id**（xlink_raw_from/xlink_raw_to），不是映射后的。
+     * 固定 32 槽，溢出的对数只计数、不丢账。*/
+    enum { XLINK_OOB_PAIR_SLOTS = 32 };
+    int xlink_oob_pair_from[XLINK_OOB_PAIR_SLOTS];
+    int xlink_oob_pair_to[XLINK_OOB_PAIR_SLOTS];
+    int xlink_oob_pair_count[XLINK_OOB_PAIR_SLOTS];
+    int xlink_oob_pair_n = 0;
+    int xlink_oob_pair_other = 0;
     if (p + (int)sizeof(uint32_t) <= end) {
         READ(&sentinel, sizeof(uint32_t));
         if (sentinel == 0xDEADBEEF) {
@@ -5432,6 +5477,11 @@ int master_load_state(MasterTopology* master, const char* file_path) {
         int max_topo = master->sub_topo_count;
         if (from_topo < 0 || from_topo >= max_topo ||
             to_topo < 0 || to_topo >= max_topo) {
+            /* Step 2 / 类 E（R4 段提前终止）：拓扑下标非法 ⇒ 既有 break
+             * （控制流逐字不变）。⚠️ from_topo == -1 是**正常**的 freq 段哨兵
+             * （存盘写 [-1,0,0,0,0,0]，见 master_serialize_tail「频率表扩展保存」
+             * 块），不计入 E —— 否则每个带频率表的健康文件都会是 E=1。*/
+            if (from_topo != -1) xlink_orphan_e++;
             break;
         }
 
@@ -5465,7 +5515,30 @@ int master_load_state(MasterTopology* master, const char* file_path) {
                  * 来自哪个段)，收尾统一汇总。控制流与丢弃行为完全不变。
                  * 明细打印的是**文件原始 id**（与修复前逐字节同格式，便于对照）。 */
                 xlink_oob_total++;
-                if (from_node < 0 || to_node < 0) xlink_oob_unmapped++;
+                /* Step 2: 互斥穷尽分类（A/B/C = R1/R2 存在性；D = R3 不变量违例）。
+                 * 下方明细行沿用既有格式，打印的仍是**文件原始 id**。*/
+                if (from_node < 0 && to_node < 0)  xlink_orphan_a++;
+                else if (to_node < 0)              xlink_orphan_b++;
+                else if (from_node < 0)            xlink_orphan_c++;
+                else                               xlink_orphan_d++;
+                /* (from,to) 拓扑对分布：只累计，不改控制流。*/
+                {
+                    int _p = -1;
+                    for (int _k = 0; _k < xlink_oob_pair_n; _k++) {
+                        if (xlink_oob_pair_from[_k] == from_topo &&
+                            xlink_oob_pair_to[_k] == to_topo) { _p = _k; break; }
+                    }
+                    if (_p >= 0) {
+                        xlink_oob_pair_count[_p]++;
+                    } else if (xlink_oob_pair_n < XLINK_OOB_PAIR_SLOTS) {
+                        xlink_oob_pair_from[xlink_oob_pair_n]  = from_topo;
+                        xlink_oob_pair_to[xlink_oob_pair_n]    = to_topo;
+                        xlink_oob_pair_count[xlink_oob_pair_n] = 1;
+                        xlink_oob_pair_n++;
+                    } else {
+                        xlink_oob_pair_other++;
+                    }
+                }
                 if (xlink_oob_detail < 10) {
                     int from_bad = (from_node < 0 ||
                                     from_node >= from_sub->net->node_count);
@@ -5605,6 +5678,67 @@ int master_load_state(MasterTopology* master, const char* file_path) {
         LOG_WARNING("[状态持久化] 跨链引用越界丢弃 %d/%d (%.1f%%) (前 %d 条明细已打印); "
                     "成因: 加载期 id 整体重排(种子副本位移), cross_links 仍用文件原始 id",
                     xlink_oob_total, xlink_seen, xlink_oob_pct, xlink_oob_detail);
+    }
+    /* TAIL-EDGE-1（自洽性校验半）Step 2: R2 的物证断言 ——
+     * file_maxid[t] + 1 == file_nodes[t]（物证：文件每拓扑 id 完全连续、缺号数 0
+     * ⇒ 文件 id 值域恰为 0..file_nodes[t]-1）。**软断言**：只报警、绝不拒绝加载
+     * （§2.3 铁律 1）；等式不成立时判定一律以 R1（xlink_idmap_get）为准，R2 只作
+     * O(1) 廉价前置。file_nodes[t]==0 时 maxid==-1，恒等成立、不打任何字
+     * ⇒ 健康文件完全安静。*/
+    for (int _t = 0; _t < XLINK_IDMAP_SLOTS; _t++) {
+        if (file_nodes[_t] == 0) continue;
+        if (file_maxid[_t] + 1 != file_nodes[_t]) {
+            fprintf(stderr, "[状态加载] 警告：拓扑 %d 文件节点 id 不连续: "
+                            "file_nodes=%d file_maxid=%d (缺号 %d) ⇒ "
+                            "R2 上界规则降级为廉价前置, 判定以 R1 为准\n",
+                    _t, file_nodes[_t], file_maxid[_t],
+                    file_nodes[_t] - file_maxid[_t] - 1);
+            LOG_WARNING("[状态持久化] 拓扑 %d 文件节点 id 不连续: file_nodes=%d "
+                        "file_maxid=%d (缺号 %d) ⇒ R2 降级为廉价前置, 判定以 R1 为准",
+                        _t, file_nodes[_t], file_maxid[_t],
+                        file_nodes[_t] - file_maxid[_t] - 1);
+        }
+    }
+    /* Step 2 收尾汇总（追加在既有越界汇总之后）：孤儿分类一行（§2.4 形态）
+     * + (from,to) 拓扑对分布一行。**零孤儿时完全安静**（与既有「无越界则不打」
+     * 同款，健康文件不多打任何字）。*/
+    if (xlink_oob_total > 0) {
+        double xlink_orphan_pct = (xlink_seen > 0)
+            ? 100.0 * (double)xlink_oob_total / (double)xlink_seen : 0.0;
+        fprintf(stderr, "[状态加载] 警告：跨链引用孤儿丢弃 %d/%d (%.1f%%)："
+                        "A(两端不存在)=%d B(仅to不存在)=%d C(仅from不存在)=%d "
+                        "D(不变量违例)=%d E(段提前终止)=%d，前 %d 条已打印\n",
+                xlink_oob_total, xlink_seen, xlink_orphan_pct,
+                xlink_orphan_a, xlink_orphan_b, xlink_orphan_c,
+                xlink_orphan_d, xlink_orphan_e, xlink_oob_detail);
+        LOG_WARNING("[状态持久化] 跨链引用孤儿丢弃 %d/%d (%.1f%%)："
+                    "A(两端不存在)=%d B(仅to不存在)=%d C(仅from不存在)=%d "
+                    "D(不变量违例)=%d E(段提前终止)=%d (前 %d 条明细已打印; "
+                    "明细用文件原始 id, 成因: 跨代 id 空间 / 剪枝重编号未同步)",
+                    xlink_oob_total, xlink_seen, xlink_orphan_pct,
+                    xlink_orphan_a, xlink_orphan_b, xlink_orphan_c,
+                    xlink_orphan_d, xlink_orphan_e, xlink_oob_detail);
+        /* (from,to) 拓扑对分布（键 = 拓扑下标对；id 指纹见上方明细行）。*/
+        char xlink_pair_buf[2048];
+        int xlink_pair_off = 0;
+        xlink_pair_buf[0] = '\0';
+        for (int _k = 0; _k < xlink_oob_pair_n; _k++) {
+            char xlink_pair_one[128];
+            snprintf(xlink_pair_one, sizeof(xlink_pair_one), "(%d,%d)=%d ",
+                     xlink_oob_pair_from[_k], xlink_oob_pair_to[_k],
+                     xlink_oob_pair_count[_k]);
+            int _need = (int)strlen(xlink_pair_one);
+            if (xlink_pair_off + _need >= (int)sizeof(xlink_pair_buf)) break;
+            memcpy(xlink_pair_buf + xlink_pair_off, xlink_pair_one, (size_t)_need);
+            xlink_pair_off += _need;
+            xlink_pair_buf[xlink_pair_off] = '\0';
+        }
+        fprintf(stderr, "[状态加载] 跨链孤儿 (from,to) 拓扑对分布: %s(共 %d 对%s)\n",
+                xlink_pair_buf, xlink_oob_pair_n,
+                xlink_oob_pair_other > 0 ? "；另有溢出对未展开" : "");
+        LOG_WARNING("[状态持久化] 跨链孤儿 (from,to) 拓扑对分布: %s(共 %d 对%s)",
+                    xlink_pair_buf, xlink_oob_pair_n,
+                    xlink_oob_pair_other > 0 ? "；另有溢出对未展开" : "");
     }
     fprintf(stderr, "[状态加载] 完成: %d 节点, %d 链接, 耗时 %ld 秒\n",
             loaded_nodes, loaded_links, (long)(t1 - t0));
