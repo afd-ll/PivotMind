@@ -1,5 +1,55 @@
 # Changelog
 
+## v0.5.29 — 2026-09-12
+
+> 来源：**跨链一致性整批（5 笔）+ 版本号单一真值源 + 两道回归护栏 + `f280cfa` 并带的五条尾巴补记**，共 **7 笔提交**（`d31a212` / `a16b74a` / `12271b9` / `d9a871f` / `6b668fd` / `d8b9828` / `25b2bdc`）均已 `commit` 并推送，权威树 HEAD `6b668fd`。主线仍是**把「静默」变成「会喊」**：这一批的对象是**跨链引用**——从「越界就悄悄丢、错位就静默指错、踩到空槽就崩、剪枝后旧 id 就失配」变成「**能映射、能分类计数、能判空跳过、能重映射、能压缩**」。完整发布说明（含逐条证据、诚实边界、红线声明、已知未修问题）见 [changelogs/073-xlink-consistency-version-ssot.md](changelogs/073-xlink-consistency-version-ssot.md)。
+
+### Fixed
+
+**① 跨链一致性整批（`src/multi_topology.c` / `include/multi_topology.h` / `src/associative_reasoning.c`，5 笔）**
+- **加载期 id 映射（`d31a212`）**：种子副本路径使内存 id 相对文件 id **整体后移 +7**，`cross_links[]` 拿文件 id 当内存 id 用 ⇒ **界内静默指错**。改为加载时维护局部映射表 `xlink_f2m`（键 = 文件 id，值 = 内存 id），校验前先换算；**界内静默指错 1470 条（99.4%）→ 0**，`live_A` 救回 **10 条**（45.0%→44.7%）。⚠ **头条越界比例 48.8% 纹丝不动**——残差两端 id 在文件里根本不存在，映射表原理上无从换算，「48.8%→≈0%」验收口径**被证伪**（上级假设错了，非方案失败）。
+- **孤儿分类记账（`a16b74a`）**：把越界引用从「静默丢」改为分类 **A/B/C/D/E** + `(from,to)` 分布 + 前 10 条明细 + 收尾汇总（**零孤儿完全安静**）。实测 `state_after`：**A=332 B=1079 C=0 D=0 E=0**，**1411/2890 = 48.8%**；`live_A` **1323/2959 = 44.7%**；配平 `2890−1411=1479=TOTAL_LINKS`。
+- **走边判空跳过 NULL 槽（`12271b9`）**：`master_prune_cross_links` 只 `free`+置 NULL、不压缩 ⇒ 「界内但指向空槽」的 adj 条目合法存在，`topology_walk_greedy_impl:2082` 直接解引用 ⇒ **真崩**（ctl `CTL_EXIT=139`）；改为**整链短路**跳过（fix `FIX_EXIT=0` + `跳过 NULL 跨链槽位 2 次`）。
+- **剪枝重映射（`d9a871f`）**：真 bug「**判越界排在了查表前面**」——用**压缩后**的 `nc` 判**重编号前**的旧 id ⇒ 合法链被提前判死。改为**有 remap 时先查表、后判越界**；探针悬垂端点 ctl **6/14 = 42.9%** → fix **0**。
+- **压缩 `cross_links`（`6b668fd`）**：新增 `master_compact_cross_links_nolock()`（非 NULL 前移 + `link_id=新下标` + 重建 `cross_adj[].link_index` + `cross_link_count=存活数`），在两个产洞口调用；探针 pre `洞=3`/`total_links` 虚报 +3 → fix `洞=0`/**读错链 0**/`cross_link_exists` **违反 0/12**。
+
+**② 版本号收为单一真值源 + 秒级门禁（`d8b9828`）**
+- 新增 `tools/version_common.py`（真值源解析 + 4 种版本串锚点）、`tools/sync_version_docs.py`（幂等生成器）、`tools/check_version_consistency.py`（秒级门禁）；`Makefile` 加 `sync-version` / `check-version`，并把 **`check-version` 接进 `make test`**。
+- `README.md` / `README.zh-CN.md` / `ARCHITECTURE.md` 里「声明当前版本」的锚点**一律由生成器改写，不得手写**（历史节天然豁免）。背景：`ARCHITECTURE.md` 抬头曾**落后 28 个小版本**（`v0.5.0` vs `v0.5.28`）无人察觉（`tests/README.md:302`）。
+- 本版真值源 `include/pivotmind_version.h` 由 `0.5.28` **bump 至 `0.5.29`**，活文档经 `make sync-version` 同步，`make check-version` **PASS**。
+
+**③ 两道回归护栏（`25b2bdc`）**
+- `tests/tools/check_lock_discipline.py`（15,560 B）：**锁纪律静态检查**（秒级，治「持 master 读锁期间取 master 写锁」），`make check-locks`，**已接进 `make test`**。
+- `tests/longrun/run_longrun_guard.sh`（9,874 B）：**opt-in 长跑监护**（默认 17 分钟 / 断言 tick 越过 600 持续增长到 ≥900），`make longrun GATEWAY=…`，**刻意不进 `test`/`test-fast`**（会真跑网关）。
+
+**④ `f280cfa` 并带的五条尾巴（072 未记，本版补记——已修）**
+- **剪枝额度半**：`max_remove` 由全局 `_total_nodes/50+1` 改为**本拓扑 `nc/50+1`**；3/9/11 拓扑单轮删除量由 **6.10% / 18.10% / 22.10%** → **恒 2.10%**。
+- **越界记账半**：跨链越界丢弃由静默改为记账（`1411/2890 = 48.8%`，配平见 ①）。
+- **防呆基线半**：`g_last_saved_nodes` 改「**只升不降**」；慢速流失 **47.5%** 改前 **0 告警** → 改后 **7 告警**（首报 40.17%），正常剪枝 **0 误报**。
+- **`TAIL-ACCT-1`**：`src/feature_io.c` 维度不匹配由静默 `return -1` 改为 `LOG_ERROR`。
+- **`TAIL-LOCK-1`**：`src/hippocampus.c` 的 `unlock` 移进 `if (vocab && vocab->net)` 内，只解锁真正加过的读锁。
+- **`TAIL-TOOL-1`**：`tools/merge_states.py` 改为以文件头 `feat_dim` 为准，兜底 `256` 并显式记账。
+
+### Quality
+- **跨链整批**：armbian 探针 **pre / half（故意跳过重建）/ fix** 三变体对照 + A/B 反证；压缩 patch `184 行 / 7 hunk`、重映射 `154 行 / 3 hunk`，**`dry-run exit=0`**；各条三支单测 **12/12**、`check-locks` **PASS**、编译自比 **0 新增告警**。
+- **版本 SSOT**：`check-version` 秒级门禁接进 `make test`，活文档 3 份 / 锚点 7 处与真值源一致。
+- **护栏**：`check_lock_discipline.py` 15,560 B、`run_longrun_guard.sh` 9,874 B，用法见 `tests/README.md`。
+
+### Known Issues
+- **已修（072 划掉）**：`TAIL-LOCK-1` / `TAIL-ACCT-1` / `TAIL-TOOL-1` → 均已随 **`f280cfa`** 修复；「版本号未 bump」→ 已由 `f280cfa` bump + `d8b9828` 门禁取代，本版 bump **`0.5.29`**。
+- **仍未修（保留）**：**`emergent_pos.bin` 静默错读风险**——文件头只校验 magic+version、**无维度字段**，降维不改 version ⇒ 旧（512）文件会被新（256）二进制**静默错读**；**当前只是部署时把旧文件移开了，代码未加防线**。
+- **新登记（未定案）**：加载结果 **±1 / +9 去重口径差**（`state_after` `1478` vs 配平 `1479`；`live_A 1635` vs 基线 1626）——隔离对照已证**非本步引入**，原因未定案。
+- **新登记（未做）**：`remove_cross_topology_link` 是第三种破契约路径（零调用者 = 死代码）；剪枝重映射 **5 条语义点待作者拍板**（含是否需要 **id 世代号 epoch** 校验）；`master_prune_cross_links` INFO 未提示「留下 N 个 NULL 洞」。
+- **验证覆盖面**：本版 7 笔**未跑 x86_64 + ASan/UBSan/TSan**、**未做端到端真实数据演练**、**未做整仓 `make`**、**未部署**。技能明载「armbian 绿了不能单独作交付依据」。
+- **部署前置（承接，仍有效）**：真实 `fmt_ver=9` 载荷会被状态闸门**有意拒绝** ⇒ 直接部署 = 「启动即拒绝、空壳运行」；须先同步写入端到 v9 或等批 1 的 v10 读端，**不可用开关绕过**。
+
+### Notes
+- **更正（2026-09-12）**：`include/pivotmind_version.h` 的真值源现为 **`0.5.29`**；活文档三份 / 锚点 7 处由生成器同步一致，`make check-version` PASS。此前 `0.5.28` 为 dev 期中间值。
+- **红线声明**：所有**限边 / 截断 / 周期性稀疏化 / 跨拓扑上限 / 队列满丢任务**逻辑，按作者架构红线本版**一律未触碰**；跨链整批只改「映射 / 计数 / 判空 / 重映射 / 压缩」，**不引入启发式修复、不拒绝加载**；版本 SSOT 只改活文档 + 门禁、不改历史节；护栏为新增测试工具。
+- **本版只新建 `changelogs/073-*.md`、在根 `CHANGELOG.md` 顶部加本条、并把 `include/pivotmind_version.h` bump 到 `0.5.29`**；⛔ 不改 `src/` / `tests/` / `Makefile`，不做 git 写操作。
+
+---
+
 ## v0.5.28 — 2026-09-11
 
 > 来源：**本轮三条独立改动**（① 状态加载版本闸门 ② 特征维度 512→256 收进 main ③ 每 11 分钟自死锁修复），均已在 armbian 上做过真实验证。状态：**工作区改动（未提交、未部署）**，HEAD `efcf907`，**15 个文件 `+99 / −34`**。三条共同的主线是**把「静默」变成「会喊」**——静默丢数据 → 显式拒绝 + 记账；静默停摆 → 根因 + 长跑对照。完整发布说明（含逐条证据、诚实边界、红线声明、已知未修问题）见 [changelogs/072-state-gate-dim256-deadlock.md](changelogs/072-state-gate-dim256-deadlock.md)。
