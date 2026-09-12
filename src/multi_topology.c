@@ -3607,6 +3607,86 @@ void huarong_net_cleanup_retired_batch(MasterTopology* master) {
     }
 }
 
+/* ── STEP3B: 剪枝重编号后修正 cross_links 端点 id（旧 id → 新 id）──
+ * 背景：master_prune_dead_nodes_nolock 压缩节点数组后把 node_id 重编号为
+ * 数组下标，但 master->cross_links[].from_node_id / to_node_id 从不更新 ⇒
+ * 引用指向错节点甚至越界（实测 POST 1743/5780 = 30.2% 端点悬垂），而
+ * has_ref[] 是按 node_id 索引的 ⇒ 保护打在错误节点身上 ⇒ 下一轮把真正被
+ * 引用的节点当死节点删（正反馈雪崩，prune-redline-review.md §4.6 证据 B）。
+ *
+ * 本函数只处理属于 topo_id 这一拓扑的端点（topo_id == 数组下标，见
+ * :264 `sub->topo_id = master->sub_topo_count`，且全仓无删除子拓扑路径）：
+ *   · remap != NULL : 端点 id 经 remap[旧id] 改写为 新id；-1 = 不可映射
+ *                     （该节点已被删 / 空槽 / 旧 id 越界）。**查表优先于
+ *                     越界判定**——重编号后旧 id 可以 ≥ 新 node_count（尾部
+ *                     槽位被压掉），先判越界会误丢合法跨链（见 helper 注释）。
+ *   · remap == NULL : 恒等映射（本拓扑本轮无删除 ⇒ 无重编号），端点 id 一律
+ *                     保持原样，只丢**可证悬垂**者（越界 / 指向空槽）。
+ *                     ⇒ 无删除轮次天然幂等（第二轮零改动）。
+ * 任一端点不可映射 ⇒ 整条链接**丢弃**（free + 置 NULL）。丢弃沿用本文件
+ * 既有约定（master_prune_cross_links）：**不压缩 cross_link_count、不动
+ * cross_adj**，消费侧的 NULL 槽由 Step 3a 的整链短路兜住（xlink_null_skipped）。
+ * 返回丢弃条数（调用方记账；本项目铁律：丢弃必须记账）。
+ * 注：本函数不动 link_id / cross_adj，故 link_id ↔ 数组下标的既有约定不变。 */
+
+/* ── STEP3B: 单个端点「旧 id → 本轮 id」解析 ──
+ * 返回该端点在**本轮**（可能已重编号）拓扑里的 id；置 *drop=1 ⇒ 该端点可证
+ * 不可用 ⇒ 调用方整链丢弃。
+ *   · remap != NULL（本拓扑本轮有重编号，remap[旧id] = 新id / -1）：
+ *     **先查表，后判越界**。⚠️ 顺序是语义关键：cross_links 里存的端点 id 是
+ *     **重编号前**的旧 id，压缩后旧 id 可能 ≥ 新 node_count 却仍被 remap 指向
+ *     一个存活节点；先按新 nc 判越界 ⇒ 这类**合法**端点被当成悬垂静默丢弃
+ *     （实测：节点 200→197 的一轮里，旧 id 199 的 2 条跨链被误丢）。表内 -1 =
+ *     该旧 id 已被删 / 空槽 / 从未存在 ⇒ 真悬垂 ⇒ drop。
+ *   · remap == NULL（本轮无删除 ⇒ 无重编号 ⇒ 恒等映射）：id 原样保留，仅当
+ *     **可证**悬垂（id ≥ node_count 或指向空槽）才 drop。
+ * 注：remap == NULL 分支里 `nid >= nc` 在 || 左侧短路 ⇒ nodes[] 不会被越界读；
+ *     remap != NULL 分支查表用 remap_n(=max_nodes) 兜住越界旧 id ⇒ 同样安全。 */
+static int xlink_map_endpoint(SubTopology* sub, const int* remap, size_t remap_n,
+                              int nc, int nid, int* drop) {
+    if (remap) {                                     /* 有重编号：查表优先 */
+        int ni = ((size_t)nid < remap_n) ? remap[nid] : -1;
+        if (ni < 0) { *drop = 1; return nid; }       /* 目标已删/空槽/旧 id 越界 */
+        if (ni >= nc || !sub->net->nodes[ni]) { *drop = 1; return nid; } /* 表不自洽，防御 */
+        return ni;                                   /* 恒等时 ni == nid ⇒ 不算改写 */
+    }
+    if (nid >= nc || !sub->net->nodes[nid]) *drop = 1;   /* 恒等：只丢可证悬垂 */
+    return nid;
+}
+static int xlink_remap_topo(MasterTopology* master, int topo_id,
+                            SubTopology* sub, const int* remap, size_t remap_n,
+                            int* out_remapped) {
+    if (out_remapped) *out_remapped = 0;
+    if (!master || !master->cross_links || !sub || !sub->net) return 0;
+    int nc = sub->net->node_count;
+    int dropped = 0, remapped = 0;
+    for (int i = 0; i < master->cross_link_count; i++) {
+        CrossTopologyLink* link = master->cross_links[i];
+        if (!link) continue;
+        int drop = 0;
+        /* 两端各自解析出「本轮 id」后再统一提交：被丢弃的链先改写再 free
+         * 会让日志的「重映射端点」数虚高（一轮实测 7 个里含 1 个属于被丢弃
+         * 链的端点）。*/
+        int new_from = link->from_node_id, new_to = link->to_node_id;
+        if (link->from_topo_id == topo_id && link->from_node_id >= 0)
+            new_from = xlink_map_endpoint(sub, remap, remap_n, nc,
+                                          link->from_node_id, &drop);
+        if (!drop && link->to_topo_id == topo_id && link->to_node_id >= 0)
+            new_to = xlink_map_endpoint(sub, remap, remap_n, nc,
+                                        link->to_node_id, &drop);
+        if (drop) {
+            free(link);
+            master->cross_links[i] = NULL;
+            dropped++;
+            continue;
+        }
+        if (new_from != link->from_node_id) { link->from_node_id = new_from; remapped++; }
+        if (new_to   != link->to_node_id)   { link->to_node_id   = new_to;   remapped++; }
+    }
+    if (out_remapped) *out_remapped = remapped;
+    return dropped;
+}
+
 /* ── 死节点清理：移除零边零激活的孤立节点 ── */
 int master_prune_dead_nodes_nolock(MasterTopology* master) {
     if (!master) return 0;
@@ -3716,7 +3796,33 @@ int master_prune_dead_nodes_nolock(MasterTopology* master) {
                     has_ref[t][node->node_id] = 2;      /* 死节点标记 */
             }
         }
-        if (dead_count == 0) { free(dead_ids); continue; }
+        if (dead_count == 0) {
+            /* STEP3B: 本拓扑本轮无删除 ⇒ 不重编号。但跨链端点仍可能**本就
+             * 悬垂**（历史遗留的越界 id —— 正是 POST 30.2% 那批脏数据），
+             * 故仍做一次恒等清扫，否则「悬垂端点 == 0」的弱不变量不成立。 */
+            if (master->cross_link_count > 0) {
+                int _xr0 = 0;
+                int _xd0 = xlink_remap_topo(master, t, sub, NULL, 0, &_xr0);
+                if (_xr0 > 0 || _xd0 > 0)
+                    LOG_INFO("[跨链重映射] topo=%d 无删除，仅清扫悬垂端点: "
+                             "重映射 %d 个, 丢弃跨链 %d 条", t, _xr0, _xd0);
+            }
+            free(dead_ids);
+            continue;
+        }
+
+        /* STEP3B: 建 旧id → 新id 重映射表（-1 = 不可映射）。用 malloc + 显式
+         * 填 -1 而非 calloc：**新 id 0 是合法值**，不能与「不可映射」混淆。
+         * 大小取 max_nodes（= nodes[] 槽位数）而非 nc：旧 id 理论上应 < nc，
+         * 但脏数据可能越界，用槽位大小覆盖之，越界者在查表时自然落回 -1。 */
+        size_t _remap_n = sub->net->max_nodes;
+        int* remap = NULL;
+        if (_remap_n > 0) {
+            remap = (int*)malloc(_remap_n * sizeof(int));
+            if (remap) {
+                for (size_t _r = 0; _r < _remap_n; _r++) remap[_r] = -1;
+            }
+        }
 
         /* 清理所有存活节点中指向死节点的悬垂边 */
         for (int n = 0; n < nc; n++) {
@@ -3769,11 +3875,29 @@ int master_prune_dead_nodes_nolock(MasterTopology* master) {
                  * huarong_topology.c:258）。此前不重编号 → 存盘 tgt_safe 校验
                  * nodes[tgt->node_id]==tgt 失败 → 边写占位静默丢弃（08-12
                  * 实测：prune 后存盘 107k 链接加载只剩 19,646，丢 82%） */
+                /* STEP3B: 重编号前先留下旧 id —— cross_links 里写的正是旧 id */
+                int _old_id = sub->net->nodes[write]->node_id;
                 sub->net->nodes[write]->node_id = write;
+                if (remap && _old_id >= 0 && (size_t)_old_id < _remap_n)
+                    remap[_old_id] = write;
                 write++;
             }
         }
         sub->net->node_count = write;
+        /* STEP3B: 重编号已完成 ⇒ 立刻把本拓扑的 cross_links 端点一并改写，
+         * 映射不到的丢弃 + 记账。**不按 removed_sub 短路**：removed_sub==0 时
+         * 也可能 write<nc（预存 NULL 槽被压掉），且脏数据里的越界端点即使无
+         * 删除也必须清扫。 */
+        {
+            int _xr = 0;
+            int _xd = xlink_remap_topo(master, t, sub, remap, _remap_n, &_xr);
+            if (_xr > 0 || _xd > 0) {
+                LOG_INFO("[跨链重映射] 剪枝重编号后 topo=%d: 节点 %d→%d, "
+                         "重映射端点 %d 个, 丢弃跨链 %d 条（端点已删除/无法映射）",
+                         t, nc, write, _xr, _xd);
+            }
+        }
+        if (remap) free(remap);
         removed += removed_sub;
         free(dead_ids);
         
