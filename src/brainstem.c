@@ -393,6 +393,14 @@ static int brainstem_tick_perception(Brainstem* bs) {
 static void brainstem_tick_synapse_scale(Brainstem* bs) {
     if (bs->tick_count % 600 != 0) return;
     if (!bs->master) return;
+    /* ⚠️ 锁纪律（src/funcword.c:479 原文）：**持读锁期间内部不得调用抢 master
+     * 写锁的函数**。glibc 的 pthread_rwlock_t 不支持同线程「读→写」升级：写锁
+     * 要等所有读者退出，而唯一的读者就是本线程自己 → 永久自死锁（本仓库
+     * self_learner.c:430-433 已记录同机制事故，这是第二次复发）。故本读锁区间内
+     * 只做纯读的节点遍历/边压缩；任何会取 master->rwlock 写锁的函数
+     * （master_reevaluate_cross_links / master_add_cross_link / master_clear_cross_links
+     * / master_prune_cross_links / auto_learn_concepts / self_learner_cycle …）
+     * 一律放在 unlock 之后调用。 */
     pthread_rwlock_rdlock(&bs->master->rwlock);
     int decayed = 0, released = 0;
     for (int t = 0; t < bs->master->sub_topo_count; t++) {
@@ -448,11 +456,17 @@ static void brainstem_tick_synapse_scale(Brainstem* bs) {
     if (decayed > 0 || released > 0)
         LOG_INFO("[突触缩放] 衰减%d条 释放%d条", decayed, released);
 
-    /* 跨拓扑连接质量重评估：每 600 tick 更新 transfer_rate */
+    pthread_rwlock_unlock(&bs->master->rwlock);
+
+    /* 跨拓扑连接质量重评估：每 600 tick 更新 transfer_rate。
+     * ⚠️ 必须在 rdunlock【之后】调用：master_reevaluate_cross_links() 内部对同一把
+     * master->rwlock 取【写】锁（src/multi_topology.c:576）。若在读锁区间内调用 =
+     * glibc 同线程「读→写」自升级 ⇒ 永久自死锁：本函数的 rdunlock 永不执行、读引用
+     * 永久留驻、其余写者永久饿死 —— 即线上「启动约 11 分钟后必死、tick 停在 600」
+     * 的根因（引入于 commit 3d2f7cba/v0.5.24，tick%600==0 才走到这里）。 */
     if (bs->master) {
         master_reevaluate_cross_links(bs->master, 10.0f);
     }
-    pthread_rwlock_unlock(&bs->master->rwlock);
 }
 
 /* 海马体巩固 + DMN梦境 */
