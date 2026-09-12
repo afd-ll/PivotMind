@@ -31,7 +31,7 @@ P2 压力检测 (重大变更前运行)
 | 状态文件边 | 84,202 | convert_state.py |
 | 平均度 | 2.8 edges/node | convert_state.py |
 | 状态文件大小 | 67,501 KB (~66 MB) | ls -lh |
-| 格式版本 / 特征维度 | v5 / 512-dim | convert_state.py |
+| 格式版本 / 特征维度 | v5 / 256-dim | convert_state.py |
 | 加载边恢复率 | 84,196/84,202 = 99.99% | gateway Pass 2 日志 |
 | 加载耗时 | ~1 秒 | gateway 日志 |
 | uXXXX 残留 | 0 (全文件扫描) | clean_unicode_escapes.py |
@@ -97,7 +97,7 @@ CI 当前覆盖的测试: `make test-tensor, test-model, test-metrics, test-trai
 
 | 项目 | 检测方法 | 通过标准 |
 |------|---------|---------|
-| 格式版本 | `convert_state.py --info` 零 WARN | format_version ≥ 5, feature_dim = 512 |
+| 格式版本 | `convert_state.py --info` 零 WARN | format_version ≥ 5, feature_dim = 256 |
 | 节点数 | 同上 | 30,000 ± 10% (词汇拓扑) |
 | 边数 | 同上 | ≥ 80,000 或 ≥ 当前基线的 95% (84,202 × 0.95 = 79,992) |
 | 平均度 | 同上 | ≥ 2.0 edges/node (基线 2.8) |
@@ -194,7 +194,8 @@ CI 当前覆盖的测试: `make test-tensor, test-model, test-metrics, test-trai
 ```bash
 # P0: 每次提交前
 make clean && make linux        # 编译
-make test                        # 单元测试 14 项
+make test                        # 单元测试 24 项 + 锁纪律静态检查(内含 check-locks)
+make check-locks                 # 单独跑锁纪律静态检查（秒级；make test 已含）
 python3 tools/test_unicode_escape.py   # Unicode 专项
 
 # 网关在线状态
@@ -225,3 +226,58 @@ python3 tests/regression/train_track.py --rounds 10  # 训练追踪
 | P2 | 新增状态文件基准测试 | 比较 save→load→save 的边数守恒 |
 | P2 | 新增 \uXXXX 格式自动化回归 | CI 中检测状态文件零 uXXXX |
 | P2 | 实现训练前后边数快照对比 | 量化每次训练的净增益 |
+
+---
+
+## 八、回归护栏：锁纪律（秒级）+ 长跑监护（opt-in）
+
+> 加于 2026-09-11。治两类结构上门禁抓不住的问题：**锁纪律违规**与**分钟级才现形的死**。
+
+### 8.1 `make check-locks` —— 锁纪律静态检查（秒级，已接进 `make test`）
+
+```bash
+make check-locks                                   # = python3 tests/tools/check_lock_discipline.py
+python3 tests/tools/check_lock_discipline.py /path/to/repo   # 也可指定仓库根
+```
+
+查什么：**持 `master->rwlock` 读锁期间，是否调用了会取同一把锁写锁的函数**。
+规则出处是仓库自己的纪律 —— `src/funcword.c`：「持读锁期间内部不得调用抢 master 写锁的函数」。
+
+为什么必须有：glibc 的 `pthread_rwlock_t` **不支持同线程「读→写」升级**，写锁要等所有读者
+退出、而唯一的读者就是本线程自己 ⇒ **永久自死锁**。它是**纯自死锁、没有数据竞争**，
+所以 **TSan / Helgrind 不会报**，只会跟着一起挂住；而它常常藏在 `tick % N == 0` 的分支里，
+**秒级单测结构上也覆盖不到**（实测：v0.5.24 引入，闯过 v0.5.26 / v0.5.27 两轮含 TSan 的全量测试）。
+
+输出：每个命中给 `文件:行` + 区间内被调函数名 + 判定 + 该函数的写锁取锁点；
+末尾 `LOCK-DISCIPLINE: PASS` / `LOCK-DISCIPLINE: FAIL (N 处)`；退出码 0 / 非 0。
+纯标准库，无第三方依赖，可进 CI。
+
+已知限制（节选，全文见脚本尾部 `LIMITATIONS`）：只查**一层直接调用**（不做调用图传递）；
+函数指针 / 宏别名 / `dlsym` 等**间接调用抓不到**；master 别名只认 `master` 与 `X->master`。
+检查器**会忽略注释与字符串里的伪调用**（预处理阶段整段置空、保留换行，故行号不漂移）。
+
+### 8.2 `make longrun` —— 长跑监护（opt-in，约 15 分钟，**刻意不进 `test`/`test-fast`**）
+
+```bash
+make longrun GATEWAY=~/pm-lockguard/bin/pivotmind_gateway
+make longrun GATEWAY=<gw> LONGRUN_ARGS="--port 8421 --minutes 26 --tick-target 900"
+# 等价直跑：
+tests/longrun/run_longrun_guard.sh --bin <gw> [--data DIR] [--port N] [--minutes M] [--interval S]
+```
+
+做什么：在**测试沙箱数据目录**里起 `pivotmind_gateway`（与线上 8080 端口隔离），
+周期性采样当前 tick（抓日志 `[堆监控] tick=`；`--use-status` 才读 `gw_token` 打 `/status`，
+令牌**永不打印**、输出里一律 `[REDACTED]`），然后断言：
+
+- 跑到 **≥900 tick**（约 15 分钟 ≈ 越过 `tick%600` 那道悬崖）；
+- tick **持续增长**（不得长时间无进展）；
+- **从未在 600 处停滞**超过 `--stall-tol`（默认 90 秒）。
+
+PASS/FAIL 都把**采样序列**（elapsed / tick / RSS / 每线程 wchan 直方图）打出来；退出码 0 / 非 0。
+结束时**一律 `kill -9`**（强杀不触发退出存盘，不污染沙箱）。
+
+⚠️ **它会真的把网关跑起来**，只能在允许运行产物的机器上跑（本项目：armbian）。
+脚本自带**内存守卫**：内存 < 2G 的机器（本机 Pi / 受限验证机）会直接拒绝执行（退出码 2），
+以免违反「本机只许编译、不许运行 PivotMind 产物」的铁律。
+
+---

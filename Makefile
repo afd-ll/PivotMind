@@ -324,6 +324,12 @@ test: test-cc-full test-tensor test-tensor-broadcast test-model test-metrics tes
 	@echo "╚══════════════════════════════════════╝"
 	@echo ""
 	@PASSED=0; FAILED=0; \
+	echo "── 锁纪律静态检查 check-locks（秒级，规则见 src/funcword.c:479）──"; \
+	if python3 tests/tools/check_lock_discipline.py; then \
+		echo "  PASS  check-locks"; PASSED=$$((PASSED+1)); \
+	else \
+		echo "  FAIL  check-locks"; FAILED=$$((FAILED+1)); \
+	fi; \
 	for t in $(TEST_BINS); do \
 		name=$$(basename $$t); \
 		if [ -x "$$t" ]; then \
@@ -368,6 +374,29 @@ test-fast: test-model test-metrics test-visual-cortex test-dialog-unit test-diff
 	echo "╚══════════════════════════════════════╝"; \
 	[ $$FAILED -eq 0 ]
 
+# ========== 锁纪律静态检查（秒级；已接进 test:）============================
+# 查「持 master 读锁期间是否调用了会取 master 写锁的函数」。
+# glibc 的 pthread_rwlock_t 不支持同线程「读→写」升级 ⇒ 永久自死锁；它是纯自
+# 死锁、无数据竞争，TSan/Helgrind 不会报，只会跟着一起挂住。规则出处是仓库自己的
+# 纪律 src/funcword.c:「持读锁期间内部不得调用抢 master 写锁的函数」。
+# 历史：修复前 src/brainstem.c:453 恰好 1 处命中（读锁在 :396），修复后 0 命中。
+# 手工跑：make check-locks   或   python3 tests/tools/check_lock_discipline.py
+check-locks:
+	@python3 tests/tools/check_lock_discipline.py
+
+# ========== 长跑监护（opt-in，约 15 分钟；**刻意不进 test/test-fast**）=======
+# 治「分钟级才现形的死」：那处自死锁只在 tick%600==0（约 11 分钟）才第一次执行到，
+# 秒级单测结构上抓不住，所以必须长跑。断言 tick 越过 600 并持续增长到 >=900。
+# ⚠️ 本目标会把 pivotmind_gateway **跑起来**，因此只能在允许运行产物的机器上跑；
+#    脚本自带内存守卫，在受限验证机（Pi，<2G）上会直接拒绝执行。
+#      make longrun GATEWAY=~/pm-lockguard/bin/pivotmind_gateway
+#      make longrun GATEWAY=<gw> LONGRUN_ARGS="--port 8421 --minutes 17 --tick-target 900"
+#    等价直跑： tests/longrun/run_longrun_guard.sh --bin <gw>
+LONGRUN_ARGS ?=
+longrun:
+	@test -n "$(GATEWAY)" || { echo "用法: make longrun GATEWAY=<pivotmind_gateway 路径> [LONGRUN_ARGS=...]"; exit 2; }
+	@tests/longrun/run_longrun_guard.sh --bin "$(GATEWAY)" $(LONGRUN_ARGS)
+
 # ========== R3 · G-T1 批次契约探针（round 3 门禁接线）==========
 # 交付物 tools/probe_batch_contract.c（方案附录 A）只编 src/thread_pool.c，
 # **不进 libpivotmind.a**，不参与 all / test / asan-test。
@@ -384,4 +413,4 @@ $(PROBE_BATCH_CONTRACT): tools/probe_batch_contract.c src/thread_pool.c include/
 
 probe-batch-contract: $(PROBE_BATCH_CONTRACT)
 
-.PHONY: all linux debug asan asan-test digital-life gateway seed-builder debug-seed test-dialog corpus-train batch-learn batch-learn-lowmem template-build path-analyze compare-templates eval-templates qa-crawler run clean install test test-fast test-tensor test-model test-metrics test-trainer test-chinese test-tensor-broadcast test-web-fetch test-dialog-unit test-diffusion-unit test-topology-unit test-memory-unit test-learner-unit test-causal-unit test-forgetting-unit test-media-reader test-visual-cortex test-pure test-search test-pfe-unit test-regression test-semantic-growth test-integration test-cc test-cc-full test-runner probe-batch-contract
+.PHONY: all linux debug asan asan-test digital-life gateway seed-builder debug-seed test-dialog corpus-train batch-learn batch-learn-lowmem template-build path-analyze compare-templates eval-templates qa-crawler run clean install test test-fast test-tensor test-model test-metrics test-trainer test-chinese test-tensor-broadcast test-web-fetch test-dialog-unit test-diffusion-unit test-topology-unit test-memory-unit test-learner-unit test-causal-unit test-forgetting-unit test-media-reader test-visual-cortex test-pure test-search test-pfe-unit test-regression test-semantic-growth test-integration test-cc test-cc-full test-runner probe-batch-contract check-locks longrun
