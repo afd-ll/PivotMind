@@ -229,9 +229,10 @@ python3 tests/regression/train_track.py --rounds 10  # 训练追踪
 
 ---
 
-## 八、回归护栏：锁纪律（秒级）+ 长跑监护（opt-in）
+## 八、回归护栏：锁纪律（秒级）+ 版本号一致性（秒级）+ 长跑监护（opt-in）
 
-> 加于 2026-09-11。治两类结构上门禁抓不住的问题：**锁纪律违规**与**分钟级才现形的死**。
+> 加于 2026-09-11（8.1 / 8.2）与 2026-09-12（8.3）。治三类结构上门禁抓不住的问题：**锁纪律违规**、
+> **版本号各写各的**、**分钟级才现形的死**。
 
 ### 8.1 `make check-locks` —— 锁纪律静态检查（秒级，已接进 `make test`）
 
@@ -279,5 +280,38 @@ PASS/FAIL 都把**采样序列**（elapsed / tick / RSS / 每线程 wchan 直方
 ⚠️ **它会真的把网关跑起来**，只能在允许运行产物的机器上跑（本项目：armbian）。
 脚本自带**内存守卫**：内存 < 2G 的机器（本机 Pi / 受限验证机）会直接拒绝执行（退出码 2），
 以免违反「本机只许编译、不许运行 PivotMind 产物」的铁律。
+
+### 8.3 `make check-version` / `make sync-version` —— 版本号单一真值源（秒级，已接进 `make test`）
+
+```bash
+make check-version      # = python3 tools/check_version_consistency.py（门禁）
+make sync-version       # = python3 tools/sync_version_docs.py（幂等生成器）
+# 也可指定仓库根 / 只看不改 / 在本仓之外做反证：
+python3 tools/check_version_consistency.py --root /path/to/repo
+python3 tools/sync_version_docs.py --root /path/to/repo --dry-run
+```
+
+**唯一真值源**：`include/pivotmind_version.h` —— `PIVOTMIND_VERSION` 与 `MAJOR/MINOR/PATCH`
+必须自洽（不自洽即报错退出）。**受管活文档**：`README.md` / `README.zh-CN.md` / `ARCHITECTURE.md`。
+其中「声明当前版本」的 **4 种锚点** —— ① shields.io badge URL 的版本段
+② 正文当前版本句（`**Current version: vX.Y.Z.**` / `**当前版本：vX.Y.Z。**`）
+③ 指标表版本行（`| Version | \`X.Y.Z\` |` / `| 版本 | … |`）
+④ 架构文档抬头（`> 当前版本: **vX.Y.Z**`）—— **一律由 `make sync-version` 改写，不得手写**。
+
+为什么必须有：同一个版本号曾散落 **8 处、各自为政**（三份活文档 7 处 + `CHANGELOG.md` 的陈旧断言 1 处），
+`ARCHITECTURE.md` 抬头一度落后 **28 个小版本**（`v0.5.0` vs `v0.5.28`）而无人察觉。
+
+⛔ **历史一律不改**：`changelogs/**`、`CHANGELOG.md` 的历史节、`docs/**`，以及活文档里的历史叙述
+（如 "v0.5.21 reset baseline"）**都不在扫描面内**，生成器结构上就匹配不到它们。
+唯一涉及 `CHANGELOG.md` 的规则是：**最新发布节**若提到 `pivotmind_version.h` 却写着过期版本串，
+则该节内必须有一条形如 `更正（YYYY-MM-DD）` 且写明当前真值版本的注记 —— 即
+「**不涂改历史，只追加带日期的更正**」（历史节天然豁免，规则不随版本 bump 误报）。
+
+输出：不一致时逐条打印 `文件:行  现值="…"  期望值="…"`，并给出 `- `（现值行）/ `+ `（期望行）
+对照，末尾 `VERSION-CONSISTENCY: FAIL …（N 处）`，退出码 **1**；一致时打印
+`VERSION-CONSISTENCY: PASS …`，退出码 **0**。生成器是**幂等**的：值已一致时替换结果与原文
+逐字节相同 ⇒ 第二次运行零改动（`sha256` 不变）。纯标准库，无第三方依赖，可进 CI。
+
+施工报告与逐条原始证据：`fix-plans/version-ssot.md`。
 
 ---

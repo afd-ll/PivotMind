@@ -330,6 +330,12 @@ test: test-cc-full test-tensor test-tensor-broadcast test-model test-metrics tes
 	else \
 		echo "  FAIL  check-locks"; FAILED=$$((FAILED+1)); \
 	fi; \
+	echo "── 版本号一致性 check-version（秒级；真值源 include/pivotmind_version.h）──"; \
+	if python3 tools/check_version_consistency.py; then \
+		echo "  PASS  check-version"; PASSED=$$((PASSED+1)); \
+	else \
+		echo "  FAIL  check-version"; FAILED=$$((FAILED+1)); \
+	fi; \
 	for t in $(TEST_BINS); do \
 		name=$$(basename $$t); \
 		if [ -x "$$t" ]; then \
@@ -384,6 +390,19 @@ test-fast: test-model test-metrics test-visual-cortex test-dialog-unit test-diff
 check-locks:
 	@python3 tests/tools/check_lock_discipline.py
 
+# ========== 版本号单一真值源（SSOT；check-version 已接进 test:）============================
+# 真值源唯一：include/pivotmind_version.h（PIVOTMIND_VERSION + MAJOR/MINOR/PATCH）。
+# 活文档 README.md / README.zh-CN.md / ARCHITECTURE.md 里「声明当前版本」的 4 种锚点
+# （shields.io badge URL、正文当前版本句、指标表版本行、架构文档抬头）一律由生成器改写，不得手写。
+# ⛔ 历史不改：changelogs/** 与 CHANGELOG.md 的历史节不在扫描面内（陈旧断言只允许追加带日期的更正注记）。
+# 手工跑：make check-version   或   python3 tools/check_version_consistency.py
+#         make sync-version    或   python3 tools/sync_version_docs.py
+sync-version:
+	@python3 tools/sync_version_docs.py
+
+check-version:
+	@python3 tools/check_version_consistency.py
+
 # ========== 长跑监护（opt-in，约 15 分钟；**刻意不进 test/test-fast**）=======
 # 治「分钟级才现形的死」：那处自死锁只在 tick%600==0（约 11 分钟）才第一次执行到，
 # 秒级单测结构上抓不住，所以必须长跑。断言 tick 越过 600 并持续增长到 >=900。
@@ -413,4 +432,4 @@ $(PROBE_BATCH_CONTRACT): tools/probe_batch_contract.c src/thread_pool.c include/
 
 probe-batch-contract: $(PROBE_BATCH_CONTRACT)
 
-.PHONY: all linux debug asan asan-test digital-life gateway seed-builder debug-seed test-dialog corpus-train batch-learn batch-learn-lowmem template-build path-analyze compare-templates eval-templates qa-crawler run clean install test test-fast test-tensor test-model test-metrics test-trainer test-chinese test-tensor-broadcast test-web-fetch test-dialog-unit test-diffusion-unit test-topology-unit test-memory-unit test-learner-unit test-causal-unit test-forgetting-unit test-media-reader test-visual-cortex test-pure test-search test-pfe-unit test-regression test-semantic-growth test-integration test-cc test-cc-full test-runner probe-batch-contract check-locks longrun
+.PHONY: all linux debug asan asan-test digital-life gateway seed-builder debug-seed test-dialog corpus-train batch-learn batch-learn-lowmem template-build path-analyze compare-templates eval-templates qa-crawler run clean install test test-fast test-tensor test-model test-metrics test-trainer test-chinese test-tensor-broadcast test-web-fetch test-dialog-unit test-diffusion-unit test-topology-unit test-memory-unit test-learner-unit test-causal-unit test-forgetting-unit test-media-reader test-visual-cortex test-pure test-search test-pfe-unit test-regression test-semantic-growth test-integration test-cc test-cc-full test-runner probe-batch-contract check-locks sync-version check-version longrun

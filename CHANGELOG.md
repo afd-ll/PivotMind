@@ -35,6 +35,7 @@
 - **长跑 A/B 对照结论已核实**（`fix-plans/deadlock-branchstem-fix.md` 已补完 · **§5.3/§5.4/§6**）——对照组 `final_tick=600`（自 20:09:20 起**冻结约 11 分钟**、4 线程成排 `futex_wait_queue`）；修复组 `final_tick=1110`（**越过 600 后又前进 510 tick**、`wchan` 无死锁形态）；**唯一变量 = `src/brainstem.c`**、同机同时段、同一份起始数据（`c7a21e48…`）。⚠ **边界（报告 §6.3）**：修复组**未做小时级长稳观察**，**不能声称「永不崩溃」**——结论严格限于「越过 600 这个已知必死点、无死锁形态」。
 - **验证覆盖面**：闸门线**未跑 `make test` 全量**、**x86_64 + ASan/UBSan/TSan 那条腿完全没跑**；降维线仅 5 支、**无运行期语义质量证据**。两条线**均未取得跨架构/跨 libc 交付依据**。
 - **未部署、未提交**；`include/pivotmind_version.h` 仍为 **`"0.5.27"`（版本号未 bump）**。
+- **→ 更正（2026-09-12）**：上面这条**已过期**（历史原文保留、不涂改）。`include/pivotmind_version.h` 已在提交 **`f280cfa`（2026-09-12）** 中 bump 至 **`"0.5.28"`（`PIVOTMIND_MAJOR/MINOR/PATCH` = `0/5/28`）**，上述三条改动亦已提交（`f280cfa` = 状态版本闸门 + 降维 512→256 + 死锁修复；`25b2bdc` = 长跑监护 + 锁纪律门禁那一轮）。⚠ **部署前置仍未解除**：真实 `fmt_ver=9` 载荷会被新闸门有意拒绝，须先同步写入端到 v9（或等批 1 的 v10 读端），不可用开关绕过。**版本号自此收敛为单一真值源**：活文档（`README.md` / `README.zh-CN.md` / `ARCHITECTURE.md`）不再手写版本串，改由 `tools/sync_version_docs.py` 从真值源幂等生成、由 `tools/check_version_consistency.py` 秒级门禁把守（已接进 `make test`，用法见 `tests/README.md`；施工与逐条证据见 `fix-plans/version-ssot.md`）。
 - **部署前置**：真实 `fmt_ver=9` 载荷共 4 副本（含 armbian `~/pivotmind/pivotmind_state.dat`），新闸门会**有意拒绝** → 直接部署 = 「启动即拒绝、空壳运行」；须先同步写入端到 v9 或等批 1 的 v10 读端，**不可用开关绕过**。
 
 ### Notes
