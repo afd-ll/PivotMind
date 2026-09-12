@@ -4894,6 +4894,78 @@ static long master_reset_all_edge_weights(MasterTopology* master) {
     return zeroed;
 }
 
+/* =====================================================================
+ * TAIL-EDGE-1（结构半）: 文件 node_id -> 内存 node_id 映射表
+ * ---------------------------------------------------------------------
+ * 为什么需要：状态文件里的 `cross_links` 记录写的是**存盘那一刻的内存
+ * node_id**（`master_serialize_tail` 直写 `link->from_node_id`），而节点记录
+ * 里的 node_id 也是同一套号（`master_save_state` 直写 `node->node_id`）——
+ * 两者在**存盘时刻**同源、互相自洽。
+ *
+ * 但**加载时刻**内存 node_id 会被重新分配，与文件里的号不再逐一对应：
+ *   1) 加载是"按概念名 find，找不到才 add"（见 Pass 1），同拓扑内**重复
+ *      概念**的记录会被吸收到先建的那个节点上 → 其后所有 id 整体前移；
+ *   2) 加载前若该拓扑里已有节点（种子/锚点在 `master_load_state` 之前就写进
+ *      net，例如 `gateway_system.c` 的词汇/语义锚点、`autonomic_learner.c` 的
+ *      上下文锚点），新节点一律排在它们后面 → 文件内容**整体后移**一个常量。
+ *      （`huarong_net_add_node` 只写 `net->concept_hash`，不写 sub->node_hash，
+ *      故这些种子对 `node_hash_find` 不可见，必然"再建一份副本"。）
+ *
+ * 于是文件里的 cross_links 若直接当内存 id 用：界内的会**指到另一个概念**
+ * （错位，且判据/剪枝保护位跟着指错），界外的被静默丢弃（越界丢边）。
+ *
+ * 本表就是这两个 id 空间的显式对齐：Pass 1 每建/取到一个节点就记下
+ * `文件 node_id -> 该节点实际拿到的内存 node_id`；跨链段落地前先查表换算。
+ * 查不到（文件里没有这个 id 的节点记录）= 真正的悬垂引用（目标早已被剪枝、
+ * 或该记录压根不受支持），仍按原行为丢弃 —— 只是不再静默、且分类记账。
+ *
+ * 表按拓扑下标（= cross_links 里的 from_topo/to_topo 口径，即
+ * `master->sub_topologies[]` 的索引）分开；每拓扑一张 "下标=文件 id" 的
+ * 直查数组，值 = 内存 id，-1 = 无。按需增长。
+ * ===================================================================== */
+#define XLINK_IDMAP_SLOTS   32          /* ≥ 最大子拓扑数，留余量 */
+#define XLINK_IDMAP_MAX_ID  2000000     /* 单拓扑表上限：防损坏文件的巨量 id 触发巨量分配 */
+#define XLINK_IDMAP_INIT    1024        /* 首块大小（条目） */
+
+static int xlink_idmap_grow(int** tab, size_t* cap, int want) {
+    if (want < 0 || want >= XLINK_IDMAP_MAX_ID) return -1;
+    if ((size_t)want < *cap) return 0;
+    size_t ncap = (*cap == 0) ? (size_t)XLINK_IDMAP_INIT : *cap;
+    while (ncap <= (size_t)want) ncap *= 2;
+    if (ncap > (size_t)XLINK_IDMAP_MAX_ID) ncap = (size_t)XLINK_IDMAP_MAX_ID;
+    int* nt = (int*)malloc(ncap * sizeof(int));
+    if (!nt) return -1;                 /* 分配失败 → 该 id 记不上（退化为旧行为，不崩） */
+    memset(nt, 0xFF, ncap * sizeof(int));   /* 全 -1（补码平台上 0xFF… = -1） */
+    if (*tab) {
+        memcpy(nt, *tab, *cap * sizeof(int));
+        free(*tab);
+    }
+    *tab = nt;
+    *cap = ncap;
+    return 0;
+}
+
+static void xlink_idmap_set(int** tab, size_t* cap, int topo, int file_id, int mem_id) {
+    if (!tab || !cap || topo < 0 || topo >= XLINK_IDMAP_SLOTS) return;
+    if (file_id < 0) return;
+    if (xlink_idmap_grow(&tab[topo], &cap[topo], file_id) != 0) return;
+    tab[topo][file_id] = mem_id;
+}
+
+static int xlink_idmap_get(int** tab, size_t* cap, int topo, int file_id) {
+    if (!tab || !cap || topo < 0 || topo >= XLINK_IDMAP_SLOTS) return -1;
+    if (file_id < 0 || (size_t)file_id >= cap[topo] || !tab[topo]) return -1;
+    return tab[topo][file_id];
+}
+
+static void xlink_idmap_free(int** tab, size_t* cap) {
+    if (!tab || !cap) return;
+    for (int i = 0; i < XLINK_IDMAP_SLOTS; i++) {
+        if (tab[i]) { free(tab[i]); tab[i] = NULL; }
+        cap[i] = 0;
+    }
+}
+
 int master_load_state(MasterTopology* master, const char* file_path) {
     if (!master || !file_path) return -1;
 
@@ -4998,6 +5070,15 @@ int master_load_state(MasterTopology* master, const char* file_path) {
     int loaded_nodes = 0;
     int loaded_links = 0;
     time_t last_report = t0;
+
+    /* TAIL-EDGE-1（结构半）: 文件 node_id -> 内存 node_id 映射（见上方辅助函数块）。
+     * 只在本函数内使用，不落进 MasterTopology 结构（最小侵入：不动头文件/ABI）。 */
+    int*   xlink_f2m[XLINK_IDMAP_SLOTS];
+    size_t xlink_f2m_cap[XLINK_IDMAP_SLOTS];
+    for (int _i = 0; _i < XLINK_IDMAP_SLOTS; _i++) {
+        xlink_f2m[_i] = NULL;
+        xlink_f2m_cap[_i] = 0;
+    }
 
     /* === 节点加载循环 (Pass 1: 创建所有节点，跳过边数据) === */
     const uint8_t* node_section_start = p;
@@ -5117,6 +5198,13 @@ int master_load_state(MasterTopology* master, const char* file_path) {
                     node->feature_dim = NODE_FEATURE_DIM;
                 }
             }
+            /* TAIL-EDGE-1（结构半）: 记下 文件 node_id -> 内存 node_id。
+             * `node_id` 是文件记录里的号（存盘时的内存号），`node->node_id`
+             * 是本次加载重新分配的号；跨链段落地前用这张表换算。
+             * 键用 target_topo->topo_id —— 与 cross_links 的 from_topo/to_topo
+             * 口径一致（都是 master->sub_topologies[] 的下标）。 */
+            xlink_idmap_set(xlink_f2m, xlink_f2m_cap,
+                            target_topo->topo_id, node_id, node->node_id);
         }
 
         // 连接数据：Pass 1 全部跳过，Pass 2 统一恢复
@@ -5305,6 +5393,15 @@ int master_load_state(MasterTopology* master, const char* file_path) {
     int xlink_seen = 0;          /* 进入节点范围校验的跨链记录数（= 分母 M）*/
     int xlink_oob_total = 0;     /* 越界丢弃累计（= 分子 N）*/
     int xlink_oob_detail = 0;    /* 已打印明细条数（上限 10）*/
+    /* TAIL-EDGE-1（结构半）新增分类/效果计数（仍只观测，不改控制流）：
+     *   xlink_oob_unmapped — 越界记录中"文件里压根没有该 id 的节点记录"的条数
+     *                        （真悬垂：目标早已被剪枝/从未落盘，加载期无从救回）
+     *   xlink_mapped_ok    — 经 id 映射换算后成功落地的条数
+     *   xlink_idmap_hits   — 映射表命中且 **内存 id != 文件 id** 的次数
+     *                        （>0 即证明"位移真实存在且已被纠正"）*/
+    int xlink_oob_unmapped = 0;
+    int xlink_mapped_ok = 0;
+    int xlink_idmap_hits = 0;
     if (p + (int)sizeof(uint32_t) <= end) {
         READ(&sentinel, sizeof(uint32_t));
         if (sentinel == 0xDEADBEEF) {
@@ -5347,12 +5444,28 @@ int master_load_state(MasterTopology* master, const char* file_path) {
             if (!from_sub || !from_sub->net || !to_sub || !to_sub->net)
                 break;
             xlink_seen++;
+            /* TAIL-EDGE-1（结构半）: **先做 id 空间对齐，再做原来的范围校验**。
+             * 文件里的 id 是存盘时的内存 id；加载期节点号会被重新分配
+             * （同拓扑重复概念被吸收 → 前移；加载前已有的种子/锚点 → 整体后移）。
+             * 不换算直接落地的话：界内引用会静默指到**另一个概念**（错位），
+             * 界外引用被丢。映射表查不到 = 文件里没有该 id 的节点记录（真悬垂），
+             * 仍按原行为丢弃（只记账，不改成拒绝加载）。 */
+            const int xlink_raw_from = from_node;
+            const int xlink_raw_to   = to_node;
+            from_node = xlink_idmap_get(xlink_f2m, xlink_f2m_cap,
+                                        from_topo, xlink_raw_from);
+            to_node   = xlink_idmap_get(xlink_f2m, xlink_f2m_cap,
+                                        to_topo, xlink_raw_to);
+            if (from_node >= 0 && from_node != xlink_raw_from) xlink_idmap_hits++;
+            if (to_node   >= 0 && to_node   != xlink_raw_to)   xlink_idmap_hits++;
             if (from_node < 0 || from_node >= from_sub->net->node_count ||
                 to_node < 0 || to_node >= to_sub->net->node_count) {
                 /* TAIL-EDGE-1 记账(不改控制流)：越界引用仍按原逻辑丢弃，
                  * 但不再静默——累计计数 + 前 10 条明细(原始 id / 当时上界 /
-                 * 来自哪个段)，收尾统一汇总。控制流与丢弃行为完全不变。 */
+                 * 来自哪个段)，收尾统一汇总。控制流与丢弃行为完全不变。
+                 * 明细打印的是**文件原始 id**（与修复前逐字节同格式，便于对照）。 */
                 xlink_oob_total++;
+                if (from_node < 0 || to_node < 0) xlink_oob_unmapped++;
                 if (xlink_oob_detail < 10) {
                     int from_bad = (from_node < 0 ||
                                     from_node >= from_sub->net->node_count);
@@ -5362,13 +5475,14 @@ int master_load_state(MasterTopology* master, const char* file_path) {
                                 "-> to(topo=%d id=%d/上限%d) weight=%.4f",
                                 xlink_oob_total, xlink_seen,
                                 from_bad ? "from" : "to",
-                                from_topo, from_node, from_sub->net->node_count,
-                                to_topo, to_node, to_sub->net->node_count,
+                                from_topo, xlink_raw_from, from_sub->net->node_count,
+                                to_topo, xlink_raw_to, to_sub->net->node_count,
                                 weight);
                     xlink_oob_detail++;
                 }
                 continue;
             }
+            xlink_mapped_ok++;
         }
 
         int link_result = master_add_cross_link(master, from_topo, from_node,
@@ -5502,12 +5616,17 @@ int master_load_state(MasterTopology* master, const char* file_path) {
      * 给新喂知识存活窗口（边恢复/自主学习尚未完成） */
     master->load_protect = (int)time(NULL);  /* 加载保护期：30 分钟（按时间） */
 
+    /* TAIL-EDGE-1（结构半）: 映射表只在本函数生命周期内需要，两个出口都要归还，
+     * 否则每次加载泄漏（最坏 32 × 2,000,000 × 4B）。此处不改变任何加载行为。 */
+    xlink_idmap_free(xlink_f2m, xlink_f2m_cap);
+
     return loaded_nodes;
 
 buffer_exhausted:
     #undef READ
     #undef SKIP
     free(buf);
+    xlink_idmap_free(xlink_f2m, xlink_f2m_cap);
     LOG_ERROR("[状态持久化] 错误: 从 %s 读取失败（数据不完整）", file_path);
     return -1;
 }
