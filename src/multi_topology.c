@@ -3668,11 +3668,16 @@ int master_prune_dead_nodes_nolock(MasterTopology* master) {
         if (nc == 0) continue;
 
         /* 收集死节点 ID（在释放前收集，确保指针有效）
-         * v0.5.12: 限流——每轮最多删总节点 2%（防误判代价 -50% → -1%）；
+         * v0.5.12: 限流——每轮最多删**本拓扑**节点数 2%（防误判代价 -50% → -1%）；
          * 并用 has_ref[t][id]=2 标记死节点——悬垂边/释放查重 O(1)（原线性扫 O(d)）*/
         int* dead_ids = (int*)calloc((size_t)nc, sizeof(int));
         int dead_count = 0;
-        int max_remove = _total_nodes / 50 + 1;   /* 2% 上限 */
+        /* TAIL-PRUNE-1 (v0.5.26): 额度必须用**本拓扑自己的规模** nc（"每拓扑 2%"）。
+         * 原先用全局 _total_nodes / 50 + 1 —— 每个子拓扑各自拿到全局 2% 的额度，
+         * N 个子拓扑单轮合计可删 ~18%（9 拓扑实测），"每拓扑 2% 限流"的声明不成立，
+         * 且小拓扑会被按全局规模成倍误删。改为 nc/50+1 后每拓扑删除量恒 ≈2%，
+         * 与拓扑数/全局规模无关。 */
+        int max_remove = nc / 50 + 1;            /* 2% 上限（本拓扑 nc 的 2%） */
         for (int n = 0; n < nc; n++) {
             ReasoningNode* node = sub->net->nodes[n];
             if (!node) continue;
@@ -3799,7 +3804,7 @@ int master_count_total_nodes(MasterTopology* master) {
     return total;
 }
 
-#define STATE_FORMAT_VERSION 8
+#define STATE_FORMAT_VERSION 9
 /* v0.5.20: 6 = 在每节点记录尾部追加 dist_sig[26]+dist_sig_count（虚词分类器
  * 位置画像，跨重启累积）。加载端向前兼容 v2..v5（旧文件无 dist_sig 段 → 归零）。
  * v0.5.21: 7 = 加载端迁移清洗——fmt_ver==6 状态加载时归零 dist_sig[0..21]
@@ -3824,14 +3829,82 @@ int master_count_total_nodes(MasterTopology* master) {
  * 解析工具（parse_state.py skill 版支持到 v7）需同步支持 v8 才能识别该块。
  * ⚠️ 一旦用 8 存盘，回退到旧二进制（只认 2..7）会因 fmt_ver=8 不被识别而误判为
  * 旧 v1 格式——回退前需先备份或接受 cross_hit 段丢失（不影响节点/边/频率表主体）。
+ * v0.5.25: 9 = 正式收编部署树的「v8 布局 + 特征维度 512→256」格式。
+ * 背景：一台部署机的**未提交**源码树把本常量改成 9（其 diff 仅此一处 + 存盘
+ * 最小间隔去重），并用 **256 维**特性写出状态文件（fmt_ver=9 / feat_dim=256，
+ * 含 3,860 节点 / 1,973 链接，5,176,666 B）。主线今日也已降维到 256
+ * （constants.h: PM_NODE_FEATURE_DIM 512→256），故 v9 与 v8 的**字节布局完全
+ * 相同**，唯一差别是文件头的 fmt_ver 值与该格式约定写出的 256 维特性。
+ * 因此主线承认 9 后，该真文件可按原样读回，**无需迁移边布局、无需改节点/边/
+ * 哨兵/跨链/freq/cross_hit 任一段**。
+ * 加载端：fmt_ver==9 走与 v8 相同的解析路径（解析循环逐字节相同）；feat_dim
+ * 段仍按 NODE_FEATURE_DIM=256 校验/截断。写盘侧常量升 9 后新文件头即写 9。
+ * 闸门未变：fmt_ver > STATE_FORMAT_VERSION 显式拒绝并记账，故 v10 及更高版本
+ * 仍被拒绝（未来格式必须先落定布局再抬常量）。
+ * 解析工具/探针若硬编码白名单，需同步把 9 纳入。
  * 迁移回退开关：PIVOTMIND_SKIP_DIST_SIG_MIGRATE=1 → 加载 v6 时跳过 dist_sig 归零；
  * PIVOTMIND_SKIP_EDGE_WEIGHT_RESET=1 → 加载 v6 时跳过边权归零（对比实验/回退用）。 */
 
 /* v0.5.12: 存盘防呆——以最后成功存盘/加载节点数为基准，本次 < 基准×60% 视为坏状态，
  * 拒绝覆盖主文件，重定向到 .suspect 并报警（08-12 事故：197k→100k 坏状态直接覆盖好文件；
- * 08-10 事故同款：54 节点覆盖 387,889）。基准不因坏状态更新——主文件永远保留最好状态。*/
+ * 08-10 事故同款：54 节点覆盖 387,889）。基准不因坏状态更新——主文件永远保留最好状态。
+ *
+ * TAIL-PRUNE-1 基线半 (v0.5.28): 基线改「只升不降」（进程内高水位）。
+ *   旧行为缺陷①：**每次存盘成功**都把基线重置为本次节点数 ⇒ 每轮 ~2% 的「慢速
+ *   放血」边放边回本，累计流失永远够不到 60% 线 → 防线对该类流失完全失效。
+ *   旧行为缺陷②：基线更新语句在**重定向 .suspect 的路径上也会执行**，于是刚被判
+ *   为「坏状态」的那次节点数反而成了新基准 —— 与上面「基准不因坏状态更新」的声明
+ *   相反，一次坏状态之后较差的存盘即可合法覆盖主文件。
+ *   新行为：**显式加载**（master_save_set_baseline，外部唯一的权威基线来源）仍直接
+ *   设值（可升可降，并把窗口清零）；**存盘成功**只升不降（仅当 saved_nodes > 基线才
+ *   抬升）⇒ 流失在基线上累计，可被既有 60% 线发现；坏状态再也无法拉低基准。
+ *   本改动**只改「基线何时移动」**：阈值（3/5）、判据、剪枝、删除行为、触发时机
+ *   （tick%60）一律未动；两处防呆打印只是**补充**流失量/窗口/基线值三个字段，
+ *   告警 sink（stderr 一行）与重定向逻辑保持原样。
+ *   注：基线仍是**进程内**量，重启后由加载值重置（跨进程持久化留待下一档架构）。 */
 static int g_last_saved_nodes = 0;
-void master_save_set_baseline(int nodes) { g_last_saved_nodes = nodes; }
+static time_t g_baseline_since = 0;      /* 基线最后一次被设置/抬升的时刻（告警「窗口」用） */
+static long   g_baseline_saves = 0;      /* 基线被设置/抬升以来的成功存盘次数（告警「窗口」用） */
+
+/* TAIL-PRUNE-1 基线半：存盘路径用——只升不降。坏状态（更小）永不拉低基准。 */
+static void master_baseline_raise(int nodes) {
+    if (nodes > g_last_saved_nodes) {
+        g_last_saved_nodes = nodes;
+        g_baseline_since = time(NULL);
+        g_baseline_saves = 0;
+    }
+}
+void master_save_set_baseline(int nodes) {
+    g_last_saved_nodes = nodes;      /* 加载：显式权威值，可升可降（重置窗口） */
+    g_baseline_since = time(NULL);
+    g_baseline_saves = 0;
+}
+
+/* TAIL-PRUNE-1 基线半：防呆告警统一出口。
+ * 原两处防呆只报「本次 / 基准」，看不出「究竟流失了多少、放了多久」；这里补三个
+ * 字段：流失量（节点数与百分比）、窗口（自基线抬升起，秒 + 存盘次数）、基线值。
+ * 判据、调用条件、重定向目标一律由调用方原样决定 —— 本函数只打印，不返回、不改状态。 */
+static void master_baseline_alert(const char* tag, const char* file_path,
+                                  const char* suspect_path, int cur_nodes) {
+    int lost = g_last_saved_nodes - cur_nodes;
+    char since_buf[32] = "未知";
+    if (g_baseline_since > 0) {
+        struct tm tm_s;
+#ifdef _WIN32
+        localtime_s(&tm_s, &g_baseline_since);
+#else
+        localtime_r(&g_baseline_since, &tm_s);
+#endif
+        strftime(since_buf, sizeof(since_buf), "%Y-%m-%d %H:%M:%S", &tm_s);
+    }
+    fprintf(stderr, "[状态持久化] ⚠️ 防呆触发%s: 本次 %d 节点 < 基准 %d×60%%"
+            "（流失 %d 节点 = %.1f%%，窗口 %ld 秒 / %ld 次存盘，基线自 %s 起）"
+            "，拒绝覆盖 %s，坏状态重定向到 %s\n",
+            tag, cur_nodes, g_last_saved_nodes,
+            lost, 100.0 * (double)lost / (double)g_last_saved_nodes,
+            (long)(g_baseline_since > 0 ? (time(NULL) - g_baseline_since) : 0),
+            g_baseline_saves, since_buf, file_path, suspect_path);
+}
 
 /* =====================================================================
  * B3 (v0.5.20): 锁外快照式存盘——锁内全量深拷贝快照（纯内存），锁外写盘。
@@ -4311,9 +4384,7 @@ static int master_save_state_locked(MasterTopology* master, const char* file_pat
     }
     if (g_last_saved_nodes > 0 && cur_nodes < g_last_saved_nodes * 3 / 5) {
         snprintf(suspect_path, sizeof(suspect_path), "%s.suspect", file_path);
-        fprintf(stderr, "[状态持久化] ⚠️ 防呆触发: 本次 %d 节点 < 基准 %d×60%%，"
-                "拒绝覆盖 %s，坏状态重定向到 %s\n",
-                cur_nodes, g_last_saved_nodes, file_path, suspect_path);
+        master_baseline_alert(" (锁内路径)", file_path, suspect_path, cur_nodes);
         file_path = suspect_path;   /* 主文件保持最后好状态，坏状态留证据 */
     }
     
@@ -4577,7 +4648,8 @@ static int master_save_state_locked(MasterTopology* master, const char* file_pat
 
     LOG_INFO("[状态持久化] 已保存到 %s (节点=%d, 链接=%d)", 
            file_path, saved_nodes, saved_links);
-    g_last_saved_nodes = saved_nodes;   /* v0.5.12: 更新防呆基准 */
+    master_baseline_raise(saved_nodes);   /* TAIL-PRUNE-1 基线半: 只升不降（原每次存盘回本） */
+    g_baseline_saves++;                   /* 告警「窗口」计数（基线抬升时已被清零） */
     
     return saved_nodes;
 }
@@ -4624,9 +4696,7 @@ int master_save_state(MasterTopology* master, const char* file_path) {
     }
     if (g_last_saved_nodes > 0 && cur_total < g_last_saved_nodes * 3 / 5) {
         snprintf(suspect_path, sizeof(suspect_path), "%s.suspect", file_path);
-        fprintf(stderr, "[状态持久化] ⚠️ 防呆触发: 本次 %d 节点 < 基准 %d×60%%，"
-                "拒绝覆盖 %s，坏状态重定向到 %s\n",
-                cur_total, g_last_saved_nodes, file_path, suspect_path);
+        master_baseline_alert(" (快照路径)", file_path, suspect_path, cur_total);
         target_path = suspect_path;
     }
 
@@ -4757,7 +4827,8 @@ int master_save_state(MasterTopology* master, const char* file_path) {
 
     LOG_INFO("[状态持久化] 已保存到 %s (节点=%d, 链接=%d)",
              target_path, saved_nodes, saved_links);
-    g_last_saved_nodes = saved_nodes;   /* v0.5.12: 更新防呆基准 */
+    master_baseline_raise(saved_nodes);   /* TAIL-PRUNE-1 基线半: 只升不降（原每次存盘回本） */
+    g_baseline_saves++;                   /* 告警「窗口」计数（基线抬升时已被清零） */
 
     return saved_nodes;
 }
@@ -4864,11 +4935,51 @@ int master_load_state(MasterTopology* master, const char* file_path) {
     // 读文件头: 格式版本
     int fmt_ver = 1;
     READ(&fmt_ver, sizeof(int));
-    // fmt_ver ∈ {2,3,4,5,6,7,8} = 带版本头的格式化文件
-    if (fmt_ver != 2 && fmt_ver != 3 && fmt_ver != 4 && fmt_ver != 5 &&
-        fmt_ver != 6 && fmt_ver != 7 && fmt_ver != 8) {
-        p = buf;       // 回退到文件头
+    int fmt_ver_raw = fmt_ver;   /* 原始首字段，仅用于日志（回退时 fmt_ver 会被改写为 1） */
+    /* fmt_ver ∈ {2..STATE_FORMAT_VERSION} = 带版本头的格式化文件；1 = 无版本头的最早期
+     * 文件（v1 兼容路径）。其余一律显式拒绝 —— 见下方「禁止静默降级」注释。 */
+    if (fmt_ver > STATE_FORMAT_VERSION) {
+        /* 未来版本（或超大垃圾值）：磁盘布局未经验证，猜解析 = 静默丢数据。
+         * 08-xx 事故：线上 fmt_ver=9 的状态文件（3860 节点，由一棵未提交的 v9 源码树
+         * 写出）落到旧二进制，被原「回退到文件头当 v1 解析」分支猜着读，最终只报
+         * 「完成: 1 节点, 0 链接」，全程零 ERROR 零 WARN —— 3860 节点无声灭失。
+         * 违反铁律「丢弃必须记账」。故此处显式拒绝、记账、不解析。 */
+        LOG_ERROR("[状态持久化] 拒绝加载 %s: 文件格式版本 fmt_ver=%d 高于本二进制支持的 "
+                  "STATE_FORMAT_VERSION=%d（可能是更高版本的未来文件，布局未知；也可能是"
+                  "垃圾/损坏值）。不回退猜解析 —— 请用与写入端匹配的二进制，或先迁移该文件。",
+                  file_path, fmt_ver, STATE_FORMAT_VERSION);
+        free(buf);
+        return -1;
+    }
+    if (fmt_ver < 1) {
+        /* 非正数（0 / 负数）：真 v1 文件的首字段是首节点 node_id（历史上恒为 0），但也可能
+         * 是损坏/非本格式文件 —— 二者无法从内容区分，故默认显式拒绝、不猜。
+         * 与种子侧 PIVOTMIND_ALLOW_LEGACY_SEED 同一先例：只有显式开关才按旧格式一次性迁移。 */
+        const char* allow_legacy_state = getenv("PIVOTMIND_ALLOW_LEGACY_STATE");
+        if (!(allow_legacy_state && strcmp(allow_legacy_state, "1") == 0)) {
+            LOG_ERROR("[状态持久化] 拒绝加载 %s: 文件首 4 字节 fmt_ver=%d 非法（非正数），"
+                      "疑似损坏或非 PivotMind 状态文件。不回退猜解析 —— 若确为无版本头的 v1 "
+                      "文件，请设 PIVOTMIND_ALLOW_LEGACY_STATE=1 后重试。",
+                      file_path, fmt_ver_raw);
+            free(buf);
+            return -1;
+        }
+        /* 显式开关命中：按无版本头的 v1 文件处理。读指针必须退回缓冲区开头 ——
+         * v1 无版本头，首 4 字节即首节点 node_id，否则会从第 5 字节起解析 → 静默丢数据。 */
+        p = buf;
         fmt_ver = 1;
+        LOG_WARNING("[状态持久化] 文件 %s 首 4 字节 fmt_ver=%d 非正数，因显式开关 "
+                    "PIVOTMIND_ALLOW_LEGACY_STATE=1，按无版本头的 v1 兼容路径解析"
+                    "（该路径不做版本校验，若来源可疑请核对后再信任其结果）。",
+                    file_path, fmt_ver_raw);
+    } else if (fmt_ver == 1) {
+        /* v1 兼容路径：仅首 4 字节恰为 1 时触发（原实现把「任何不认识的版本」都当 v1，
+         * 已移除）。此路径不做任何版本/布局校验，必须显式记账。
+         * 读指针必须退回缓冲区开头 —— v1 无版本头，首 4 字节即首节点 node_id；
+         * 少了这行回退就会从第 5 字节起解析，静默读到 0 节点（本轮修复的瑕疵 A）。 */
+        p = buf;
+        LOG_WARNING("[状态持久化] 文件 %s 无版本头（fmt_ver=1），正在用 v1 兼容路径解析；"
+                    "该路径不做版本校验，若来源可疑请核对后再信任其结果。", file_path);
     }
 
     // v5+: 特征维度校验
@@ -5189,6 +5300,11 @@ int master_load_state(MasterTopology* master, const char* file_path) {
     /* === 跨拓扑连接加载 === */
     uint32_t sentinel = 0;
     int expected_cross_count = 0;
+    /* TAIL-EDGE-1 记账(仅观测，不改控制流)：跨链引用越界丢弃的累计与明细。
+     * 越界记录仍按原逻辑 continue 丢弃（行为不变），此处只负责"不再静默"。 */
+    int xlink_seen = 0;          /* 进入节点范围校验的跨链记录数（= 分母 M）*/
+    int xlink_oob_total = 0;     /* 越界丢弃累计（= 分子 N）*/
+    int xlink_oob_detail = 0;    /* 已打印明细条数（上限 10）*/
     if (p + (int)sizeof(uint32_t) <= end) {
         READ(&sentinel, sizeof(uint32_t));
         if (sentinel == 0xDEADBEEF) {
@@ -5230,8 +5346,27 @@ int master_load_state(MasterTopology* master, const char* file_path) {
             SubTopology* to_sub   = master->sub_topologies[to_topo];
             if (!from_sub || !from_sub->net || !to_sub || !to_sub->net)
                 break;
+            xlink_seen++;
             if (from_node < 0 || from_node >= from_sub->net->node_count ||
                 to_node < 0 || to_node >= to_sub->net->node_count) {
+                /* TAIL-EDGE-1 记账(不改控制流)：越界引用仍按原逻辑丢弃，
+                 * 但不再静默——累计计数 + 前 10 条明细(原始 id / 当时上界 /
+                 * 来自哪个段)，收尾统一汇总。控制流与丢弃行为完全不变。 */
+                xlink_oob_total++;
+                if (xlink_oob_detail < 10) {
+                    int from_bad = (from_node < 0 ||
+                                    from_node >= from_sub->net->node_count);
+                    LOG_WARNING("[状态加载] 跨链引用越界丢弃 #%d/%d: "
+                                "段=cross_links(sentinel=0xDEADBEEF) 越界端=%s "
+                                "from(topo=%d id=%d/上限%d) "
+                                "-> to(topo=%d id=%d/上限%d) weight=%.4f",
+                                xlink_oob_total, xlink_seen,
+                                from_bad ? "from" : "to",
+                                from_topo, from_node, from_sub->net->node_count,
+                                to_topo, to_node, to_sub->net->node_count,
+                                weight);
+                    xlink_oob_detail++;
+                }
                 continue;
             }
         }
@@ -5346,6 +5481,17 @@ int master_load_state(MasterTopology* master, const char* file_path) {
 
     free(buf);
     time_t t1 = time(NULL);
+    /* TAIL-EDGE-1 收尾汇总：跨链越界丢弃记账一行（无越界则保持安静，不打）*/
+    if (xlink_oob_total > 0) {
+        double xlink_oob_pct = (xlink_seen > 0)
+            ? 100.0 * (double)xlink_oob_total / (double)xlink_seen : 0.0;
+        fprintf(stderr, "[状态加载] 警告：跨链引用越界丢弃 %d/%d (%.1f%%)，"
+                        "前 %d 条已打印\n",
+                xlink_oob_total, xlink_seen, xlink_oob_pct, xlink_oob_detail);
+        LOG_WARNING("[状态持久化] 跨链引用越界丢弃 %d/%d (%.1f%%) (前 %d 条明细已打印); "
+                    "成因: 加载期 id 整体重排(种子副本位移), cross_links 仍用文件原始 id",
+                    xlink_oob_total, xlink_seen, xlink_oob_pct, xlink_oob_detail);
+    }
     fprintf(stderr, "[状态加载] 完成: %d 节点, %d 链接, 耗时 %ld 秒\n",
             loaded_nodes, loaded_links, (long)(t1 - t0));
     LOG_INFO("[状态持久化] 已从 %s 加载 (节点=%d, 链接=%d)",

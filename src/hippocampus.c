@@ -90,8 +90,14 @@ int hippocampus_consolidate(Hippocampus* hc) {
                 }
                 *sep = '|';
             }
+            /* v0.5.11 fix (TAIL-LOCK-1): 此 unlock 必须与上方 :63 的 rdlock
+             * 处于同一作用域（`if (vocab && vocab->net)` 内）。原代码把它放在
+             * 内层 if 之外、外层 if 之内，当 hc->log_count>0 而 vocab==NULL 或
+             * vocab->net==NULL 时，会对本线程从未持有过的读锁调用 unlock
+             * （误扣他人读引用 / 返回 EPERM）。移出本层或上提 rdlock 都会再次
+             * 破坏配对，勿改。 */
+            pthread_rwlock_unlock(&hc->topology->rwlock);
         }
-        pthread_rwlock_unlock(&hc->topology->rwlock);
     }
 
     /* 感觉皮层联动：通过丘脑获取感知皮层实例，选低置信度概念联网查证 */

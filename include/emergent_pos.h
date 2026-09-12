@@ -150,11 +150,11 @@ int emergent_pos_init_centroids(EmergentPOS* ep, struct MasterTopology* master);
 /**
  * 硬分类 — 找最接近的锚点词类
  *
- * 取词的 512 维特征向量，与所有锚点中心计算余弦相似度，
+ * 取词的 256 维特征向量，与所有锚点中心计算余弦相似度，
  * 返回相似度最高且超过阈值的最接近词类。
  *
  * @param ep         涌现词类系统
- * @param features   词节点的 512 维特征向量
+ * @param features   词节点的 256 维特征向量
  * @return POSTag 标签，POS_UNKNOWN 表示未能分类
  */
 POSTag emergent_pos_classify(EmergentPOS* ep, const float* features);
@@ -166,7 +166,7 @@ POSTag emergent_pos_classify(EmergentPOS* ep, const float* features);
  * tags[] 按相似度降序排列。
  *
  * @param ep       涌现词类系统
- * @param features 词节点的 512 维特征向量
+ * @param features 词节点的 256 维特征向量
  * @param result   输出：软分类结果
  */
 void emergent_pos_classify_soft(EmergentPOS* ep, const float* features,
@@ -187,7 +187,7 @@ POSTag emergent_pos_tag(EmergentPOS* ep, struct MasterTopology* master,
                         const char* word);
 
 /**
- * 种子词可信标签（只走第一层，绕开 512 维语义分类器）。
+ * 种子词可信标签（只走第一层，绕开 256 维语义分类器）。
  *
  * v2.1 阶段0-A：喂料路径 dist_sig 累积只用此函数的标签——它是人标先验
  * （ep->anchors[tag].seeds[] 线性命中），不是 emergent_pos_classify 学出来的
@@ -208,7 +208,7 @@ void emergent_pos_tag_soft(EmergentPOS* ep, struct MasterTopology* master,
  *
  * @param ep       涌现词类系统
  * @param tag      目标词类
- * @param features 词的 512 维特征向量
+ * @param features 词的 256 维特征向量
  */
 void emergent_pos_adjust_centroid(EmergentPOS* ep, POSTag tag,
                                   const float* features);

@@ -10,6 +10,7 @@
  */
 
 #include "feature_learn.h"
+#include "common.h"
 #include "constants.h"
 #include <stdlib.h>
 #include <string.h>
@@ -39,9 +40,10 @@ static void feature_seed_from_concept(const char* concept, float* feats, int dim
     }
 }
 
-#ifndef NODE_FEATURE_DIM
-#define NODE_FEATURE_DIM PM_NODE_FEATURE_DIM
-#endif
+/* v0.5.25 收敛：此处原有一份本地 `#ifndef NODE_FEATURE_DIM / #define NODE_FEATURE_DIM
+ * PM_NODE_FEATURE_DIM` 兜底定义（因本 TU 未包含 common.h）。现改为包含 common.h，
+ * 让 NODE_FEATURE_DIM 只有全树唯一别名定义（common.h:22 → constants.h:PM_NODE_FEATURE_DIM），
+ * 避免第三处定义点日后各自漂移。 */
 
 /* 线程局部聚合缓冲池（复用，避免每轮分配/释放） */
 #define MAX_SMOOTH_THREADS 64

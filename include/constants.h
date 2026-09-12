@@ -34,7 +34,10 @@
 #define PM_DEFAULT_CONN_CAP  10    // 节点默认连接容量
 #define PM_CROSS_HIT_TABLE   2048  // 跨拓扑 hit 记录哈希表大小
 #define PM_MAX_NODES_PER_TOPO 1000000 /* 单拓扑索引槽位 (v0.5.1: 1M, flat array auto-grows; 非硬上限) */
-#define PM_NODE_FEATURE_DIM  512   // 拓扑节点语义向量维度
+#define PM_NODE_FEATURE_DIM  256   // 拓扑节点语义向量维度（全仓唯一真值源）
+                                   // v0.5.25 降维: 512->256 去随机投影冗余——512 维由
+                                   // FNV-1a 伪随机投影生成，高维分量近似正交、不携带额外
+                                   // 语义信息；减半后区分度不降，内存/余弦开销减半。
 #define PM_NODE_LOCK_COUNT   256   // 节点级锁分片数（须为2的幂）
 
 /* ========== 学习参数 ========== */

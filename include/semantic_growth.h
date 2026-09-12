@@ -8,7 +8,7 @@
 #include "multi_topology.h"
 
 /** 余弦相似度阈值 — 高于此值的词汇节点归入同一语义聚类 */
-#define SG_COSINE_THRESHOLD 0.02f  /* 极低：512维随机向量几乎正交，需更多Hebbian训练 */
+#define SG_COSINE_THRESHOLD 0.02f  /* 极低：256维随机向量几乎正交，需更多Hebbian训练 */
 /** 每轮最多采样的词汇节点数 */
 #define SG_MAX_SAMPLE 200  /* ARM 保守值 */
 /** 最少成员数才创建语义聚类节点 */

@@ -20,7 +20,7 @@
  *
  * 阶段：
  *   Phase 1 (已实现): 帧提取 + 零向量占位 + 跨模态对齐 + 建边
- *   Phase 2 (预留): CLIP ViT-B/32 编码器集成 (512-dim)
+ *   Phase 2 (预留): CLIP ViT-B/32 编码器集成（原生 512-dim，接入时须投影到 PM_NODE_FEATURE_DIM）
  *   Phase 3 (预留): Whisper ASR 后备 (无字幕视频)
  */
 
@@ -47,7 +47,7 @@ typedef struct {
     int   max_frames_per_video;      /* 单视频最大帧数 (0=无限制) */
 
     /* ── 视觉编码器 ── */
-    int   feature_dim;               /* 输出特征维度 (默认 512) */
+    int   feature_dim;               /* 输出特征维度 (默认 PM_NODE_FEATURE_DIM) */
     int   use_clip_encoder;          /* 1=CLIP编码器 (Phase 2), 0=零向量占位 */
     char  clip_model_path[512];      /* CLIP 模型路径 (Phase 2) */
 
@@ -69,7 +69,7 @@ typedef struct {
 
 #define VISUAL_CORTEX_DEFAULT_CONFIG { \
     "ffmpeg", "", 500, 1, 30, "", 200, \
-    512, 0, "", \
+    PM_NODE_FEATURE_DIM, 0, "", \
     2000.0f, 2, 0.6f, \
     5000, 1, 60, 0 \
 }

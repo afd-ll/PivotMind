@@ -10,19 +10,40 @@ merge_states.py — 合并多个 parallel-trained pivotmind_state 文件
 去重策略：按 (topo_type, concept) 合并节点（无视 node_id 不一致）
 跨拓扑连接：通过 concept 名重映射 node_id
 
-格式: streaming v4 (int fmt_ver + 节点流 + 跨拓扑流)
+格式: streaming state (文件头 + 节点流 + 跨拓扑流)
+  文件头: fmt_ver(int)  fmt_ver>=5 时再跟 feat_dim(int)（真值源写端恒写 PM_NODE_FEATURE_DIM）
   节点: topo_type(int) node_id(int) concept_len(int) concept(char*) activation(float)
-        feat_dim(int) features(float*NODE_FEATURE_DIM=24) conn_count(int)
+        feat_dim(int，本节点特征的声明维度) payload(float × 文件头 feat_dim，恒为 NODE_FEATURE_DIM 个) conn_count(int)
   连接: tgt_concept_len(int) tgt_concept(char*) weight(float) bias(float) confidence(float)
   跨拓扑: from_topo_id(int) from_node_id(int) to_topo_id(int) to_node_id(int)
            weight(float) use_count(int)
+
+特征维度真值源: include/constants.h 的 PM_NODE_FEATURE_DIM（现为 256）。
+  解析维度优先级（不再硬编码）：
+    1) fmt_ver>=5 → 以文件头读到的 feat_dim 为准；
+    2) fmt_ver<=4 → 文件头无 feat_dim，以节点内声明的 feat_dim 为准；
+    3) 两者都缺失/非法 → 才用兵底默认值 NODE_FEATURE_DIM，并显式记账。
+  维度声明与数据不符（声明 > 可用 payload）→ 明确报错，不静默错位。
 """
 
 import struct
 import sys
 import os
 
-NODE_FEATURE_DIM = 24  # 与 C 代码 PM_NODE_FEATURE_DIM 一致
+# 特征维度真值源: include/constants.h 的 PM_NODE_FEATURE_DIM（现为 256，全仓唯一真值源）。
+# 本常量仅作「文件头与节点都未给出可用维度」时的兵底默认值 —— 一经使用必打记账行
+# （见 _fallback_note），不许静默套用。
+NODE_FEATURE_DIM = 256
+FEATURE_DIM_MAX = 65536          # 维度合法性上界（防损坏文件导致天文数字读取/OOM）
+_fallback_ledger = []            # 兵底值使用台账: [(path, concept_or_marker, 原因)]
+
+
+def _fallback_note(path, where, reason):
+    """显式记账：兵底默认值被使用/写端按真值源改写时必须留痕（铁律：降级必须记账）"""
+    _fallback_ledger.append((path, where, reason))
+    print(f"  ⚠ [{path}] {where}: {reason}")
+    print(f"      → 使用兵底默认值 NODE_FEATURE_DIM={NODE_FEATURE_DIM}"
+          f"（真值源 include/constants.h PM_NODE_FEATURE_DIM）")
 
 
 def read_state(path):
@@ -39,7 +60,29 @@ def read_state(path):
     with open(path, 'rb') as f:
         fmt_ver = struct.unpack('<i', f.read(4))[0]
         print(f"  [{path}] 格式版本: {fmt_ver}")
-        if fmt_ver not in (1, 2, 3, 4):
+
+        # v5+: 文件头第 2 个 int 即 feat_dim（真值源 src/multi_topology.c:4372-4375）。
+        # 以它为准（不再硬编码）；缺失/非法才退兵底值并记账。
+        file_feat_dim = 0
+        if fmt_ver >= 5:
+            data = f.read(4)
+            if len(data) < 4:
+                raise ValueError(f"[{path}] 文件头 fmt_ver={fmt_ver}（v5+ 应含 feat_dim）"
+                                 f"但 feat_dim 字段缺失 —— 文件截断，拒绝静默错位")
+            file_feat_dim = struct.unpack('<i', data)[0]
+            print(f"  [{path}] 文件头 feat_dim: {file_feat_dim}")
+            if file_feat_dim <= 0 or file_feat_dim > FEATURE_DIM_MAX:
+                _fallback_note(path, "文件头", f"feat_dim={file_feat_dim} 非法")
+                file_feat_dim = 0
+            elif file_feat_dim != NODE_FEATURE_DIM:
+                # 以文件头为准解析，但与真值源不符必须记账（不回退、不硬编码）
+                _fallback_note(path, "文件头",
+                               f"feat_dim={file_feat_dim} 与真值源 {NODE_FEATURE_DIM} 不符"
+                               f"（以文件头为准解析）")
+        elif fmt_ver not in (1, 2, 3, 4):
+            # 首字段既非已知带版本头版本号：按「无版本头」处理（保留原行为），但显式记账
+            print(f"  ⚠ [{path}] fmt_ver={fmt_ver} 非已知版本号，按无版本头（v1 旧格式）解析"
+                  f" —— 该路径不做版本校验，来源可疑请核对（记账）")
             f.seek(0)
 
         while True:
@@ -49,6 +92,12 @@ def read_state(path):
                 if len(data) < 4:
                     break
                 topo_type = struct.unpack('<i', data)[0]
+                # 段边界守卫（镜像真值源 src/multi_topology.c:4951-4955）：节点流结束处是
+                # 跨拓扑段哨兵 0xDEADBEEF，拓扑类型合法域恒为 0..255。守卫缺失 = 把哨兵/尾段
+                # 当节点读 → 静默错位。
+                if topo_type < 0 or topo_type > 255:
+                    f.seek(-4, 1)   # 回退，让后续跨拓扑段从正确位置开始
+                    break
             else:
                 topo_type = 0
 
@@ -78,17 +127,51 @@ def read_state(path):
             activation = struct.unpack('<f', data)[0]
 
             # --- v4: 特征向量 ---
+            # 布局（真值源 src/multi_topology.c 写端 :4407-:4426）:
+            #   declared_dim(int) + 恒为 NODE_FEATURE_DIM 个 float 的 payload
             features = None
             if fmt_ver >= 4:
                 data = f.read(4)
                 if len(data) < 4:
-                    break
-                feat_dim = struct.unpack('<i', data)[0]
+                    raise ValueError(f"[{path}] 概念 '{concept}' 的特征段声明维度字段缺失"
+                                     f"（文件截断）—— 拒绝静默错位")
+                declared_dim = struct.unpack('<i', data)[0]
 
-                feat_data = f.read(NODE_FEATURE_DIM * 4)
-                if len(feat_data) < NODE_FEATURE_DIM * 4:
-                    break
-                features = list(struct.unpack(f'<{NODE_FEATURE_DIM}f', feat_data))
+                # 本节点特征 payload 的字节跨度：优先文件头 feat_dim（以文件为准），
+                # 其次节点声明维度（v4 及更早无文件头 dim），都没有才退兵底值并记账。
+                if file_feat_dim > 0:
+                    stride_dim = file_feat_dim
+                elif 0 < declared_dim <= FEATURE_DIM_MAX:
+                    stride_dim = declared_dim
+                else:
+                    _fallback_note(path, f"概念 '{concept}'",
+                                   f"文件头无可用 feat_dim 且节点声明 feat_dim={declared_dim}")
+                    stride_dim = NODE_FEATURE_DIM
+
+                # 声明维度 > 可用 payload 跨度 = 声明与数据不符 → 明确报错，禁止静默错位
+                if declared_dim > stride_dim:
+                    raise ValueError(
+                        f"[{path}] 概念 '{concept}' 声明 feat_dim={declared_dim} > 可用 payload "
+                        f"跨度 {stride_dim} —— 维度声明与数据不符（疑似错位/损坏文件）；"
+                        f"拒绝静默错位（真值源 include/constants.h PM_NODE_FEATURE_DIM）")
+
+                feat_data = f.read(stride_dim * 4)
+                if len(feat_data) < stride_dim * 4:
+                    raise ValueError(
+                        f"[{path}] 概念 '{concept}' 声明 feat_dim={declared_dim} 需 "
+                        f"{stride_dim * 4} 字节特征 payload，实际只读到 {len(feat_data)} 字节"
+                        f" —— 文件截断，拒绝静默错位")
+                payload = list(struct.unpack(f'<{stride_dim}f', feat_data))
+
+                if declared_dim <= 0:
+                    # 声明无特征：payload 整段是补位零（真值源读端同段跳过，:4992-:4994）
+                    features = None
+                else:
+                    features = payload[:declared_dim]
+                    if declared_dim != stride_dim:
+                        print(f"  ℹ [{path}] 概念 '{concept}' 声明 feat_dim={declared_dim}，"
+                              f"payload 跨度 {stride_dim}（补零 {stride_dim - declared_dim} 个），"
+                              f"取前 {declared_dim} 维")
 
             # --- 连接数 ---
             data = f.read(4)
@@ -177,14 +260,19 @@ def read_state(path):
 
     total_edges = sum(len(n['connections']) for n in nodes.values())
     print(f"  [{path}] 读取: {len(nodes)} 节点, {total_edges} 边, {len(cross_links)} 跨拓扑")
+    if _fallback_ledger:
+        print(f"  [{path}] 兵底值使用台账累计 {len(_fallback_ledger)} 条: "
+              + "; ".join(f"{w}({r})" for _, w, r in _fallback_ledger))
     return nodes, cross_links, old_id_map, fmt_ver
 
 
 def write_state(path, nodes, cross_links, fmt_ver):
     """写入状态文件，返回 (node_count, edge_count, cross_count)"""
     with open(path, 'wb') as f:
-        # 1. 版本头
+        # 1. 版本头（v5+ 含文件头 feat_dim，布局见真值源 src/multi_topology.c:4372-4375）
         f.write(struct.pack('<i', fmt_ver))
+        if fmt_ver >= 5:
+            f.write(struct.pack('<i', NODE_FEATURE_DIM))
 
         # 2. 节点流（按 topo_type, concept 排序）
         sorted_keys = sorted(nodes.keys(), key=lambda k: (k[0], k[1]))
@@ -200,11 +288,23 @@ def write_state(path, nodes, cross_links, fmt_ver):
 
             f.write(struct.pack('<f', node['activation']))
 
-            # v4 特征向量
+            # v4 特征向量（布局镜像真值源 src/multi_topology.c 写端 :4407-:4426）:
+            #   声明维度 = 特征向量实际长度（封顶真值源 NODE_FEATURE_DIM）；
+            #   payload 恒为 NODE_FEATURE_DIM 个 float —— 不足补零，超出截断。
             if fmt_ver >= 4 and node['features'] is not None:
-                f.write(struct.pack('<i', NODE_FEATURE_DIM))
-                f.write(struct.pack(f'<{NODE_FEATURE_DIM}f', *node['features']))
+                feats = list(node['features'])
+                declared = len(feats)
+                if declared > NODE_FEATURE_DIM:
+                    print(f"  ⚠ 概念 '{node['concept']}' 特征长度 {declared} > 真值源 "
+                          f"NODE_FEATURE_DIM={NODE_FEATURE_DIM}，按真值源截断并记账")
+                    declared = NODE_FEATURE_DIM
+                    feats = feats[:NODE_FEATURE_DIM]
+                f.write(struct.pack('<i', declared))
+                f.write(struct.pack(f'<{declared}f', *feats))
+                for _ in range(NODE_FEATURE_DIM - declared):
+                    f.write(struct.pack('<f', 0.0))   # 补零到 NODE_FEATURE_DIM
             elif fmt_ver >= 4:
+                # 现状保留（经核对与真值源写端 :4420-4426 一致：声明 0 + 写 NODE_FEATURE_DIM 个零）
                 f.write(struct.pack('<i', 0))
                 for _ in range(NODE_FEATURE_DIM):
                     f.write(struct.pack('<f', 0.0))

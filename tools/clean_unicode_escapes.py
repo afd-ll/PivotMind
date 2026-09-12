@@ -18,6 +18,9 @@ import struct
 import argparse
 
 STATE_FORMAT_VERSION = 5
+# 拓扑节点语义向量维度 —— 必须与 include/constants.h 的 PM_NODE_FEATURE_DIM 保持一致。
+# 仅作缺字段时的兜底默认；真实 .dat 文件的维度从文件头第 2 个 int 读出（本工具维度无关）。
+NODE_FEATURE_DIM = 256
 SENTINEL = 0xDEADBEEF
 
 # 匹配无前缀的 uXXXX（非 ASCII 码点，避免误伤英文词如 "usage"）
@@ -73,7 +76,7 @@ def read_binary(path: str) -> dict:
     pos = 0
     result = {
         "format_version": STATE_FORMAT_VERSION,
-        "feature_dim": 512,
+        "feature_dim": NODE_FEATURE_DIM,
         "nodes": [],
         "cross_links": [],
     }
@@ -190,7 +193,7 @@ def read_binary(path: str) -> dict:
 def write_binary(data: dict, path: str) -> None:
     """写入 .dat 二进制文件。与 convert_state.py write_binary 逻辑一致。"""
     buf = bytearray()
-    feat_dim = data.get("feature_dim", 512)
+    feat_dim = data.get("feature_dim", NODE_FEATURE_DIM)
 
     buf += struct.pack("<i", data["format_version"])
     buf += struct.pack("<i", feat_dim)

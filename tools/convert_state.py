@@ -22,6 +22,9 @@ import json
 import argparse
 
 STATE_FORMAT_VERSION = 5
+# 拓扑节点语义向量维度 —— 必须与 include/constants.h 的 PM_NODE_FEATURE_DIM 保持一致。
+# 仅作缺字段时的兜底默认；真实 .dat 文件的维度从文件头第 2 个 int 读出（本工具维度无关）。
+NODE_FEATURE_DIM = 256
 SENTINEL = 0xDEADBEEF
 FREQ_SENTINEL = -1  # marks start of frequency table section
 
@@ -34,7 +37,7 @@ def read_binary(path):
     pos = 0
     result = {
         "format_version": STATE_FORMAT_VERSION,
-        "feature_dim": 512,
+        "feature_dim": NODE_FEATURE_DIM,
         "nodes": [],
         "cross_links": [],
     }
@@ -161,7 +164,7 @@ def write_binary(data, path):
 
     # Header
     buf += struct.pack("<i", data["format_version"])
-    feat_dim = data.get("feature_dim", 512)
+    feat_dim = data.get("feature_dim", NODE_FEATURE_DIM)
     buf += struct.pack("<i", feat_dim)
 
     # Nodes
@@ -221,7 +224,7 @@ def print_info(data):
     links = data["_total_cross_links"]
     kb = data["_file_kb"]
     print(f"  Format version: {data['format_version']}")
-    print(f"  Feature dim:    {data.get('feature_dim', 512)}")
+    print(f"  Feature dim:    {data.get('feature_dim', NODE_FEATURE_DIM)}")
     print(f"  Total nodes:    {nodes}")
     print(f"  Cross-links:    {links}")
     print(f"  File size:      {kb} KB")
@@ -265,7 +268,7 @@ def main():
         with open(in_path, "r", encoding="utf-8") as f:
             data = json.load(f)
         data.setdefault("format_version", STATE_FORMAT_VERSION)
-        data.setdefault("feature_dim", 512)
+        data.setdefault("feature_dim", NODE_FEATURE_DIM)
         data.setdefault("_total_nodes", len(data.get("nodes", [])))
         data.setdefault("_total_cross_links", len(data.get("cross_links", [])))
     else:

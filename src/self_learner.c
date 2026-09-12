@@ -361,7 +361,7 @@ static int audit_path(SelfLearner* sl, WalkStep* steps, int len) {
             if (steps[a].topo_id != steps[c].topo_id) {
                 /* v0.5.14 fix: 写锁贯穿下不能调带锁版 cross_link_exists（EDEADLK），
                  * 删除外层判重——master_add_cross_link_nolock 内部自带判重
-                 * （已存在返回 -1），语义等价且省一次 512 维余弦白算 */
+                 * （已存在返回 -1），语义等价且省一次 256 维余弦白算 */
                 float sim = 0.0f;
                 if (na->features && nc->features &&
                     na->feature_dim > 0 && na->feature_dim == nc->feature_dim) {

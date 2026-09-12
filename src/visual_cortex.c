@@ -146,7 +146,7 @@ static int vc_queue_pop(VisualCortex* vc, VCTask* out) {
 
 /* ==================== 帧提取 ==================== */
 
-/* 场景切换检测: 只比较前 N 维以求速度 (全512维太慢) */
+/* 场景切换检测: 只比较前 N 维以求速度 (全 256 维太慢) */
 #define VC_SCENE_DIFF_DIMS 64
 
 static int frame_diff_score(const float* prev, const float* cur, int dim) {

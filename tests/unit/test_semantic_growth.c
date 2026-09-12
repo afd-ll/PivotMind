@@ -36,9 +36,9 @@ static int tests_failed = 0;
     tests_failed++; \
 } while(0)
 
-/* ── NODE_FEATURE_DIM 必须与 semantic_growth 一致 ── */
+/* ── NODE_FEATURE_DIM 必须与 semantic_growth 一致（真值源 constants.h） ── */
 #ifndef NODE_FEATURE_DIM
-#define NODE_FEATURE_DIM 512
+#define NODE_FEATURE_DIM PM_NODE_FEATURE_DIM
 #endif
 
 /* ── 测试 1: NULL 安全 ── */

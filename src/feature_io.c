@@ -1,6 +1,7 @@
 #include "feature_io.h"
 #include "huarong_topology.h"
 #include "common.h"
+#include "error.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -92,7 +93,12 @@ int load_features(MasterTopology* master, const char* filepath) {
     if (magic != FEATURE_FILE_MAGIC) { fclose(fp); return -1; }
     if (fread(&n, sizeof(uint32_t), 1, fp) != 1) { fclose(fp); return -1; }
     if (fread(&d, sizeof(uint32_t), 1, fp) != 1) { fclose(fp); return -1; }
-    if (d != NODE_FEATURE_DIM) { fclose(fp); return -1; }
+    if (d != NODE_FEATURE_DIM) {
+        LOG_ERROR("[特征持久化] 拒绝加载 %s: 特征维度不匹配 (期望=%d, 文件=%d)",
+                  filepath, NODE_FEATURE_DIM, (int)d);
+        fclose(fp);
+        return -1;
+    }
 
     // 校验节点数 — 不再严格拒绝，改用自适应加载
     int total_nodes = count_all_nodes(master);

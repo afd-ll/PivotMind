@@ -1,5 +1,49 @@
 # Changelog
 
+## v0.5.28 — 2026-09-11
+
+> 来源：**本轮三条独立改动**（① 状态加载版本闸门 ② 特征维度 512→256 收进 main ③ 每 11 分钟自死锁修复），均已在 armbian 上做过真实验证。状态：**工作区改动（未提交、未部署）**，HEAD `efcf907`，**15 个文件 `+99 / −34`**。三条共同的主线是**把「静默」变成「会喊」**——静默丢数据 → 显式拒绝 + 记账；静默停摆 → 根因 + 长跑对照。完整发布说明（含逐条证据、诚实边界、红线声明、已知未修问题）见 [changelogs/072-state-gate-dim256-deadlock.md](changelogs/072-state-gate-dim256-deadlock.md)。
+
+### Fixed
+
+**① 状态加载版本闸门（`src/multi_topology.c` `master_load_state()`）**
+- **旧代码对不认识的 `fmt_ver` 一律 `p = buf` 回退当 v1 猜解析**：5.17 MB 的真 `fmt_ver=9` 状态文件被静默读成「**完成: 1 节点, 0 链接**」、`LOAD_RC=1`、判 **ACCEPTED**，全程**零 ERROR 零 WARN**（事故口径 **3,860 节点无声灭失**）——违反铁律「丢弃必须记账」。
+- 改为**显式三分支**：`fmt_ver > STATE_FORMAT_VERSION(=8)`（未来版本）→ `LOG_ERROR` + `return -1`，该判断**在开关判断之前，故 `PIVOTMIND_ALLOW_LEGACY_STATE` 对未来版本永远无效**；`fmt_ver < 1`（0/负数）→ 默认 `LOG_ERROR` + `return -1`；`fmt_ver == 1` → **补回 `p = buf`**（v1 无版本头，首 4 字节即首节点 `node_id`）+ `LOG_WARNING` 记账。
+- 新增显式开关 **`PIVOTMIND_ALLOW_LEGACY_STATE`**（仿种子侧 `PIVOTMIND_ALLOW_LEGACY_SEED`；必须**严格等于 `"1"`**，只对 `fmt_ver<1` 生效；语义是「信任来源 + 显式记账」，不是校验）。
+- **反证**：未改二进制读真 v9 → 1 节点 ACCEPTED、零记账；修复版 → `[ERROR]` + `rc=-1` + `EXIT=1`（**带开关也 `rc=-1`**）；非法首字段 `0/-1/9999/INT_MAX` 均拒绝；合法旧版本 v2/v5/v8 **不误伤**（各读 3 节点 `rc=3`）。单测 `test_memory_unit` 6/6、`test_topology_unit` 3/3、`test_diffusion_unit` 3/3 全 `EXIT=0`；修复树/未改树同口径 **0 warning 0 error**。
+
+**② 特征维度 512→256 收进 main（13 文件）**
+- 真值源 `include/constants.h:37`：`PM_NODE_FEATURE_DIM 512` → **`256`**；顺带**收敛 4 处分散定义**（`constants.h` 真值源 / `common.h` 唯一别名 / `feature_learn.c` 删本地 `#ifndef` 兜底改 `#include "common.h"` / `test_semantic_growth.c:41` 字面量改宏）与 **2 个 Python 工具**（`convert_state.py` / `clean_unicode_escapes.py` 各新增 `NODE_FEATURE_DIM = 256`）。
+- `include/visual_cortex.h` 的 `feature_dim` 默认值 `512` → `PM_NODE_FEATURE_DIM`；其余为注释/文档同步。
+- **穷举确认**：源码**无残留「裸 512 维度字面量」参与特征向量读写**；其余 512 均为缓冲区/容量/批大小等无关常量（未动）。
+
+**③ 每 11 分钟必死的自死锁（`src/brainstem.c`）**
+- `brainstem_tick_synapse_scale()` 持 master **读锁**期间调用会取**同一把锁写锁**的 `master_reevaluate_cross_links()`（`src/multi_topology.c:576`）→ glibc 同线程「**读→写**」升级 = **永久自死锁**；该函数只在 `tick%600==0` 进门 ⇒ **启动约 11 分钟必死**（现场 58/58 次运行全部停在 tick=600、1007 次运行最大 tick=600）。
+- **引入点 commit `3d2f7cba`（v0.5.24，2026-09-06）**：属**修复引入回归**，是同类机制**第 2 次复发**（首次 `src/self_learner.c:430-433`，v0.5.14 已修）。审计：全仓 31 个 rdlock 获取点**恰好 1 处不配对 = `brainstem.c:396`**，修复后重扫 **0 命中**。
+- 修法：**把调用移出读锁区间**（`unlock` 提前到 `master_reevaluate_cross_links()` 之前）+ 在读锁处补**纪律注释**（引用 `src/funcword.c:479` 原文「⚠️ 持读锁期间内部不得调用抢 master 写锁的函数」）。**功能行一字未改**。
+
+### Quality
+- **闸门**：armbian harness 对照 + 反向验证共 **60 份 `.out` 全读**；核心反证、开关语义 B1–B10、D 组（v2/v5/v8 不误伤）逐条；**全仓 v1 误伤复扫**（本机 38 + armbian 30 候选 + 仓库全历史）确认**无真实 v1 状态文件会被误伤**。
+- **降维**：armbian 五支测试（`test_tensor` 14/14、`test_topology_unit` 3/3、`test_memory_unit` 6/6、`test_diffusion_unit` 3/3、`test_web_fetch` 46/46）**退出码全 0**；**维度自检 + 反证**：`pm-dim256` = 256 / 特征块 1024 B vs `pivotmind-baseline` = 512 / 2048 B。
+- **死锁**：A/B 二进制 md5 不同（`53f4a0de…` vs `ca46d176…`，唯一变量 = `src/brainstem.c`），两组全量重编译 **0 warning / 0 error**。
+
+### Known Issues
+- **`TAIL-LOCK-1`**：`src/hippocampus.c:63/:94` **反向不配对（多解锁）**——`vocab==NULL` 早退时会 `unlock` 一把**从未加过**的读锁，可能污染 `__readers` 计数。方向与本轮自死锁相反，**非停摆根因**，属真缺陷，待单独立项。
+- **`TAIL-ACCT-1`**：`src/feature_io.c:95` 是特征加载路径上**唯一的静默丢弃点**（无 `LOG_ERROR`/记账）→ 违反铁律「丢弃必须记账」。
+- **`TAIL-TOOL-1`**：`tools/merge_states.py:25` 的 `NODE_FEATURE_DIM = 24`（**既非 512 也非 256**，注释还谎称一致），且 `:88` **忽略**从文件读到的 `feat_dim` → **拿真状态文件跑会静默错读**（`:88/:91` 读、`:205/:206/:209` 写全按 24）。与本次降维**正交**（远端起即存在）。
+- **`emergent_pos.bin` 静默错读风险（本轮新发现）**：文件头只校验 magic+version、**无维度字段**，降维不改 version → 旧（512）文件会被新（256）二进制**静默错读**（与 `pivotmind_state.dat` 的显式拒绝形成不一致防御）。静态分析结论，未端到端复现。
+- **长跑 A/B 对照结论已核实**（`fix-plans/deadlock-branchstem-fix.md` 已补完 · **§5.3/§5.4/§6**）——对照组 `final_tick=600`（自 20:09:20 起**冻结约 11 分钟**、4 线程成排 `futex_wait_queue`）；修复组 `final_tick=1110`（**越过 600 后又前进 510 tick**、`wchan` 无死锁形态）；**唯一变量 = `src/brainstem.c`**、同机同时段、同一份起始数据（`c7a21e48…`）。⚠ **边界（报告 §6.3）**：修复组**未做小时级长稳观察**，**不能声称「永不崩溃」**——结论严格限于「越过 600 这个已知必死点、无死锁形态」。
+- **验证覆盖面**：闸门线**未跑 `make test` 全量**、**x86_64 + ASan/UBSan/TSan 那条腿完全没跑**；降维线仅 5 支、**无运行期语义质量证据**。两条线**均未取得跨架构/跨 libc 交付依据**。
+- **未部署、未提交**；`include/pivotmind_version.h` 仍为 **`"0.5.27"`（版本号未 bump）**。
+- **部署前置**：真实 `fmt_ver=9` 载荷共 4 副本（含 armbian `~/pivotmind/pivotmind_state.dat`），新闸门会**有意拒绝** → 直接部署 = 「启动即拒绝、空壳运行」；须先同步写入端到 v9 或等批 1 的 v10 读端，**不可用开关绕过**。
+
+### Notes
+- **主线：把「静默」变成「会喊」。** 三种静默各对应一条修法：静默丢数据（旧解析）→ 显式拒绝 + 记账；静默停摆（自死锁）→ 根因 + 长跑对照；静默错读（维度/工具）→ 单一真值源 + 如实登记。
+- **教训：「秒级的测试抓不住分钟级的死」。** 该自死锁引入于 **v0.5.24**，**v0.5.26 / v0.5.27 两轮**（含 x86_64/TSan 复验、armbian 全量）都没抓住——因为它要**跑满约 11 分钟（tick=600）才第一次执行到**，秒级单测/TSan/冒烟套件都在此之前结束；且它是**纯自死锁**，TSan/Helgrind **不报 report、只跟着挂住**。建议后续加一条**长跑监护用例**（建议 ≥900 tick，断言 tick 越过 600 且持续增长）＋ 锁纪律探针，把这类低频分支上的死锁压到可回归。
+- **红线声明**：所有**限边 / 截断 / 周期性稀疏化 / 跨拓扑上限 / 队列满丢任务**逻辑，按作者架构红线本版**一律未触碰**；版本闸门只改「拒绝/记账」不改合法文件解析结果，降维只收敛真值源不改算法，死锁修复功能行一字未改。
+
+---
+
 ## v0.5.27 — 2026-09-11
 
 > 来源：**round 3 并发修复**（由 x86_64/TSan 复验驱动，承接 v0.5.26 登记的既有并发债：已知未修问题 A 的批次契约、B 的批内竞争）。commit `1e84755`，相对 v0.5.26 发布点 `49d8a69`，**20 个文件 `+944 / −126`**（分支另含一处 v0.5.26 文档补记提交 `d75eec1`，不计入本数）。三条主线：① R1 批次完成语义（`tasks_left` 任务账 + 每批 `batch_epoch` 代次握手）② 对话路径 worker 生命周期 + R2a/R2b 激活账本锁域 ③ TSan 复验后的三处收口。完整发布说明（含双平台验证数字、跨树对照与诚实边界、红线声明）见 [changelogs/071-round3-concurrency-activation-locks.md](changelogs/071-round3-concurrency-activation-locks.md)。

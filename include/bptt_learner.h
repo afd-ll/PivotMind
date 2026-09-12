@@ -3,9 +3,9 @@
  * @brief BPTT 在线学习器 — RNN 反向传播接入对话管线
  *
  * 设计：
- * - 输入：用户对话中每个字的拓扑节点特征向量 (NODE_FEATURE_DIM=512)
+ * - 输入：用户对话中每个字的拓扑节点特征向量 (NODE_FEATURE_DIM，当前 256)
  * - 目标：回复中每个字的特征向量
- * - 模型：SimpleRNN(512→256) → Linear(256→512)
+ * - 模型：SimpleRNN(NODE_FEATURE_DIM→256) → Linear(256→NODE_FEATURE_DIM)
  * - 损失：MSE
  * - 优化器：Adam (lr=0.001)
  *
