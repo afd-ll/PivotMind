@@ -656,9 +656,20 @@ DialogInput* dialog_parse_input(const char* text) {
     
     // 复制tokens到动态内存
     input->tokens = (char**)malloc(input->token_count * sizeof(char*));
-    if (!input->tokens) { input->token_count = 0; return input; }
+    if (!input->tokens) {
+        /* 接管即负责：malloc 失败路径同样要还 utf8_tokenize 分配的临时 token */
+        for (int i = 0; i < input->token_count; i++) {
+            free(tokens_buf[i]);
+        }
+        input->token_count = 0;
+        return input;
+    }
     for (int i = 0; i < input->token_count; i++) {
         input->tokens[i] = strdup(tokens_buf[i]);
+    }
+    // 释放 utf8_tokenize 分配的临时缓冲区
+    for (int i = 0; i < input->token_count; i++) {
+        free(tokens_buf[i]);
     }
     
     return input;

@@ -75,6 +75,8 @@ Layer* layer_create_simple_rnn(int input_size, int hidden_size) {
 
     layer->type = LAYER_SIMPLE_RNN;
     layer->trainable = true;
+    layer->weights = NULL;   /* 契约 C1：层级槽显式初始化；RNN 权重在 RNNData */
+    layer->bias = NULL;      /* 契约 C1 */
     layer->output = NULL;
     layer->grad_weights = NULL;
     layer->grad_bias = NULL;

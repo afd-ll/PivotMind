@@ -185,6 +185,9 @@ void model_train_step(Model* model, Tensor* input, Tensor* target, float learnin
 
     // 清理损失
     if (loss) tensor_destroy(loss);
+
+    /* model_forward 契约：返回的是克隆张量，所有权归调用方，本函数必须释放 */
+    if (pred) tensor_destroy(pred);
 }
 
 // 设置优化器
