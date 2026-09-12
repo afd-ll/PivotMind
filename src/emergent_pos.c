@@ -765,6 +765,27 @@ int emergent_pos_try_emerge(EmergentPOS* ep) {
 
 #define EMERGENT_POS_DEFAULT_FILE "emergent_pos.bin"
 
+/* v0.5.30 P0b: 维度闸门（TAIL-DIM-1）——文件头加维度字段，读端校验。
+ *
+ * 旧病根：v1 头 <magic,version> 里**没有维度字段**，记录宽度由编译期
+ * PM_NODE_FEATURE_DIM 决定。512→256 降维后，512 时代旧文件会被按 256 静默读错
+ * （质心只读到前半截、后续字段全错位），零日志零感知。
+ *
+ * 新头（v2）：magic(4) + version(4) + dim(4) + active_count(4) + 记录…
+ * 旧头（v1）：magic(4) + version(4) + active_count(4) + 记录…   ← 无 dim
+ *
+ * 向后兼容铁律（作者亲授）：**无维度字段 = 明确的旧格式**，不拒绝——
+ * 按整文件 size 反推维度 + WARN + 记账；**只有反推不出来才拒绝**。
+ * 反推方程见 ep_infer_legacy_dim()。 */
+#define EMERGENT_POS_MAGIC        0x504D4550u   /* "PMEP" */
+#define EMERGENT_POS_VERSION_DIM  2u            /* v2: 头含 dim 字段（本次起写端输出） */
+#define EMERGENT_POS_VERSION_LEGACY 1u          /* v1: 无 dim 字段（512 时代旧格式，只读兼容） */
+#define EMERGENT_POS_EXTRA_MAX    16            /* extra_classes[16] 上限（与结构体一致） */
+
+/* 记账：v1 旧格式文件按 size 反推维度成功加载的累计次数（进程内只增）。
+ * 与 WARN 日志配套——「让失败/降级可见」的计数一侧。 */
+static unsigned long g_ep_legacy_dim_inferred = 0;
+
 int emergent_pos_save(EmergentPOS* ep, const char* filepath) {
     if (!ep) return -1;
     const char* path = filepath ? filepath : EMERGENT_POS_DEFAULT_FILE;
@@ -789,10 +810,14 @@ int emergent_pos_save(EmergentPOS* ep, const char* filepath) {
         } \
     } while (0)
 
-    uint32_t magic = 0x504D4550; /* "PMEP" */
-    uint32_t version = 1;
+    /* v0.5.30 P0b: 写端输出带维度的新头 —— magic + version(2) + dim + active_count。
+     * dim 字段是维度闸门的判据：读端凭它校验，不再靠编译期宏猜。 */
+    uint32_t magic   = EMERGENT_POS_MAGIC;              /* "PMEP" */
+    uint32_t version = EMERGENT_POS_VERSION_DIM;        /* 2 = 头含 dim（v1 无 dim = 旧格式） */
+    uint32_t dim     = (uint32_t)PM_NODE_FEATURE_DIM;   /* 全仓唯一真值源 constants.h:37 */
     EP_WRITE(&magic, sizeof(magic), 1);
     EP_WRITE(&version, sizeof(version), 1);
+    EP_WRITE(&dim, sizeof(dim), 1);
 
     uint32_t active_count = 0;
     for (int tag = POS_NOUN; tag < POS_COUNT; tag++)
@@ -847,6 +872,83 @@ int emergent_pos_save(EmergentPOS* ep, const char* filepath) {
     return 0;
 }
 
+/* ----------------------------------------------------------------
+ * v0.5.30 P0b: 维度闸门辅助（TAIL-DIM-1）
+ * ---------------------------------------------------------------- */
+
+/* 旧格式(无维度字段)文件按整文件 size 反推特征维度。
+ *
+ * 布局方程（A=active_count, E=extra_count, D=特征维度）：
+ *   size = 12 + A*(4 + 4D + 4 + 4) + 4 + E*(4 + 4D + 4 + 4 + 32)
+ *        = 16 + 12A + 44E + 4D*(A+E)
+ *
+ * 解法：对 E ∈ [0, EMERGENT_POS_EXTRA_MAX] 逐个求整数 D，再做二次校验
+ *      （offset_E = 12 + A*(12+4D) 处的 int 必须恰好 == E）。
+ * 判定：
+ *   - 0 解  → 返回 0（调用方拒绝：size 与任何候选维度都不自洽）
+ *   - 1 解  → 返回 1
+ *   - 多解且其中恰一个 == 当前 PM_NODE_FEATURE_DIM → 取它（当前维度读数最稳）
+ *   - 仍多解 → 返回 0（歧义不猜，宁可拒绝）
+ */
+static int ep_infer_legacy_dim(size_t size, uint32_t active,
+                               const unsigned char* buf,
+                               uint32_t* out_dim, int* out_extra) {
+    if (active > (uint32_t)(POS_COUNT - 1)) return 0;   /* 越界即非本格式 */
+    if (active == 0 && size == 16) {                    /* 空文件：无质心，维度无关 */
+        *out_dim = (uint32_t)PM_NODE_FEATURE_DIM;
+        *out_extra = 0;
+        return 1;
+    }
+
+    uint32_t sol_dim[EMERGENT_POS_EXTRA_MAX + 1];
+    int      sol_extra[EMERGENT_POS_EXTRA_MAX + 1];
+    int nsol = 0;
+
+    for (int e = 0; e <= EMERGENT_POS_EXTRA_MAX; e++) {
+        long long num = (long long)size - 16
+                      - 12LL * (long long)active - 44LL * (long long)e;
+        long long den = 4LL * ((long long)active + (long long)e);
+        if (den <= 0 || num <= 0) continue;
+        if (num % den != 0) continue;
+        long long d = num / den;
+        if (d < 1 || d > 65536) continue;
+        size_t off_e = (size_t)12 + (size_t)active * (12u + 4u * (size_t)d);
+        if (off_e + 4 > size) continue;
+        int e_at = 0;
+        memcpy(&e_at, buf + off_e, sizeof(int));
+        if (e_at != e) continue;                        /* 二次校验 */
+        sol_dim[nsol] = (uint32_t)d;
+        sol_extra[nsol] = e;
+        nsol++;
+        if (nsol > EMERGENT_POS_EXTRA_MAX) break;
+    }
+
+    if (nsol == 0) return 0;
+    if (nsol == 1) { *out_dim = sol_dim[0]; *out_extra = sol_extra[0]; return 1; }
+
+    int pick = -1, cur = 0;
+    for (int i = 0; i < nsol; i++)
+        if (sol_dim[i] == (uint32_t)PM_NODE_FEATURE_DIM) { pick = i; cur++; }
+    if (cur == 1) { *out_dim = sol_dim[pick]; *out_extra = sol_extra[pick]; return 1; }
+    return 0;
+}
+
+/* 把文件里 file_dim 宽的中心向量装入当前 PM_NODE_FEATURE_DIM 宽的数组。
+ * 同维直拷；跨维（只可能来自 v1 旧格式反推路径）按 min() 截断、不足补 0，
+ * 上层已 WARN + 记账（语义不完整，锚点需重建）。 */
+static void ep_load_centroid(float* dst, const unsigned char* src,
+                             uint32_t file_dim, float* scratch) {
+    if (file_dim == (uint32_t)PM_NODE_FEATURE_DIM) {
+        memcpy(dst, src, (size_t)PM_NODE_FEATURE_DIM * sizeof(float));
+        return;
+    }
+    memcpy(scratch, src, (size_t)file_dim * sizeof(float));
+    uint32_t n = file_dim < (uint32_t)PM_NODE_FEATURE_DIM
+               ? file_dim : (uint32_t)PM_NODE_FEATURE_DIM;
+    for (uint32_t d = 0; d < n; d++) dst[d] = scratch[d];
+    for (uint32_t d = n; d < (uint32_t)PM_NODE_FEATURE_DIM; d++) dst[d] = 0.0f;
+}
+
 int emergent_pos_load(EmergentPOS* ep, const char* filepath) {
     if (!ep) return 0;
     const char* path = filepath ? filepath : EMERGENT_POS_DEFAULT_FILE;
@@ -854,58 +956,223 @@ int emergent_pos_load(EmergentPOS* ep, const char* filepath) {
     FILE* f = fopen(path, "rb");
     if (!f) return 0; /* 文件不存在是正常情况，返回 0 */
 
-    /* 验证 magic + version */
-    uint32_t magic = 0, version = 0;
-    if (fread(&magic, sizeof(magic), 1, f) != 1) goto fail;
-    if (fread(&version, sizeof(version), 1, f) != 1) goto fail;
-    if (magic != 0x504D4550 || version != 1) goto fail;
+    /* v0.5.30 P0b: 整文件读入 —— 维度闸门必须知道「文件实际长度」才能
+     * 反推维度、并校验头自述维度是否与内容自洽（见 ep_infer_legacy_dim）。 */
+    if (fseek(f, 0, SEEK_END) != 0) {
+        fprintf(stderr, "[EmergentPOS] 加载失败 " __FILE__ ":%d: %s 无法定位文件尾 (%s)"
+                " → 拒绝\n", __LINE__, path, strerror(errno));
+        fclose(f);
+        return -1;
+    }
+    long fsz_l = ftell(f);
+    if (fsz_l < 0) {
+        fprintf(stderr, "[EmergentPOS] 加载失败 " __FILE__ ":%d: %s 无法取文件长度 (%s)"
+                " → 拒绝\n", __LINE__, path, strerror(errno));
+        fclose(f);
+        return -1;
+    }
+    size_t size = (size_t)fsz_l;
+    rewind(f);
+    unsigned char* buf = (unsigned char*)malloc(size ? size : 1);
+    if (!buf) {
+        fprintf(stderr, "[EmergentPOS] 加载失败 " __FILE__ ":%d: %s 内存不足 (%zu 字节)"
+                " → 拒绝\n", __LINE__, path, size);
+        fclose(f);
+        return -1;
+    }
+    if (size > 0 && fread(buf, 1, size, f) != size) {
+        fprintf(stderr, "[EmergentPOS] 加载失败 " __FILE__ ":%d: %s 读取失败 期望=%zu 字节"
+                " 实际读入不足 (%s) → 拒绝\n", __LINE__, path, size, strerror(errno));
+        free(buf);
+        fclose(f);
+        return -1;
+    }
+    fclose(f);
 
-    /* 读取硬编码锚点 */
+    /* ---- 文件头：magic + version（+ v2 的 dim）---- */
+    if (size < 12) {
+        fprintf(stderr, "[EmergentPOS] 加载失败 " __FILE__ ":%d: %s 文件截断 期望>=12 字节"
+                " 实际=%zu 字节（连 magic+version+active_count 都不够）→ 拒绝\n",
+                __LINE__, path, size);
+        free(buf);
+        return -1;
+    }
+    uint32_t magic = 0, version = 0;
+    memcpy(&magic, buf, 4);
+    memcpy(&version, buf + 4, 4);
+    if (magic != EMERGENT_POS_MAGIC) {
+        fprintf(stderr, "[EmergentPOS] 加载失败 " __FILE__ ":%d: %s magic 不符 期望=%08x(PMEP)"
+                " 实际=%08x → 拒绝（非本格式文件）\n",
+                __LINE__, path, EMERGENT_POS_MAGIC, magic);
+        free(buf);
+        return -1;
+    }
+
+    uint32_t file_dim = 0;
+    size_t   hdr      = 0;   /* 读 active_count 的偏移（= 头长度） */
+    int      legacy_inferred = 0;
+
+    if (version == EMERGENT_POS_VERSION_DIM) {
+        /* 新头：维度由文件自述，必须等于当前二进制维度（否则内容宽度不符） */
+        if (size < 12) {
+            fprintf(stderr, "[EmergentPOS] 加载失败 " __FILE__ ":%d: %s 文件截断 期望>=12 字节"
+                    " 实际=%zu 字节（v2 头缺 dim 字段）→ 拒绝\n", __LINE__, path, size);
+            free(buf);
+            return -1;
+        }
+        memcpy(&file_dim, buf + 8, 4);
+        hdr = 12;   /* magic(4)+version(4)+dim(4)；紧随其后是 active_count */
+        if (file_dim != (uint32_t)PM_NODE_FEATURE_DIM) {
+            fprintf(stderr, "[EmergentPOS] 加载失败 " __FILE__ ":%d: %s 维度不符 期望=%d"
+                    "（当前二进制 PM_NODE_FEATURE_DIM）实际=%u（文件头自述）→ 拒绝\n",
+                    __LINE__, path, PM_NODE_FEATURE_DIM, file_dim);
+            free(buf);
+            return -1;
+        }
+    } else if (version == EMERGENT_POS_VERSION_LEGACY) {
+        /* 旧头：无维度字段 = 明确的旧格式 ⇒ 按 size 反推 + WARN + 记账（不拒绝）。
+         * ⛔ 绝不"无维度字段就一刀切拒绝"——那会把手上所有历史文件全废掉。 */
+        uint32_t active_probe = 0;
+        memcpy(&active_probe, buf + 8, 4);
+        int extra_probe = 0;
+        if (!ep_infer_legacy_dim(size, active_probe, buf, &file_dim, &extra_probe)) {
+            fprintf(stderr, "[EmergentPOS] 加载失败 " __FILE__ ":%d: %s 无法按 size 反推维度"
+                    " 期望=size==16+12*active+44*extra+4*dim*(active+extra)"
+                    " 实际=size=%zu active=%u → 拒绝（size 与任何候选维度都不自洽，"
+                    "疑为截断/损坏）\n", __LINE__, path, size, active_probe);
+            free(buf);
+            return -1;
+        }
+        legacy_inferred = 1;
+        hdr = 8;    /* magic(4)+version(4)；v1 无 dim，紧随其后就是 active_count */
+        g_ep_legacy_dim_inferred++;   /* 记账 */
+        fprintf(stderr, "[EmergentPOS] WARN " __FILE__ ":%d: %s 旧格式文件(无维度字段,"
+                "version=%u) 按 size 反推维度 dim=%u (期望=%d=当前二进制) size=%zu active=%u"
+                " extra=%d → 按反推维度读取并记账(本进程累计第 %lu 次)%s\n",
+                __LINE__, path, EMERGENT_POS_VERSION_LEGACY, file_dim, PM_NODE_FEATURE_DIM,
+                size, active_probe, extra_probe, g_ep_legacy_dim_inferred,
+                (file_dim == (uint32_t)PM_NODE_FEATURE_DIM) ? ""
+                    : " ⚠ 维度不一致：跨维按 min() 截断/补零载入，锚点语义不完整，"
+                      "请在下次训练/重启后重建并落盘");
+    } else {
+        fprintf(stderr, "[EmergentPOS] 加载失败 " __FILE__ ":%d: %s 版本未知 期望=%u(旧格式)"
+                "|%u(带维度) 实际=%u → 拒绝\n", __LINE__, path,
+                EMERGENT_POS_VERSION_LEGACY, EMERGENT_POS_VERSION_DIM, version);
+        free(buf);
+        return -1;
+    }
+
+    /* ---- 记录区 ---- */
+    if (hdr + 4 > size) {
+        fprintf(stderr, "[EmergentPOS] 加载失败 " __FILE__ ":%d: %s 文件截断 期望>=%zu 字节"
+                "（缺 active_count 字段）实际=%zu 字节 → 拒绝\n", __LINE__, path, hdr + 4, size);
+        free(buf);
+        return -1;
+    }
     uint32_t active_count = 0;
-    if (fread(&active_count, sizeof(active_count), 1, f) != 1) goto fail;
+    memcpy(&active_count, buf + hdr, 4);
+    hdr += 4;
+    if (active_count > (uint32_t)(POS_COUNT - 1)) {
+        fprintf(stderr, "[EmergentPOS] 加载失败 " __FILE__ ":%d: %s active_count 越界 期望=0..%d"
+                " 实际=%u → 拒绝\n", __LINE__, path, POS_COUNT - 1, active_count);
+        free(buf);
+        return -1;
+    }
+
+    size_t anchor_rec = 12u + 4u * (size_t)file_dim;   /* tag+centroid+member+stab */
+    size_t extra_rec  = 44u + 4u * (size_t)file_dim;   /* id+centroid+member+coh+label32 */
+
+    float* scratch = NULL;   /* file_dim 宽的临时中心（仅跨维度时需要） */
+    if (file_dim != (uint32_t)PM_NODE_FEATURE_DIM) {
+        scratch = (float*)malloc((size_t)file_dim * sizeof(float));
+        if (!scratch) {
+            fprintf(stderr, "[EmergentPOS] 加载失败 " __FILE__ ":%d: %s 内存不足"
+                    "（跨维临时缓冲 %u 维）→ 拒绝\n", __LINE__, path, file_dim);
+            free(buf);
+            return -1;
+        }
+    }
 
     /* A-P1-5 fix: 先清零再累加——此前只 ++ 不清零，重复 load 会累加越界写 */
     ep->extra_class_count = 0;
     int loaded = 0;
     for (uint32_t i = 0; i < active_count; i++) {
+        if (hdr + anchor_rec > size) {
+            fprintf(stderr, "[EmergentPOS] 加载失败 " __FILE__ ":%d: %s 文件截断 期望>=%zu 字节"
+                    "（第 %u/%u 个锚点记录，记录宽=%zu）实际=%zu 字节 → 拒绝\n",
+                    __LINE__, path, hdr + anchor_rec, i + 1, active_count, anchor_rec, size);
+            goto reject;
+        }
         int tag = 0;
-        if (fread(&tag, sizeof(int), 1, f) != 1) goto fail;
-        if (tag <= POS_UNKNOWN || tag >= POS_COUNT) goto fail;
-
+        memcpy(&tag, buf + hdr, 4);
+        hdr += 4;
+        if (tag <= POS_UNKNOWN || tag >= POS_COUNT) {
+            fprintf(stderr, "[EmergentPOS] 加载失败 " __FILE__ ":%d: %s 锚点 tag 越界 期望=%d..%d"
+                    " 实际=%d（第 %u 个锚点记录）→ 拒绝\n",
+                    __LINE__, path, POS_UNKNOWN + 1, POS_COUNT - 1, tag, i + 1);
+            goto reject;
+        }
         POSAnchor* anchor = &ep->anchors[tag];
-        if (fread(anchor->centroid, sizeof(float), PM_NODE_FEATURE_DIM, f) != PM_NODE_FEATURE_DIM)
-            goto fail;
-        if (fread(&anchor->member_count, sizeof(int), 1, f) != 1) goto fail;
-        if (fread(&anchor->centroid_stability, sizeof(float), 1, f) != 1) goto fail;
+        ep_load_centroid(anchor->centroid, buf + hdr, file_dim, scratch);
+        hdr += 4u * (size_t)file_dim;
+        memcpy(&anchor->member_count, buf + hdr, 4); hdr += 4;
+        memcpy(&anchor->centroid_stability, buf + hdr, 4); hdr += 4;
         anchor->is_active = 1;
         loaded++;
     }
 
     /* 读取额外词类 */
+    if (hdr + 4 > size) {
+        fprintf(stderr, "[EmergentPOS] 加载失败 " __FILE__ ":%d: %s 文件截断 期望>=%zu 字节"
+                "（缺 extra_count 字段）实际=%zu 字节 → 拒绝\n", __LINE__, path, hdr + 4, size);
+        goto reject;
+    }
     int extra_count = 0;
-    if (fread(&extra_count, sizeof(int), 1, f) != 1) goto fail;
-    if (extra_count > 16) extra_count = 16;
+    memcpy(&extra_count, buf + hdr, 4);
+    hdr += 4;
+    if (extra_count < 0 || extra_count > EMERGENT_POS_EXTRA_MAX) {
+        fprintf(stderr, "[EmergentPOS] 加载失败 " __FILE__ ":%d: %s extra_count 越界 期望=0..%d"
+                " 实际=%d → 拒绝\n", __LINE__, path, EMERGENT_POS_EXTRA_MAX, extra_count);
+        goto reject;
+    }
 
     for (int ei = 0; ei < extra_count; ei++) {
-        if (fread(&ep->extra_classes[ei].class_id, sizeof(int), 1, f) != 1) goto fail;
-        if (fread(ep->extra_classes[ei].centroid, sizeof(float), PM_NODE_FEATURE_DIM, f) != PM_NODE_FEATURE_DIM)
-            goto fail;
-        if (fread(&ep->extra_classes[ei].member_count, sizeof(int), 1, f) != 1) goto fail;
-        if (fread(&ep->extra_classes[ei].coherence, sizeof(float), 1, f) != 1) goto fail;
-        if (fread(ep->extra_classes[ei].label_hint, sizeof(char), 32, f) != 32) goto fail;
+        if (hdr + extra_rec > size) {
+            fprintf(stderr, "[EmergentPOS] 加载失败 " __FILE__ ":%d: %s 文件截断 期望>=%zu 字节"
+                    "（第 %d/%d 个额外词类记录，记录宽=%zu）实际=%zu 字节 → 拒绝\n",
+                    __LINE__, path, hdr + extra_rec, ei + 1, extra_count, extra_rec, size);
+            goto reject;
+        }
+        memcpy(&ep->extra_classes[ei].class_id, buf + hdr, 4); hdr += 4;
+        ep_load_centroid(ep->extra_classes[ei].centroid, buf + hdr, file_dim, scratch);
+        hdr += 4u * (size_t)file_dim;
+        memcpy(&ep->extra_classes[ei].member_count, buf + hdr, 4); hdr += 4;
+        memcpy(&ep->extra_classes[ei].coherence, buf + hdr, 4); hdr += 4;
+        memcpy(ep->extra_classes[ei].label_hint, buf + hdr, 32); hdr += 32;
         ep->extra_classes[ei].is_active = 1;
         ep->extra_class_count++;
     }
 
-    fclose(f);
-    fprintf(stderr, "[EmergentPOS] 加载完成: %d 硬编码锚点 + %d 额外词类 ← %s\n",
-            loaded, ep->extra_class_count, path);
+    /* 整文件必须被恰好消费完：多出字节 = 头自述维度/计数与内容不符
+     * （例如头写 256 而内容按 512 写），少字节 = 截断 —— 二者都拒绝。 */
+    if (hdr != size) {
+        fprintf(stderr, "[EmergentPOS] 加载失败 " __FILE__ ":%d: %s 文件长度不符 期望=%zu 字节"
+                "（按头自述：dim=%u active=%u extra=%d；记录区起点来源=%s）实际=%zu 字节"
+                " → 拒绝\n", __LINE__, path, hdr, file_dim, active_count, extra_count,
+                legacy_inferred ? "size反推" : "头内dim", size);
+        goto reject;
+    }
+
+    free(scratch);
+    free(buf);
+    fprintf(stderr, "[EmergentPOS] 加载完成: %d 硬编码锚点 + %d 额外词类 ← %s"
+            "（维度=%u%s）\n", loaded, ep->extra_class_count, path, file_dim,
+            legacy_inferred ? "，旧格式按 size 反推" : "");
     return loaded + ep->extra_class_count;
 
-fail:
-    fclose(f);
-    fprintf(stderr, "[EmergentPOS] 加载失败: %s 内容损坏/不完整，返回 -1"
-            "（区别于文件不存在的 0）\n", path);
+reject:
+    free(scratch);
+    free(buf);
     return -1;
 }
 

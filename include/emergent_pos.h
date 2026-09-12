@@ -247,7 +247,13 @@ const char* emergent_pos_class_name(EmergentPOS* ep, int class_id);
 /**
  * 持久化: 保存所有锚点中心 + 额外词类到磁盘
  *
- * 文件格式: 二进制, 先写 10 个硬编码锚点中心, 再写额外词类数+中心。
+ * 文件格式（v0.5.30 P0b 起写端输出 v2）: 二进制。
+ *   v2: magic(4)="PMEP" + version(4)=2 + dim(4)=PM_NODE_FEATURE_DIM + active_count(4)
+ *       + active_count × { tag(4) + centroid(dim×4) + member_count(4) + stability(4) }
+ *       + extra_count(4)
+ *       + extra_count × { class_id(4) + centroid(dim×4) + member_count(4)
+ *                         + coherence(4) + label_hint(32) }
+ *   v1(旧): 同 v2 但**头里没有 dim 字段** —— 512 时代旧格式，读端按 size 反推维度。
  * 每次 classify 调用中自动触发（每 EMERGE_CHECK_INTERVAL 次）。
  *
  * @param ep       涌现词类系统
@@ -259,12 +265,14 @@ int emergent_pos_save(EmergentPOS* ep, const char* filepath);
 /**
  * 持久化: 从磁盘加载锚点中心
  *
+ * v2 文件按头内 dim 校验（不符即拒绝）；**v1 旧格式(无维度字段)按整文件 size 反推维度
+ * + WARN + 记账，只有"size 反推不出"才拒绝**（TAIL-DIM-1；⛔ 不误伤历史文件）。
  * 若加载成功, 所有已激活锚点直接恢复, 无需懒初始化。
- * 若文件不存在或损坏, 返回 0 让调用者走懒初始化路径。
+ * 若文件不存在返回 0 让调用者走懒初始化路径；损坏/维度不符/截断/反推不出返回 -1。
  *
  * @param ep       涌现词类系统
  * @param filepath 文件路径
- * @return 成功加载的锚点数, 0=未找到/无效
+ * @return 成功加载的锚点数；0=文件不存在；-1=拒绝(损坏/维度不符/截断/反推不出)
  */
 int emergent_pos_load(EmergentPOS* ep, const char* filepath);
 
