@@ -1929,6 +1929,12 @@ static int topology_walk_greedy_impl(SubTopology* sub, int start_node_id,
     int path_len = 0;
     int current_id = start_node_id;
 
+    /* STEP3A 记账：cross_links[] 的 NULL 洞跳过累计（仅计数，不改控制流）。
+     * master_prune_cross_links 只 free + 置 NULL、既不压缩 cross_link_count、
+     * 也不重建 cross_adj[].link_index，故「界内但指向空槽」的 adj 条目合法存在；
+     * 本计数器只用于把这些原本会解引用 NULL 的条目显式跳过，并在收尾汇总一行。 */
+    int xlink_null_skipped = 0;
+
     // 语义上下文：累积已走过节点的特征向量均值
     float context_features[NODE_FEATURE_DIM] = {0};
     int context_count = 0;
@@ -2080,6 +2086,14 @@ static int topology_walk_greedy_impl(SubTopology* sub, int start_node_id,
                         while (entry) {
                             if (entry->link_index < master->cross_link_count) {
                                 CrossTopologyLink* link = master->cross_links[entry->link_index];
+                                /* STEP3A：NULL 洞（已剪除槽位）跳过并记账。
+                                 * 注意不能只写成 `if (link && link->to_topo_id == …)`：
+                                 * 下面的 else-if 链会再次解引用 link，必须整链短路。 */
+                                if (!link) {
+                                    xlink_null_skipped++;
+                                    entry = entry->next;
+                                    continue;
+                                }
                                 if (link->to_topo_id == TOPO_SEMANTIC && check_semantic) {
                                     semantic_cross_score += link->weight;
                                     semantic_hit_count++;
@@ -2358,6 +2372,13 @@ static int topology_walk_greedy_impl(SubTopology* sub, int start_node_id,
             context_valence = context_valence * 0.7f + cont_node->valence * 0.3f;
         /* 注意：path_target_weights 不在此处释放（原实现在此 free，会被上面的
          * break 退出路径跳过，造成每步泄漏）。统一到循环之后的唯一返回路径释放。 */
+    }
+
+    /* STEP3A 收尾汇总：本轮走边跳过的 NULL 跨链槽位（无则保持安静，不打） */
+    if (xlink_null_skipped > 0) {
+        LOG_DEBUG("[跨拓扑走边] 跳过 NULL 跨链槽位 %d 次 "
+                  "(topo=%d 起点=%d；成因: 剪枝 free+置 NULL 未压缩 cross_link_count)",
+                  xlink_null_skipped, sub->topo_id, start_node_id);
     }
 
     free(path_target_weights);   /* 与循环外那次 calloc 配对；free(NULL) 亦安全 */
