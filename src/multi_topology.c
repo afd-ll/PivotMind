@@ -699,10 +699,13 @@ int master_reevaluate_cross_links(MasterTopology* master, float expected_use) {
 
 /** 哈希函数：四元组映射到 [0, CROSS_HIT_TABLE_SIZE) */
 static inline unsigned int cross_hit_hash(int ft, int fn, int tt, int tn) {
-    unsigned int h = (unsigned int)(ft * 73856093) ^
-                     (unsigned int)(fn * 19349669) ^
-                     (unsigned int)(tt * 83492791) ^
-                     (unsigned int)(tn);
+    /* 全部乘法在 unsigned int 域内完成（模 2^32），与旧写法
+     * (unsigned int)(int_expr) 的补码回绕结果逐位相同，
+     * 不改变任何桶分布；此处只是消除 signed 溢出的 UB。 */
+    unsigned int h = (unsigned int)ft * 73856093u ^
+                     (unsigned int)fn * 19349669u ^
+                     (unsigned int)tt * 83492791u ^
+                     (unsigned int)tn;
     return h & (CROSS_HIT_TABLE_SIZE - 1);  // 2的幂取模
 }
 
