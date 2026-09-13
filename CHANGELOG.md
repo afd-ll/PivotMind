@@ -1,5 +1,29 @@
 # Changelog
 
+## v0.5.35 — 2026-09-13
+
+> 来源：老大「**接下来就是做分开语种了**」→「**先分离多语种，专项专做再说**」。动工前盘点发现语种判定散落 9 处、口径分三档且各有错判 —— 在这样的地基上做分离，边界本身就是错的。本版只做一件事：**让「语种是什么」在全仓只有一个答案**（真值源）；刻意不碰节点数据结构、跨语种边、状态格式（那些属「专项」，见 D1/D2/D3）。工作区 `/home/cx/pm-fix`（Pi 3B），分支 `feat/paths-callsite-migration`，`main` 未动。完整说明（含三档错判、契约单测、线上只读分布实测与 6 条诚实边界）见 [changelogs/079-lang-ssot-convergence.md](changelogs/079-lang-ssot-convergence.md)。
+
+### Added —— 语种判定 SSOT
+1. **新增 `include/lang.h` + `src/lang.c`**：`PmLang` 枚举（unknown/zh/en/ja/ko/other）+ **全仓唯一**的码点级解码 `pm_utf8_decode()` + `pm_lang_of_cp()` / `pm_lang_of()`（首码点）/ `pm_lang_of_text()`（投票主导）/ `pm_zh_ratio_permille()` / `pm_has_zh()` + 三个语义明确的谓词 `pm_is_nonascii()` / `pm_is_zh_char()` / `pm_is_ascii_text()` + 稳定短名 `pm_lang_name()`。设计思路与显示宽度 SSOT（`src/ui.c`）同源：**一个维度一个真值源**。`Makefile` 的 `CORE_SRC = $(wildcard src/*.c)` 自动纳入 `src/lang.c`，无需改 Makefile。
+
+### Changed —— 9 处散落判据全部收敛（10 文件）
+2. **三档互不相同的旧口径**：① `& 0x80`（任何非 ASCII 都算中文 ⇒ é/ü/假名/谚文/emoji 全中招）；② `strlen(s)==3`（**CJK 标点「。」与平假名「あ」都是 3 字节 ⇒ 被误当汉字**）；③ 码点仅认基本区（丢掉扩展 A 3400-4DBF）。逐点改走 SSOT：`utf8_tokenizer.c` / `autonomic_learner.c` / `cognitive_controller.c` / `feed_cli.c` / `compound_promote.c` / `article_reader.c` / `diffusion.c` / `gateway_handlers.c` / `chinese.c`（死代码，一并归正）。**保留旧函数名作薄转发**，调用点零改动即可切到新口径。
+
+### Added —— 契约单测（第 28 支）
+3. **`tests/unit/test_lang_unit.c`**（9 组 / 13 用例）：解码 1/2/3/4 字节 + 非法/截断/空串/NULL 不崩溃；CJK 基本区与**扩展 A** 两端的包含/排除边界；日/韩/英/其它；数字标点 ⇒ UNKNOWN。含 **★回归锁**：CJK 标点「。」(U+3002) 与平假名「あ」(U+3042) 都是 3 字节，一旦被判为中文即说明「字节数=语种」的错误口径回归。Makefile 6 处接入（`ASAN_TEST_BINS` / 编译规则 / 别名 `test-lang-unit` / `TEST_BINS` / `test:` 前置依赖 / `.PHONY`），全部追加、零删除。
+
+### Added —— `state_dump` 语种分布节（本版可见产出）
+4. 遍历全部子拓扑概念节点，按 `pm_lang_of` 统计各语种占比。**线上 state 只读副本**实测：总节点 3923 / `zh 3116 (79.4%)` / `en 694 (17.7%)` / `unknown 112 (2.9%)`。其中 `en` 基本是**结构性元节点的 ASCII 类目码**（领域/语法/语用/文化/上下文/模板拓扑），**非中文错判** —— 汉字区 4E00-9FFF 是精确范围，中文不会落到 EN；线上语料实质是单语中文。
+
+### Fixed —— 新警告清零
+5. `include/lang.h` 注释内的字面量 `src/*.c` 触发 `-Wcomment`（该头被 10+ 个 TU 包含 ⇒ 每个 TU 各响一次）。改写为不提该字面量后，两机 `warning:` 均 **0 行**。
+
+### Verified
+- 三机（Pi 按现行铁律不编译）：WSL x86_64 / gcc 15.2.0 与 armbian-1 aarch64 / gcc 13.3.0，`make clean && make all` 均 **0 error / 0 warning**；`make check-tools` ✓ 19/19；`make check-version` PASS；`make test` **28 通过 / 0 失败**（27→28）；新单测两机直跑 RC=0。
+- 线上实例 `pid 2215289` 与线上数据全程未动（仅监听 `127.0.0.1:8080`）；线上 state 仅**只读复制**一份做分布测量，**源文件 md5 前后一致**。
+- 待决策（留「专项」轮）：**D1 英文语料来源 / D2 跨语种语义层（仓内对「跨语种」有三套互相矛盾的答案）/ D3 状态格式 9→10（`ReasoningNode` 无 `lang` 字段）**。
+
 ## v0.5.34 — 2026-09-13
 
 > 来源：老大「**可以，都一起抓了做了吧**」。—— 把 v0.5.33 收尾时补做的 CLI/网关端到端验证挖出的 5 处缺陷一次性收口；发版收尾又补跑 `make test`，顺带把**非 C 介质**（Makefile / 脚本 / 测试）里的同类框病一并收掉。工作区 `/home/cx/pm-fix`（Pi 3B），分支 `feat/paths-callsite-migration`，`main` 未动。完整说明（含三机验证数据与 8 条诚实边界）见 [changelogs/078-asset-ssot-frame-width-load-count.md](changelogs/078-asset-ssot-frame-width-load-count.md)。
