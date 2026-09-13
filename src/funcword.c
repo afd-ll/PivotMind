@@ -271,7 +271,6 @@ FuncClass funcword_classify_node(ReasoningNode* nd,
     if (!nd || !nd->concept) return FC_VOID;
 
     int len = (int)strlen(nd->concept);
-    unsigned char c0 = (unsigned char)nd->concept[0];
 
     /* ---- 多字词 ---- */
     if (len > 3) {
@@ -287,8 +286,8 @@ FuncClass funcword_classify_node(ReasoningNode* nd,
         return FC_HIGH_FREQ;
     }
 
-    /* ---- 单字（3 字节 CJK）---- */
-    if (len == 3 && (c0 & 0x80)) {
+    /* ---- 单字（v0.5.38：按语种 SSOT 判「单个汉字」）---- */
+    if (pm_is_single_char(nd->concept) && pm_is_zh_char(nd->concept)) {
         /* 轴②/轴③ 用跨拓扑聚合统计（或退化用节点自身边） */
         int ec;
         float max_w, mean_w;
@@ -394,10 +393,8 @@ static int funcword_scan_shadow(HuarongTopologyNet* vnet,
     for (int i = 0; i < vnet->node_count; i++) {
         ReasoningNode* nd = vnet->nodes[i];
         if (!nd || !nd->concept) continue;
-        int len = (int)strlen(nd->concept);
-        if (len != 3) continue;   /* 影子模式先聚焦单字 */
-        unsigned char c0 = (unsigned char)nd->concept[0];
-        if ((c0 & 0x80) == 0) continue;
+        /* v0.5.38：单字聚焦改走语种 SSOT —— 按码点判「单个汉字」，不再按 3 字节猜 */
+        if (!pm_is_single_char(nd->concept) || !pm_is_zh_char(nd->concept)) continue;
 
         /* 跨拓扑聚合统计（轴②/轴③） */
         FuncwordAgg agg;
