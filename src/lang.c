@@ -149,6 +149,27 @@ int pm_is_zh_char(const char* s) {
     return (pm_lang_of_cp(cp) == PM_LANG_ZH) ? 1 : 0;
 }
 
+/* v0.5.38：「单字」按码点判，不按字节数判（字节数只是编码长度）。 */
+int pm_is_single_char(const char* s) {
+    unsigned int cp = 0u;
+    int n;
+    if (!s || !s[0]) return 0;
+    n = pm_utf8_decode(s, &cp);
+    if (n < 1) n = 1;
+    return (cp != 0u && s[n] == '\0') ? 1 : 0;
+}
+
+/* v0.5.38：单个非表意字符 —— 不是汉字、却曾被当“单字”的那一类。 */
+int pm_is_single_nonzh_char(const char* s) {
+    unsigned int cp = 0u;
+    int n;
+    if (!s || !s[0]) return 0;
+    n = pm_utf8_decode(s, &cp);
+    if (n < 1) n = 1;
+    if (cp <= 0x7Fu || s[n] != '\0') return 0;   /* 非单字符 / ASCII 单字符 ⇒ 不在本列 */
+    return (pm_lang_of_cp(cp) != PM_LANG_ZH) ? 1 : 0;
+}
+
 /* ────────────────────────── 名称映射 ────────────────────────── */
 
 const char* pm_lang_name(PmLang lang) {

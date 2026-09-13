@@ -1808,6 +1808,8 @@ int diffusion_generate(DiffusionCtx* ctx,
             if (lang_dom > 0 && !pm_is_nonascii(word_prio[p])) continue;
             if (lang_dom < 0 && pm_is_nonascii(word_prio[p])) continue;
             /* 中文单字不输出（v0.6：口语至少 2 字词，"出大的只了"类噪声） */
+            /* v0.5.38 正梁：单个非表意字符（CJK 标点/假名/谚文等）不得进入输出 */
+            if (pm_is_single_nonzh_char(word_prio[p])) continue;
             if ((unsigned char)word_prio[p][0] >= 0x80 && strlen(word_prio[p]) == 3) continue;
             int dup = 0;
             for (int w = 0; w < word_count; w++) {
@@ -1836,6 +1838,8 @@ int diffusion_generate(DiffusionCtx* ctx,
             if (final[i].relevance < 0.3f) continue;
             if (is_function_word(final[i].word)) continue;
             /* 中文单字不输出（v0.6） */
+            /* v0.5.38 正梁：单个非表意字符（CJK 标点/假名/谚文等）不得进入输出 */
+            if (pm_is_single_nonzh_char(final[i].word)) continue;
             if ((unsigned char)final[i].word[0] >= 0x80 && strlen(final[i].word) == 3) continue;
 
             /* 去重 */
@@ -1872,6 +1876,8 @@ int diffusion_generate(DiffusionCtx* ctx,
                     if (lang_dom > 0 && !pm_is_nonascii(nb->concept)) continue;
                     if (lang_dom < 0 && pm_is_nonascii(nb->concept)) continue;
                     /* 中文单字不输出（v0.6） */
+                    /* v0.5.38 正梁：单个非表意字符（CJK 标点/假名/谚文等）不得进入输出 */
+                    if (pm_is_single_nonzh_char(nb->concept)) continue;
                     if ((unsigned char)nb->concept[0] >= 0x80 && strlen(nb->concept) == 3) continue;
                     int dup = 0;
                     for (int w2 = 0; w2 < word_count; w2++)
@@ -1918,6 +1924,8 @@ int diffusion_generate(DiffusionCtx* ctx,
             if (is_function_word(word_prio[p])) continue;
             if (lang_dom > 0 && !pm_is_nonascii(word_prio[p])) continue;
             if (lang_dom < 0 && pm_is_nonascii(word_prio[p])) continue;
+            /* v0.5.38 正梁：单个非表意字符不得进入输出 */
+            if (pm_is_single_nonzh_char(word_prio[p])) continue;
             if ((unsigned char)word_prio[p][0] >= 0x80 && strlen(word_prio[p]) == 3) continue;  /* 中文单字 */
             output_words[out_fallback++] = word_prio[p];
             selected[sel++] = word_prio[p];
@@ -1934,6 +1942,8 @@ int diffusion_generate(DiffusionCtx* ctx,
             /* fallback 路径不强制语言过滤（保证有输出，避免空回复/句号） */
             if (is_function_word(final[i].word)) continue;
             /* 中文单字不输出（v0.6，降级路径也生效——"时间是"的"是"） */
+            /* v0.5.38 正梁：单个非表意字符（CJK 标点/假名/谚文等）不得进入输出 */
+            if (pm_is_single_nonzh_char(final[i].word)) continue;
             if ((unsigned char)final[i].word[0] >= 0x80 && strlen(final[i].word) == 3) continue;
 
             int inhibited = 0;

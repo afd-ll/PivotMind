@@ -223,6 +223,58 @@ static void test_names(void) {
 
 /* ══════════════════════════════ main ══════════════════════════════ */
 
+/* ══════════════ 9. 单字符谓词（v0.5.38 正梁口径） ══════════════ */
+/* 这两支谓词是输出层「非表意字符不得进入输出」的唯一判据源：
+ *   - pm_is_single_char       ：是不是「一个字符」（按码点，不按字节数）
+ *   - pm_is_single_nonzh_char ：是不是「一个非表意字符」（旧歪判据歪打正着压制的那类）
+ * 回归锁：一旦有人把「3 字节 = 汉字 / 3 字节 = 单字」的口径又带回来，本组必然变红。 */
+
+static void test_single_char_predicates(void) {
+    T_START("pm_is_single_char: 恰一个码点（按码点判，非字节数）");
+    CHECK(pm_is_single_char("\xE4\xB8\xAD") == 1, "「中」⇒ 1");
+    CHECK(pm_is_single_char("\xE3\x80\x82") == 1, "「。」⇒ 1（3 字节但仍是单字符）");
+    CHECK(pm_is_single_char("\xC3\xA9") == 1, "「é」(2字节) ⇒ 1");
+    CHECK(pm_is_single_char("\xF0\x9F\x98\x80") == 1, "「😀」(4字节) ⇒ 1");
+    CHECK(pm_is_single_char("a") == 1, "「a」⇒ 1");
+    CHECK(pm_is_single_char("\xE4\xB8\xAD\xE6\x96\x87") == 0, "「中文」(2 个码点) ⇒ 0");
+    CHECK(pm_is_single_char("\xE4\xB8\xAD""a") == 0, "「中a」⇒ 0");
+    CHECK(pm_is_single_char("") == 0, "空串 ⇒ 0");
+    CHECK(pm_is_single_char(NULL) == 0, "NULL ⇒ 0");
+    CHECK(pm_is_single_char("\x80") == 0, "裸续字节（非法码点）⇒ 0");
+    T_END();
+
+    T_START("pm_is_single_nonzh_char: 单个非表意字符（输出层正梁）");
+    CHECK(pm_is_single_nonzh_char("\xE3\x80\x82") == 1, "「。」(CJK 标点/UNKNOWN) ⇒ 1");
+    CHECK(pm_is_single_nonzh_char("\xE3\x80\x8C") == 1, "「「」⇒ 1");
+    CHECK(pm_is_single_nonzh_char("\xE3\x80\x8D") == 1, "「」」⇒ 1");
+    CHECK(pm_is_single_nonzh_char("\xEF\xBC\x8C") == 1, "「，」(全角/UNKNOWN) ⇒ 1");
+    CHECK(pm_is_single_nonzh_char("\xE3\x81\x82") == 1, "「あ」(假名/JA) ⇒ 1");
+    CHECK(pm_is_single_nonzh_char("\xEF\xBD\xB1") == 1, "「ｱ」(半角片假名/JA) ⇒ 1");
+    CHECK(pm_is_single_nonzh_char("\xEA\xB0\x80") == 1, "「가」(谚文/KO) ⇒ 1");
+    CHECK(pm_is_single_nonzh_char("\xF0\x9F\x98\x80") == 1, "「😀」(emoji/OTHER) ⇒ 1");
+    CHECK(pm_is_single_nonzh_char("\xC2\xB7") == 1, "「·」(2字节/UNKNOWN) ⇒ 1");
+    CHECK(pm_is_single_nonzh_char("\xE4\xB8\xAD") == 0, "「中」是汉字 ⇒ 0（归 pm_is_zh_char）");
+    CHECK(pm_is_single_nonzh_char("a") == 0, "「a」ASCII 单字符 ⇒ 0（不在本列）");
+    CHECK(pm_is_single_nonzh_char("3") == 0, "「3」⇒ 0");
+    CHECK(pm_is_single_nonzh_char("hello") == 0, "「hello」多字符 ⇒ 0");
+    CHECK(pm_is_single_nonzh_char("\xE4\xB8\xAD\xE6\x96\x87") == 0, "「中文」⇒ 0");
+    CHECK(pm_is_single_nonzh_char("") == 0, "空串 ⇒ 0");
+    CHECK(pm_is_single_nonzh_char(NULL) == 0, "NULL ⇒ 0");
+    T_END();
+
+    T_START("正梁 ∪ 单汉字 = 单个多字节字符（与旧 strlen==3 口径对照）");
+    /* 旧判据 `首字节>=0x80 && strlen==3` 压制的 3 字节字符，两种归类合并后应完全覆盖：
+     * 汉字走 pm_is_zh_char（C 步），非汉字走 pm_is_single_nonzh_char（B 步正梁）。 */
+    CHECK(pm_is_single_nonzh_char("\xE3\x80\x82") || pm_is_zh_char("\xE3\x80\x82"),
+          "「。」必须被两者之一命中（否则改口径后必然漏出）");
+    CHECK(pm_is_single_nonzh_char("\xE3\x81\x82") || pm_is_zh_char("\xE3\x81\x82"),
+          "「あ」必须被两者之一命中");
+    CHECK(pm_is_single_nonzh_char("\xE4\xB8\xAD") || pm_is_zh_char("\xE4\xB8\xAD"),
+          "「中」必须被两者之一命中");
+    T_END();
+}
+
+
 int main(void) {
     printf("\n=== 语种判定 SSOT 契约单测 (include/lang.h) ===\n\n");
 
@@ -234,6 +286,7 @@ int main(void) {
     test_lang_of_text();
     test_ratio_and_has();
     test_predicates();
+    test_single_char_predicates();
     test_names();
 
     printf("\n");
