@@ -184,7 +184,7 @@ static DialogSystem* create_loaded_system(void) {
 
 int main(void) {
     printf("╔══════════════════════════════════════════════════════╗\n");
-    printf("║  CognitiveController 完整测试 — 训练数据版本       ║\n");
+    printf("║  CognitiveController 完整测试 — 训练数据版本         ║\n");
     printf("╚══════════════════════════════════════════════════════╝\n\n");
     fflush(stdout);
 

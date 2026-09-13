@@ -231,7 +231,7 @@ static void print_separator(void) {
 
 int main(void) {
     printf("╔══════════════════════════════════════════════════════╗\n");
-    printf("║       CognitiveController 测试套件(含断言)          ║\n");
+    printf("║       CognitiveController 测试套件(含断言)           ║\n");
     printf("╚══════════════════════════════════════════════════════╝\n");
     fflush(stdout);
 

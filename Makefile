@@ -470,7 +470,7 @@ test: test-cc-full test-tensor test-tensor-broadcast test-model test-metrics tes
 	done; \
 	echo ""; \
 	echo "╔══════════════════════════════════════╗"; \
-	printf "║  结果: %2d 通过, %2d 失败             ║\n" $$PASSED $$FAILED; \
+	printf "║  结果: %2d 通过, %2d 失败              ║\n" $$PASSED $$FAILED; \
 	echo "╚══════════════════════════════════════╝"; \
 	[ $$FAILED -eq 0 ]
 
@@ -496,7 +496,7 @@ test-fast: test-model test-metrics test-visual-cortex test-dialog-unit test-diff
 	done; \
 	echo ""; \
 	echo "╔══════════════════════════════════════╗"; \
-	printf "║  结果: %2d 通过, %2d 失败             ║\n" $$PASSED $$FAILED; \
+	printf "║  结果: %2d 通过, %2d 失败              ║\n" $$PASSED $$FAILED; \
 	echo "╚══════════════════════════════════════╝"; \
 	[ $$FAILED -eq 0 ]
 

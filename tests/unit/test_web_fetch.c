@@ -17,6 +17,7 @@
  */
 
 #include "web_fetch.h"
+#include "ui.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -616,7 +617,7 @@ static void test_live_content_type(void) {
 
 int main(void) {
     printf("╔══════════════════════════════════════════════════╗\n");
-    printf("║          WebFetch 单元测试                        ║\n");
+    printf("║          WebFetch 单元测试                       ║\n");
     printf("╚══════════════════════════════════════════════════╝\n\n");
 
     /* ── 组 1: 响应码分类器（无需初始化） ── */
@@ -683,12 +684,23 @@ int main(void) {
     test_live_content_type();
     web_fetch_destroy();
 
-    /* ── 汇总 ── */
+    /* ── 汇总 ──
+     * 边框内宽 50 列。行内容按【终端显示宽度】补空格，口径复用 ui_disp_width
+     * （全项目唯一），于是「(N 跳过)」「(N 失败)」出现与否都不会把右边框推走。 */
     printf("\n╔══════════════════════════════════════════════════╗\n");
-    printf("║  测试汇总: %d/%d 通过", tests_passed, tests_run);
-    if (tests_skipped > 0) printf(" (%d 跳过)", tests_skipped);
-    if (tests_failed > 0)  printf(" (%d 失败)", tests_failed);
-    printf("            ║\n");
+    {
+        char row[192];
+        size_t n = (size_t)snprintf(row, sizeof row, "  测试汇总: %d/%d 通过",
+                                    tests_passed, tests_run);
+        if (n > sizeof row - 1) n = sizeof row - 1;
+        if (tests_skipped > 0)
+            n += (size_t)snprintf(row + n, sizeof row - n, " (%d 跳过)", tests_skipped);
+        if (n > sizeof row - 1) n = sizeof row - 1;
+        if (tests_failed > 0)
+            n += (size_t)snprintf(row + n, sizeof row - n, " (%d 失败)", tests_failed);
+        int pad = 50 - ui_disp_width(row);
+        printf("║%s%*s║\n", row, pad > 0 ? pad : 0, "");
+    }
     printf("╚══════════════════════════════════════════════════╝\n");
 
     return (tests_failed > 0) ? 1 : 0;

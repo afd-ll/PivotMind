@@ -92,7 +92,7 @@ int main(void) {
 
     /* ASCII 框线宽度固定 38 字符，汇总行靠右填充 */
     printf("\n╔══════════════════════════════════════╗\n");
-    printf("║  汇总: %d/%d 通过                     ║\n", passed, total);
+    printf("║  汇总: %2d/%2d 通过                    ║\n", passed, total);
     printf("╚══════════════════════════════════════╝\n");
 
     return (passed == total) ? 0 : 1;
