@@ -11,10 +11,11 @@
 ### Fixed —— `snprintf` 字面量尺寸体检（21 处全查）
 - **★ 真 bug：`src/template_builder.c:1016`** —— `snprintf(tn->tpl_connectors[k], 8, "%s", conn)`，而字段是 `char tpl_connectors[4][TPL_CONNECTOR_BUF]`（**32 B**，头注释「UTF-8 中文约10字」）⇒ **连接词被静默截到 7 字节**（中文仅 2 字），且它参与合并键归一化 ⇒ 不同连接词会撞键。改 `sizeof`。
 - **5 处 off-by-one（把 `N-1` 写进 `char[N]`）**：`dialog_system.c` 的 `cause_key`/`effect_key`/`intent_key`/`fb`、`hippocampus.c` 的 `dialog_log[slot]` —— 安全，但**白白丢掉最后一个字节**，长输入会被静默截尾。统一改 `sizeof`。
-- **4 处改为 `sizeof`（与字面量等价，纯归正）**：`dream_engine.c` questions/answers、`perception.c` expanded、`gateway_handlers.c` rs、`pivotmind_gateway.c` rs。
+- **5 处改为 `sizeof`（与字面量等价，纯归正）**：`dream_engine.c` questions/answers、`perception.c` expanded、`gateway_handlers.c` rs、`pivotmind_gateway.c` rs。
 - **7 处字面量保持不变（并说明为什么）**：`dialog_system.c:1650`、`causal_reasoning.c:1147`、`concept_processor.c:198`、`concept_abstraction.c:321/397`、`perception.c:1319/1361` 都是 `malloc(N)` 后 `snprintf(ptr, N, ...)` —— **`sizeof(ptr)` 只会得到指针大小（8）**，字面量才是正确写法。
 - **2 处「剩余容量」写法保持不变**：`gateway_http.c:40`（`snprintf(dst+j, 8, ...)`，循环守卫 `j < dst_size - 8` 已保证余量 ≥8）、`pivotmind_gateway.c:63`（`snprintf(buf+o, 3, "%02x", ...)`，守卫 `o + 2 < cap` 已保证余量 ≥3）—— 字面量是转义宽度，正确。
-- `include/topology_growth.h`：`diagnose_topology()` 的 `report` **无尺寸参数**，补契约注释「非 NULL 时缓冲区至少 256 字节」（该函数仓库内无调用方，未改签名以免破坏 ABI）。
+- **1 处「调用方缓冲区」写法保持不变**：`src/topology_growth.c:1055` 的 `snprintf(report, 256, ...)` —— `report` 由**调用方**提供，被调方不知道其大小 ⇒ 字面量是唯一选择（改 `sizeof` 只会得到指针大小 8）。与下一条的契约注释互为两端。（此处系复核时补记：首次体检漏列，靠「改完再扫一遍、差额对账」抓出。）
+- `include/topology_growth.h`：`diagnose_topology()` 的 `report` **无尺寸参数**，补契约注释「非 NULL 时缓冲区至少 256 字节」（该函数仓库内无调用方 —— 全仓仅头文件声明与其 `src/topology_growth.c:1035` 定义两处出现 —— 故未改签名以免破坏 ABI；其实现末尾的 `snprintf(report, 256, ...)` 即上一条保留的那处）。
 
 ### Added
 - `deploy/migrate-home-layout.sh` —— 旧扁平布局 → SSOT 布局迁移（默认只打印计划，`--yes` 才动手；`--dry-run`；检测到在用实例即拒绝；同盘 `mv` 原子改名，绝不覆盖已存在的 `data/<name>`）。

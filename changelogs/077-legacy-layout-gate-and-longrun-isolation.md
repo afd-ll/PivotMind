@@ -112,7 +112,7 @@ snprintf(tn->tpl_connectors[k], sizeof(tn->tpl_connectors[k]), "%s", conn);   //
 
 统一改 `sizeof`。长输入本会在最后一个字节被悄悄砍掉。
 
-### 3.3 改为 `sizeof`（等价，纯归正，4 处）
+### 3.3 改为 `sizeof`（等价，纯归正，5 处）
 
 | 位置 | 字面量 | 缓冲区 |
 |---|---|---|
@@ -140,12 +140,17 @@ snprintf(tn->tpl_connectors[k], sizeof(tn->tpl_connectors[k]), "%s", conn);   //
 
 **保持原样**，并在本文档留档说明 —— 免得下次「体检」又被当成漏网之鱼改错。
 
-### 3.5 ⛔ 必须保留字面量（2 处，「剩余容量 + 转义宽度」配对）
+### 3.5 ⛔ 必须保留字面量（3 处：2 处「剩余容量 + 转义宽度」配对 + 1 处「调用方缓冲区」）
 
 | 位置 | 字面量 | 守卫 | 说明 |
 |---|---|---|---|
 | `demos/gateway_http.c:40` | `8` | `for (...; j < dst_size - 8; ...)` | `\uXXXX` = 6 + `\0` = 7 ≤ 8 字节，正确 |
 | `demos/pivotmind_gateway.c:63` | `3` | `for (...; o + 2 < cap; ...)` | `%02x` = 2 + `\0` = 3 字节，正确 |
+| `src/topology_growth.c:1055` | `256` | — | `report` 是**调用方提供**的缓冲区，被调方不知道其大小 ⇒ 字面量是唯一选择（改 `sizeof` 会得到指针大小 8）。与下面 3.6 补的契约注释（≥256 字节）互为两端 |
+
+> 这一处是复核时**补记**的：首次体检把 `src/topology_growth.c:1055` 漏在了清单外，
+> 导致总数少算 1。核对方式 —— 改动后全仓再扫一遍字面量写法，剩 10 处，
+> 而清单里只列了 9 处，差额即此处。现已补入。
 
 ### 3.6 契约补注（1 处）
 
@@ -156,7 +161,12 @@ snprintf(tn->tpl_connectors[k], sizeof(tn->tpl_connectors[k]), "%s", conn);   //
 * @param report 输出报告 (可为 NULL；**非 NULL 时缓冲区至少 256 字节**)
 ```
 
-该函数**仓库内无调用方**，故**未改签名**（避免动 ABI）。
+该函数**仓库内无调用方**（全仓仅 `include/topology_growth.h:332` 声明 + `src/topology_growth.c:1035`
+定义两处出现），故**未改签名**（避免动 ABI）。
+
+顺带说明：它的实现 `src/topology_growth.c:1055` 正是上面 3.5 里保留字面量 `256` 的那一处 ——
+契约注释与实现是同一件事的两端。核对过余量：该 `snprintf` 的最大展开
+（`"Topology %d: usage=%.2f, density=%.3f, status=%s"`）约 72 字节，256 有充分余量。
 
 ### 3.7 汇总
 
@@ -164,11 +174,11 @@ snprintf(tn->tpl_connectors[k], sizeof(tn->tpl_connectors[k]), "%s", conn);   //
 |---|---|---|
 | ★ 真 bug（静默截断 + 键碰撞） | 1 | 改 `sizeof` |
 | off-by-one | 5 | 改 `sizeof` |
-| 等价归正 | 4+1 = 5 | 改 `sizeof` |
+| 等价归正 | 5 | 改 `sizeof` |
 | 保留（`malloc` + 指针陷阱） | 7 | 不动，本文档留档 |
-| 保留（剩余容量） | 2 | 不动，本文档留档 |
+| 保留（2 处剩余容量 + 1 处调用方缓冲区） | 3 | 不动，本文档留档 |
 | 契约补注 | 1 | 改注释 |
-| **合计** | **21** | |
+| **合计** | **21 处 `snprintf` + 1 处契约注释** | |
 
 ---
 
