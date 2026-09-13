@@ -1,6 +1,7 @@
 #include "huarong_topology.h"
 #include "node_hash.h"
 #include "common.h"
+#include "lang.h"   /* v0.5.36: 语种 SSOT —— create_reasoning_node 里给节点定 lang 标 */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -92,6 +93,10 @@ ReasoningNode* create_reasoning_node(int node_id, const char* concept,
     // EMA 累积读垃圾值、funcword 分类器读到 1675794228 类垃圾
     memset(node->dist_sig, 0, sizeof(node->dist_sig));
     node->dist_sig_count = 0;
+
+    /* v0.5.36: 语种标签——由语种 SSOT 定标（concept 创建后不再变 ⇒ 值恒定）。
+     * 这是【物化缓存】：权威是 pm_lang_of()，本字段供下游免解码直读。 */
+    node->lang = (uint8_t)pm_lang_of(concept);
     
     // 惰性边分配：不预分配，第一条边加入时按需分配
     node->edges = NULL;

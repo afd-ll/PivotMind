@@ -130,6 +130,13 @@ typedef struct ReasoningNode {
     // [11..21] + 位置先验[22..25]（句首/句尾/动词后/动词前）。EMA 在线累积。
     float dist_sig[26];
     int dist_sig_count;          // 累积样本数（<20 不参与聚类——防多义词污染）
+
+    // v0.5.36: 语种标签 —— 语种 SSOT（include/lang.h）的【物化缓存】。
+    // 权威永远是 pm_lang_of(concept)；本字段只是把它落盘，供下游子系统
+    // （扩散过滤/统计/将来的分语种分表）免解码直读。取值 = PmLang 枚举：
+    // 0=unknown 1=zh 2=en 3=ja 4=ko 5=other。
+    // 加载期按 SSOT 重算校验，不符即纠偏（见 multi_topology.c 的 lang 一致性校验）。
+    uint8_t lang;
 } ReasoningNode;
 
 /**

@@ -13,6 +13,7 @@
 #include "dict_loader.h"
 #include "template_builder.h"
 #include "node_cache.h"  /* v0.5.10: node_cache_export_frozen_edges 声明（此前漏 include，gcc14 隐式声明报错） */
+#include "lang.h"  /* v0.5.36: 语种 SSOT —— 节点 lang 落盘/校验的权威来源 */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -4060,7 +4061,7 @@ int master_count_total_nodes(MasterTopology* master) {
     return total;
 }
 
-#define STATE_FORMAT_VERSION 9
+#define STATE_FORMAT_VERSION 10
 /* v0.5.20: 6 = 在每节点记录尾部追加 dist_sig[26]+dist_sig_count（虚词分类器
  * 位置画像，跨重启累积）。加载端向前兼容 v2..v5（旧文件无 dist_sig 段 → 归零）。
  * v0.5.21: 7 = 加载端迁移清洗——fmt_ver==6 状态加载时归零 dist_sig[0..21]
@@ -4098,6 +4099,15 @@ int master_count_total_nodes(MasterTopology* master) {
  * 闸门未变：fmt_ver > STATE_FORMAT_VERSION 显式拒绝并记账，故 v10 及更高版本
  * 仍被拒绝（未来格式必须先落定布局再抬常量）。
  * 解析工具/探针若硬编码白名单，需同步把 9 纳入。
+ * v0.5.36: 10 = 每节点记录尾部追加 1 字节 lang（语种标签，取值 PmLang 0..5）。
+ * 背景：「多语种分离」要让语种成为节点的**结构属性**，而非运行期临时值。
+ * lang 是语种 SSOT（include/lang.h 的 pm_lang_of）的**物化缓存**——
+ *   写端：create_reasoning_node() 定标，存盘时直写该字节（两处写路径同布局）；
+ *   读端：fmt_ver>=10 读该字节，fmt_ver<10（v2..v9）无此段 ⇒ 由 concept 现算；
+ *         两种路径最后都按 pm_lang_of() 重算比对，不符则【以 SSOT 为准纠偏】并计数，
+ *         收尾 WARN 报 lang 一致性——即落盘值只是凭证，权威只有一个。
+ * ⚠️ 一旦用 10 存盘，回退到只认 ≤9 的旧二进制会被闸门**显式拒绝**（不是静默误读），
+ *    故线上换版前必须备份 v9 状态文件；回退不可逆（见 changelogs/080）。
  * 迁移回退开关：PIVOTMIND_SKIP_DIST_SIG_MIGRATE=1 → 加载 v6 时跳过 dist_sig 归零；
  * PIVOTMIND_SKIP_EDGE_WEIGHT_RESET=1 → 加载 v6 时跳过边权归零（对比实验/回退用）。 */
 
@@ -4186,6 +4196,7 @@ typedef struct SaveNodeSnap {
     SaveEdgeSnap* edges;
     float dist_sig[26];
     int   dist_sig_count;
+    uint8_t lang;               /* v0.5.36: 语种标签（SSOT 物化缓存），写 1 字节 */
 } SaveNodeSnap;
 
 /* 候选A / SaveTopoSnap & SaveSnapshot 全量快照结构已废弃（见 4.3 流式批化），
@@ -4412,6 +4423,7 @@ if (sc > 3000) sc = 3000;
             }
             memcpy(ns->dist_sig, node->dist_sig, sizeof(node->dist_sig));
             ns->dist_sig_count = node->dist_sig_count;
+            ns->lang = node->lang;   /* v0.5.36: 语种标签随快照深拷贝 */
         }
     }
 
@@ -4480,6 +4492,7 @@ static int master_serialize_batch(FILE* fp, MasterTopology* master,
 
         fwrite(ns->dist_sig, sizeof(float), 26, fp);
         fwrite(&ns->dist_sig_count, sizeof(int), 1, fp);
+        fwrite(&ns->lang, sizeof(uint8_t), 1, fp);   /* [v10] 语种标签（1 字节） */
     }
     return 0;
 }
@@ -4792,6 +4805,12 @@ static int master_save_state_locked(MasterTopology* master, const char* file_pat
             // [v6] dist_sig 持久化（虚词分类器位置画像，跨重启累积）
             fwrite(node->dist_sig, sizeof(float), 26, fp);
             fwrite(&node->dist_sig_count, sizeof(int), 1, fp);
+            /* [v10] 语种标签：SSOT 物化缓存（concept 不变则恒定） */
+            {
+                uint8_t langb = (uint8_t)(node->concept ? pm_lang_of(node->concept)
+                                                        : PM_LANG_UNKNOWN);
+                fwrite(&langb, sizeof(uint8_t), 1, fp);
+            }
             
             saved_nodes++;
         }
@@ -5325,6 +5344,7 @@ int master_load_state(MasterTopology* master, const char* file_path) {
 
     int loaded_nodes = 0;
     int loaded_links = 0;
+    int lang_mismatch = 0;   /* [v10] 落盘 lang 与 SSOT 重算不符的节点数（观测用；值一律纠偏） */
     /* v0.5.34「丢弃必须记账」：拓扑在目标 master 里未注册 ⇒ 节点无处可放、被丢弃。
      * 原实现在 !target_topo 分支里 loaded_nodes++ —— 把「丢弃」记成「已加载」，
      * 于是「完成: N 节点」是谎报（实测：未注册任何子拓扑的调用方报 N 而实际加载 0）。
@@ -5532,6 +5552,22 @@ int master_load_state(MasterTopology* master, const char* file_path) {
             }
         }
 
+        /* [v10] lang 段（每节点记录尾部，1 字节）
+         * SSOT 权威：无论读到什么/有没有读，最后都用 pm_lang_of(concept) 定值。
+         *   fmt_ver>=10  -> 读该字节并比对（不符则计数；值仍以 SSOT 为准）
+         *   fmt_ver<10   -> v2..v9 无此段，直接由 concept 现算（前向兼容、零迁移） */
+        if (fmt_ver >= 10) {
+            uint8_t langb = 0;
+            READ(&langb, sizeof(uint8_t));
+            if (node && node->concept) {
+                uint8_t expect = (uint8_t)pm_lang_of(node->concept);
+                if (langb != expect) lang_mismatch++;
+                node->lang = expect;
+            }
+        } else if (node && node->concept) {
+            node->lang = (uint8_t)pm_lang_of(node->concept);
+        }
+
         loaded_nodes++;
 
         /* 每 5000 个节点报告进度 */
@@ -5667,10 +5703,22 @@ int master_load_state(MasterTopology* master, const char* file_path) {
             if (fmt_ver >= 6) {
                 SKIP(26 * (int)sizeof(float) + (int)sizeof(int));
             }
+            // [v10] 跳过 lang 段（Pass 2 只恢复边，lang 已在 Pass 1 应用/现算）
+            if (fmt_ver >= 10) {
+                SKIP((int)sizeof(uint8_t));
+            }
         }
 
         p = pass1_end;  // 恢复到跨拓扑段前
         fprintf(stderr, "[状态加载] Pass 2 完成: 恢复 %d 条边 (目标缺失 %d, 自环 %d)\n", restored_edges, p2_fail_notfound, p2_fail_self);
+    }
+
+    /* [v10] lang 一致性收尾：落盘标签与 SSOT 不符的节点数（值已一律纠偏为 SSOT） */
+    if (lang_mismatch > 0) {
+        LOG_WARNING("[状态加载] lang 一致性: %d 个节点的落盘语种标签与 pm_lang_of() 不符，"
+                    "已按 SSOT 纠偏（口径变更或脏数据，非致命）", lang_mismatch);
+    } else {
+        fprintf(stderr, "[状态加载] lang 一致性: 全部节点与语种 SSOT 一致\n");
     }
 
     /* === 跨拓扑连接加载 === */
