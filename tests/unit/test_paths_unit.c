@@ -1,6 +1,6 @@
 /**
  * @file test_paths_unit.c
- * @brief pivotmind_paths 契约单测（10 条）—— 逐条直接断言 include/pivotmind_paths.h 的定稿契约。
+ * @brief pivotmind_paths 契约单测（13 条）—— 逐条直接断言 include/pivotmind_paths.h 的定稿契约。
  *
  * 设计要点（为什么这么写，别改成别的样子）：
  *  ① pm_home() 是 pthread_once「解析一次并缓存」⇒ **同一进程里改环境变量不再生效**。
@@ -8,6 +8,11 @@
  *     结果（home 字符串 + ensure 返回值）与 stderr（WARN 捕获）经管道带回父进程判定。
  *  ② 子进程用例必须在**父进程第一次调用 pm_home() 之前**跑完（fork 会复制已解析的缓存）。
  *  ③ 不写「只建一次」这类断言 —— 契约是「最终就绪」，不是「只调用一次 mkdir」。
+ *  ④ 用例 11 把 12 个登记文件名在此【固化一份】——这是有意的：SSOT 的表内容必须被测试锁死，
+ *     改表就得同步改本单测（= 有意识的变更）。「文件名只在表里出现一次」的红线约束的是
+ *     **调用点**，不约束作为「表校验器」的本单测；调用点仍一律取 pm_file()。
+ *  ⑤ 用例 13 走子进程族（同 ①②）：$PIVOTMIND_LOG_FILE 的覆盖分支同样受「解析一次并缓存」约束，
+ *     父进程里改环境变量不生效，只能在子进程里设好再问。
  */
 
 #include "pivotmind_paths.h"
@@ -123,8 +128,10 @@ static int child_run(const char *pvm_home, int pvm_set,
     return 0;
 }
 
-static int child_exited_clean(const child_result *r) {
-    return WIFEXITED(r->status) && WEXITSTATUS(r->status) == 0;
+/* 只收 status 值（不收结构体指针）：child_result 与 log_child_result 的 status
+   字段偏移不同，收指针极易混用（GCC 13 仅告警、GCC 14 起是 error）。收值即免疫。 */
+static int child_exited_clean(int status) {
+    return WIFEXITED(status) && WEXITSTATUS(status) == 0;
 }
 
 /* 父进程侧临时目录（每个子进程用例一个，互不干扰） */
@@ -143,7 +150,7 @@ static void t1_pivotmind_home_unset_uses_home_level2(void) {
     T_START("1. $PIVOTMIND_HOME 未设 ⇒ 走第 2 级 $HOME/pivotmind");
     CHECK(make_home(th, sizeof th, "t1") == 0, "mkdtemp 失败: %s", strerror(errno));
     CHECK(child_run(NULL, 0, th, 1, 0u, &r) == 0, "子进程通信失败");
-    CHECK(child_exited_clean(&r), "子进程异常退出 status=0x%x", r.status);
+    CHECK(child_exited_clean(r.status), "子进程异常退出 status=0x%x", r.status);
     snprintf(want, sizeof want, "%s/pivotmind", th);
     CHECK(strcmp(r.home, want) == 0, "期望 \"%s\"，实际 \"%s\"", want, r.home);
     CHECK(r.log_len == 0u, "纯查询用例不应有任何 WARN，实际 stderr %zu 字节: %s", r.log_len, r.log);
@@ -167,7 +174,7 @@ static void t2_invalid_pivotmind_home_falls_to_level2(void) {
 
         CHECK(make_home(th, sizeof th, "t2") == 0, "[%zu] mkdtemp 失败", i);
         CHECK(child_run(bad[i], 1, th, 1, 0u, &r) == 0, "[%zu] 子进程通信失败", i);
-        CHECK(child_exited_clean(&r), "[%zu] 子进程异常退出 status=0x%x", i, r.status);
+        CHECK(child_exited_clean(r.status), "[%zu] 子进程异常退出 status=0x%x", i, r.status);
         snprintf(want, sizeof want, "%s/pivotmind", th);
         CHECK(strcmp(r.home, want) == 0, "[%zu] 非法值 \"%s\"：期望第 2 级 \"%s\"，实际 \"%s\"",
               i, bad[i], want, r.home);
@@ -198,13 +205,13 @@ static void t3_home_missing_uses_pm_home_default(void) {
 
         /* (a) $HOME 缺失 ⇒ 第 3 级 */
         CHECK(child_run(NULL, 0, NULL, 0, 0u, &r) == 0, "子进程通信失败");
-        CHECK(child_exited_clean(&r), "子进程异常退出 status=0x%x", r.status);
+        CHECK(child_exited_clean(r.status), "子进程异常退出 status=0x%x", r.status);
         CHECK(strcmp(r.home, PM_HOME_DEFAULT) == 0,
               "$HOME 缺失时应走第 3 级 \"%s\"，实际 \"%s\"", PM_HOME_DEFAULT, r.home);
 
         /* (b) $HOME 存在 ⇒ 第 2 级，且第 3 级不触发 */
         CHECK(child_run(NULL, 0, th, 1, 0u, &r) == 0, "子进程通信失败");
-        CHECK(child_exited_clean(&r), "子进程异常退出 status=0x%x", r.status);
+        CHECK(child_exited_clean(r.status), "子进程异常退出 status=0x%x", r.status);
         CHECK(strcmp(r.home, want2) == 0, "$HOME 存在时应走第 2 级 \"%s\"，实际 \"%s\"", want2, r.home);
         CHECK(strcmp(r.home, PM_HOME_DEFAULT) != 0,
               "第 3 级被触发（拿到了 PM_HOME_DEFAULT=\"%s\"，第 2 级应命中）", r.home);
@@ -229,7 +236,7 @@ static void t10_sandbox_end_to_end(void) {
     T_START("10. 沙箱端到端：HOME=<临时目录> + PIVOTMIND_HOME 未设 ⇒ ensure(ALL)==0 且目录树真实存在");
     CHECK(make_home(th, sizeof th, "t10") == 0, "mkdtemp 失败");
     CHECK(child_run(NULL, 0, th, 1, PM_DIR_ALL, &r) == 0, "子进程通信失败");
-    CHECK(child_exited_clean(&r), "子进程异常退出 status=0x%x", r.status);
+    CHECK(child_exited_clean(r.status), "子进程异常退出 status=0x%x", r.status);
     snprintf(want, sizeof want, "%s/pivotmind", th);
     CHECK(strcmp(r.home, want) == 0, "home 应为 \"%s\"，实际 \"%s\"", want, r.home);
     CHECK(r.ensure_rc == 0, "pm_ensure_dirs(PM_DIR_ALL) 应返回 0，实际 %d (0x%x)",
@@ -254,6 +261,132 @@ static void t10_sandbox_end_to_end(void) {
         (void)rmdir(p);
     }
     (void)rmdir(want);
+    (void)rmdir(th);
+    T_END();
+}
+
+/* ============================ 子进程日志探针（用例 13） ============================ */
+
+typedef struct {
+    char   path[PM_PATH_MAX];   /* 子进程 pm_log_path() 的结果 */
+    char   log[8192];           /* 子进程 stderr 全文（WARN 捕获） */
+    size_t log_len;
+    int    status;
+} log_child_result;
+
+/* 在子进程里：设 $PIVOTMIND_LOG_FILE / $HOME（$PIVOTMIND_HOME 一律清掉 ⇒ 走第 2 级）
+   → pm_log_path() → 回传结果 + stderr 文本。返回 0 = 父子通信正常。
+   ⚠️ 同 child_run：必须在父进程第一次 pm_home() 之前跑（fork 复制已解析的 once 缓存，
+      父进程解析过之后，子进程再设环境也不会重新解析）。 */
+static int child_run_log(const char *logfile, int logfile_set,
+                         const char *home, int home_set,
+                         log_child_result *r)
+{
+    int dp[2], ep[2];
+    pid_t pid;
+    ssize_t n;
+    size_t total;
+    char buf[PM_PATH_MAX + 64];
+    char *nl;
+    int len;
+
+    memset(r, 0, sizeof *r);
+    if (pipe(dp) != 0 || pipe(ep) != 0) return -1;
+
+    pid = fork();
+    if (pid < 0) return -1;
+
+    if (pid == 0) {
+        const char *p;
+        char line[PM_PATH_MAX + 64];
+
+        (void)close(dp[0]);
+        (void)close(ep[0]);
+        if (dup2(ep[1], STDERR_FILENO) < 0) _exit(97);
+        (void)close(ep[1]);
+
+        if (logfile_set) (void)setenv("PIVOTMIND_LOG_FILE", logfile, 1);
+        else             (void)unsetenv("PIVOTMIND_LOG_FILE");
+        (void)unsetenv("PIVOTMIND_HOME");
+        if (home_set) (void)setenv("HOME", home, 1);
+        else          (void)unsetenv("HOME");
+
+        p = pm_log_path();                                  /* 契约：永不为 NULL */
+        len = snprintf(line, sizeof line, "%s\n", (p != NULL) ? p : "(NULL)");
+        if (len > 0 && write(dp[1], line, (size_t)len) != len) _exit(98);
+        (void)close(dp[1]);
+        fflush(NULL);
+        _exit(0);
+    }
+
+    (void)close(dp[1]);
+    (void)close(ep[1]);
+
+    total = 0;
+    while (total < sizeof buf - 1u && (n = read(dp[0], buf + total, sizeof buf - 1u - total)) > 0) {
+        total += (size_t)n;
+    }
+    buf[total] = '\0';
+    (void)close(dp[0]);
+
+    total = 0;
+    while (total < sizeof r->log - 1u && (n = read(ep[0], r->log + total, sizeof r->log - 1u - total)) > 0) {
+        total += (size_t)n;
+    }
+    r->log[total] = '\0';
+    r->log_len = total;
+    (void)close(ep[0]);
+
+    (void)waitpid(pid, &r->status, 0);
+
+    nl = strchr(buf, '\n');
+    if (nl == NULL) return -1;
+    *nl = '\0';
+    snprintf(r->path, sizeof r->path, "%s", buf);
+    return 0;
+}
+
+/* ============================ 用例 13 ============================ */
+
+static void t13_pivotmind_log_file_override(void) {
+    char th[256];
+    char want[PM_PATH_MAX];
+    log_child_result r;
+
+    T_START("13. $PIVOTMIND_LOG_FILE：绝对路径 ⇒ 采用（尾斜杠规范掉）；空串 ⇒ 静默回退；相对路径 ⇒ WARN + 回退");
+    CHECK(make_home(th, sizeof th, "t13") == 0, "mkdtemp 失败: %s", strerror(errno));
+    snprintf(want, sizeof want, "%s/pivotmind/log/pivotmind.log", th);
+
+    /* (a) 非空绝对路径 ⇒ 采用，且无 WARN */
+    CHECK(child_run_log("/var/tmp/pm_custom.log", 1, th, 1, &r) == 0, "(a) 子进程通信失败");
+    CHECK(child_exited_clean(r.status), "(a) 子进程异常退出 status=0x%x", r.status);
+    CHECK(strcmp(r.path, "/var/tmp/pm_custom.log") == 0, "(a) 应采用覆盖值，实际 \"%s\"", r.path);
+    CHECK(r.log_len == 0u, "(a) 合法覆盖不应有 WARN，实际 stderr %zu 字节: %s", r.log_len, r.log);
+
+    /* (b) 尾部斜杠被规范掉（不出现 "//"） */
+    CHECK(child_run_log("/var/tmp/pm_custom.log/", 1, th, 1, &r) == 0, "(b) 子进程通信失败");
+    CHECK(child_exited_clean(r.status), "(b) 子进程异常退出 status=0x%x", r.status);
+    CHECK(strcmp(r.path, "/var/tmp/pm_custom.log") == 0, "(b) 尾斜杠应被去除，实际 \"%s\"", r.path);
+
+    /* (c) 空串 ⇒ 「未设置」语义 ⇒ 静默回退（不 WARN） */
+    CHECK(child_run_log("", 1, th, 1, &r) == 0, "(c) 子进程通信失败");
+    CHECK(child_exited_clean(r.status), "(c) 子进程异常退出 status=0x%x", r.status);
+    CHECK(strcmp(r.path, want) == 0, "(c) 空串应回退 \"%s\"，实际 \"%s\"", want, r.path);
+    CHECK(r.log_len == 0u, "(c) 空串属「未设置」，不应 WARN，实际 stderr %zu 字节: %s", r.log_len, r.log);
+
+    /* (d) 相对路径 ⇒ 视为非法 + WARN（不许静默）⇒ 回退 */
+    CHECK(child_run_log("relative/path.log", 1, th, 1, &r) == 0, "(d) 子进程通信失败");
+    CHECK(child_exited_clean(r.status), "(d) 子进程异常退出 status=0x%x", r.status);
+    CHECK(strcmp(r.path, want) == 0, "(d) 相对路径应回退 \"%s\"，实际 \"%s\"", want, r.path);
+    CHECK(strstr(r.log, "WARN") != NULL, "(d) 相对路径应产生 WARN（stderr %zu 字节：%s）", r.log_len, r.log);
+    CHECK(strstr(r.log, "PIVOTMIND_LOG_FILE") != NULL, "(d) WARN 未指明 PIVOTMIND_LOG_FILE：%s", r.log);
+
+    /* (e) 未设置 ⇒ 回退（与父进程用例 12 同源，这里在独立子进程里再证一次） */
+    CHECK(child_run_log(NULL, 0, th, 1, &r) == 0, "(e) 子进程通信失败");
+    CHECK(child_exited_clean(r.status), "(e) 子进程异常退出 status=0x%x", r.status);
+    CHECK(strcmp(r.path, want) == 0, "(e) 未设置应回退 \"%s\"，实际 \"%s\"", want, r.path);
+    CHECK(r.log_len == 0u, "(e) 未设置不应 WARN，实际 stderr: %s", r.log);
+
     (void)rmdir(th);
     T_END();
 }
@@ -475,6 +608,99 @@ static void t9_pm_dir_invalid_which(void) {
     T_END();
 }
 
+/* ============================ 用例 11 ============================ */
+
+static void t11_pm_file_contract(void) {
+    /* 12 个登记文件名在此【固化一份】：SSOT 的表内容必须被测试锁死，改表就得同步改本用例
+       （= 有意识的变更）。「文件名只在本表出现一次」的红线约束的是**调用点**，
+       不约束作为「表校验器」的本单测。 */
+    static const char *const want_name[12] = {
+        "pivotmind_state.dat",      /* PM_FILE_STATE         */
+        "brain_state.dat",          /* PM_FILE_BRAIN_CACHE   */
+        "features.bin",             /* PM_FILE_FEATURES      */
+        "cross_edges.bin",          /* PM_FILE_CROSS_EDGES   */
+        "memory_seed.dat",          /* PM_FILE_MEMORY_SEED   */
+        "emergent_pos.bin",         /* PM_FILE_EMERGENT_POS  */
+        "pivotmind_config.json",    /* PM_FILE_CONFIG        */
+        "intent_base.bin",          /* PM_FILE_INTENT_BASE   */
+        "pfe_strategy.bin",         /* PM_FILE_PFE_STRATEGY  */
+        "pfe_workspace.bin",        /* PM_FILE_PFE_WORKSPACE */
+        "pretrain_embeddings.bin",  /* PM_FILE_PRETRAIN_EMB  */
+        "gw_token"                  /* PM_FILE_TOKEN         */
+    };
+    const char *data = pm_dir(PM_DIR_DATA);
+    char want[PM_PATH_MAX];
+    char buf[PM_PATH_MAX];
+    int i, j;
+
+    T_START("11. pm_file(合法位) ⇒ <home>/data/<登记名>，与 pm_path 一致、指针稳定、12 项互异；非法位 ⇒ NULL");
+    CHECK(data != NULL && data[0] == '/', "pm_dir(PM_DIR_DATA) 非法: %s", data ? data : "(NULL)");
+
+    for (i = 0; i < 12; i++) {
+        unsigned bit = 1u << i;
+        const char *f = pm_file(bit);
+
+        CHECK(f != NULL && f[0] != '\0', "pm_file(1u<<%d) 返回 NULL/空", i);
+        CHECK(f[0] == '/', "pm_file(1u<<%d) 不是绝对路径: \"%s\"", i, f);
+        snprintf(want, sizeof want, "%s/%s", data, want_name[i]);
+        CHECK(strcmp(f, want) == 0, "1u<<%d: 期望 \"%s\"，实际 \"%s\"", i, want, f);
+
+        /* 同一 SSOT 的两种取法必须一致（pm_file 与 pm_path(DATA, name) 是同一落点） */
+        CHECK(pm_path(buf, sizeof buf, PM_DIR_DATA, want_name[i]) > 0,
+              "1u<<%d: pm_path(DATA, \"%s\") 失败", i, want_name[i]);
+        CHECK(strcmp(buf, f) == 0, "1u<<%d: pm_path 与 pm_file 不一致（\"%s\" vs \"%s\"）", i, buf, f);
+
+        /* 指针稳定：解析一次并缓存（g_files[idx]） */
+        CHECK(pm_file(bit) == f, "1u<<%d: 返回指针不稳定（%p vs %p）",
+              i, (const void *)f, (const void *)pm_file(bit));
+    }
+
+    /* 12 项两两互异（同一位表重复登记会立刻暴露） */
+    for (i = 0; i < 12; i++) {
+        for (j = i + 1; j < 12; j++) {
+            CHECK(strcmp(pm_file(1u << i), pm_file(1u << j)) != 0,
+                  "1u<<%d 与 1u<<%d 撞车: %s", i, j, pm_file(1u << i));
+        }
+    }
+
+    /* 位表自洽：PM_FILE_ALL = 12 位全置；相邻位号必须落在 data/ 下 */
+    CHECK(PM_FILE_ALL == 0x00000FFFu, "PM_FILE_ALL 应为 0x00000FFF，实际 0x%08x", PM_FILE_ALL);
+
+    /* 非法 which ⇒ NULL（与 pm_dir 同构，绝不「悄悄返回 home」） */
+    CHECK(pm_file(0u) == NULL, "pm_file(0) 应为 NULL");
+    CHECK(pm_file(1u << 12) == NULL, "pm_file(1u<<12) 应为 NULL（越界位）");
+    CHECK(pm_file(1u << 31) == NULL, "pm_file(1u<<31) 应为 NULL（越界位）");
+    CHECK(pm_file(PM_FILE_STATE | PM_FILE_TOKEN) == NULL, "pm_file(多 bit) 应为 NULL");
+    CHECK(pm_file(0xffffffffu) == NULL, "pm_file(全 1) 应为 NULL");
+    CHECK(pm_file(PM_FILE_STATE) != NULL && pm_file(PM_FILE_STATE)[0] == '/',
+          "阴性对照失败：合法位应给出绝对路径");
+    T_END();
+}
+
+/* ============================ 用例 12 ============================ */
+
+static void t12_pm_log_path_default(void) {
+    const char *lp;
+    const char *logdir = pm_dir(PM_DIR_LOG);
+    char want[PM_PATH_MAX];
+    int i;
+
+    T_START("12. pm_log_path()（无 $PIVOTMIND_LOG_FILE）⇒ <home>/log/pivotmind.log，指针稳定、不与数据文件撞车");
+    CHECK(logdir != NULL && logdir[0] == '/', "pm_dir(PM_DIR_LOG) 非法: %s", logdir ? logdir : "(NULL)");
+    lp = pm_log_path();
+    CHECK(lp != NULL && lp[0] == '/', "pm_log_path() 非法: %s", lp ? lp : "(NULL)");
+    snprintf(want, sizeof want, "%s/pivotmind.log", logdir);
+    CHECK(strcmp(lp, want) == 0, "期望 \"%s\"，实际 \"%s\"", want, lp);
+    CHECK(pm_log_path() == lp, "返回指针不稳定（%p vs %p）",
+          (const void *)lp, (const void *)pm_log_path());
+
+    /* 日志落在 log/ 而非 data/ ⇒ 与 12 个数据文件必须全不重合 */
+    for (i = 0; i < 12; i++) {
+        CHECK(strcmp(lp, pm_file(1u << i)) != 0, "日志路径与 pm_file(1u<<%d) 撞车: %s", i, lp);
+    }
+    T_END();
+}
+
 /* ============================ main ============================ */
 
 int main(void) {
@@ -485,11 +711,12 @@ int main(void) {
     printf("编译期缺省 PM_HOME_DEFAULT = (未定义！)\n\n");
 #endif
 
-    /* ⚠️ 以下 4 条必须在父进程第一次 pm_home() 之前跑（fork 复制已解析的 once 缓存） */
+    /* ⚠️ 以下 5 条必须在父进程第一次 pm_home() 之前跑（fork 复制已解析的 once 缓存） */
     t1_pivotmind_home_unset_uses_home_level2();
     t2_invalid_pivotmind_home_falls_to_level2();
     t3_home_missing_uses_pm_home_default();
     t10_sandbox_end_to_end();
+    t13_pivotmind_log_file_override();
 
     /* 父进程沙箱：HOME=<临时目录>，$PIVOTMIND_HOME 未设 ⇒ 第 2 级 */
     snprintf(g_tmproot, sizeof g_tmproot, "/tmp/pm_paths_test_XXXXXX");
@@ -499,6 +726,9 @@ int main(void) {
     }
     if (setenv("HOME", g_tmproot, 1) != 0) { printf("FATAL: setenv(HOME) 失败\n"); return 2; }
     (void)unsetenv("PIVOTMIND_HOME");
+    /* 父进程批断言的是 pm_log_path() 的【默认分支】⇒ 必须清掉覆盖开关：环境里若恰好有
+       $PIVOTMIND_LOG_FILE，用例 12 会误判。覆盖分支由子进程用例 13 负责。 */
+    (void)unsetenv("PIVOTMIND_LOG_FILE");
     snprintf(g_want_home, sizeof g_want_home, "%s/pivotmind", g_tmproot);
 
     t4_ensure_creates_0700();
@@ -507,6 +737,8 @@ int main(void) {
     t7_concurrent_ensure();
     t8_pm_path_bounds();
     t9_pm_dir_invalid_which();
+    t11_pm_file_contract();
+    t12_pm_log_path_default();
 
     /* 清理沙箱（自底向上，全部为空目录） */
     {

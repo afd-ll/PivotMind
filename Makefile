@@ -164,7 +164,7 @@ $(BUILD_DIR)/qa_crawler: $(OBJ_DIR)/qa_crawler.o $(LIB_NAME)
 # ========== 构建目标 ==========
 
 # 默认 (跳过 clean)
-all: $(LIB_NAME) seed-builder debug-seed gateway
+all: $(LIB_NAME) seed-builder debug-seed gateway digital-life
 
 # Linux 一键构建全�?
 linux: clean

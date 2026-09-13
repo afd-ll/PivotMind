@@ -22,7 +22,7 @@
 #include <signal.h>
 #include "dialog_system.h"
 #include "active_learner.h"
-#include "background_clock.h"
+#include "brainstem.h"
 #include "multi_topology.h"
 #include "memory_system.h"
 #include "feature_io.h"
@@ -44,7 +44,7 @@ typedef struct {
     CausalGraph* causal_graph;     // 因果图
     DialogSystem* dialog;          // 对话服务
     ActiveLearner* learner;        // 主动学习器
-    BackgroundClock* bg_clock;     // 后台时钟（持续运转）
+    Brainstem* brainstem;          // 脑干节律控制器（心跳/昼夜/稀疏衰减，持续运转）
     
     // 运行控制
     int is_running;
@@ -226,12 +226,12 @@ DigitalLifeSystem* digital_life_create() {
     }
     printf("     ✓ 对话系统就绪\n");
 
-    // 6. 创建后台时钟
-    printf("[6/6] 创建后台时钟...\n");
-    sys->bg_clock = background_clock_create(sys->topology, sys->memory,
-                                           sys->dialog->cognitive_state);
-    if (!sys->bg_clock) {
-        printf("错误: 无法创建后台时钟\n");
+    // 6. 创建脑干（节律控制器：心跳/昼夜周期/稀疏衰减/节点冻结）
+    printf("[6/6] 创建脑干节律控制器...\n");
+    sys->brainstem = brainstem_create(sys->topology, sys->memory,
+                                      sys->dialog->cognitive_state);
+    if (!sys->brainstem) {
+        printf("错误: 无法创建脑干\n");
         dialog_system_destroy(sys->dialog);
         active_learner_destroy(sys->learner);
         causal_graph_destroy(sys->causal_graph);
@@ -240,7 +240,7 @@ DigitalLifeSystem* digital_life_create() {
         free(sys);
         return NULL;
     }
-    printf("     ✓ 后台时钟就绪 (tick=%dms, decay=%.3f)\n",
+    printf("     ✓ 脑干就绪 (tick=%dms, decay=%.3f)\n",
            PM_CLOCK_TICK_INTERVAL_MS, PM_CLOCK_DECAY_PER_TICK);
     
     // 尝试加载之前保存的拓扑状态
@@ -389,8 +389,8 @@ void digital_life_destroy(DigitalLifeSystem* sys) {
         active_learner_destroy(sys->learner);
     }
     
-    if (sys->bg_clock) {
-        background_clock_destroy(sys->bg_clock);
+    if (sys->brainstem) {
+        brainstem_destroy(sys->brainstem);
     }
     
     if (sys->dialog) {
@@ -433,8 +433,8 @@ void digital_life_start(DigitalLifeSystem* sys) {
     // 启动主动学习器（后台线程，5分钟周期）
     active_learner_start(sys->learner);
 
-    // 启动后台时钟（后台线程，1秒tick）
-    background_clock_start(sys->bg_clock);
+    // 启动脑干（后台线程，1秒tick）
+    brainstem_start(sys->brainstem);
     
     sys->is_running = 1;
     
@@ -450,7 +450,7 @@ void digital_life_stop(DigitalLifeSystem* sys) {
     sys->is_running = 0;
     sys->shutdown_requested = 1;
     
-    background_clock_stop(sys->bg_clock);
+    brainstem_stop(sys->brainstem);
     active_learner_stop(sys->learner);
     
     printf("[系统] 溯智系统已停止\n");
@@ -493,8 +493,8 @@ void print_stats(DigitalLifeSystem* sys) {
         printf("累计遗忘: %d\n", sys->learner->total_forgotten);
     }
     
-    if (sys->bg_clock) {
-        printf("后台时钟 tick: %d\n", sys->bg_clock->tick_count);
+    if (sys->brainstem) {
+        printf("脑干 tick: %d\n", brainstem_tick_count(sys->brainstem));
     }
     
     if (sys->topology) {
@@ -776,11 +776,11 @@ int main(int argc, char* argv[]) {
         } else if (strncmp(input, "verbose", 7) == 0) {
             if (strcmp(input, "verbose on") == 0) {
                 active_learner_set_verbose(sys->learner, 1);
-                background_clock_set_verbose(sys->bg_clock, 1);
+                brainstem_set_verbose(sys->brainstem, 1);
                 printf("  [系统] 后台日志: 开启\n");
             } else if (strcmp(input, "verbose off") == 0) {
                 active_learner_set_verbose(sys->learner, 0);
-                background_clock_set_verbose(sys->bg_clock, 0);
+                brainstem_set_verbose(sys->brainstem, 0);
                 printf("  [系统] 后台日志: 关闭\n");
             } else {
                 printf("  用法: verbose on / verbose off\n");
