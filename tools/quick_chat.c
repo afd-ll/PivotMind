@@ -2,6 +2,7 @@
  * quick_chat.c — 快速对话测试
  * 加载训练状态 + 词典，立即回答
  */
+#include "pivotmind_paths.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -11,7 +12,7 @@
 #include "dict_loader.h"
 
 int main(int argc, char** argv) {
-    const char* state_path = argc > 1 ? argv[1] : "pivotmind_state.dat";
+    const char* state_path = argc > 1 ? argv[1] : pm_file(PM_FILE_STATE);
     const char* question   = argc > 2 ? argv[2] : "你好，介绍下你自己";
 
     setbuf(stdout, NULL);

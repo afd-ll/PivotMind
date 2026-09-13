@@ -12,6 +12,7 @@
  *   字 A 和字 B 在同一组 QA 中同时出现 → 它们的特征向量互相拉近
  *   多次拉近后，同类上下文中的字自然聚类 → 语义空间浮现
  */
+#include "pivotmind_paths.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -158,7 +159,7 @@ static void init_features(ReasoningNode* node) {
 // ==================== 主函数 ====================
 
 int main(int argc, char* argv[]) {
-    const char* state_path = argc > 1 ? argv[1] : "pivotmind_state.dat";
+    const char* state_path = argc > 1 ? argv[1] : pm_file(PM_FILE_STATE);
     const char* qa_path = argc > 2 ? argv[2] : "data/hermes_knowledge_base.json";
     int epochs = argc > 3 ? atoi(argv[3]) : 10;
     if (epochs < 1) epochs = 1;

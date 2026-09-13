@@ -6,6 +6,7 @@
  *
  * 安全: fork+exec curl, 父进程超时保护, 不会卡死
  */
+#include "pivotmind_paths.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -460,7 +461,7 @@ int main(int argc, char* argv[]) {
                    rss_count, total_articles, total_lines, total_pairs);
 
             if ((qi + 1) % save_every == 0) {
-                int nodes = master_save_state(topo, "pivotmind_state.dat");
+                int nodes = master_save_state(topo, pm_file(PM_FILE_STATE));
                 printf("  [saved %d nodes]\n", nodes);
             }
 
@@ -469,7 +470,7 @@ int main(int argc, char* argv[]) {
     }
 
     autonomic_state_destroy(&astate);
-    int nodes = master_save_state(topo, "pivotmind_state.dat");
+    int nodes = master_save_state(topo, pm_file(PM_FILE_STATE));
     printf("\n=== Done: %ld articles, %ld chars, %ld QA pairs, %d nodes ===\n",
            total_articles, total_lines, total_pairs, nodes);
 

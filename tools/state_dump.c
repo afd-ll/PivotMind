@@ -1,6 +1,7 @@
 /**
  * state_dump.c — 快速加载状态并打印训练数据统计
  */
+#include "pivotmind_paths.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -10,7 +11,7 @@
 #include "constants.h"
 
 int main(int argc, char** argv) {
-    const char* path = (argc > 1) ? argv[1] : "pivotmind_state.dat";
+    const char* path = (argc > 1) ? argv[1] : pm_file(PM_FILE_STATE);
     printf("=== 玄枢状态分析: %s ===\n\n", path);
 
     MasterTopology* master = master_topology_create(0);

@@ -13,6 +13,7 @@
  * 用法: ./build/bin/seed_builder [knowledge_base.json]
  */
 
+#include "pivotmind_paths.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -414,12 +415,12 @@ int main(int argc, char* argv[]) {
            total_nodes, master->cross_link_count, pair_count);
 
     // 6. 保存状态
-    const char* state_file = "pivotmind_state.dat";
+    const char* state_file = pm_file(PM_FILE_STATE);
     printf("\n保存到 %s...\n", state_file);
     master_save_state(master, state_file);
     
     // 保存记忆种子
-    const char* mem_file = "memory_seed.dat";
+    const char* mem_file = pm_file(PM_FILE_MEMORY_SEED);
     memory_save_seed(memory, mem_file);
 
     // 7. 清理

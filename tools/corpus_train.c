@@ -17,6 +17,7 @@
  *     这样走边时会偏向顺着语序走
  */
 
+#include "pivotmind_paths.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -387,7 +388,7 @@ static int process_qa_data(MasterTopology* master, SubTopology* vocab_sub,
 // ==================== 主函数 ====================
 
 int main(int argc, char* argv[]) {
-    const char* state_file = argc > 1 ? argv[1] : "pivotmind_state.dat";
+    const char* state_file = argc > 1 ? argv[1] : pm_file(PM_FILE_STATE);
     int epochs = argc > 2 ? atoi(argv[2]) : 1;
     const char* qa_file = argc > 3 ? argv[3] : QA_PATH;
 
@@ -455,11 +456,11 @@ int main(int argc, char* argv[]) {
 
     // 6. 初始化特征向量 + 跨拓扑连接
     printf("\n[5/5] 保存状态...\n");
-    if (access("features.bin", F_OK) != 0) {
+    if (access(pm_file(PM_FILE_FEATURES), F_OK) != 0) {
         int initted = init_random_features(master);
         printf("     ✓ 初始化特征向量 (%d 节点)\n", initted);
     } else {
-        int loaded = load_features(master, "features.bin");
+        int loaded = load_features(master, pm_file(PM_FILE_FEATURES));
         printf("     ✓ 加载特征向量 (%d 节点)\n", loaded > 0 ? loaded : 0);
         // 即使加载成功, 也确保新节点有特征向量
         int extra = init_random_features(master);
@@ -468,13 +469,13 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    if (access("cross_edges.bin", F_OK) != 0) {
+    if (access(pm_file(PM_FILE_CROSS_EDGES), F_OK) != 0) {
         int rebuilt = rebuild_cross_connections(master);
         printf("     ✓ 重建跨拓扑连接 (%d 条)\n", rebuilt);
-        save_cross_edges(master, "cross_edges.bin");
+        save_cross_edges(master, pm_file(PM_FILE_CROSS_EDGES));
     }
 
-    save_features(master, "features.bin");
+    save_features(master, pm_file(PM_FILE_FEATURES));
     master_save_state(master, state_file);
 
     // 统计

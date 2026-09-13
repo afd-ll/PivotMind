@@ -6,6 +6,7 @@
  * 共享类型与原型见 gateway_internal.h。
  */
 
+#include "pivotmind_paths.h"
 #include "gateway_internal.h"
 #include <sys/stat.h>   /* stat：判定既有种子是否有内容 */
 
@@ -183,18 +184,24 @@ static int gw_system_init(GatewaySystem* gw) {
 
     // 加载持久化数据
     fprintf(stderr, "[gateway]   加载持久化状态...\n");
-    if (access("pivotmind_state.dat", F_OK) == 0) {
-        int loaded = master_load_state(gw->topology, "pivotmind_state.dat");
+    if (access(pm_file(PM_FILE_STATE), F_OK) == 0) {
+        int loaded = master_load_state(gw->topology, pm_file(PM_FILE_STATE));
 
         /* v0.5.10 fix: 加载失败（数据不完整）时回退 SD 卡备份——
          * systemd SIGKILL 杀在存盘写一半 → 正式文件损坏（08-08 20:21:44
          * 实测 62,105 链接全丢）。备份目录滚动保留最近文件。 */
         if (loaded < 0) {
             fprintf(stderr, "[gateway]   ⚠ 主状态加载失败，尝试回退 SD 卡备份...\n");
-            const char* backup_dir = "/mnt/sdcard/pivotmind_backup";
+            /* 路径 SSOT：备份目录 = <home>/data/backup（原为 /mnt/sdcard/pivotmind_backup） */
+            char backup_dir[PM_PATH_MAX];
             char backup_path[1024];
             struct dirent** entries = NULL;
-            int n = scandir(backup_dir, &entries, NULL, alphasort);
+            int n;
+            if (pm_data_path(backup_dir, sizeof backup_dir, "backup") < 0) {
+                fprintf(stderr, "[gateway]   ⚠ 备份目录路径拼接失败，跳过回退\n");
+                backup_dir[0] = '\0';   /* scandir 必失败 ⇒ 走「无可用备份」分支 */
+            }
+            n = scandir(backup_dir, &entries, NULL, alphasort);
             char newest[1024] = {0};
             if (n > 0) {
                 for (int i = 0; i < n; i++) {
@@ -217,7 +224,7 @@ static int gw_system_init(GatewaySystem* gw) {
                 loaded = master_load_state(gw->topology, newest);
                 if (loaded > 0) {
                     /* 回退成功后立即原子存盘回主路径，后续正常滚动 */
-                    master_save_state(gw->topology, "pivotmind_state.dat");
+                    master_save_state(gw->topology, pm_file(PM_FILE_STATE));
                 }
             } else {
                 fprintf(stderr, "[gateway]   ⚠ 无可用备份，以空状态启动（知识可能已丢失）\n");
@@ -244,7 +251,7 @@ static int gw_system_init(GatewaySystem* gw) {
         fprintf(stderr, "[gateway]   POS 池管道已挂载 → 感知皮层\n");
     }
 
-    int feat_loaded = load_features(gw->topology, "features.bin");
+    int feat_loaded = load_features(gw->topology, pm_file(PM_FILE_FEATURES));
     if (feat_loaded > 0) fprintf(stderr, "[gateway]   加载特征向量: %d 节点\n", feat_loaded);
     else { int initted = init_random_features(gw->topology); fprintf(stderr, "[gateway]   初始化特征向量: %d 节点\n", initted); }
 
@@ -258,8 +265,8 @@ static int gw_system_init(GatewaySystem* gw) {
      * 同时记录既有文件尺寸：只有"确实有内容可能被毁"时才禁止存盘；
      * 不存在或 0 字节的种子允许本次正常写入（无害且可自愈）。 */
     {
-        long seed_sz = gw_file_size_or_neg1("memory_seed.dat");
-        int loaded = memory_load_seed(gw->memory, "memory_seed.dat");
+        long seed_sz = gw_file_size_or_neg1(pm_file(PM_FILE_MEMORY_SEED));
+        int loaded = memory_load_seed(gw->memory, pm_file(PM_FILE_MEMORY_SEED));
         g_memory_seed_load_ok  = (loaded >= 0) ? 1 : 0;
         g_memory_seed_had_data = (seed_sz > 16);   /* 16B = 仅 footer 的空种子 */
         if (loaded < 0) {
@@ -288,7 +295,7 @@ static int gw_system_init(GatewaySystem* gw) {
      * v0.5.17 fix: cap 改固定 200000——动态 cap（节点数×1.3）随节点增长每次漂移
      * → file_nodes != node_cap → wb+ 截断重建冻结库 → 冻结边导出 0 → 存盘丢
      * 冻结边（08-13 实测：23万边 → 6万边）。固定 cap 保证启动间不重建。 */
-    gw->brain_cache = node_cache_create("brain_state.dat", 200000);
+    gw->brain_cache = node_cache_create(pm_file(PM_FILE_BRAIN_CACHE), 200000);
     if (!gw->brain_cache) {
         fprintf(stderr, "[gateway] 大脑缓存创建失败\n");
         return -1;
@@ -507,11 +514,11 @@ void gw_system_shutdown(GatewaySystem* gw) {
     if (gw->topology) {
         int total = master_count_total_nodes(gw->topology);
         if (total >= 20) {
-            int saved = master_save_state(gw->topology, "pivotmind_state.dat");
+            int saved = master_save_state(gw->topology, pm_file(PM_FILE_STATE));
             if (saved >= 0) printf("[gateway]   保存拓扑状态: %d 节点\n", saved);
-            int feat_saved = save_features(gw->topology, "features.bin");
+            int feat_saved = save_features(gw->topology, pm_file(PM_FILE_FEATURES));
             if (feat_saved > 0) printf("[gateway]   保存特征: %d 节点\n", feat_saved);
-            int cross_saved = save_cross_edges(gw->topology, "cross_edges.bin");
+            int cross_saved = save_cross_edges(gw->topology, pm_file(PM_FILE_CROSS_EDGES));
             if (cross_saved > 0) printf("[gateway]   保存跨拓扑连接: %d 条\n", cross_saved);
         } else {
             printf("[gateway]   跳过存盘 (总节点=%d < 门卫阈值 20，避免覆盖有效数据)\n", total);
@@ -533,14 +540,14 @@ void gw_system_shutdown(GatewaySystem* gw) {
             fprintf(stderr, "[gateway]   ⚠ 跳过保存记忆种子: 加载失败或仅 %d 条，"
                     "拒绝覆盖既有有效种子\n", ltm_count);
         } else {
-            int saved = memory_save_seed(gw->memory, "memory_seed.dat");
+            int saved = memory_save_seed(gw->memory, pm_file(PM_FILE_MEMORY_SEED));
             if (saved >= 0) printf("[gateway]   保存记忆种子: %d 条\n", saved);
             else fprintf(stderr, "[gateway]   ⚠ 保存记忆种子失败 (返回 %d)\n", saved);
         }
     }
 
     // 3. 删除临时状态文件（brain_state.dat 只是脑干运行缓存，主状态已在上面保存）
-    remove("brain_state.dat");
+    remove(pm_file(PM_FILE_BRAIN_CACHE));
     printf("[gateway]   清理临时状态文件\n");
 
     // 4. 销毁学习调度器（线程已在 1b 停掉并 join，这里只释放对象；

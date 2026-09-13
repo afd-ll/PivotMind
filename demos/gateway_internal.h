@@ -12,6 +12,7 @@
  * 本头集中提供: 引擎头、公共宏、核心结构体与跨模块函数原型。
  */
 
+#include "pivotmind_paths.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -66,7 +67,7 @@
 #define GW_READ_TIMEOUT_S  10
 #define GW_BACKLOG         16
 #define GW_TOKEN_LEN       64            // C1: API token 十六进制长度 (32 字节随机数)
-#define GW_TOKEN_FILE      "/home/cx/pivotmind/gw_token"  // C1+: token 持久化文件 (0600, 跨重启不变)
+#define GW_TOKEN_FILE      pm_file(PM_FILE_TOKEN)  // C1+: token 持久化文件 (0600, 跨重启不变)；路径 SSOT
 
 /* B4 (v0.5.20): learn 并发队列化开关。
  * LEARN_ASYNC_CHAT: 1 = handle_chat 两处同步 _learn_tokens 改入队（输入 flush / 回复 fire-and-forget）；

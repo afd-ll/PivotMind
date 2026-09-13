@@ -13,6 +13,7 @@
  *       默认: pivotmind_state.dat  data/hermes_knowledge_base.json  1
  */
 
+#include "pivotmind_paths.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -270,7 +271,7 @@ static void collect_topo_health(MasterTopology* master,
 // ==================== 主函数 ====================
 
 int main(int argc, char* argv[]) {
-    const char* state_path = argc > 1 ? argv[1] : "pivotmind_state.dat";
+    const char* state_path = argc > 1 ? argv[1] : pm_file(PM_FILE_STATE);
     const char* qa_path = argc > 2 ? argv[2] : "data/hermes_knowledge_base.json";
     int epochs = argc > 3 ? atoi(argv[3]) : 1;
     if (epochs < 1) epochs = 1;
@@ -338,7 +339,7 @@ int main(int argc, char* argv[]) {
 
     // 尝试加载或重建跨拓扑连接（调试临时跳过重建以加速）
     {
-        int cross_loaded = load_cross_edges(master, "cross_edges.bin");
+        int cross_loaded = load_cross_edges(master, pm_file(PM_FILE_CROSS_EDGES));
         if (cross_loaded > 0) {
             printf("  ✓ 加载跨拓扑连接 %d 条\n", cross_loaded);
         } else {
@@ -346,7 +347,7 @@ int main(int argc, char* argv[]) {
             int rebuilt = rebuild_cross_connections(master);
             if (rebuilt > 0) {
                 printf("  ✓ 已重建跨拓扑连接 (%d 条)\n", rebuilt);
-                save_cross_edges(master, "cross_edges.bin");
+                save_cross_edges(master, pm_file(PM_FILE_CROSS_EDGES));
             } else {
                 printf("  - 警告: 跨拓扑重建失败，训练将在无跨连接状态下运行\n");
             }
@@ -575,7 +576,7 @@ int main(int argc, char* argv[]) {
     // 一次性保存（关掉了中间刷盘，在这里显式保存以确保完整性）
     {
         char path[512];
-        const char* state_path = argc > 1 ? argv[1] : "pivotmind_state.dat";
+        const char* state_path = argc > 1 ? argv[1] : pm_file(PM_FILE_STATE);
         snprintf(path, 511, "%s", state_path);
 
         FILE* existing = fopen(path, "rb");
@@ -595,7 +596,7 @@ int main(int argc, char* argv[]) {
         }
 
         // 同时保存特征向量（确保 features.bin 与 state 一致）
-        int feat_saved = save_features(master, "features.bin");
+        int feat_saved = save_features(master, pm_file(PM_FILE_FEATURES));
         if (feat_saved > 0) {
             printf("  ✓ 已保存特征向量 (%d 节点)\n", feat_saved);
         } else {
@@ -605,7 +606,7 @@ int main(int argc, char* argv[]) {
         // 保存跨拓扑连接到独立文件
         // 注: master_save_state 已包含跨链接数据（sentinel分界），
         // 此文件为 redundancy 备份，保留以兼容 digital_life 启动时的 cross_edges.bin 加载
-        int cross_saved = save_cross_edges(master, "cross_edges.bin");
+        int cross_saved = save_cross_edges(master, pm_file(PM_FILE_CROSS_EDGES));
         if (cross_saved > 0) {
             printf("  ✓ 已保存跨拓扑连接 (%d 条)\n", cross_saved);
         }

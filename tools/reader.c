@@ -20,6 +20,7 @@
  * 用法: ./build/bin/reader 书.txt [epochs]
  */
 
+#include "pivotmind_paths.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -328,7 +329,7 @@ int main(int argc, char* argv[]) {
 
     // 4. 导出种子
     printf("[4/4] 导出种子...\n");
-    const char* seed_path = "pivotmind_state.dat";
+    const char* seed_path = pm_file(PM_FILE_STATE);
     int exported = export_seed(seed_path);
     if (exported > 0)
         printf("  ✓ 已导出 %s (%d 字)\n", seed_path, exported);

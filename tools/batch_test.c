@@ -2,6 +2,7 @@
  * batch_test.c - 批量对话测试，只加载一次state
  * 用法: batch_test.exe state_file
  */
+#include "pivotmind_paths.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -27,7 +28,7 @@ static const char* tests[] = {
 };
 
 int main(int argc, char* argv[]) {
-    const char* state_file = argc > 1 ? argv[1] : "pivotmind_state.dat";
+    const char* state_file = argc > 1 ? argv[1] : pm_file(PM_FILE_STATE);
     init_random();
 
     printf("=== 批量对话测试 ===\n\n");
@@ -53,7 +54,7 @@ int main(int argc, char* argv[]) {
     if (loaded < 0) { printf("错误: 加载失败\n"); return 1; }
     printf("[加载] %d 节点已就绪\n\n", loaded);
 
-    load_cross_edges(master, "cross_edges.bin");
+    load_cross_edges(master, pm_file(PM_FILE_CROSS_EDGES));
     template_auto_build(master, 500, 100);
 
     // 批量测试

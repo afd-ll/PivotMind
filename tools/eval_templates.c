@@ -15,6 +15,7 @@
  *   - 语义紧度: 路径中相邻节点特征余弦相似度均值
  */
 
+#include "pivotmind_paths.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -131,7 +132,7 @@ static int rank_cmp(const void* a, const void* b) {
 }
 
 int main(int argc, char** argv) {
-    const char* state_file = "pivotmind_state.dat";
+    const char* state_file = pm_file(PM_FILE_STATE);
     if (argc > 1) state_file = argv[1];
 
     printf("========================================\n");

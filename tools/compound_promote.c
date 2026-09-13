@@ -13,6 +13,7 @@
  *
  * 用法: compound_promote <state.dat> [threshold=3.0] [max_words=500]
  */
+#include "pivotmind_paths.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -62,7 +63,7 @@ static int find_reverse_edge(ReasoningNode* b, ReasoningNode* a) {
 }
 
 int main(int argc, char** argv) {
-    const char* state_path = argc > 1 ? argv[1] : "pivotmind_state.dat";
+    const char* state_path = argc > 1 ? argv[1] : pm_file(PM_FILE_STATE);
     float threshold = argc > 2 ? (float)atof(argv[2]) : DEFAULT_THRESHOLD;
     int max_words = argc > 3 ? atoi(argv[3]) : DEFAULT_MAX_WORDS;
     setbuf(stdout, NULL);

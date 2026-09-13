@@ -26,6 +26,7 @@
  *   PIVOTMIND_BIND_ADDR=0.0.0.0 pivotmind_gateway  # 监听全网卡（默认仅 127.0.0.1）
  */
 
+#include "pivotmind_paths.h"
 #include "gateway_internal.h"
 
 /* 全局网关实例：learn worker 等跨模块访问（见 gateway_internal.h extern）。
@@ -412,8 +413,11 @@ int main(int argc, char* argv[]) {
     /* v0.5.25 P2-4: 支持 PIVOTMIND_LOG_FILE=路径 将 stdout/stderr 一并落盘。
      * 用 dup2 而非 freopen：crash handler 直接 write(2, ...)，
      * fd 重定向后 [CRASH] 崩溃现场同样写入文件，配合服务托管可回溯崩溃。 */
+    /* 路径 SSOT：显式设置 PIVOTMIND_LOG_FILE 才重定向（journald 默认可见性不变）；
+     * 路径本身由 pm_log_path() 统一规范化（绝对路径校验 + 去尾斜杠）。 */
     const char* logf = getenv("PIVOTMIND_LOG_FILE");
     if (logf && logf[0]) {
+        logf = pm_log_path();
         int lfd = open(logf, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
         if (lfd >= 0) {
             if (dup2(lfd, STDOUT_FILENO) >= 0)
@@ -476,10 +480,22 @@ int main(int argc, char* argv[]) {
     if (train_config.corpus_path && !format_explicit)
         train_config.format = train_detect_format(train_config.corpus_path);
 
-    // 切换工作目录
+    /* 切换工作目录 —— 只影响【语料】相对路径的解析；
+     * 数据文件落点已改由路径 SSOT（pm_home() 绝对路径）决定，不再跟随 CWD。 */
     if (chdir(workdir) != 0) {
         fprintf(stderr, "[gateway] 无法切换到工作目录: %s (%s)\n", workdir, strerror(errno));
         return 1;
+    }
+
+    /* 路径 SSOT（第 2 步）：数据/日志/会话/运行/语料目录默认自建。
+     * 未就绪明细逐条 WARN + 汇总；不拒绝启动（只读环境下仍可提供只读查询）。 */
+    {
+        unsigned bad = pm_ensure_dirs(PM_DIR_ALL);
+        if (bad != 0u)
+            fprintf(stderr, "[gateway] ⚠ 部分数据目录未就绪 (mask=0x%x)："
+                            "加载/存盘会失败，请检查 PIVOTMIND_HOME 或 $HOME 的可写性\n", bad);
+        else
+            printf("[gateway] 数据根: %s\n", pm_home());
     }
 
     /* C1: GatewaySystem 放到堆上（旧版是 main 的栈对象，连接线程、学习 worker、

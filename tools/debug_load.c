@@ -1,3 +1,4 @@
+#include "pivotmind_paths.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include "multi_topology.h"
@@ -21,7 +22,7 @@ int main() {
         printf("  t=%d type=%d name=%s\n", t, (int)m->sub_topologies[t]->type, m->sub_topologies[t]->name);
     }
 
-    int loaded = master_load_state(m, "pivotmind_state.dat");
+    int loaded = master_load_state(m, pm_file(PM_FILE_STATE));
     printf("\nLoaded: %d nodes, %d links\n", loaded, m->cross_link_count);
 
     for (int t = 0; t < m->sub_topo_count; t++) {

@@ -5,6 +5,7 @@
  * 用法: ./build/bin/build_cross_links [状态文件]
  *       默认: pivotmind_state.dat
  */
+#include "pivotmind_paths.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -13,7 +14,7 @@
 #include "node_hash.h"
 
 int main(int argc, char* argv[]) {
-    const char* state_path = argc > 1 ? argv[1] : "pivotmind_state.dat";
+    const char* state_path = argc > 1 ? argv[1] : pm_file(PM_FILE_STATE);
     
     printf("╔═══════════════════════════════════════════╗\n");
     printf("║    跨拓扑连接构建工具 v1.0                ║\n");

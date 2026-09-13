@@ -10,6 +10,7 @@
  *   默认: state_file = pivotmind_state.dat, starts = 500, walks = 3
  */
 
+#include "pivotmind_paths.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -56,7 +57,7 @@ static const char* node_concept(ReasoningNode* node, int max_len) {
  * ============================================================ */
 
 int main(int argc, char** argv) {
-    const char* state_file = "pivotmind_state.dat";
+    const char* state_file = pm_file(PM_FILE_STATE);
     int num_starts  = DEFAULT_NUM_STARTS;
     int walks_per   = DEFAULT_WALKS_PER;
 

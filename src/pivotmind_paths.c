@@ -283,8 +283,11 @@ static int pm_ensure_one(const char *path) {
 }
 
 const char *pm_home(void) {
-#if defined(__GNUC__)
-    /* 编译期硬门（常量折叠，不带运行期开销）：相对路径 ⇒ 编译不过。见文件头那段说明。 */
+#if defined(__GNUC__) && defined(__OPTIMIZE__)
+    /* 编译期硬门（常量折叠，不带运行期开销）：相对路径 ⇒ 编译不过。见文件头那段说明。
+     * ⚠ 必须带 __OPTIMIZE__ 守卫：__attribute__((error)) 的检查依赖优化器把 `if (0)` 消掉；
+     *   -O0 下该调用点残留 ⇒ 即便 PM_HOME_DEFAULT 合法也会误报（构建直接失败）。
+     *   -O0 的兜底由 Makefile 主门承担：PM_HOME_DEFAULT 不以 '/' 开头 ⇒ $(error)。 */
     if (PM_HOME_DEFAULT[0] != '/') pm_home_default_must_be_absolute();
 #endif
     pthread_once(&g_once, pm_resolve_once);

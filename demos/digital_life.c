@@ -12,6 +12,7 @@
  * 特点: 持续学习，可长期运行
  */
 
+#include "pivotmind_paths.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -243,7 +244,7 @@ DigitalLifeSystem* digital_life_create() {
            PM_CLOCK_TICK_INTERVAL_MS, PM_CLOCK_DECAY_PER_TICK);
     
     // 尝试加载之前保存的拓扑状态
-    const char* state_file = "pivotmind_state.dat";
+    const char* state_file = pm_file(PM_FILE_STATE);
     if (access(state_file, F_OK) == 0) {
         int loaded = master_load_state(sys->topology, state_file);
         if (loaded >= 0) {
@@ -253,7 +254,7 @@ DigitalLifeSystem* digital_life_create() {
 
     // 加载/初始化特征向量
     {
-        int feat_loaded = load_features(sys->topology, "features.bin");
+        int feat_loaded = load_features(sys->topology, pm_file(PM_FILE_FEATURES));
         if (feat_loaded > 0) {
             printf("     ✓ 已加载特征向量 (%d 节点)\n", feat_loaded);
         } else {
@@ -264,7 +265,7 @@ DigitalLifeSystem* digital_life_create() {
 
     // 可选: 从预训练 Word2Vec 嵌入迁移特征
     {
-        const char* pretrain_file = "pretrain_embeddings.bin";
+        const char* pretrain_file = pm_file(PM_FILE_PRETRAIN_EMB);
         if (access(pretrain_file, F_OK) == 0) {
             Vocab* pretrain_vocab = vocab_create(10000);
             PretrainState* ps = pretrain_state_load(pretrain_vocab, pretrain_file);
@@ -281,7 +282,7 @@ DigitalLifeSystem* digital_life_create() {
 
     // 加载/重建跨拓扑连接
     {
-        int cross_loaded = load_cross_edges(sys->topology, "cross_edges.bin");
+        int cross_loaded = load_cross_edges(sys->topology, pm_file(PM_FILE_CROSS_EDGES));
         if (cross_loaded > 0) {
             printf("     ✓ 已加载跨拓扑连接 (%d 条)\n", cross_loaded);
         } else {
@@ -291,7 +292,7 @@ DigitalLifeSystem* digital_life_create() {
     }
     
     // 加载记忆种子
-    const char* mem_file = "memory_seed.dat";
+    const char* mem_file = pm_file(PM_FILE_MEMORY_SEED);
     memory_load_seed(sys->memory, mem_file);
 
     // ========== 模板拓扑：自动构建 ==========
@@ -363,20 +364,20 @@ void digital_life_destroy(DigitalLifeSystem* sys) {
     
     // 保存拓扑状态
     if (sys->topology) {
-        const char* state_file = "pivotmind_state.dat";
+        const char* state_file = pm_file(PM_FILE_STATE);
         int saved = master_save_state(sys->topology, state_file);
         if (saved >= 0) {
             printf("  ✓ 已保存拓扑状态 (%d 节点)\n", saved);
         }
         
         // 保存特征向量
-        int feat_saved = save_features(sys->topology, "features.bin");
+        int feat_saved = save_features(sys->topology, pm_file(PM_FILE_FEATURES));
         if (feat_saved > 0) {
             printf("  ✓ 已保存特征向量 (%d 节点)\n", feat_saved);
         }
         
         // 保存跨拓扑连接
-        int cross_saved = save_cross_edges(sys->topology, "cross_edges.bin");
+        int cross_saved = save_cross_edges(sys->topology, pm_file(PM_FILE_CROSS_EDGES));
         if (cross_saved > 0) {
             printf("  ✓ 已保存跨拓扑连接 (%d 条)\n", cross_saved);
         }
@@ -402,7 +403,7 @@ void digital_life_destroy(DigitalLifeSystem* sys) {
     
     if (sys->memory) {
         // 保存记忆种子
-        const char* mem_file = "memory_seed.dat";
+        const char* mem_file = pm_file(PM_FILE_MEMORY_SEED);
         int saved = memory_save_seed(sys->memory, mem_file);
         if (saved >= 0) {
             printf("  ✓ 已保存记忆种子 (%d 条)\n", saved);

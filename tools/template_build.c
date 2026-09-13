@@ -12,6 +12,7 @@
  *   walks_per  = 3
  */
 
+#include "pivotmind_paths.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -60,7 +61,7 @@ static int rank_cmp_desc(const void* a, const void* b) {
  * ============================================================ */
 
 int main(int argc, char** argv) {
-    const char* state_file = "pivotmind_state.dat";
+    const char* state_file = pm_file(PM_FILE_STATE);
     const char* out_file   = "pivotmind_state_with_templates.dat";
     int num_starts  = DEFAULT_NUM_STARTS;
     int walks_per   = DEFAULT_WALKS_PER;

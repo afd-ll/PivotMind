@@ -3,6 +3,7 @@
  * @brief Step 3: 模板投票效果对比 (直接构建，绕过 save/load)
  */
 
+#include "pivotmind_paths.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -56,7 +57,7 @@ static int run_walk(MasterTopology* master, SubTopology* vocab,
 }
 
 int main(int argc, char** argv) {
-    const char* state_file = "pivotmind_state.dat";
+    const char* state_file = pm_file(PM_FILE_STATE);
     if (argc > 1) state_file = argv[1];
 
     printf("========================================\n");
