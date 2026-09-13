@@ -286,7 +286,7 @@ char* dialog_generate(DialogReasoning* reasoning, const char* input,
             {
                 ReasoningNode* start_node = (path_nodes[0] >= 0 && path_nodes[0] < sub->net->node_count)
                     ? sub->net->nodes[path_nodes[0]] : NULL;
-                if (start_node && start_node->concept && concept_is_printable(start_node->concept)) {
+                if (start_node && start_node->concept && concept_is_outputtable(start_node->concept)) {
                     pos += snprintf(response + pos, max_len - pos, "%s", start_node->concept);
                     last_concept = start_node->concept;
                 }
@@ -296,7 +296,7 @@ char* dialog_generate(DialogReasoning* reasoning, const char* input,
                 int nid = path_nodes[p];
                 if (nid < 0 || nid >= sub->net->node_count) continue;
                 ReasoningNode* node = sub->net->nodes[nid];
-                if (!node || !node->concept || !concept_is_printable(node->concept)) continue;
+                if (!node || !node->concept || !concept_is_outputtable(node->concept)) continue;
                 
                 // 去重
                 if (last_concept && node->concept && strcmp_null(last_concept, node->concept) == 0) continue;
@@ -363,7 +363,7 @@ char* dialog_generate(DialogReasoning* reasoning, const char* input,
         }
         // 兜底2：走边没走出结果，输出最高激活概念
         if (pos == 0 && reasoning->assoc_count > 0) {
-            if (concept_is_printable(reasoning->associations[0].concept))
+            if (concept_is_outputtable(reasoning->associations[0].concept))
                 snprintf(response, max_len, "%s", reasoning->associations[0].concept);
         }
 
@@ -502,6 +502,17 @@ int concept_is_printable(const char* concept) {
         if (c == '-' || c == '_' || c == '/') continue;
         return 0;  /* 空格 @#$%^&*+=|~` 等纯噪音 */
     }
+    return 1;
+}
+
+/**
+ * 用户可见输出判据 —— concept_is_printable() 之上再拒掉内部匿名节点。
+ * 语义拓扑匿名节点（src/semantic_growth.c 产出）命名形如 sem_<x>_<n>，
+ * 是内部标识符，绝不能出现在给用户的回复里。
+ */
+int concept_is_outputtable(const char* concept) {
+    if (!concept_is_printable(concept)) return 0;
+    if (strncmp(concept, "sem_", 4) == 0) return 0;  /* semantic_growth 匿名节点 */
     return 1;
 }
 

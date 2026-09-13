@@ -127,12 +127,7 @@ void handle_chat(GatewaySystem* gw, int fd, const char* body) {
                 punct_cnt++;
         }
         int wordish = (cjk_cnt / 3);  /* 汉字数（含标点容差，如"很大。"=3） */
-        int is_void = (wordish <= 3) ||              /* ≤1 个实义词 */
-                      (strstr(response, "很大") && wordish <= 3) ||
-                      (strstr(response, "很快") && wordish <= 3) ||
-                      (strstr(response, "很好") && wordish <= 3) ||
-                      (strstr(response, "好的") && wordish <= 3) ||
-                      (strstr(response, "、") && wordish <= 3);
+        int is_void = (wordish <= 3);                /* <=1 个实义词（后 5 个 strstr 子句均被本条件蕴含，已删） */
         if (is_void) { free(response); response = strdup("好的。"); }
     }
 

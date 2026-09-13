@@ -1489,14 +1489,14 @@ char* master_generate_response(MasterTopology* master,
                 int found = 0;
                 for (int i = 0; i < wc && pos < max_output_len - 10; i++) {
                     ReasoningNode* node = node_hash_find(vocab_sub->node_hash, dict_words[i]);
-                    if (node && node->concept && concept_is_printable(node->concept)) {
+                    if (node && node->concept && concept_is_outputtable(node->concept)) {
                         if (pos > 0) pos += snprintf(response + pos, max_output_len - pos, "，");
                         pos += snprintf(response + pos, max_output_len - pos, "%s", node->concept);
                         found = 1;
                         for (int c = 0; c < node->edge_count && c < 3 && pos < max_output_len - 20; c++) {
                             if (node->edges && node->edges[c].confidence > 0.6f
                                 && node->edges[c].target && node->edges[c].target->concept
-                                && concept_is_printable(node->edges[c].target->concept)) {
+                                && concept_is_outputtable(node->edges[c].target->concept)) {
                                 pos += snprintf(response + pos, max_output_len - pos,
                                     " %s", node->edges[c].target->concept);
                             }
@@ -1609,7 +1609,7 @@ char* master_generate_response(MasterTopology* master,
                         int sid = path_nodes[0];
                         if (sid >= 0 && sid < node_count) {
                             ReasoningNode* sn = vocab_sub->net->nodes[sid];
-                            if (sn && sn->concept && concept_is_printable(sn->concept))
+                            if (sn && sn->concept && concept_is_outputtable(sn->concept))
                                 pos += snprintf(response + pos, max_output_len - pos, "%s", sn->concept);
                         }
                     }
@@ -1618,7 +1618,7 @@ char* master_generate_response(MasterTopology* master,
                         int nid = path_nodes[p];
                         if (nid < 0 || nid >= node_count) continue;
                         ReasoningNode* node = vocab_sub->net->nodes[nid];
-                        if (!node || !node->concept || !concept_is_printable(node->concept)) continue;
+                        if (!node || !node->concept || !concept_is_outputtable(node->concept)) continue;
 
                         const char* connector = NULL;
                         int prev_nid = path_nodes[p - 1];

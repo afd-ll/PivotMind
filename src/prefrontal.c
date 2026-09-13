@@ -173,7 +173,7 @@ char* prefrontal_chat(Prefrontal* pf, const char* input) {
                         }
                         if (best_nid >= 0 && best_nid < vocab->net->node_count) {
                             ReasoningNode* answer = vocab->net->nodes[best_nid];
-                            if (answer && answer->concept && concept_is_printable(answer->concept)) {
+                            if (answer && answer->concept && concept_is_outputtable(answer->concept)) {
                                 char buf[256];
                                 snprintf(buf, sizeof(buf), "%s是%s色的。",
                                          subj_node->concept ? subj_node->concept : "",

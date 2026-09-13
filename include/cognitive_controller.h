@@ -459,6 +459,16 @@ int cc_get_all_patterns(CognitiveController* cc,
  */
 int concept_is_printable(const char* concept);
 
+/**
+ * 用户可见输出判据 — 概念是否允许出现在【给用户的回复文本】里
+ * 在 concept_is_printable() 之上再拒掉内部匿名节点（sem_<x>_<n>，
+ * 产出方 src/semantic_growth.c）：这类名字是内部标识符，泄漏即 bug。
+ * 分工：本函数专用于「回复文本」路径；调试/诊断输出（state_dump /
+ * diagnose_*）若确需显示内部名，继续用 concept_is_printable()。
+ * @return 1=可输出, 0=应静默跳过
+ */
+int concept_is_outputtable(const char* concept);
+
 // ==================== 涌现式词类系统 API ====================
 
 /**

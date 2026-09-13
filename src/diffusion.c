@@ -1824,7 +1824,7 @@ int diffusion_generate(DiffusionCtx* ctx,
             if (!final[i].word || strlen(final[i].word) < 2) continue;
             if (final[i].word[0] == '@' || final[i].word[0] == '?' ||
                 (final[i].word[0] == 'H' && final[i].word[1] == 'e')) continue;
-            if (strncmp(final[i].word, "sem_", 4) == 0) continue;   /* semantic_growth 匿名节点 */
+            if (!concept_is_outputtable(final[i].word)) continue;   /* semantic_growth 匿名节点 */
             if (lang_dom > 0 && (unsigned char)final[i].word[0] < 0x80) continue;  /* 中文主导：过滤英文词 */
             if (lang_dom < 0 && (unsigned char)final[i].word[0] >= 0x80) continue; /* 英文主导：过滤中文词 */
             /* 话题分级（v0.6）：relevance<0.3 的候选是"高频噪声激活"
@@ -1923,7 +1923,7 @@ int diffusion_generate(DiffusionCtx* ctx,
             if (out_fallback >= MAX_REPLY_WORDS) break;
             if (final[i].word[0] == '@' || final[i].word[0] == '?' ||
                 (final[i].word[0] == 'H' && final[i].word[1] == 'e')) continue;
-            if (strncmp(final[i].word, "sem_", 4) == 0) continue;   /* semantic_growth 匿名节点 */
+            if (!concept_is_outputtable(final[i].word)) continue;   /* semantic_growth 匿名节点 */
             /* fallback 路径不强制语言过滤（保证有输出，避免空回复/句号） */
             if (is_function_word(final[i].word)) continue;
             /* 中文单字不输出（v0.6，降级路径也生效——"时间是"的"是"） */
