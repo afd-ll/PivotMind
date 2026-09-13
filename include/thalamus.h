@@ -54,6 +54,12 @@ typedef enum {
     THAL_SUBSYSTEM_COUNT = 10
 } ThalamusSubsystem;
 
+/* v0.5.39: 丘脑自己的信箱槽位 —— 丘脑不属于 10 个脑区，此前没有自己的队列，
+ * 只能靠「遍历全部脑区队列」来捞广播给自己的信（FEEDBACK_REPORT，target=-1），
+ * 副作用是把各脑区的定向信一并清空 ⇒ 定向信号永远到不了收件方。
+ * 此宏即 signal_queues[] 的末槽下标，把「丘脑自己」与「各脑区」在存储上分开。 */
+#define THAL_SELF_QUEUE  (THAL_SUBSYSTEM_COUNT)
+
 /* ================================================================
  *  脑区信号枚举 — 丘脑总线上传输的信号类型
  * ================================================================ */
@@ -188,11 +194,11 @@ typedef struct Thalamus {
     void* region_ptrs[THAL_SUBSYSTEM_COUNT];   /* 各脑区实例指针 */
     BrainTopoPartition partitions[THAL_SUBSYSTEM_COUNT]; /* 子拓扑归属 */
 
-    /* ── 信号队列（每个脑区一个） ── */
+    /* ── 信号队列（每个脑区一个 + 末槽 THAL_SELF_QUEUE 为丘脑自用） ── */
     struct {
         BrainSignal slots[THAL_SIGNAL_QUEUE_SIZE];
         int head, tail, count;
-    } signal_queues[THAL_SUBSYSTEM_COUNT];
+    } signal_queues[THAL_SUBSYSTEM_COUNT + 1];
 
     /* ── 工具指针注册表（非脑区组件，如 node_cache、self_learner） ── */
     void* utility_ptrs[5];

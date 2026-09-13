@@ -146,8 +146,8 @@ int thalamus_send_signal(Thalamus* th, int target, const BrainSignal* sig) {
     pthread_mutex_lock(&th->lock);
     int sent = 0;
 
-    if (target >= 0 && target < THAL_SUBSYSTEM_COUNT) {
-        /* 定向发送 */
+    if (target >= 0 && target <= THAL_SELF_QUEUE) {
+        /* 定向发送（含丘脑自用槽 THAL_SELF_QUEUE） */
         if (th->signal_queues[target].count < THAL_SIGNAL_QUEUE_SIZE) {
             int tail = th->signal_queues[target].tail;
             th->signal_queues[target].slots[tail] = *sig;
@@ -205,11 +205,13 @@ int thalamus_send_feedback(Thalamus* th, int source,
     memset(&sig, 0, sizeof(sig));
     sig.type   = THAL_SIG_FEEDBACK_REPORT;
     sig.source = source;
-    sig.target = -1; /* 广播到丘脑自己（在 tick 中被消费） */
+    /* v0.5.39: 由「广播(-1)」改为「定向投给丘脑自用信箱」—— 反馈本就是
+     * 上报给丘脑的，广播到各脑区既无意义、又会挤占其仅 16 格的队列。 */
+    sig.target = THAL_SELF_QUEUE;
     sig.data.feedback.consolidated = consolidated;
     sig.data.feedback.searched     = searched;
     sig.data.feedback.dreamed      = dreamed;
-    return thalamus_send_signal(th, -1, &sig);
+    return thalamus_send_signal(th, THAL_SELF_QUEUE, &sig);
 }
 
 /* ================================================================
@@ -362,22 +364,24 @@ void thalamus_tick(Thalamus* th) {
         }
     }
 
-    /* ── 消费信号队列中的反馈，更新 throttle（sigmoid 曲线） ── */
-    for (int r = 0; r < THAL_SUBSYSTEM_COUNT; r++) {
-        while (th->signal_queues[r].count > 0) {
-            int h = th->signal_queues[r].head;
-            BrainSignal sig = th->signal_queues[r].slots[h];
-            th->signal_queues[r].head = (h + 1) % THAL_SIGNAL_QUEUE_SIZE;
-            th->signal_queues[r].count--;
+    /* ── 消费「丘脑自用信箱」中的反馈，更新 throttle（sigmoid 曲线） ──
+     * v0.5.39: 原实现 `for (r < THAL_SUBSYSTEM_COUNT)` 遍历全部脑区队列并把
+     * 它们**清空**，导致各脑区的定向信号（如海马体→感知区的 CONS_NODE）在
+     * 收件方读取之前即被丢弃 —— 这也是 recv_signal 全仓零调用的原因之一。
+     * 现只消费 THAL_SELF_QUEUE，各脑区队列原样保留给对应脑区自行收取。 */
+    while (th->signal_queues[THAL_SELF_QUEUE].count > 0) {
+        int h = th->signal_queues[THAL_SELF_QUEUE].head;
+        BrainSignal sig = th->signal_queues[THAL_SELF_QUEUE].slots[h];
+        th->signal_queues[THAL_SELF_QUEUE].head = (h + 1) % THAL_SIGNAL_QUEUE_SIZE;
+        th->signal_queues[THAL_SELF_QUEUE].count--;
 
-            if (sig.type == THAL_SIG_FEEDBACK_REPORT) {
-                if (sig.data.feedback.consolidated > 0)
-                    th->fb_hippo_consolidated += sig.data.feedback.consolidated;
-                if (sig.data.feedback.searched > 0)
-                    th->fb_percept_searched += sig.data.feedback.searched;
-                if (sig.data.feedback.dreamed > 0)
-                    th->fb_dmn_dreamed += sig.data.feedback.dreamed;
-            }
+        if (sig.type == THAL_SIG_FEEDBACK_REPORT) {
+            if (sig.data.feedback.consolidated > 0)
+                th->fb_hippo_consolidated += sig.data.feedback.consolidated;
+            if (sig.data.feedback.searched > 0)
+                th->fb_percept_searched += sig.data.feedback.searched;
+            if (sig.data.feedback.dreamed > 0)
+                th->fb_dmn_dreamed += sig.data.feedback.dreamed;
         }
     }
 

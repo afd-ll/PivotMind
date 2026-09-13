@@ -366,6 +366,24 @@ static int brainstem_tick_perception(Brainstem* bs) {
     int work = 0;
     float p_throttle = thalamus_get_throttle(th, THAL_PERCEPTION);
     Perception* p = (Perception*)thalamus_get_region(th, THAL_PERCEPTION);
+
+    /* v0.5.39: 代感知区收取丘脑信号总线的**定向**信件。
+     * 此前 thalamus_tick 遍历并清空全部脑区队列 ⇒ 定向信号永远到不了收件方
+     * （这也是 thalamus_recv_signal 全仓零调用的原因）。丘脑改为只消费自用槽
+     * 之后，投递责任落在这里。当前唯一在发的定向信号是海马体的 CONS_NODE
+     * （「这个节点置信度低，去联网查证」）。
+     * ⚠️ 只转交、不执行 —— perception_request_concept() 内部仅入队，
+     * 真正的 HTTP 由 perception worker 线程串行跑。 */
+    if (p) {
+        BrainSignal sigs[4];
+        int n = thalamus_recv_signal(th, THAL_PERCEPTION, sigs, 4);
+        for (int i = 0; i < n; i++) {
+            if (sigs[i].type == THAL_SIG_CONSOLIDATE_NODE) {
+                perception_request_concept(p, sigs[i].data.consolidate.node_id);
+            }
+        }
+    }
+
     if (p) work = perception_tick(p, p_throttle);
 
     /* 每小时搜一次 Bing 新闻头条（3600 ticks ≈ 1h） */

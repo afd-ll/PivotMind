@@ -191,6 +191,17 @@ void perception_stats(Perception* p, long* searches, long* learned, long* new_co
 int perception_enqueue_search(Perception* p, const char* concept);
 
 /**
+ * v0.5.39: 接受丘脑信号总线转来的「定向点单」。
+ * 当前唯一来源：海马体的 THAL_SIG_CONSOLIDATE_NODE ——「这个节点置信度低，
+ * 去联网查证」。只做 node_id → 概念名 → **异步入队**；
+ * 🔴 绝不在此同步执行网络搜索（否则会重演 v0.5.8 之前的脑干主循环被
+ * curl 拖死）。队列消费由 perception worker 线程串行负责。
+ * @param node_id  词汇子拓扑(TOPO_VOCABULARY)中的节点下标
+ * @return 1=已入队, 0=未入队（参数无效 / 节点无效 / 队列满）
+ */
+int perception_request_concept(Perception* p, int node_id);
+
+/**
  * v0.5.8: 绑定涌现词类系统——喂料路径（article_reader）把未分类新词送入 POS 池
  * @param ep 涌现词类系统指针（可 NULL）
  */

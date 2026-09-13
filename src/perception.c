@@ -798,6 +798,24 @@ int perception_enqueue_search(Perception* p, const char* concept) {
     return _perception_enqueue(p, concept);
 }
 
+/* v0.5.39: 丘脑信号总线的定向点单（海马体 → 感知区）。
+ * 背景：此前丘脑 tick 会遍历并清空**全部脑区队列**，导致定向信号
+ * （THAL_SIG_CONSOLIDATE_NODE，海马体发往 THAL_PERCEPTION）在收件方
+ * 读取前即被丢弃；现丘脑已改为只消费自用槽，感知区在这里真正收信。
+ * ⚠️ 只入队、不执行：同步版 perception_consolidate_node() 会跑
+ * search_and_learn（HTTP）——那正是 v0.5.8 修掉的「脑干主循环被网络拖死」。 */
+int perception_request_concept(Perception* p, int node_id) {
+    if (!p || !p->topology || node_id < 0) return 0;
+
+    SubTopology* vocab = master_get_sub_topology_by_type(p->topology, TOPO_VOCABULARY);
+    if (!vocab || !vocab->net || node_id >= vocab->net->node_count) return 0;
+
+    ReasoningNode* node = vocab->net->nodes[node_id];
+    if (!node || !node->concept || !node->concept[0]) return 0;
+
+    return _perception_enqueue(p, node->concept);
+}
+
 int perception_tick(Perception* p, float throttle) {
     (void)throttle;  /* 纯随机模式不再需要 throttle 抽签 */
     if (!p) return 0;
