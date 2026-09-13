@@ -75,11 +75,15 @@ static char* read_file(const char* path, long* out_len) {
 // 标记是否为句子结束标点
 static int is_sent_end(const char* p) {
     // 中文句号 ！？。！？…——\n
-    unsigned char c = (unsigned char)*p;
+    /* 必须按【无符号】字节比较：char 在 x86_64 上是 signed，0xBC / 0x81 / 0x89 / 0x8E
+     * 全部 >127 而落进负值区间，比较恒假 —— 中文句末标点会在整个 x86_64 上被静默
+     * 漏判（ARM 上 char 是 unsigned，所以此前只在 x86 侧退化）。 */
+    const unsigned char* u = (const unsigned char*)p;
+    unsigned char c = u[0];
     if (c == '\n' || c == '\r') return 1;
     if (c == 0xEF) { // 全角标点如 。！？
-        if (p[1] == 0xBC && (p[2] == 0x81 || p[2] == 0x89)) return 1; // ！？
-        if (p[1] == 0xBC && p[2] == 0x8E) return 1; // 。
+        if (u[1] == 0xBC && (u[2] == 0x81 || u[2] == 0x89)) return 1; // ！？
+        if (u[1] == 0xBC && u[2] == 0x8E) return 1; // 。
     }
     return 0;
 }

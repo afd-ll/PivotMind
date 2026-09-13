@@ -88,7 +88,6 @@ int main(int argc, char* argv[]) {
     // [2/3] 创建跨拓扑连接
     printf("\n[2/3] 创建跨拓扑连接...\n");
     int total_cross = 0;
-    const float CROSS_WEIGHT = 0.5f;
     
     // 目标拓扑列表：语义、情绪、概念
     SubTopology* targets[] = {semantic, emotion, concept};
@@ -147,8 +146,8 @@ int main(int argc, char* argv[]) {
     
     printf("\n[3/3] 保存状态...\n");
     // 备份旧状态
-    char bak[520];
-    snprintf(bak, 519, "%s.cross_bak", state_path);
+    char bak[PM_PATH_MAX + 11];   /* path(<=4095) + ".cross_bak"(10) + NUL */
+    snprintf(bak, sizeof(bak), "%s.cross_bak", state_path);
     remove(bak);
     rename(state_path, bak);
     

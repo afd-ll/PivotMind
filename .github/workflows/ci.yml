@@ -15,6 +15,8 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libsqlite3-dev libssl-dev libcurl4-openssl-dev zlib1g-dev
       - name: Build (x86_64, OpenMP)
         run: make linux
+      - name: Verify all tools built (全工具门禁)
+        run: make check-tools
       - name: Run tests
         run: make test
       - name: Show binaries
@@ -87,6 +89,9 @@ jobs:
             CC=aarch64-linux-gnu-gcc \
             CFLAGS="-Wall -Wextra -O2 -Iinclude -Iinclude/nn -Isrc/nn -I. -Ilibs -I/tmp/openssl-arm/include -I/tmp/curl-arm/include -I/tmp/zlib-arm/include -std=gnu99 -fopenmp -pthread -MD -MP -DHAS_OPENSSL" \
             LDFLAGS="-L/tmp/openssl-arm/lib -L/tmp/curl-arm/lib -L/tmp/zlib-arm/lib -lm -lcurl -lssl -lcrypto -lz -pthread"
+
+      - name: Verify all tools built (全工具门禁)
+        run: make check-tools
 
       - name: Verify ARM64 ELF
         run: |

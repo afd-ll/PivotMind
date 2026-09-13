@@ -115,6 +115,17 @@ static int cross_cmp(const void* a, const void* b) {
     return (ea->to_node > eb->to_node) - (ea->to_node < eb->to_node);
 }
 
+/* 读满 n 项，短读即报错退出。
+ * 状态文件被截断时必须显式失败：否则未初始化/残缺的缓冲区会被
+ * 当成真实节点/边静默合并进结果，产出“看着正常”的坏状态。 */
+static void rd_or_die(void* dst, size_t sz, size_t n, FILE* f, const char* what) {
+    if (n == 0) return;
+    if (fread(dst, sz, n, f) != n) {
+        fprintf(stderr, "错误: 读取 %s 失败（文件截断或损坏）\n", what);
+        exit(1);
+    }
+}
+
 int main(int argc, char* argv[]) {
     if (argc != 4) {
         fprintf(stderr, "用法: %s <state_a> <state_b> <state_out>\n", argv[0]);
@@ -137,7 +148,7 @@ int main(int argc, char* argv[]) {
 
     // ===== 读取文件 A =====
     FileHeader ha;
-    fread(&ha, sizeof(FileHeader), 1, fa);
+    rd_or_die(&ha, sizeof(FileHeader), 1, fa, "文件A头");
     if (ha.magic != MAGIC) {
         fprintf(stderr, "文件A魔数错误: 0x%X\n", ha.magic);
         fclose(fa); fclose(fb);
@@ -149,43 +160,43 @@ int main(int argc, char* argv[]) {
     // 定位到子拓扑数据
     fseek(fa, sizeof(FileHeader), SEEK_SET);
     SubHeader* subs_a = malloc(sizeof(SubHeader) * ha.topo_count);
-    fread(subs_a, sizeof(SubHeader), ha.topo_count, fa);
+    rd_or_die(subs_a, sizeof(SubHeader), ha.topo_count, fa, "文件A子拓扑表");
 
     // 读取所有节点
-    int total_nodes_a = 0;
-    for (int i = 0; i < ha.topo_count; i++) total_nodes_a += subs_a[i].node_count;
+    uint32_t total_nodes_a = 0;
+    for (uint32_t i = 0; i < ha.topo_count; i++) total_nodes_a += subs_a[i].node_count;
     NodeV4* nodes_a = calloc(total_nodes_a, sizeof(NodeV4));
     int offset = 0;
-    for (int i = 0; i < ha.topo_count; i++) {
-        fread(nodes_a + offset, sizeof(NodeV4), subs_a[i].node_count, fa);
+    for (uint32_t i = 0; i < ha.topo_count; i++) {
+        rd_or_die(nodes_a + offset, sizeof(NodeV4), subs_a[i].node_count, fa, "文件A节点");
         offset += subs_a[i].node_count;
     }
 
     // 读取所有边
-    int total_edges_a = 0;
-    for (int i = 0; i < ha.topo_count; i++) total_edges_a += subs_a[i].edge_count;
+    uint32_t total_edges_a = 0;
+    for (uint32_t i = 0; i < ha.topo_count; i++) total_edges_a += subs_a[i].edge_count;
     EdgeV4* edges_a = calloc(total_edges_a, sizeof(EdgeV4));
     offset = 0;
-    for (int i = 0; i < ha.topo_count; i++) {
-        fread(edges_a + offset, sizeof(EdgeV4), subs_a[i].edge_count, fa);
+    for (uint32_t i = 0; i < ha.topo_count; i++) {
+        rd_or_die(edges_a + offset, sizeof(EdgeV4), subs_a[i].edge_count, fa, "文件A边");
         offset += subs_a[i].edge_count;
     }
 
     // 读取跨拓扑边
     CrossEdgeV4* cross_a = calloc(ha.cross_count, sizeof(CrossEdgeV4));
-    fread(cross_a, sizeof(CrossEdgeV4), ha.cross_count, fa);
+    rd_or_die(cross_a, sizeof(CrossEdgeV4), ha.cross_count, fa, "文件A跨拓扑边");
 
     // 读取字符串池
     uint32_t str_count_a;
-    fread(&str_count_a, sizeof(uint32_t), 1, fa);
+    rd_or_die(&str_count_a, sizeof(uint32_t), 1, fa, "文件A字符串计数");
     StringEntry* strings_a = calloc(str_count_a, sizeof(StringEntry));
-    fread(strings_a, sizeof(StringEntry), str_count_a, fa);
+    rd_or_die(strings_a, sizeof(StringEntry), str_count_a, fa, "文件A字符串池");
 
     fclose(fa);
 
     // ===== 读取文件 B =====
     FileHeader hb;
-    fread(&hb, sizeof(FileHeader), 1, fb);
+    rd_or_die(&hb, sizeof(FileHeader), 1, fb, "文件B头");
     if (hb.magic != MAGIC) {
         fprintf(stderr, "文件B魔数错误: 0x%X\n", hb.magic);
         fclose(fb);
@@ -196,33 +207,33 @@ int main(int argc, char* argv[]) {
 
     fseek(fb, sizeof(FileHeader), SEEK_SET);
     SubHeader* subs_b = malloc(sizeof(SubHeader) * hb.topo_count);
-    fread(subs_b, sizeof(SubHeader), hb.topo_count, fb);
+    rd_or_die(subs_b, sizeof(SubHeader), hb.topo_count, fb, "文件B子拓扑表");
 
-    int total_nodes_b = 0;
-    for (int i = 0; i < hb.topo_count; i++) total_nodes_b += subs_b[i].node_count;
+    uint32_t total_nodes_b = 0;
+    for (uint32_t i = 0; i < hb.topo_count; i++) total_nodes_b += subs_b[i].node_count;
     NodeV4* nodes_b = calloc(total_nodes_b, sizeof(NodeV4));
     offset = 0;
-    for (int i = 0; i < hb.topo_count; i++) {
-        fread(nodes_b + offset, sizeof(NodeV4), subs_b[i].node_count, fb);
+    for (uint32_t i = 0; i < hb.topo_count; i++) {
+        rd_or_die(nodes_b + offset, sizeof(NodeV4), subs_b[i].node_count, fb, "文件B节点");
         offset += subs_b[i].node_count;
     }
 
-    int total_edges_b = 0;
-    for (int i = 0; i < hb.topo_count; i++) total_edges_b += subs_b[i].edge_count;
+    uint32_t total_edges_b = 0;
+    for (uint32_t i = 0; i < hb.topo_count; i++) total_edges_b += subs_b[i].edge_count;
     EdgeV4* edges_b = calloc(total_edges_b, sizeof(EdgeV4));
     offset = 0;
-    for (int i = 0; i < hb.topo_count; i++) {
-        fread(edges_b + offset, sizeof(EdgeV4), subs_b[i].edge_count, fb);
+    for (uint32_t i = 0; i < hb.topo_count; i++) {
+        rd_or_die(edges_b + offset, sizeof(EdgeV4), subs_b[i].edge_count, fb, "文件B边");
         offset += subs_b[i].edge_count;
     }
 
     CrossEdgeV4* cross_b = calloc(hb.cross_count, sizeof(CrossEdgeV4));
-    fread(cross_b, sizeof(CrossEdgeV4), hb.cross_count, fb);
+    rd_or_die(cross_b, sizeof(CrossEdgeV4), hb.cross_count, fb, "文件B跨拓扑边");
 
     uint32_t str_count_b;
-    fread(&str_count_b, sizeof(uint32_t), 1, fb);
+    rd_or_die(&str_count_b, sizeof(uint32_t), 1, fb, "文件B字符串计数");
     StringEntry* strings_b = calloc(str_count_b, sizeof(StringEntry));
-    fread(strings_b, sizeof(StringEntry), str_count_b, fb);
+    rd_or_die(strings_b, sizeof(StringEntry), str_count_b, fb, "文件B字符串池");
 
     fclose(fb);
 
@@ -237,7 +248,8 @@ int main(int argc, char* argv[]) {
 
     // 合并节点 (ID并集)
     NodeV4* nodes_merged = calloc(total_nodes_a + total_nodes_b, sizeof(NodeV4));
-    int n_merged = 0, i = 0, j = 0;
+    int n_merged = 0;
+    uint32_t i = 0, j = 0;
     while (i < total_nodes_a || j < total_nodes_b) {
         if (j >= total_nodes_b || (i < total_nodes_a && nodes_a[i].id < nodes_b[j].id)) {
             nodes_merged[n_merged++] = nodes_a[i++];
@@ -263,7 +275,7 @@ int main(int argc, char* argv[]) {
             i++; j++;
         }
     }
-    printf("合并节点: %d (A:%d + B:%d)\n", n_merged, total_nodes_a, total_nodes_b);
+    printf("合并节点: %d (A:%u + B:%u)\n", n_merged, total_nodes_a, total_nodes_b);
 
     // 合并边 (并集，同一条边置信度取均值)
     EdgeV4* edges_merged = calloc(total_edges_a + total_edges_b, sizeof(EdgeV4));
@@ -290,7 +302,7 @@ int main(int argc, char* argv[]) {
             }
         }
     }
-    printf("合并边: %d (A:%d + B:%d)\n", e_merged, total_edges_a, total_edges_b);
+    printf("合并边: %d (A:%u + B:%u)\n", e_merged, total_edges_a, total_edges_b);
 
     // 合并跨拓扑边
     CrossEdgeV4* cross_merged = calloc(ha.cross_count + hb.cross_count, sizeof(CrossEdgeV4));
@@ -317,12 +329,12 @@ int main(int argc, char* argv[]) {
             }
         }
     }
-    printf("合并跨拓扑边: %d (A:%d + B:%d)\n", c_merged, ha.cross_count, hb.cross_count);
+    printf("合并跨拓扑边: %d (A:%u + B:%u)\n", c_merged, ha.cross_count, hb.cross_count);
 
     // 合并字符串池 (去重)
     StringEntry* strings_merged = calloc(str_count_a + str_count_b, sizeof(StringEntry));
     int s_merged = 0;
-    for (int i = 0; i < str_count_a; i++) {
+    for (uint32_t i = 0; i < str_count_a; i++) {
         int found = 0;
         for (int j = 0; j < s_merged; j++) {
             if (strcmp(strings_merged[j].str, strings_a[i].str) == 0) {
@@ -331,7 +343,7 @@ int main(int argc, char* argv[]) {
         }
         if (!found) strings_merged[s_merged++] = strings_a[i];
     }
-    for (int i = 0; i < str_count_b; i++) {
+    for (uint32_t i = 0; i < str_count_b; i++) {
         int found = 0;
         for (int j = 0; j < s_merged; j++) {
             if (strcmp(strings_merged[j].str, strings_b[i].str) == 0) {
@@ -340,7 +352,7 @@ int main(int argc, char* argv[]) {
         }
         if (!found) strings_merged[s_merged++] = strings_b[i];
     }
-    printf("合并字符串: %d (A:%d + B:%d)\n", s_merged, str_count_a, str_count_b);
+    printf("合并字符串: %d (A:%u + B:%u)\n", s_merged, str_count_a, str_count_b);
 
     // ===== 写输出 =====
     // 简化：按子拓扑分类节点
@@ -363,7 +375,7 @@ int main(int argc, char* argv[]) {
     h_out.data_size = 0;  // 不计算，写时填充
 
     // 更新子拓扑—把A的节点合并到子拓扑0
-    for (int i = 0; i < ha.topo_count; i++) {
+    for (uint32_t i = 0; i < ha.topo_count; i++) {
         if (i == 0) subs_a[i].node_count = merged_node_count;
         else subs_a[i].node_count = 0;
         subs_a[i].edge_count = 0;    // 边不按拓扑区分（简化）
@@ -377,7 +389,7 @@ int main(int argc, char* argv[]) {
     fwrite(subs_a, sizeof(SubHeader), ha.topo_count, fout);
 
     // 写所有节点
-    for (int i = 0; i < ha.topo_count; i++) {
+    for (uint32_t i = 0; i < ha.topo_count; i++) {
         if (i == 0)
             fwrite(nodes_merged, sizeof(NodeV4), merged_node_count, fout);
         // 其他子拓扑不写节点
@@ -392,7 +404,7 @@ int main(int argc, char* argv[]) {
     fwrite(edges_merged, sizeof(EdgeV4), merged_edge_count, fout);
 
     // 其他子拓扑边数为0
-    for (int i = 1; i < ha.topo_count; i++) {
+    for (uint32_t i = 1; i < ha.topo_count; i++) {
         topo_edge_counts = 0;
         fwrite(&topo_edge_counts, sizeof(uint32_t), 1, fout);
     }

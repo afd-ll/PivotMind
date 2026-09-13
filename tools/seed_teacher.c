@@ -127,7 +127,7 @@ int main(int argc, char* argv[]) {
     // 批量注入对话模式
     int new_count = 0;
     int skip_count = 0;
-    for (int i = 0; i < PATTERN_COUNT; i++) {
+    for (size_t i = 0; i < PATTERN_COUNT; i++) {
         char key[256];
         snprintf(key, sizeof(key), "response:%s", patterns[i][0]);
         

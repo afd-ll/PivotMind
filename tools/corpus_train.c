@@ -181,7 +181,7 @@ static int process_corpus_dir(MasterTopology* master, SubTopology* vocab_sub,
         size_t len = strlen(entry->d_name);
         if (len < 4 || strcmp(entry->d_name + len - 4, ".txt") != 0) continue;
 
-        char filepath[1024];
+        char filepath[PM_PATH_MAX];
         snprintf(filepath, sizeof(filepath), "%s/%s", real_path, entry->d_name);
 
         struct stat st;

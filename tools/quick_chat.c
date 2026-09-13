@@ -32,7 +32,7 @@ int main(int argc, char** argv) {
     master_add_sub_topology(master, TOPO_TEMPLATE,   "", 4000, 8);
 
     FILE* df = fopen("data/jieba_dict.txt", "r");
-    if (df) { fclose(df); DictTable* d = dict_table_create(524288); dict_load_jieba(d,"data/jieba_dict.txt"); master->ext_dict = d; }
+    if (df) { fclose(df); DictTable* d = dict_table_create(524288); dict_load_jieba(d,"data/jieba_dict.txt"); master->ext_dict = (struct ExternalDict*)d; }
 
     printf("加载状态...\n");
     int loaded = master_load_state(master, state_path);

@@ -537,9 +537,9 @@ void handle_dialog(DigitalLifeSystem* sys, char* input) {
     }
     if (strcmp(input, "clear") == 0) {
 #ifdef _WIN32
-        system("cls");
+        { int _rc = system("cls");   (void)_rc; }   /* 清屏失败无补救；必须赋值，GCC 的 -Wunused-result 不认 (void) 强转 */
 #else
-        system("clear");
+        { int _rc = system("clear"); (void)_rc; }   /* 同上 */
 #endif
         return;
     }

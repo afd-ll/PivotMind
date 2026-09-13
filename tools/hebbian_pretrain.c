@@ -72,9 +72,15 @@ static int read_qa_json(const char* path, char*** out_q, char*** out_a, int max_
     fseek(fp, 0, SEEK_END);
     long fsize = ftell(fp);
     rewind(fp);
-    char* data = (char*)malloc(fsize + 1);
-    fread(data, 1, fsize, fp);
+    if (fsize < 0) { printf("  × 读取失败(ftell): %s\n", path); fclose(fp); return 0; }
+    char* data = (char*)malloc((size_t)fsize + 1);
+    if (!data) { printf("  × 内存不足: %s\n", path); fclose(fp); return 0; }
+    size_t got = fread(data, 1, (size_t)fsize, fp);
     fclose(fp);
+    if (got != (size_t)fsize) {
+        printf("  × 读取不完整(期望 %ld 实得 %zu): %s\n", fsize, got, path);
+        free(data); return 0;
+    }
     data[fsize] = '\0';
 
     char** questions = (char**)calloc(max_qa, sizeof(char*));
@@ -348,8 +354,8 @@ int main(int argc, char* argv[]) {
 
     // 5. 保存状态
     printf("\n保存状态...\n");
-    char bak[520];
-    snprintf(bak, 519, "%s.hebbian_bak", state_path);
+    char bak[PM_PATH_MAX + 13];   /* path(<=4095) + ".hebbian_bak"(12) + NUL */
+    snprintf(bak, sizeof(bak), "%s.hebbian_bak", state_path);
     remove(bak);
     rename(state_path, bak);
     int saved = master_save_state(master, state_path);

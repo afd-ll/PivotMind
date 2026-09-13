@@ -262,6 +262,13 @@ static void collect_topo_health(MasterTopology* master,
 // 跨拓扑重建间隔:
 //   - 正常编译: 每5000条QA重建一次（内存充裕的Pi 3B）
 //   - 编译时定义 LOW_MEM: 重建延后到训练结束时一次性做（Zero 2W等受限设备）
+//
+// ⚠️ [待决策 · v0.5.31 编译体检发现] 本宏当前是【死宏】——全文件除下面两行 #define
+//    外零引用。真实重建发生在 (a) 每个 epoch 结束(≈:486) 与 (b) 训练收尾(≈:583)，
+//    所以“每 5000 条 QA 重建一次”的机制其实已被重构掉。
+//    后果：batch_learn_lowmem 与 batch_learn 产出的二进制【逐字节相同】(md5 一致)，
+//    “低内存版”当前无任何实际差异。处置待定（删除该变体 / 把 LOW_MEM 接回重建判定），
+//    未经决策前不得据此认为 lowmem 能省内存。
 #ifndef LOW_MEM
 #define CROSS_REBUILD_INTERVAL 5000
 #else
@@ -539,7 +546,7 @@ int main(int argc, char* argv[]) {
                         if (nblen < 2 || nblen > 6) continue;
                         /* 合并: node->concept + nb->concept */
                         char merged_word[64];
-                        snprintf(merged_word, 63, "%s%s", node->concept, nb->concept);
+                        snprintf(merged_word, sizeof(merged_word), "%s%s", node->concept, nb->concept);
                         if (dict && !dict_table_lookup(dict, merged_word)) {
                             dict_table_insert(dict, merged_word, 10, "n");
                             merged++;
@@ -585,15 +592,15 @@ int main(int argc, char* argv[]) {
 
     // 一次性保存（关掉了中间刷盘，在这里显式保存以确保完整性）
     {
-        char path[512];
+        char path[PM_PATH_MAX];
         const char* state_path = argc > 1 ? argv[1] : pm_file(PM_FILE_STATE);
-        snprintf(path, 511, "%s", state_path);
+        snprintf(path, sizeof(path), "%s", state_path);
 
         FILE* existing = fopen(path, "rb");
         if (existing) {
             fclose(existing);
-            char bak[520];
-            snprintf(bak, 519, "%s.bak", path);
+            char bak[PM_PATH_MAX + 4];   /* path(<=4095) + ".bak"；旧版固定 520 字节会被 -Wformat-truncation 抓出截断 */
+            snprintf(bak, sizeof(bak), "%s.bak", path);
             remove(bak);
             rename(path, bak);
         }

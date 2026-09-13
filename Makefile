@@ -1,7 +1,7 @@
-# C语言AI框架 Makefile �?PivotMind
+# C语言AI框架 Makefile —— PivotMind
 #
-# 增量编译: 每个 .c 独立编译�?.o，二进制仅链接所需 .o
-# 改一个源文件 �?只重新编译该文件 �?重新链接相关二进�?
+# 增量编译: 每个 .c 独立编译成 .o，二进制仅链接所需 .o
+# 改一个源文件 → 只重新编译该文件 → 重新链接相关二进制
 # 自动依赖追踪: -MD -MP 生成 .d 文件，头文件变化时自动重编译
 
 # 编译器 — ccache 加速（未安装时自动回退到 gcc）
@@ -71,13 +71,13 @@ $(shell mkdir -p $(BUILD_DIR) $(OBJ_DIR) $(DEP_DIR))
 
 export TMPDIR = /tmp
 
-# 源文件（通配自动发现�?
+# 源文件（通配自动发现）
 # ⇒ 新增 src/pivotmind_paths.c（路径 SSOT）由 $(wildcard src/*.c) 自动进入
 #    CORE_SRC/CORE_OBJ，**无需手工登记**；核验：make -n libpivotmind.a | grep pivotmind_paths
 CORE_SRC = $(wildcard src/*.c) $(wildcard src/nn/*.c)
 TOOL_SRC = $(wildcard tools/*.c demos/*.c)
 
-# 所�?.o 文件（映射到 obj/ 目录�?
+# 所有 .o 文件（映射到 obj/ 目录）
 CORE_OBJ = $(patsubst src/%.c, $(OBJ_DIR)/%.o, $(CORE_SRC))
 TOOL_OBJ = $(patsubst tools/%.c, $(OBJ_DIR)/%.o, $(filter tools/%.c, $(TOOL_SRC)))
 TOOL_OBJ += $(patsubst demos/%.c, $(OBJ_DIR)/%.o, $(filter demos/%.c, $(TOOL_SRC)))
@@ -87,7 +87,7 @@ CORE_DEP = $(patsubst src/%.c, $(DEP_DIR)/%.d, $(CORE_SRC))
 TOOL_DEP = $(patsubst tools/%.c, $(DEP_DIR)/%.d, $(filter tools/%.c, $(TOOL_SRC)))
 TOOL_DEP += $(patsubst demos/%.c, $(DEP_DIR)/%.d, $(filter demos/%.c, $(TOOL_SRC)))
 
-# 包含自动生成的依赖文�?
+# 包含自动生成的依赖文件
 -include $(CORE_DEP) $(TOOL_DEP)
 
 # 静态库
@@ -95,16 +95,16 @@ LIB_NAME = libpivotmind.a
 
 # ========== 编译规则 ==========
 
-# 核心�?.c �?.o（依赖文件写�?dep/ 目录�?
+# 核心的 .c → .o（依赖文件写到 dep/ 目录）
 $(OBJ_DIR)/%.o: src/%.c
 	@mkdir -p $(dir $(OBJ_DIR)/$*) $(dir $(DEP_DIR)/$*)
 	$(CC) $(CFLAGS) $(DEPFLAGS) -c $< -o $@
 
-# 工具 .c �?.o
+# 工具 .c → .o
 $(OBJ_DIR)/%.o: tools/%.c
 	$(CC) $(CFLAGS) $(DEPFLAGS) -c $< -o $@
 
-# 演示 .c �?.o
+# 演示 .c → .o
 $(OBJ_DIR)/%.o: demos/%.c
 	$(CC) $(CFLAGS) $(DEPFLAGS) -c $< -o $@
 
@@ -112,7 +112,7 @@ $(OBJ_DIR)/%.o: demos/%.c
 $(LIB_NAME): $(CORE_OBJ)
 	ar rcs $@ $(CORE_OBJ)
 
-# ========== 二进�?==========
+# ========== 二进制 ==========
 
 $(BUILD_DIR)/digital_life: $(OBJ_DIR)/digital_life.o $(LIB_NAME)
 	TMPDIR=/tmp $(CC) $(CFLAGS) -o $@ $(OBJ_DIR)/digital_life.o -L. -lpivotmind $(LDFLAGS)
@@ -141,11 +141,12 @@ $(BUILD_DIR)/batch_learn: $(OBJ_DIR)/batch_learn.o $(LIB_NAME)
 $(BUILD_DIR)/edge_builder: $(OBJ_DIR)/edge_builder.o $(LIB_NAME)
 	$(CC) $(CFLAGS) -o $@ $(OBJ_DIR)/edge_builder.o -L. -lpivotmind $(LDFLAGS)
 
-# 低内存版（禁掉周期性跨拓扑重建，适合 Zero 2W �?512MB 以下设备�?
-$(BUILD_DIR)/batch_learn_lowmem: $(OBJ_DIR)/batch_learn.o $(LIB_NAME)
-	$(CC) $(CFLAGS) -DLOW_MEM -o $@ $(OBJ_DIR)/batch_learn.o -L. -lpivotmind $(LDFLAGS)
+# 低内存版（-DLOW_MEM 于【编译期】生效：周期性跨拓扑重建延后到训练结束；
+#  适合 Zero 2W / 512MB 以下设备。⚠️ 见 batch_learn_lowmem 规则处的历史坑）
+$(BUILD_DIR)/batch_learn_lowmem: $(OBJ_DIR)/batch_learn_lowmem.o $(LIB_NAME)
+	$(CC) $(CFLAGS) -o $@ $(OBJ_DIR)/batch_learn_lowmem.o -L. -lpivotmind $(LDFLAGS)
 
-# ·������ / ģ�幹������
+# 模板构建 / 模板分析工具
 $(BUILD_DIR)/template_build: $(OBJ_DIR)/template_build.o $(LIB_NAME)
 	$(CC) $(CFLAGS) -o $@ $(OBJ_DIR)/template_build.o -L. -lpivotmind $(LDFLAGS)
 
@@ -161,12 +162,89 @@ $(BUILD_DIR)/eval_templates: $(OBJ_DIR)/eval_templates.o $(LIB_NAME)
 $(BUILD_DIR)/qa_crawler: $(OBJ_DIR)/qa_crawler.o $(LIB_NAME)
 	$(CC) $(CFLAGS) -o $@ $(OBJ_DIR)/qa_crawler.o -L. -lpivotmind $(LDFLAGS)
 
+# —— 以下 11 个工具此前【只有源文件、没有任何二进制规则】：
+#    即从未被 make / CI 编译过（v0.5.31 跑编译检测时才暴露）。现补规则并纳入 all。
+$(BUILD_DIR)/batch_test: $(OBJ_DIR)/batch_test.o $(LIB_NAME)
+	$(CC) $(CFLAGS) -o $@ $(OBJ_DIR)/batch_test.o -L. -lpivotmind $(LDFLAGS)
+
+$(BUILD_DIR)/build_cross_links: $(OBJ_DIR)/build_cross_links.o $(LIB_NAME)
+	$(CC) $(CFLAGS) -o $@ $(OBJ_DIR)/build_cross_links.o -L. -lpivotmind $(LDFLAGS)
+
+$(BUILD_DIR)/compound_promote: $(OBJ_DIR)/compound_promote.o $(LIB_NAME)
+	$(CC) $(CFLAGS) -o $@ $(OBJ_DIR)/compound_promote.o -L. -lpivotmind $(LDFLAGS)
+
+$(BUILD_DIR)/debug_load: $(OBJ_DIR)/debug_load.o $(LIB_NAME)
+	$(CC) $(CFLAGS) -o $@ $(OBJ_DIR)/debug_load.o -L. -lpivotmind $(LDFLAGS)
+
+$(BUILD_DIR)/feed_cli: $(OBJ_DIR)/feed_cli.o $(LIB_NAME)
+	$(CC) $(CFLAGS) -o $@ $(OBJ_DIR)/feed_cli.o -L. -lpivotmind $(LDFLAGS)
+
+$(BUILD_DIR)/hebbian_pretrain: $(OBJ_DIR)/hebbian_pretrain.o $(LIB_NAME)
+	$(CC) $(CFLAGS) -o $@ $(OBJ_DIR)/hebbian_pretrain.o -L. -lpivotmind $(LDFLAGS)
+
+$(BUILD_DIR)/merge_state: $(OBJ_DIR)/merge_state.o $(LIB_NAME)
+	$(CC) $(CFLAGS) -o $@ $(OBJ_DIR)/merge_state.o -L. -lpivotmind $(LDFLAGS)
+
+$(BUILD_DIR)/quick_chat: $(OBJ_DIR)/quick_chat.o $(LIB_NAME)
+	$(CC) $(CFLAGS) -o $@ $(OBJ_DIR)/quick_chat.o -L. -lpivotmind $(LDFLAGS)
+
+$(BUILD_DIR)/reader: $(OBJ_DIR)/reader.o $(LIB_NAME)
+	$(CC) $(CFLAGS) -o $@ $(OBJ_DIR)/reader.o -L. -lpivotmind $(LDFLAGS)
+
+$(BUILD_DIR)/seed_teacher: $(OBJ_DIR)/seed_teacher.o $(LIB_NAME)
+	$(CC) $(CFLAGS) -o $@ $(OBJ_DIR)/seed_teacher.o -L. -lpivotmind $(LDFLAGS)
+
+$(BUILD_DIR)/state_dump: $(OBJ_DIR)/state_dump.o $(LIB_NAME)
+	$(CC) $(CFLAGS) -o $@ $(OBJ_DIR)/state_dump.o -L. -lpivotmind $(LDFLAGS)
+
+# ========== 工具二进制清单（SSOT：all: 与 tools: 共用同一份，禁止手抄）==========
+# 收录口径：tools/*.c 里所有「有 main 或可独立成二进制」的工具；
+# 唯一例外 probe_batch_contract（其独立门禁见文件末尾，刻意不进 all/test）。
+TOOL_BINS = \
+	$(BUILD_DIR)/corpus_train \
+	$(BUILD_DIR)/batch_learn \
+	$(BUILD_DIR)/batch_learn_lowmem \
+	$(BUILD_DIR)/edge_builder \
+	$(BUILD_DIR)/template_build \
+	$(BUILD_DIR)/path_analyze \
+	$(BUILD_DIR)/compare_templates \
+	$(BUILD_DIR)/eval_templates \
+	$(BUILD_DIR)/qa_crawler \
+	$(BUILD_DIR)/batch_test \
+	$(BUILD_DIR)/build_cross_links \
+	$(BUILD_DIR)/compound_promote \
+	$(BUILD_DIR)/debug_load \
+	$(BUILD_DIR)/feed_cli \
+	$(BUILD_DIR)/hebbian_pretrain \
+	$(BUILD_DIR)/merge_state \
+	$(BUILD_DIR)/quick_chat \
+	$(BUILD_DIR)/reader \
+	$(BUILD_DIR)/seed_teacher \
+	$(BUILD_DIR)/state_dump
+
 # ========== 构建目标 ==========
 
 # 默认 (跳过 clean)
-all: $(LIB_NAME) seed-builder debug-seed gateway digital-life
+# 默认 (跳过 clean) —— ⚠️ 含全部 $(TOOL_BINS)：工具必须在默认构建里，
+# 否则「没被任何目标编译」的工具会静默腐烂（v0.5.31 的教训）。
+# 内存受限设备（Pi 3B 905Mi/LTO）请改用定向目标：make gateway / make seed-builder。
+all: $(LIB_NAME) seed-builder debug-seed gateway digital-life $(TOOL_BINS)
 
-# Linux 一键构建全�?
+# 全部工具（显式聚合目标；本地/CI 都可直接调它做「全工具编译」）
+tools: $(TOOL_BINS)
+
+# 断言 $(TOOL_BINS) 已全部产出（**不触发构建**，只做存在性门禁）。
+# 清单与 all: 同源（TOOL_BINS），禁止在 CI 里手抄工具名 —— 手抄必然与 Makefile 漂移。
+check-tools:
+	@miss=0; \
+	for t in $(TOOL_BINS); do \
+	  if [ -x "$$t" ]; then printf '  OK   %s\n' "$$t"; \
+	  else printf '  MISS %s\n' "$$t"; miss=$$((miss+1)); fi; \
+	done; \
+	if [ $$miss -ne 0 ]; then echo "✗ 有 $$miss 个工具未产出"; exit 1; fi; \
+	echo "✓ 全部 $(words $(TOOL_BINS)) 个工具已产出"
+
+# Linux 一键构建全部
 linux: clean
 	$(MAKE) all
 
@@ -203,7 +281,7 @@ asan-test:
 	echo ""; \
 	[ $$FAILED -eq 0 ]
 
-# 各个可执行文�?
+# 各个可执行文件
 digital-life: $(BUILD_DIR)/digital_life
 gateway: $(BUILD_DIR)/pivotmind_gateway
 seed-builder: $(BUILD_DIR)/seed_builder
@@ -217,6 +295,17 @@ path-analyze: $(BUILD_DIR)/path_analyze
 compare-templates: $(BUILD_DIR)/compare_templates
 eval-templates: $(BUILD_DIR)/eval_templates
 qa-crawler: $(BUILD_DIR)/qa_crawler
+batch-test: $(BUILD_DIR)/batch_test
+build-cross-links: $(BUILD_DIR)/build_cross_links
+compound-promote: $(BUILD_DIR)/compound_promote
+debug-load: $(BUILD_DIR)/debug_load
+feed-cli: $(BUILD_DIR)/feed_cli
+hebbian-pretrain: $(BUILD_DIR)/hebbian_pretrain
+merge-state: $(BUILD_DIR)/merge_state
+quick-chat: $(BUILD_DIR)/quick_chat
+reader: $(BUILD_DIR)/reader
+seed-teacher: $(BUILD_DIR)/seed_teacher
+state-dump: $(BUILD_DIR)/state_dump
 
 edge-builder: $(BUILD_DIR)/edge_builder
 
@@ -470,4 +559,4 @@ $(PROBE_BATCH_CONTRACT): tools/probe_batch_contract.c src/thread_pool.c include/
 
 probe-batch-contract: $(PROBE_BATCH_CONTRACT)
 
-.PHONY: all linux debug asan asan-test digital-life gateway seed-builder debug-seed test-dialog corpus-train batch-learn batch-learn-lowmem template-build path-analyze compare-templates eval-templates qa-crawler run clean install test test-fast test-tensor test-model test-metrics test-trainer test-chinese test-tensor-broadcast test-web-fetch test-dialog-unit test-diffusion-unit test-topology-unit test-memory-unit test-learner-unit test-causal-unit test-forgetting-unit test-media-reader test-visual-cortex test-pure test-search test-pfe-unit test-regression test-semantic-growth test-integration test-cc test-cc-full test-runner probe-batch-contract check-locks sync-version check-version longrun test-paths-unit
+.PHONY: all linux debug asan asan-test digital-life gateway seed-builder debug-seed test-dialog corpus-train batch-learn batch-learn-lowmem template-build path-analyze compare-templates eval-templates qa-crawler run clean install test test-fast test-tensor test-model test-metrics test-trainer test-chinese test-tensor-broadcast test-web-fetch test-dialog-unit test-diffusion-unit test-topology-unit test-memory-unit test-learner-unit test-causal-unit test-forgetting-unit test-media-reader test-visual-cortex test-pure test-search test-pfe-unit test-regression test-semantic-growth test-integration test-cc test-cc-full test-runner probe-batch-contract check-locks sync-version check-version longrun test-paths-unit tools check-tools batch-test build-cross-links compound-promote debug-load feed-cli hebbian-pretrain merge-state quick-chat reader seed-teacher state-dump

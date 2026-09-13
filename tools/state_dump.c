@@ -113,7 +113,8 @@ int main(int argc, char** argv) {
             if (!node || !node->edges) continue;
             for (int c = 0; c < node->edge_count; c++) {
                 int b = (int)(node->edges[c].confidence * 10);
-                if (b < 0) b = 0; if (b > 9) b = 9;
+                if (b < 0) b = 0;
+                if (b > 9) b = 9;
                 bins[b]++;
                 total_conf_samples++;
             }
