@@ -173,7 +173,8 @@ int thalamus_send_signal(Thalamus* th, int target, const BrainSignal* sig) {
 }
 
 int thalamus_recv_signal(Thalamus* th, int region, BrainSignal* out, int max) {
-    if (!th || !out || max <= 0 || region < 0 || region >= THAL_SUBSYSTEM_COUNT) return 0;
+    /* 边界与 thalamus_send_signal 对称：允许 region == THAL_SELF_QUEUE（丘脑自用槽） */
+    if (!th || !out || max <= 0 || region < 0 || region > THAL_SELF_QUEUE) return 0;
 
     pthread_mutex_lock(&th->lock);
 
@@ -191,7 +192,8 @@ int thalamus_recv_signal(Thalamus* th, int region, BrainSignal* out, int max) {
 }
 
 int thalamus_has_signal(Thalamus* th, int region) {
-    if (!th || region < 0 || region >= THAL_SUBSYSTEM_COUNT) return 0;
+    /* 同上：has 也必须认自用槽，否则「发得进、收不出」 */
+    if (!th || region < 0 || region > THAL_SELF_QUEUE) return 0;
     int count;
     pthread_mutex_lock(&th->lock);
     count = th->signal_queues[region].count;
