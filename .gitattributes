@@ -1,0 +1,25 @@
+# ── 玄枢 · 行尾统一策略 ───────────────────────────────────────────────
+# 背景：仓库历史上积累了 163 个 CRLF + 10 个混合换行的文件。跨平台改文件时
+#       （Windows 克隆 → 改 → 传回 Linux）会被 git 判成「整文件重写」，
+#       实测一次 27 行的真实改动被放大成 1192 行。
+# 策略：文本文件一律「入库 LF、检出 LF」—— 任何平台改完传回都是 no-op。
+# 注意：.gitattributes 里后写的规则覆盖先写的，所以「特例」必须排在 `*` 之后。
+* text=auto eol=lf
+
+# Windows 批处理对 LF 容错差，必须 CRLF
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+
+# 二进制资源：不参与行尾转换，也不做文本 diff
+*.png    binary
+*.jpg    binary
+*.jpeg   binary
+*.gif    binary
+*.ico    binary
+*.pdf    binary
+*.bin    binary
+*.dat    binary
+*.o      binary
+*.a      binary
+*.so     binary
+*.so.*   binary
