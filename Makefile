@@ -141,11 +141,6 @@ $(BUILD_DIR)/batch_learn: $(OBJ_DIR)/batch_learn.o $(LIB_NAME)
 $(BUILD_DIR)/edge_builder: $(OBJ_DIR)/edge_builder.o $(LIB_NAME)
 	$(CC) $(CFLAGS) -o $@ $(OBJ_DIR)/edge_builder.o -L. -lpivotmind $(LDFLAGS)
 
-# 低内存版（-DLOW_MEM 于【编译期】生效：周期性跨拓扑重建延后到训练结束；
-#  适合 Zero 2W / 512MB 以下设备。⚠️ 见 batch_learn_lowmem 规则处的历史坑）
-$(BUILD_DIR)/batch_learn_lowmem: $(OBJ_DIR)/batch_learn_lowmem.o $(LIB_NAME)
-	$(CC) $(CFLAGS) -o $@ $(OBJ_DIR)/batch_learn_lowmem.o -L. -lpivotmind $(LDFLAGS)
-
 # 模板构建 / 模板分析工具
 $(BUILD_DIR)/template_build: $(OBJ_DIR)/template_build.o $(LIB_NAME)
 	$(CC) $(CFLAGS) -o $@ $(OBJ_DIR)/template_build.o -L. -lpivotmind $(LDFLAGS)
@@ -203,7 +198,6 @@ $(BUILD_DIR)/state_dump: $(OBJ_DIR)/state_dump.o $(LIB_NAME)
 TOOL_BINS = \
 	$(BUILD_DIR)/corpus_train \
 	$(BUILD_DIR)/batch_learn \
-	$(BUILD_DIR)/batch_learn_lowmem \
 	$(BUILD_DIR)/edge_builder \
 	$(BUILD_DIR)/template_build \
 	$(BUILD_DIR)/path_analyze \
@@ -289,7 +283,6 @@ debug-seed: $(BUILD_DIR)/debug_seed
 test-dialog: $(BUILD_DIR)/test_dialog
 corpus-train: $(BUILD_DIR)/corpus_train
 batch-learn: $(BUILD_DIR)/batch_learn
-batch-learn-lowmem: $(BUILD_DIR)/batch_learn_lowmem
 template-build: $(BUILD_DIR)/template_build
 path-analyze: $(BUILD_DIR)/path_analyze
 compare-templates: $(BUILD_DIR)/compare_templates
@@ -559,4 +552,4 @@ $(PROBE_BATCH_CONTRACT): tools/probe_batch_contract.c src/thread_pool.c include/
 
 probe-batch-contract: $(PROBE_BATCH_CONTRACT)
 
-.PHONY: all linux debug asan asan-test digital-life gateway seed-builder debug-seed test-dialog corpus-train batch-learn batch-learn-lowmem template-build path-analyze compare-templates eval-templates qa-crawler run clean install test test-fast test-tensor test-model test-metrics test-trainer test-chinese test-tensor-broadcast test-web-fetch test-dialog-unit test-diffusion-unit test-topology-unit test-memory-unit test-learner-unit test-causal-unit test-forgetting-unit test-media-reader test-visual-cortex test-pure test-search test-pfe-unit test-regression test-semantic-growth test-integration test-cc test-cc-full test-runner probe-batch-contract check-locks sync-version check-version longrun test-paths-unit tools check-tools batch-test build-cross-links compound-promote debug-load feed-cli hebbian-pretrain merge-state quick-chat reader seed-teacher state-dump
+.PHONY: all linux debug asan asan-test digital-life gateway seed-builder debug-seed test-dialog corpus-train batch-learn template-build path-analyze compare-templates eval-templates qa-crawler run clean install test test-fast test-tensor test-model test-metrics test-trainer test-chinese test-tensor-broadcast test-web-fetch test-dialog-unit test-diffusion-unit test-topology-unit test-memory-unit test-learner-unit test-causal-unit test-forgetting-unit test-media-reader test-visual-cortex test-pure test-search test-pfe-unit test-regression test-semantic-growth test-integration test-cc test-cc-full test-runner probe-batch-contract check-locks sync-version check-version longrun test-paths-unit tools check-tools batch-test build-cross-links compound-promote debug-load feed-cli hebbian-pretrain merge-state quick-chat reader seed-teacher state-dump
