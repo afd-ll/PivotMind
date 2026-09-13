@@ -17,6 +17,8 @@ jobs:
         run: make linux
       - name: Verify all tools built (全工具门禁)
         run: make check-tools
+      - name: Verify wiring (接线门禁)
+        run: make check-wiring
       - name: Run tests
         run: make test
       - name: Show binaries
@@ -92,6 +94,8 @@ jobs:
 
       - name: Verify all tools built (全工具门禁)
         run: make check-tools
+      - name: Verify wiring (接线门禁)
+        run: make check-wiring
 
       - name: Verify ARM64 ELF
         run: |

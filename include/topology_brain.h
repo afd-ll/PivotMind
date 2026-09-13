@@ -55,11 +55,10 @@ typedef enum {
 typedef struct {
     float ema_alpha;           // EMA 衰减率 (默认 0.05)
     float converge_threshold;  // 收敛阈值 (默认 0.35)
-    int   scan_interval;       // 扫描间隔 (默认 600 tick ≈ 10min)
     int   verbose;
 } TopoBrainConfig;
 
-#define TOPOBRAIN_DEFAULT_CONFIG { 0.05f, 0.35f, 600, 0 }
+#define TOPOBRAIN_DEFAULT_CONFIG { 0.05f, 0.35f, 0 }
 
 // ==================== 主结构（对外不透明） ====================
 
@@ -75,9 +74,6 @@ TopologyBrain* topobrain_create(int initial_nodes);
 
 /** 销毁 */
 void topobrain_destroy(TopologyBrain* tb);
-
-/** 设置配置（生效于下次 scan） */
-void topobrain_set_config(TopologyBrain* tb, TopoBrainConfig* cfg);
 
 /**
  * 注册一个新节点，默认为词汇区

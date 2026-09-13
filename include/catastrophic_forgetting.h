@@ -191,11 +191,6 @@ void ewc_config_destroy(EWCConfig* config);
  */
 EWCConfig* ewc_get_default_config(void);
 
-/**
- * 设置默认 EWC 配置
- */
-void ewc_set_default_config(EWCConfig* config);
-
 // ========== 费雪信息矩阵 ==========
 
 /**

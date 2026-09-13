@@ -410,6 +410,10 @@ static void gw_crash_handler(int sig) {
 }
 
 int main(int argc, char* argv[]) {
+    /* v0.5.37 接线：PIVOTMIND_SEED 此前是空开关（CHANGELOG 早已当成品交付）。
+     * 在任何 init_random()/srand() 之前读环境变量；未设该变量时不改变任何行为。 */
+    init_random_from_env();
+
     /* v0.5.25 P2-4: 支持 PIVOTMIND_LOG_FILE=路径 将 stdout/stderr 一并落盘。
      * 用 dup2 而非 freopen：crash handler 直接 write(2, ...)，
      * fd 重定向后 [CRASH] 崩溃现场同样写入文件，配合服务托管可回溯崩溃。 */

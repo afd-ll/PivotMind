@@ -127,13 +127,6 @@ TopologyGrowthConfig* topology_growth_get_default_config(void) {
     return g_default_config;
 }
 
-void topology_growth_set_default_config(TopologyGrowthConfig* config) {
-    if (g_default_config) {
-        topology_growth_config_destroy(g_default_config);
-    }
-    g_default_config = config;
-}
-
 // ==================== 动态节点操作 ====================
 
 int insert_node_dynamic(MasterTopology* master, int topo_id,
