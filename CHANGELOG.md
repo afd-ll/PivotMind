@@ -1,5 +1,28 @@
 # Changelog
 
+## v0.5.33 — 2026-09-13
+
+> 来源：老大「**全部修复**」。—— 修 v0.5.32 收尾时挖出的两个高危问题（长跑脚本隔离洞、旧扁平布局升级失忆），外加一轮全仓 `snprintf` 字面量尺寸体检。工作区 `/home/cx/pm-fix`（Pi 3B），分支 `feat/paths-callsite-migration`，`main` 未动。完整说明见 [changelogs/077-legacy-layout-gate-and-longrun-isolation.md](changelogs/077-legacy-layout-gate-and-longrun-isolation.md)。
+
+### Fixed —— 两个高危
+1. **`tests/longrun/run_longrun_guard.sh` 的沙箱隔离在路径 SSOT 之后已失效**：脚本只把 `$DATA` 当 argv 传引擎，**从不设 `PIVOTMIND_HOME`**；而 v0.5.30 起数据落点由 `pm_home()` 决定，argv 只喂 `chdir()`。⇒ 不设 `PIVOTMIND_HOME` 时引擎会读写 `$HOME/pivotmind`（**线上数据目录**），脚本自以为的沙箱是假的。现在脚本内 `export PIVOTMIND_HOME="$DATA"`；`TOKEN_FILE` 也从过时的硬编码 `/home/cx/pivotmind/gw_token` 改为 SSOT 推导 `$DATA/data/gw_token`（`GW_TOKEN_FILE` 早已是 `pm_file(PM_FILE_TOKEN)`）。
+2. **旧扁平布局 ⇒ 原地升级会「静默从空脑启动」**：线上 `<home>/` 是 v0.5.28 的扁平布局（state 等文件在根目录），而 v0.5.33 的 SSOT 只读 `<home>/data/`。换二进制后引擎找不到 `data/pivotmind_state.dat`，会**新建空状态并正常启动、不报错** = 玄枢失忆。新增 `pm_legacy_layout_report()` / `pm_legacy_layout_guard()`（`pivotmind_paths`）+ 4 个入口接线（gateway 硬拒，digital_life / batch_learn / quick_chat 只告警），并配 `deploy/migrate-home-layout.sh` 迁移脚本。放行开关：`PIVOTMIND_ALLOW_LEGACY_LAYOUT=1`。
+
+### Fixed —— `snprintf` 字面量尺寸体检（21 处全查）
+- **★ 真 bug：`src/template_builder.c:1016`** —— `snprintf(tn->tpl_connectors[k], 8, "%s", conn)`，而字段是 `char tpl_connectors[4][TPL_CONNECTOR_BUF]`（**32 B**，头注释「UTF-8 中文约10字」）⇒ **连接词被静默截到 7 字节**（中文仅 2 字），且它参与合并键归一化 ⇒ 不同连接词会撞键。改 `sizeof`。
+- **5 处 off-by-one（把 `N-1` 写进 `char[N]`）**：`dialog_system.c` 的 `cause_key`/`effect_key`/`intent_key`/`fb`、`hippocampus.c` 的 `dialog_log[slot]` —— 安全，但**白白丢掉最后一个字节**，长输入会被静默截尾。统一改 `sizeof`。
+- **4 处改为 `sizeof`（与字面量等价，纯归正）**：`dream_engine.c` questions/answers、`perception.c` expanded、`gateway_handlers.c` rs、`pivotmind_gateway.c` rs。
+- **7 处字面量保持不变（并说明为什么）**：`dialog_system.c:1650`、`causal_reasoning.c:1147`、`concept_processor.c:198`、`concept_abstraction.c:321/397`、`perception.c:1319/1361` 都是 `malloc(N)` 后 `snprintf(ptr, N, ...)` —— **`sizeof(ptr)` 只会得到指针大小（8）**，字面量才是正确写法。
+- **2 处「剩余容量」写法保持不变**：`gateway_http.c:40`（`snprintf(dst+j, 8, ...)`，循环守卫 `j < dst_size - 8` 已保证余量 ≥8）、`pivotmind_gateway.c:63`（`snprintf(buf+o, 3, "%02x", ...)`，守卫 `o + 2 < cap` 已保证余量 ≥3）—— 字面量是转义宽度，正确。
+- `include/topology_growth.h`：`diagnose_topology()` 的 `report` **无尺寸参数**，补契约注释「非 NULL 时缓冲区至少 256 字节」（该函数仓库内无调用方，未改签名以免破坏 ABI）。
+
+### Added
+- `deploy/migrate-home-layout.sh` —— 旧扁平布局 → SSOT 布局迁移（默认只打印计划，`--yes` 才动手；`--dry-run`；检测到在用实例即拒绝；同盘 `mv` 原子改名，绝不覆盖已存在的 `data/<name>`）。
+- `deploy/README.md` —— 数据根布局变更说明 + 升级步骤。
+
+### Verified
+- 三台机器、三个编译器 `make clean && make all`：**0 error / 0 warning**；`make check-tools` ✓19/19；`make check-version` PASS。
+
 ## v0.5.32 — 2026-09-13
 
 > 来源：老大对 v0.5.31 `[待决策]` 项的裁决 —— **删掉 `batch_learn_lowmem` 变体**。该变体与 `batch_learn` 产出的二进制逐字节相同（死宏 `CROSS_REBUILD_INTERVAL` 全文件零引用），是个**假开关**：它让人以为存在「低内存方案」，实测却无任何差异。工作区 `/home/cx/pm-fix`（Pi 3B），分支 `feat/paths-callsite-migration`，`main` 未动。完整说明（含决策取舍与诚实边界）见 [changelogs/076-drop-batch-learn-lowmem-variant.md](changelogs/076-drop-batch-learn-lowmem-variant.md)。
