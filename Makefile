@@ -535,6 +535,15 @@ sync-version:
 check-version:
 	@python3 tools/check_version_consistency.py
 
+# ========== 接线门禁（opt-in，**刻意不进 test:/CI**）========================
+# 列「有定义/声明、零调用点」的函数（疑似「写了一半没接线」的死代码）：
+# 复核消除启发式误报 + 白名单豁免；有未豁免命中则退出码非 0。
+# ⚠️ 首次运行会报出已知的真死函数 ⇒「先清死代码还是先加白名单」由负责人决定，
+#    故本目标**刻意不接进 `test:` 与 .github/workflows/ci.yml**。
+# 手工跑：make check-wiring   或   python3 tools/check_wiring.py
+check-wiring:
+	@python3 tools/check_wiring.py
+
 # ========== 长跑监护（opt-in，约 15 分钟；**刻意不进 test/test-fast**）=======
 # 治「分钟级才现形的死」：那处自死锁只在 tick%600==0（约 11 分钟）才第一次执行到，
 # 秒级单测结构上抓不住，所以必须长跑。断言 tick 越过 600 并持续增长到 >=900。
@@ -564,4 +573,4 @@ $(PROBE_BATCH_CONTRACT): tools/probe_batch_contract.c src/thread_pool.c include/
 
 probe-batch-contract: $(PROBE_BATCH_CONTRACT)
 
-.PHONY: all linux debug asan asan-test digital-life gateway seed-builder debug-seed test-dialog corpus-train batch-learn template-build path-analyze compare-templates eval-templates qa-crawler run clean install test test-fast test-tensor test-model test-metrics test-trainer test-chinese test-tensor-broadcast test-web-fetch test-dialog-unit test-diffusion-unit test-topology-unit test-memory-unit test-learner-unit test-causal-unit test-forgetting-unit test-media-reader test-visual-cortex test-pure test-search test-pfe-unit test-regression test-semantic-growth test-integration test-cc test-cc-full test-runner probe-batch-contract check-locks sync-version check-version longrun test-paths-unit test-lang-unit test-lang-persist-unit tools check-tools batch-test build-cross-links compound-promote debug-load feed-cli hebbian-pretrain merge-state quick-chat reader seed-teacher state-dump test-concept-output
+.PHONY: all linux debug asan asan-test digital-life gateway seed-builder debug-seed test-dialog corpus-train batch-learn template-build path-analyze compare-templates eval-templates qa-crawler run clean install test test-fast test-tensor test-model test-metrics test-trainer test-chinese test-tensor-broadcast test-web-fetch test-dialog-unit test-diffusion-unit test-topology-unit test-memory-unit test-learner-unit test-causal-unit test-forgetting-unit test-media-reader test-visual-cortex test-pure test-search test-pfe-unit test-regression test-semantic-growth test-integration test-cc test-cc-full test-runner probe-batch-contract check-locks sync-version check-version check-wiring longrun test-paths-unit test-lang-unit test-lang-persist-unit tools check-tools batch-test build-cross-links compound-promote debug-load feed-cli hebbian-pretrain merge-state quick-chat reader seed-teacher state-dump test-concept-output
