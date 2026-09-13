@@ -1,5 +1,24 @@
 # Changelog
 
+## v0.5.39 — 2026-09-13
+
+> 来源：老大定的一句话判据 ——「**全部补收件人，我就说嘛，地基绝对不稳**」。全仓三层「拔线」扫描查出：丘脑信号总线定义了 19 种 `THAL_SIG_*`，**只有 1 种被消费**，而 `thalamus_recv_signal()` / `thalamus_has_signal()` **全仓零调用**。根因不是「忘了建收件端」，而是**架构缺位 —— 丘脑自己没有信箱**：`ThalamusSubsystem` 枚举只有 10 个脑区、**没有丘脑自己那一项**，`FEEDBACK_REPORT` 只能靠「遍历全部 10 个脑区队列」来捞自己的信，副作用是**每次丘脑 tick（每 30 拍）把所有人的定向信箱扫荡干净**，定向信号在收件方读到之前就被丢弃。本版做**第 0 步（修信箱）+ 甲档第一条（打通 `CONSOLIDATE_NODE`）**，作为后续 16 种信号的样板。工作区 `/home/cx/pm-fix`（Pi 3B），分支 `feat/signal-bus`。完整说明见 [changelogs/082-signal-bus-self-queue-and-cons-node.md](changelogs/082-signal-bus-self-queue-and-cons-node.md)。
+
+### 架构 —— 给丘脑建自己的信箱（`THAL_SELF_QUEUE`）
+1. `include/thalamus.h`：新增 `#define THAL_SELF_QUEUE (THAL_SUBSYSTEM_COUNT)` 作为 `signal_queues[]` 的末槽，把「丘脑自己」与「各脑区」在**存储上分开**；数组由 `[THAL_SUBSYSTEM_COUNT]` 扩为 `[THAL_SUBSYSTEM_COUNT + 1]`（`thalamus_create()` 走 `calloc` ⇒ 新槽自动清零，无需额外初始化）。
+2. `src/thalamus.c`：① `thalamus_send_signal()` 定向边界由 `target < THAL_SUBSYSTEM_COUNT` 放宽为 `<= THAL_SELF_QUEUE`；② `thalamus_send_feedback()` 由「广播 `-1`」改为**定向投给丘脑自用信箱**（反馈本就是上报丘脑的，广播到各脑区既无意义、又会挤占其仅 16 格的队列）；③ `thalamus_tick()` 消费循环由「**遍历全部 10 个脑区队列并清空**」改为「**只消费 `THAL_SELF_QUEUE`**」，各脑区队列原样保留给对应脑区自行收取。
+
+### 接线 —— 甲档第一条：海马体 → 感知区「联网查证」
+3. 新增 `perception_request_concept(Perception*, int node_id)`（`include/perception.h` + `src/perception.c`）：`node_id` → 查词汇子拓扑取概念名 → **异步入队**。🔴 **只入队、不执行** —— 同步版 `perception_consolidate_node()` 会跑 `search_and_learn`（HTTP），那正是 v0.5.8 之前「脑干主循环被 curl 拖死」的老毛病；真正的 HTTP 交由 perception worker 线程串行执行。
+4. `src/brainstem.c`：`brainstem_tick_perception` 代感知区 `thalamus_recv_signal(th, THAL_PERCEPTION, ...)`，把 `THAL_SIG_CONSOLIDATE_NODE` 转交 `perception_request_concept()`（**只转交、不执行**）。这是 `thalamus_recv_signal()` 在**全仓的第一个调用点**。
+
+### Verified
+- **WSL（x86_64 / gcc 15.2.0）**：`make clean && make all -j8` **0 error / 0 warning**；`make test` **32 通过 / 0 失败**；`make asan-test` **15/15 PASS**（新增队列操作内存安全）；新增投递验证程序 **17/17 PASS**。
+- **armbian-1（aarch64 / gcc 13.3.0）**：第二编译器全量构建 —— _（见 082 验证节）_；线上实例与线上数据**未触碰**。
+- **投递验证采用「可区分断言」** —— 每条断言**旧实现必 FAIL、新实现必 PASS**：① 定向信在 `thalamus_tick` 后**仍存活**（旧实现 = 0）；② 反馈只进丘脑自用槽、**10 个脑区队列零污染**（旧实现 = 10 条）；③ 任一脑区的定向信都不被 tick 清空；④ 反馈被丘脑消费 —— 直接检视队列内信件的**类型与载荷**，不用会被同一次 tick 清零的累加器。
+- ⚠️ **诚实边界（详见 082）**：本版只做「第 0 步 + 1 条链路」，**甲档其余 6 种信号的收件人归属尚未定** —— 它们都是「状态通知」式广播，收件人需要判别，**不是照抄样板即可**；**乙档 10 种从来没人发**，须先补发件端。**未上线部署**。
+- ⚠️ 已知遗留：`thalamus_recv_signal()` / `thalamus_has_signal()` 的 `region` 边界仍是 `>= THAL_SUBSYSTEM_COUNT` 即拒，与 `thalamus_send_signal()` 放宽后的边界**不对称**（丘脑读不了自己的信箱）；当前无功能影响（唯一读自用槽的是 tick 内部直读数组），已登记待办。
+
 ## v0.5.37 — 2026-09-13
 
 > 来源：老大定的一句话判据 ——「一个从没被调用过的配置注入口，等于在宣称一个不存在的能力。**能接线就接线，接不了就删。**」据此把上一轮诊断扫出的 8 个「有定义/声明、零调用点」函数逐条定性：**6 删 + 2 接线**（其中 `PIVOTMIND_SEED` 是**修 bug**：它早在 CHANGELOG 当成品交付，实际是空开关）。清完之后 `make check-wiring` 首次全绿，于是把这门禁从「建了不接」接入 `test:` 与两个 CI job。工作区 `/home/cx/pm-fix`（Pi 3B），分支 `feat/check-wiring`。完整说明（含正反例沙箱证据与 6 条诚实边界）见 [changelogs/081-deadcode-cleanup-and-wiring-gate.md](changelogs/081-deadcode-cleanup-and-wiring-gate.md)。
