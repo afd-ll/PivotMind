@@ -25,7 +25,7 @@
  * 设计口径：
  *   - **码点级，不是字节级**：一律先 pm_utf8_decode 解出码点，再按 Unicode 区块归属。
  *   - 与显示宽度 SSOT（src/ui.c 的 ui_disp_width）同源思路：一个维度一个真值源。
- *   - Makefile 的 `CORE_SRC = $(wildcard src/*.c)` 会自动纳入 src/lang.c，无需改 Makefile。
+ *   - Makefile 的 CORE_SRC 用 `src/` 通配全部 `.c`，会自动纳入 src/lang.c，不需要改 Makefile。
  *
  * 用法约定：
  *   - **新代码一律用本文件的 API，不要再写裸判据**（`& 0x80` / `strlen==3` / 裸码点比较）。
