@@ -21,7 +21,7 @@
 - **WSL（x86_64 / gcc 15.2.0）**：`make clean && make -j8 all` **0 error / 0 warning**；`make check-tools` ✓ **19/19**；`make check-wiring` **0 命中 / RC=0**；`make test` **32 通过 / 0 失败**；`make asan-test` **15/15 PASS**；新单测直跑 **6/6**。
 - **armbian-1（aarch64 / gcc 13.3.0）**：`nice -n 19 -j2` 全量构建与 `make test` 全绿；线上实例 `pid 2215289` 与线上数据**未触碰**。
 - **正反例沙箱**：`check-wiring` 拒绝档 RC=1 / 放行档 RC=0；守护单测抽掉 guard 后 T1 变红。
-- ⚠️ 诚实边界（详见 081）：本版只删死代码 + 给一个宣称过的开关通电，**未修任何功能**；门禁覆盖面有限；`make asan-test` 下 14 条预存 `-Wformat-truncation` 落在**未改动**文件（默认构建 0 warning）；**未上线部署**。
+- ⚠️ 诚实边界（详见 081）：本版只删死代码 + 给一个宣称过的开关通电，**未修任何功能**；门禁覆盖面有限；`make asan-test` 下 14 条预存告警（12 条 `-Wformat-truncation` + 2 条 `-Wformat-overflow`，详见 081 第二轮更正） 落在**未改动**文件（默认构建 0 warning）；**未上线部署**。
 ## v0.5.36 — 2026-09-13
 
 > 来源：老大对 079 第七节 **D3 决策**的裁决 ——「**落**」。把语种从「运行期临时值」升级为节点的**固有结构属性**：`ReasoningNode` 新增 `uint8_t lang`，状态格式 **9 → 10**。**落盘值是语种 SSOT（`pm_lang_of`）的物化缓存**，加载期无条件按 SSOT 重算覆盖 —— **落了盘也不产生第二个真值源**。本版只「打标」，不做分表、不动跨语种边（D2 仍属专项轮）。工作区 `/home/cx/pm-fix`（Pi 3B），分支 `feat/paths-callsite-migration`，`main` 未动。完整说明（含「纯往返断言证明不了持久化」的方法论、v9 零迁移实测与 4 条诚实边界）见 [changelogs/080-lang-persist.md](changelogs/080-lang-persist.md)。

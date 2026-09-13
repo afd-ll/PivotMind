@@ -125,7 +125,7 @@
    这不等于「玄枢的随机性/可复现性被解决了」—— 它只是让一个已有入口名副其实。
 2. **`check-wiring` 覆盖面有限**：只扫上述 4 个命名族，且看不见函数指针 / 回调 / 宏展开的调用点。它抓的是
    「机制在、没接线」这一类**高发**缺陷，不是全部。本次**刻意不扩命名族**（避免误报淹没真信号）。
-3. **`make asan-test` 下存在 14 条预存 `-Wformat-truncation` 警告**，全部落在本版**未改动**的文件
+3. **`make asan-test` 下存在 14 条预存告警（12 条 `-Wformat-truncation` + 2 条 `-Wformat-overflow`）**，全部落在本版**未改动**的文件
    （`autonomic_learner.c` / `multi_topology.c` / `visual_cortex.c` / `tests/unit/test_paths_unit.c`），仅在 ASan 旗标
    （`-O1`）下出现；默认出货构建（`-O2`）**0 warning**。本版未处理它们（不在范围内），如实记录。
 4. **两笔提交的中间态**：第一笔（代码）提交后、第二笔（文档，含活文档版本锚点）提交前，`make check-version` 会**红**
@@ -133,3 +133,51 @@
    必然中间态，不是缺陷，也不是「先红后绿蒙混」。
 5. **本版未上线部署**（遵铁律）。armbian 的 `pm-v0537-arm` 仅做编译验证，未替换线上二进制、未动线上数据。
 6. **本版未并入 `feat/lang-zhchar`**（B 类语种口径），其 A/B 结论为「不合入」，保留为实验记录。
+
+---
+
+## 第二轮 · 更正记录（2026-09-13，发布后自查）
+
+本笔是**合并之后的追加更正提交**（纯文档，不改任何代码；代码提交仍是 `387bbec`，tip 后为 `91c23e2`）。
+起因：合并后在 WSL 的 tip 克隆上重跑 `make asan-test` 并**逐条解析告警**，发现首版把告警的**种类计数**写错了。
+
+**实测（WSL x86_64 / gcc 15.2.0，tip `91c23e2`，`make clean && make asan-test`）**
+
+```
+ASAN_RC=0   PASS=15   FAIL=0
+total_warning_lines = 14
+-Wformat-truncation        = 12
+```
+
+逐条落点（全部是本版**未改动**的文件）：
+
+| 文件 | 条数 |
+|---|---|
+| `tests/unit/test_paths_unit.c` | 5 |
+| `src/multi_topology.c` | 4 |
+| `src/autonomic_learner.c` | 2 |
+| `src/visual_cortex.c` | 1 |
+
+另有 **2 条 `-Wformat-overflow`（`null format string`）**，报在 `/usr/include/x86_64-linux-gnu/bits/stdio2.h:166`
+（`__builtin___snprintf_chk` 的展开处，根因是某个 TU 传了 NULL 格式串）—— 这 2 条**不属于** `-Wformat-truncation`。
+
+**错在哪**：首版把「14 条总告警行」整体说成「14 条 `-Wformat-truncation`」。正确口径是
+**14 条预存告警 = 12 条 `-Wformat-truncation` + 2 条 `-Wformat-overflow`**。上文「诚实边界」第 3 条与
+`CHANGELOG.md` 顶部节已按此更正。
+
+**结论不变**（更正的是计数口径，不是判断）：14 条**全部**落在本版未改动的文件、**仅** ASan 旗标（`-O1`）下出现、
+默认出货构建（`-O2`）**0 warning** ⇒ 「本版未引入任何新告警」仍然成立。
+
+**可复查命令**
+
+```sh
+cd <tip 克隆>
+export PIVOTMIND_HOME=<隔离沙箱>
+make clean && make asan-test > /tmp/asan.log 2>&1
+grep -cE 'warning:' /tmp/asan.log                 # 14
+grep -c 'Wformat-truncation' /tmp/asan.log        # 12
+grep -E '\.(c|h):[0-9]+:[0-9]+: warning:' /tmp/asan.log   # 逐条列点
+```
+
+**教训**：写「N 条 XX 类告警」之前必须**按 `warning: ... [-Wxxx=]` 分组计数**，不能数 `warning:` 行数 ——
+同一份构建日志里混着 `-Wformat-truncation` 与 `-Wformat-overflow` 时，前者很容易被当成全部。
