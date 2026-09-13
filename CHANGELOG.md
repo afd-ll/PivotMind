@@ -1,5 +1,52 @@
 # Changelog
 
+## v0.5.31 — 2026-09-13
+
+> 来源：老大「**工具要做好，然后要跑那些检测，通常能抓出来很多东西的**」。做完发现 **`tools/` 层长期零自动编译**——23 个 `.c` 里 11 个**根本没有二进制规则**、9 个虽有规则却**不在 `all:` 里**（`make linux` / CI 只编 4 个二进制）；再用三个 GCC 版本交叉一扫，**抓出 4 类真 bug**。权威工作区 `/home/cx/pm-fix`（Pi 3B），分支 `feat/paths-callsite-migration`，`main` 未动。完整发布说明（逐条证据 / 诚实边界 / 待决策项）见 [changelogs/075-tools-build-integration-warning-sweep.md](changelogs/075-tools-build-integration-warning-sweep.md)。
+
+### Added
+
+**工具进构建（Makefile）**
+- `TOOL_BINS` = **20 个工具二进制**，`all:` 与 `tools:` **共用同一份清单**；新增 `tools:` 聚合目标。
+- 补齐 **11 条缺失的二进制规则** + 11 个 phony 别名：`batch_test` / `build_cross_links` / `compound_promote` / `debug_load` / `feed_cli` / `hebbian_pretrain` / `merge_state` / `quick_chat` / `reader` / `seed_teacher` / `state_dump` —— 这些此前**只有源文件、没有任何构建入口**。
+- 新增 `check-tools:` 门禁：用 `TOOL_BINS` 断言「20 个全产出」，**不触发构建、不在 CI 里手抄清单**（手抄必然与 Makefile 漂移）。
+
+**CI**
+- `build-x86_64` / `build-arm` 两个 job 各加一步 `make check-tools`。
+
+### Changed
+- `all:` 并入 `$(TOOL_BINS)`。⚠️ 代价：`all` 变重 —— **内存受限设备（Pi 3B 905Mi + LTO）别跑 `make all`**，改用 `make gateway` / `make seed-builder` 等定向目标（已写进 Makefile 注释）。
+- `batch_learn_lowmem` 规则修正：旧规则把 `-DLOW_MEM` 写在**链接行**上（对已编译好的 `.o` 完全无效），改为编译它自己的翻译单元。
+- `Makefile` 注释中 **14 处 U+FFFD 乱码**复原（纯注释改动，残留 0）。
+
+### Fixed —— 三个编译器交叉扫出来的真问题
+1. **`tools/quick_chat.c:35` 编译错误（GCC 14+）**：`master->ext_dict = d;` 缺 `(struct ExternalDict*)` 强转。三个同名站点（`batch_learn.c:342` / `feed_cli.c:213` / `multi_topology.c:73`）早有强转，**独此漏网**。GCC 13 只 warning，**GCC 14 起 `-Wincompatible-pointer-types` 升为 error** ⇒ 该工具在新编译器上根本编不过。
+2. **`tools/reader.c` `is_sent_end()` 静默架构 bug**：`char` 在 x86_64 上**有符号**，`p[1] == 0xBC`（188）**恒假** ⇒ **中文句末标点判定在 x86_64 上完全失效**；ARM 上 `char` 无符号，所以此前「看起来正常」。改走 `const unsigned char*`。
+3. **`.bak` 缓冲截断（3 处）**：`char bak[520]; snprintf(bak, 519, "%s.bak", path);`，而 `path` 上限 `PM_PATH_MAX=4096` ⇒ 路径偏长时**备份文件名被静默截断**。`batch_learn.c` / `build_cross_links.c` / `hebbian_pretrain.c` 统一改 `PM_PATH_MAX + 后缀` 并用 `sizeof`。由 GCC **14.2** 的 `-Wformat-truncation` 抓出（**GCC 15.2 不报**）。
+4. **`tools/merge_state.c` 静默吞错 + 计数错乱**：① 14 处 `fread` 返回值未检查 ⇒ 新增 `rd_or_die()`，状态文件被截断时**显式报错退出**，不再把残缺缓冲区当数据静默合并；② 17 处 `int` → `uint32_t` + 4 处 `printf %d`→`%u`。
+5. `tools/hebbian_pretrain.c` 加 `fread` / `ftell` / `malloc` 守卫；`demos/digital_life.c` `system()` 返回值（**⚠️ `(void)system(...)` 抑制不了 GCC `-Wunused-result`，必须赋值给变量**）；`seed_teacher.c` / `state_dump.c` / `build_cross_links.c` / `corpus_train.c` / `batch_learn.c` 若干告警。
+
+### Verified
+三台机器、三个编译器，`make clean && make all` 全量构建 **0 error / 0 warning**：
+
+| 机器 | 架构 | gcc | 方式 | 结果 |
+|------|------|-----|------|------|
+| WSL/G15 | x86_64 | **15.2.0** | `make clean && make -j8 all` | 24 二进制 / 0E 0W |
+| astar728-1 | armv7l (Pi 3B) | **14.2.0** | 12 个改动文件逐个 `gcc -c` | 0E 0W |
+| armbian-1 | aarch64 (RK3399) | **13.3.0** | 干净克隆 + `make clean && make -j4 all` | 24 二进制（20 工具齐）/ 0E 0W |
+
+`make check-tools` ⇒ `✓ 全部 20 个工具已产出`；`Makefile` 保持 CRLF、工具源 LF、`U+FFFD` 残留 0。
+
+### Known Issues / 待决策
+- **`CROSS_REBUILD_INTERVAL` 是死宏**（除自身 `#define` 外零引用）⇒ `batch_learn_lowmem` 与 `batch_learn` 产出的二进制**逐字节相同**（md5 一致，已实测），「低内存版」当前**无任何实际差异**。已在源码处标注 `[待决策]`；处置（① 删掉该变体 ② 把 `LOW_MEM` 接回重建判定）**涉及训练内存语义，未擅自决断**。
+- `demos/gateway_handlers.c:618`、`demos/pivotmind_gateway.c:236` 的 `snprintf(x, N, ...)` 用字面量尺寸（当前与缓冲同值，**安全**但非 `sizeof`）：涉及线上部署二进制，未改。
+- CI 仍只在 `main`/`master`/`develop` 触发 ⇒ `feat/*` 分支不跑 CI；本次的 `check-tools` 门禁要**合入 `main` 才生效**。
+
+### 方法教训（进纪律）
+- **`gcc -fsyntax-only` 漏报 `-Wunused-result`**：首轮用它扫出「23/23 全零」是**假象**，真实 `-c` 编译后暴露 16 个 ⇒ 编译检测必须真实编译。
+- **`(void)expr` 抑制不了 GCC `-Wunused-result`**（最小样例已实测）；必须赋值给变量。
+- **单编译器不足以定案**：有符号 `char` 要 x86_64 才现形；`bak` 截断要 GCC 14.2 才报；`quick_chat` 强转要 GCC 14+ 才升级为 error。三个版本交叉扫，才算「跑过检测」。
+
 ## v0.5.30 — 2026-09-13
 
 > 来源：**路径可移植化三段式全部落地（6 笔）+ `digital_life` 复活（1 笔）+ v0.5.29 之后落的 7 笔尾巴**，共 **14 笔**（`6dacf75` / `84176c0` / `1128813` / `d3b30dd` / `7995028` / `0c7a960` / `0c172a2` / `faf7655` / `1a2e873` / `0b6a3fd` / `9fd28f7` / `f500ef2` / `ab1853e` / `2e0bb19`），均已 `commit`；权威工作区 `/home/cx/pm-fix`（Pi 3B）HEAD `2e0bb19`，分支 `feat/paths-callsite-migration`，`main` 未动。完整发布说明（含逐条证据、诚实边界、红线声明、已知未做）见 [changelogs/074-paths-ssot-three-steps.md](changelogs/074-paths-ssot-three-steps.md)。主线是**把「数据文件落在哪儿」从散落各处的字符串字面量与 `getenv` 收成一个唯一真值源，并让目录「默认自建」**。

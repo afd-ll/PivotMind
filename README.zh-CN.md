@@ -8,7 +8,7 @@
 
 [English](README.md) · [简体中文](README.zh-CN.md)
 
-[![版本](https://img.shields.io/badge/version-v0.5.30-blue.svg)](changelogs/)
+[![版本](https://img.shields.io/badge/version-v0.5.31-blue.svg)](changelogs/)
 [![CI](https://github.com/afd-ll/PivotMind/actions/workflows/ci.yml/badge.svg)](https://github.com/afd-ll/PivotMind/actions/workflows/ci.yml)
 [![许可证](https://img.shields.io/badge/license-Apache%202.0-green.svg)](LICENSE)
 [![语言](https://img.shields.io/badge/C-99%2B-orange.svg)](https://en.wikipedia.org/wiki/C99)
@@ -24,7 +24,7 @@
 
 项目围绕低资源设备上的持续在线学习设计。语料输入是主要学习信号；模型自身生成的输出不会被直接当作独立事实来源。
 
-**当前版本：v0.5.30。** 这是一个处于玩具期的研究项目，不是大语言模型的替代品，也不是已经完成的生产级对话系统。
+**当前版本：v0.5.31。** 这是一个处于玩具期的研究项目，不是大语言模型的替代品，也不是已经完成的生产级对话系统。
 
 ## 架构
 
@@ -102,7 +102,7 @@ w(i, j, t + 1) = w(i, j, t) + eta * cooccur(i, j)
 
 | 指标 | 数值 |
 |---|---|
-| 版本 | `0.5.30` |
+| 版本 | `0.5.31` |
 | 运行状态 | `running`；`/health` 返回 `ok` |
 | 节点 | `17,105` |
 | 拓扑 | `12` |
