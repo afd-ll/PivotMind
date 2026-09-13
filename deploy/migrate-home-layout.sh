@@ -118,8 +118,11 @@ live_pids() {
   for d in /proc/[0-9]*; do
     [ -d "$d" ] || continue
     pid="${d#/proc/}"
-    if [ -r "$d/environ" ]; then
-      if tr '\0' '\n' < "$d/environ" 2>/dev/null | grep -qxF "PIVOTMIND_HOME=$HOME_DIR"; then
+    if [ -e "$d/environ" ]; then
+      # 注意：/proc/<pid>/environ 对「非本人进程」是 EPERM，而 [ -r ] 会误判为可读
+      # （它看的是权限位）。故这里必须用 cat + 2>/dev/null 吞掉错误，
+      # 不能用重定向（`< file` 的失败由 shell 报，2>/dev/null 压不住）。
+      if cat "$d/environ" 2>/dev/null | tr '\0' '\n' | grep -qxF "PIVOTMIND_HOME=$HOME_DIR"; then
         echo "$pid"; continue
       fi
     fi
