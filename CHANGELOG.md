@@ -1,5 +1,31 @@
 # Changelog
 
+## v0.5.36 — 2026-09-13
+
+> 来源：老大对 079 第七节 **D3 决策**的裁决 ——「**落**」。把语种从「运行期临时值」升级为节点的**固有结构属性**：`ReasoningNode` 新增 `uint8_t lang`，状态格式 **9 → 10**。**落盘值是语种 SSOT（`pm_lang_of`）的物化缓存**，加载期无条件按 SSOT 重算覆盖 —— **落了盘也不产生第二个真值源**。本版只「打标」，不做分表、不动跨语种边（D2 仍属专项轮）。工作区 `/home/cx/pm-fix`（Pi 3B），分支 `feat/paths-callsite-migration`，`main` 未动。完整说明（含「纯往返断言证明不了持久化」的方法论、v9 零迁移实测与 4 条诚实边界）见 [changelogs/080-lang-persist.md](changelogs/080-lang-persist.md)。
+
+### Added —— 节点语种标签落盘（state fmt_ver 9→10）
+1. **`include/huarong_topology.h`**：`ReasoningNode` 尾部新增 `uint8_t lang`（`PmLang` 0=unknown/1=zh/2=en/3=ja/4=ko/5=other）。**`src/huarong_topology.c`**：`create_reasoning_node()` 由 `pm_lang_of(concept)` 定标（concept 创建后不再变 ⇒ 值恒定）。该字段是**物化缓存**，权威永远是 `pm_lang_of()`。
+
+### Changed —— 状态格式 9 → 10（两条写路径必须同布局）
+2. **`src/multi_topology.c`**：`STATE_FORMAT_VERSION` 9→10（版本注释块补 v10 条目 + **回滚不可逆告警**）。`SaveNodeSnap.lang` 随快照深拷贝；**两条写路径**（流式批 `master_serialize_batch` 与锁内 `master_save_state_locked`）均在 `dist_sig_count` 之后追加 **1 字节 lang**，布局**逐字节一致**（否则同一份状态会因 `PIVOTMIND_SAVE` 开关写出两种文件）。
+
+### Changed —— 读端 SSOT 权威 + 前向兼容（零迁移）
+3. 加载分两 Pass（创建节点 / 恢复边）：`fmt_ver>=10` **读**该字节并与 `pm_lang_of` 比对（不符则**以 SSOT 为准纠偏** + `lang_mismatch` 计数，收尾 `LOG_WARNING` 记账）；`fmt_ver<10`（v2..v9）**无此段** ⇒ 由 `concept` 现算 —— **旧文件零迁移、无需迁移脚本**。Pass 2 跳过 lang 段。**版本闸门未变**：`fmt_ver > 10` 显式拒绝并记账。
+
+### Added —— 契约单测（第 29 支）
+4. **`tests/unit/test_lang_persist_unit.c`**（**6 组 / 6 通过**：T0–T5）。**关键方法论**：加载端由 `huarong_net_add_node()` 重建节点并按 SSOT 重算 `lang` ⇒ **纯往返断言证明不了持久化存在**（字节没写、读回的值也照样"正确"）；改用**三个能真正变红的探针** —— **T1 文件字节探针**（把 `dist_sig_count` 写成唯一哨兵定位记录尾部，直接验紧随其后的 1 字节 + `fmt_ver==10`）、**T3 故意写脏**（改成错值 ⇒ 内存值仍 SSOT + stderr 出现「lang 一致性: 1 个节点」）、**T4 抽掉字节**（按哨兵删掉 lang 字节 + `fmt_ver` 改回 9 ⇒ 仍全部对齐）。另有 T2 往返、T5 双路径文件逐字节一致（`fork` + `PIVOTMIND_SAVE=locked`）。**Makefile 7 处接入**：`ASAN_TEST_TARGETS` / `ASAN_TEST_BINS` / 编译规则 / 别名 `test-lang-persist-unit` / `TEST_BINS` / `test:` 前置依赖 / `.PHONY`。
+
+### Fixed —— v0.5.35 `make asan-test` 的「双清单」遗漏
+5. `make asan-test` 有 `ASAN_TEST_TARGETS`（构建）与 `ASAN_TEST_BINS`（执行）**两张表**；v0.5.35 只补了后者 ⇒ `asan-test` 先 `clean` 再**只构建 TARGETS**、却去执行 BINS 里**未构建**的 `test_lang_unit` ⇒ `[ -x ]` 不成立、**恒定 FAIL**（当时收尾没跑过 `asan-test` 所以没发现）。本版**两张表都补齐**。
+
+### Verified
+- 三机（Pi 按现行铁律不编译）：WSL x86_64 / gcc 15.2.0 与 armbian-1 aarch64 / gcc 13.3.0，`make clean && make all` 均 **0 error / 0 warning**；`make check-tools` ✓ 19/19；`make check-version` PASS；`make test` **29 通过 / 0 失败**（28→29）；新单测两机直跑 **6 run / 6 passed / 0 failed**；`make asan-test`（WSL）**13/13 PASS，LSan 无泄漏**。
+- **真实线上 v9 前向兼容 A/B**（armbian，只读副本）：v0.5.36 二进制加载线上 v9 状态**成功**（3903 节点 / 3635 边，`lang 一致性: 全部节点与语种 SSOT 一致`，**零迁移**）；把副本 `fmt_ver` 改到 11 ⇒ 加载**显式拒绝并报错**（闸门有效）。
+- 线上实例 `pid 2215289`（仅监听 `127.0.0.1:8080`）与线上数据全程未动；线上 state 仅**只读复制**一份做 A/B，源文件未被写。
+
+> ⚠️ **换版提示**：一旦用 v0.5.36 存盘（`fmt_ver=10`），退回只认 ≤9 的旧二进制会被闸门**显式拒绝**（非静默误读）⇒ 线上换版前**必须备份 v9 状态文件**；回退不可逆。
+
 ## v0.5.35 — 2026-09-13
 
 > 来源：老大「**接下来就是做分开语种了**」→「**先分离多语种，专项专做再说**」。动工前盘点发现语种判定散落 9 处、口径分三档且各有错判 —— 在这样的地基上做分离，边界本身就是错的。本版只做一件事：**让「语种是什么」在全仓只有一个答案**（真值源）；刻意不碰节点数据结构、跨语种边、状态格式（那些属「专项」，见 D1/D2/D3）。工作区 `/home/cx/pm-fix`（Pi 3B），分支 `feat/paths-callsite-migration`，`main` 未动。完整说明（含三档错判、契约单测、线上只读分布实测与 6 条诚实边界）见 [changelogs/079-lang-ssot-convergence.md](changelogs/079-lang-ssot-convergence.md)。
