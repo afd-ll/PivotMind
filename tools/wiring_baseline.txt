@@ -69,11 +69,12 @@ D gru_init_weights                   # include/nn/layer_gru.h:90 —— 全仓�
 A test_tensor_create_negative_size   # tests/unit/test_tensor.c:145 —— 被 test_tensor.c:505 注释停用（-5 转 size_t 会过大分配）
 
 # ══════════════════════════════════════════════════════════════════
-# B · 显式丢弃 `(void)形参;`（39）
+# B · 显式丢弃 `(void)形参;`（38）
 #     绝大多数是**签名固定、参数本就该丢**（main 的 argv / 信号处理函数的 signum /
 #     线程入口的 arg / 回调的 ctx）⇒ 属于「消 -Wunused-parameter」的正常写法。
-#     🔴 但其中 `perception_tick throttle` 是**真缺陷**（上游注意信号被主动丢弃，
-#     见待办 A7）—— 这正是本判据存在的理由。
+#     ★ 本判据已立功：`perception_tick throttle` 曾是**真缺陷**（上游注意信号
+#     被主动丢弃，见待办 A7）。v0.5.40 B-1 已接线修复（throttle 现为感知区
+#     第一道闸门），该条已从下方清单移除 —— 判据 B 存在的意义已被实证。
 # ══════════════════════════════════════════════════════════════════
 B main argc                                # main 签名固定
 B main argv                                # main 签名固定
@@ -113,4 +114,3 @@ B topology_walk_cross query_anchor         # 参数暂未用
 B train_do_auto_save workdir               # 参数暂未用
 B unified_free tag                         # 参数暂未用
 B unified_realloc tag                      # 参数暂未用
-B perception_tick throttle                 # 🔴 真缺陷：上游注意信号被主动丢弃（待办 A7）
