@@ -1,5 +1,30 @@
 # Changelog
 
+## v0.5.34 — 2026-09-13
+
+> 来源：老大「**可以，都一起抓了做了吧**」。—— 把 v0.5.33 收尾时补做的 CLI/网关端到端验证挖出的 5 处缺陷一次性收口；发版收尾又补跑 `make test`，顺带把**非 C 介质**（Makefile / 脚本 / 测试）里的同类框病一并收掉。工作区 `/home/cx/pm-fix`（Pi 3B），分支 `feat/paths-callsite-migration`，`main` 未动。完整说明（含三机验证数据与 8 条诚实边界）见 [changelogs/078-asset-ssot-frame-width-load-count.md](changelogs/078-asset-ssot-frame-width-load-count.md)。
+
+### Fixed —— 资产路径并入 SSOT（P1 / P1-B）
+1. **8 处资产仍是「相对 CWD 的裸路径」** ⇒ 从任意目录启动工具/网关就找不到，且**找到失败后静默降级**（词典没了退化成逐字分词、语料没了只报一句"无法打开"）。在 `pivotmind_paths` 增设**资产表**：`pm_asset()` + `PM_ASSET_JIEBA_DICT` / `PM_ASSET_QA_CORPUS` / `PM_ASSET_KB` / `PM_ASSET_XIAOHUANGJI`（刻意与 12 个状态文件的 `g_filename[]` **分开**，避免污染 v0.5.33 刚落地的旧扁平布局审计）。调用点全部改走 `pm_asset()`：`quick_chat` / `feed_cli` / `batch_learn` / `hebbian_pretrain` / `corpus_train` / `seed_builder` / `demos/gateway_system` / `demos/pivotmind_gateway`。另修 `tools/corpus_train.c` 的 `#define CORPUS_DIR "~/本地书库"`（**C 里 `~` 从不展开**，是永远找不到的路径）→ `pm_dir(PM_DIR_CORPUS)`。
+2. **网关 `--train-mode` 的双根**：默认语料写死 `"data/hermes_knowledge_base.json"`，与资产根不是同一个根 ⇒ 统一为 `pm_asset(PM_ASSET_QA_CORPUS)`。
+
+### Fixed —— `quick_chat` 缺失状态的退出码语义（P2）
+3. 状态文件**缺失**判成了加载异常：源码注释写着「缺 ⇒ 首次运行 / 空脑，属正常路径（RC=0）」，紧跟的 `if (loaded <= 10) { printf("× 状态加载异常"); return 1; }` 却把「文件不在」与「文件在却几乎没加载出东西」判成同一件事 —— 先提示「属正常」，再按异常退出（**是 WSL 用退出码实测才暴露的**）。改为记住 `state_present`：文件**不在** ⇒ 打印空脑提示后**继续**（RC=0）；文件在但 ≤10 节点 ⇒ RC=1；文件**损坏** ⇒ `multi_topology` fail-loud，RC=1。
+
+### Fixed —— 制表框按【显示宽度】对齐（P3）
+4. 全仓框一律用 `strlen`（**字节数**）补空格 ⇒ CJK 占 2 显示列却只算 1 ⇒ **右边框一律错位**（42 条内容行里 31 条错位；标题带版本号时手改空格**必然复发**）。在 `ui.c` / `ui.h` 立**显示宽度感知**的框 API：`ui_disp_width()`（EAW `W`/`F`=2、组合符/零宽=0、其余=1）、`ui_frame_stream(FILE*)`（切流并返回原流，便于成对恢复）、`ui_frame_begin/sep/sep_label/row/end/title()`（`title` 的 `inner_w<=0` ⇒ 自动宽度）。**17 处站点 / 14 文件全部迁移**，含两处块内含 `for`/`if` 的复合框（`template_builder.c` 的 POS 诊断走 `ui_frame_stream(stderr)`、`batch_learn.c` 的完成汇总框）。顺带修 `ui_box_start()` 的横线也按字节数算的同类缺陷。
+   - **超宽治根**：`ui_frame_row` 超宽不再「不截断、留一格再收边」（那正是把右边框推走的写法），改为按**显示列**在**码点边界**截断、末位打 `U+2026 …` —— 既不整行溢出，也不静默丢数据（省略号是「这里被切了」的凭证）。配套把 UTF-8 解码抽成 `static ui_utf8_decode()`，`ui_disp_width` 复用（解码口径收成一处）。内容层面的两处另修：`compound_promote` 标题框改**自动宽度**；`batch_learn` 完成框的「权重饱和」行**拆成两行**（三个百分数同占一行，43 列必然不够）。
+   - **第二轮（非 C 介质）**：补跑 `make test` 发现其输出框 **40 vs 39** 错位（框由 `Makefile:473/499` 自己 `printf`，**不在第一轮「19 个工具二进制」的取样面内**）。用静态测量器扫全仓 19 个框块（13 块错位），修 11 处：`Makefile` / `scripts/demo.sh` / `tools/textbook_download_guide.py` / `tests/test_runner.c` / `test_cognitive_controller.c` / `test_cognitive_full.c` / `test_web_fetch.c`。其中 `test_web_fetch.c` 的汇总框是两段式行 + 有条件后缀，改为**运行期用 `ui_disp_width()` 算填充**（实测 `tests_skipped = 9`，**「(9 跳过)」是常态路径**而非罕见分支，写死空格必被推走）。
+
+### Fixed —— `state_dump` 的加载计数（P3）
+5. `tools/state_dump.c` 只调 `master_topology_create(0)` ⇒ 子拓扑 0 个，而 `multi_topology.c` 的加载循环按 `topo_type` 找注册项，找不到就**丢弃节点却计成「已加载」** ⇒ 顶部打印 `N 节点`、详情却是 `总节点数: 0`，**自相矛盾**。改为按标准全集注册 12 个子拓扑（`TOPO_VOCABULARY`..`TOPO_VISUAL`，0..11），注册失败**硬失败**；并把「丢弃」与「加载」**分开计数**（`skipped_unknown_topo` + 按类型分桶 `skipped_by_type[256]`，收尾打 WARN 明细）。修完立刻在 `build_cross_links` 上抓到真的丢节点并明确报出。
+
+### Verified
+- 三机（Pi 按现行铁律**不编译**）：WSL x86_64 / gcc 15.2.0 与 armbian-1 aarch64 / gcc 13.3.0，`make clean && make all` 均 **0 error / 0 warning**；`make check-tools` ✓ 19/19；`make check-version` PASS；`make test` **27 通过 / 0 失败**，`make test-fast` **16 通过 / 0 失败**；直跑 6 个测试二进制全 RC=0。
+- **显示宽度检查器**（把连续的、含 `╔╠╚║` 的行聚成"框块"，要求块内每行显示列宽相同）：工具启动框矩阵 **14 框块 / 0 错位**（修前 2 处错位）；第二轮全量 **WSL 9 框块 / 0 错位、armbian 23 框块 / 0 错位**。
+- **资产 SSOT 的决定性 A/B**：在外来 CWD 放一份同名诱饵词典（仅 1 条词），从该 CWD 启动仍加载**数据根**的 10 条 ⇒ SSOT 权威、CWD 不再参与；负对照（数据根指向空目录）明确告警「词典不存在…（逐字模式）」。
+- 线上实例与线上数据**全程未动**（armbian `pid 1948532` 存活、仅监听 `127.0.0.1:8080`）。
+
 ## v0.5.33 — 2026-09-13
 
 > 来源：老大「**全部修复**」。—— 修 v0.5.32 收尾时挖出的两个高危问题（长跑脚本隔离洞、旧扁平布局升级失忆），外加一轮全仓 `snprintf` 字面量尺寸体检。工作区 `/home/cx/pm-fix`（Pi 3B），分支 `feat/paths-callsite-migration`，`main` 未动。完整说明见 [changelogs/077-legacy-layout-gate-and-longrun-isolation.md](changelogs/077-legacy-layout-gate-and-longrun-isolation.md)。
