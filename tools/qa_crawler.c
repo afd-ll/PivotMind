@@ -289,6 +289,16 @@ int main(int argc, char* argv[]) {
     int rounds = 1, save_every = 3, delay_s = 3;
     int fetch_articles = 0;
 
+    /* 路径 SSOT：数据目录默认自建（未就绪则加载/存盘会失败）。
+     * 与 gateway / digital_life main 同款处理；不拒绝运行（只读环境下仍可做只读查询）。 */
+    {
+        unsigned bad = pm_ensure_dirs(PM_DIR_ALL);
+        if (bad != 0u)
+            fprintf(stderr, "[paths] ⚠ 部分数据目录未就绪 (mask=0x%x)：加载/存盘会失败\n", bad);
+        else
+            printf("[paths] 数据根: %s\n", pm_home());
+    }
+
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--queries") && i+1 < argc) qf = argv[++i];
         else if (!strcmp(argv[i], "--rounds") && i+1 < argc) rounds = atoi(argv[++i]);

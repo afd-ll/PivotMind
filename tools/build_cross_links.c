@@ -15,6 +15,16 @@
 
 int main(int argc, char* argv[]) {
     const char* state_path = argc > 1 ? argv[1] : pm_file(PM_FILE_STATE);
+
+    /* 路径 SSOT：数据目录默认自建（未就绪则加载/存盘会失败）。
+     * 与 gateway / digital_life main 同款处理；不拒绝运行（只读环境下仍可做只读查询）。 */
+    {
+        unsigned bad = pm_ensure_dirs(PM_DIR_ALL);
+        if (bad != 0u)
+            fprintf(stderr, "[paths] ⚠ 部分数据目录未就绪 (mask=0x%x)：加载/存盘会失败\n", bad);
+        else
+            printf("[paths] 数据根: %s\n", pm_home());
+    }
     
     printf("╔═══════════════════════════════════════════╗\n");
     printf("║    跨拓扑连接构建工具 v1.0                ║\n");

@@ -392,6 +392,16 @@ int main(int argc, char* argv[]) {
     int epochs = argc > 2 ? atoi(argv[2]) : 1;
     const char* qa_file = argc > 3 ? argv[3] : QA_PATH;
 
+    /* 路径 SSOT：数据目录默认自建（未就绪则加载/存盘会失败）。
+     * 与 gateway / digital_life main 同款处理；不拒绝运行（只读环境下仍可做只读查询）。 */
+    {
+        unsigned bad = pm_ensure_dirs(PM_DIR_ALL);
+        if (bad != 0u)
+            fprintf(stderr, "[paths] ⚠ 部分数据目录未就绪 (mask=0x%x)：加载/存盘会失败\n", bad);
+        else
+            printf("[paths] 数据根: %s\n", pm_home());
+    }
+
     init_random();
     srand((unsigned)time(NULL));
     setbuf(stdout, NULL); // 无缓冲，实时输出日志

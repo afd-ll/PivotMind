@@ -304,6 +304,16 @@ int main(int argc, char* argv[]) {
 
     const char* kb_file = argc > 1 ? argv[1] : "data/knowledge_base.json";
 
+    /* 路径 SSOT：数据目录默认自建（未就绪则加载/存盘会失败）。
+     * 与 gateway / digital_life main 同款处理；不拒绝运行（只读环境下仍可做只读查询）。 */
+    {
+        unsigned bad = pm_ensure_dirs(PM_DIR_ALL);
+        if (bad != 0u)
+            fprintf(stderr, "[paths] ⚠ 部分数据目录未就绪 (mask=0x%x)：加载/存盘会失败\n", bad);
+        else
+            printf("[paths] 数据根: %s\n", pm_home());
+    }
+
     // 1. 创建系统
     printf("[1/5] 创建系统组件...\n");
     MasterTopology* master = master_topology_create(16);
