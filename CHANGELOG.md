@@ -1,5 +1,24 @@
 # Changelog
 
+## v0.5.32 — 2026-09-13
+
+> 来源：老大对 v0.5.31 `[待决策]` 项的裁决 —— **删掉 `batch_learn_lowmem` 变体**。该变体与 `batch_learn` 产出的二进制逐字节相同（死宏 `CROSS_REBUILD_INTERVAL` 全文件零引用），是个**假开关**：它让人以为存在「低内存方案」，实测却无任何差异。工作区 `/home/cx/pm-fix`（Pi 3B），分支 `feat/paths-callsite-migration`，`main` 未动。完整说明（含决策取舍与诚实边界）见 [changelogs/076-drop-batch-learn-lowmem-variant.md](changelogs/076-drop-batch-learn-lowmem-variant.md)。
+
+### Removed
+- **`tools/batch_learn_lowmem.c`** —— 13 行薄壳翻译单元（`#define LOW_MEM` + `#include "batch_learn.c"`），已删除。
+- **死宏 `CROSS_REBUILD_INTERVAL`**（`tools/batch_learn.c`）—— 连同其 10 行 `[待决策]` 注释一并清除，共 16 行。
+- `Makefile` 四处：`batch_learn_lowmem` 二进制规则、phony 别名 `batch-learn-lowmem:`、`TOOL_BINS` 条目、`.PHONY` 条目。
+
+### Changed
+- 工具清单 **20 → 19**。`TOOL_SRC` 是 `$(wildcard tools/*.c)`，源文件删除后自动不再编译；`check-tools:` 用 `$(words $(TOOL_BINS))` 动态计数，**无硬编码**，CI 两个 job 门禁无需改动。
+
+### Verified
+- 三台机器 `make clean && make all` **0 error / 0 warning**；`make check-tools` ✓ 19/19。
+- `batch_learn` 二进制仍在、行为未变；全仓代码与构建层 `lowmem` **零残留**（仅历史文档保留记录）。
+
+### Boundary
+- 本次**只删除、不给替代**。若将来真要支持 Zero 2W 级设备，需在 `batch_learn.c` 内**重新设计**重建策略（真实重建点在 epoch 末与训练收尾），而不是重新引入这个空壳变体。
+
 ## v0.5.31 — 2026-09-13
 
 > 来源：老大「**工具要做好，然后要跑那些检测，通常能抓出来很多东西的**」。做完发现 **`tools/` 层长期零自动编译**——23 个 `.c` 里 11 个**根本没有二进制规则**、9 个虽有规则却**不在 `all:` 里**（`make linux` / CI 只编 4 个二进制）；再用三个 GCC 版本交叉一扫，**抓出 4 类真 bug**。权威工作区 `/home/cx/pm-fix`（Pi 3B），分支 `feat/paths-callsite-migration`，`main` 未动。完整发布说明（逐条证据 / 诚实边界 / 待决策项）见 [changelogs/075-tools-build-integration-warning-sweep.md](changelogs/075-tools-build-integration-warning-sweep.md)。
