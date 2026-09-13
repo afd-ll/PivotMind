@@ -17,6 +17,7 @@
 #include "constants.h"
 #include "cingulate.h"   /* 包含 cingulate_diffusion_evaluate */
 #include "causal_reasoning.h"
+#include "lang.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -756,7 +757,7 @@ int pfe_solve_subgoal(PrefrontalExecutive* pfe, int goal_index) {
                     }
                     if (tpl) continue;
                 }
-                if ((unsigned char)w[0] >= 0x80 && strlen(w) == 3) continue;
+                if (pm_is_zh_char(w) && strlen(w) == 3) continue;
                 pos += snprintf(best_text + pos, sizeof(best_text) - (size_t)pos,
                                 "%s", w);
                 out_cnt++;
@@ -1695,7 +1696,7 @@ static int pfe_semantic_field_answer(PrefrontalExecutive* pfe, const char* subje
             if (strcmp(nb->concept, TPL[ti]) == 0) { skip = 1; break; }
         if (skip) continue;
         /* 中文单字不输出 */
-        if ((unsigned char)nb->concept[0] >= 0x80 && strlen(nb->concept) == 3) continue;
+        if (pm_is_zh_char(nb->concept) && strlen(nb->concept) == 3) continue;
         /* 用户可见输出判据：语义场词直接拼进 PFE answer_text → 回复。
          * 语义场的邻居可能落在内部匿名节点上（sem_<x>_<n>），必须拒。 */
         if (!concept_is_outputtable(nb->concept)) continue;
