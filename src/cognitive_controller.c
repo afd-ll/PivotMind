@@ -1,3 +1,4 @@
+#include "pivotmind_paths.h"
 #include "common.h"
 /**
  * @file cognitive_controller.c
@@ -397,7 +398,9 @@ static void get_intent_base_weights(int intent_type, float* base) {
 // ==================== 意图基准在线学习 ====================
 // LEARN_RATE 使用 cognitive_params.h 中的定义 (0.005f)
 
-#define INTENT_BASE_FILE "intent_base.bin"
+/* 路径 SSOT：默认落点 = <home>/data/intent_base.bin。
+ * ⚠ 本宏是【运行期表达式】而非字符串字面量。 */
+#define INTENT_BASE_FILE pm_file(PM_FILE_INTENT_BASE)
 
 static void intent_base_save(CognitiveController* cc) {
     if (!cc) return;

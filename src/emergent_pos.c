@@ -3,6 +3,7 @@
  * @brief 涌现式词类系统 — 种子锚点 + 特征向量聚类的实现
  */
 
+#include "pivotmind_paths.h"
 #include "emergent_pos.h"
 #include "multi_topology.h"
 #include "huarong_topology.h"
@@ -763,7 +764,9 @@ int emergent_pos_try_emerge(EmergentPOS* ep) {
  *  持久化 — 保存/加载锚点中心 + 额外词类
  * ================================================================ */
 
-#define EMERGENT_POS_DEFAULT_FILE "emergent_pos.bin"
+/* 路径 SSOT：默认落点 = <home>/data/emergent_pos.bin。
+ * ⚠ 本宏是【运行期表达式】而非字符串字面量，勿用于需要编译期常量的场合。 */
+#define EMERGENT_POS_DEFAULT_FILE pm_file(PM_FILE_EMERGENT_POS)
 
 /* v0.5.30 P0b: 维度闸门（TAIL-DIM-1）——文件头加维度字段，读端校验。
  *

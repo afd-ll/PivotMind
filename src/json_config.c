@@ -3,6 +3,7 @@
  * @brief 运行时配置加载器 — 最小化 JSON 解析，零外部依赖
  */
 
+#include "pivotmind_paths.h"
 #include "json_config.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -271,7 +272,7 @@ ConfigContext* config_load(const char* path) {
 
     config_init_defaults(ctx);
 
-    if (!path) path = "pivotmind_config.json";
+    if (!path) path = pm_file(PM_FILE_CONFIG);   /* 路径 SSOT */
 
     FILE* fp = fopen(path, "r");
     if (!fp) {
@@ -319,7 +320,7 @@ void config_destroy(ConfigContext* ctx) {
 }
 
 int config_write_default(const char* path) {
-    if (!path) path = "pivotmind_config.json";
+    if (!path) path = pm_file(PM_FILE_CONFIG);   /* 路径 SSOT */
     FILE* fp = fopen(path, "w");
     if (!fp) return -1;
 

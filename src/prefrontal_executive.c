@@ -6,6 +6,7 @@
  * 通过丘脑总线获取 CognitiveController 并复用其标准流水线。
  */
 
+#include "pivotmind_paths.h"
 #include "prefrontal_executive.h"
 #include "idea_arena.h"
 #include "amygdala.h"
@@ -22,7 +23,9 @@
 #include <math.h>
 
 /* ── Phase 3: 策略权重持久化 ── */
-#define PFE_STRATEGY_FILE "pfe_strategy.bin"
+/* 路径 SSOT：默认落点 = <home>/data/pfe_strategy.bin。
+ * ⚠ 本宏是【运行期表达式】而非字符串字面量。 */
+#define PFE_STRATEGY_FILE pm_file(PM_FILE_PFE_STRATEGY)
 
 /* 权重学习参数 */
 #define PFE_WEIGHT_EMA      0.08f  /* 权重 EMA 更新速率（低速率=稳定） */
@@ -1502,7 +1505,9 @@ void pfe_adapt_parameters(PrefrontalExecutive* pfe, PFEReasonMode mode) {
  *  Phase 3: 推理工作区持久化 — 支持中断后恢复
  * ================================================================ */
 
-#define PFE_WORKSPACE_FILE "pfe_workspace.bin"
+/* 路径 SSOT：默认落点 = <home>/data/pfe_workspace.bin。
+ * ⚠ 本宏是【运行期表达式】而非字符串字面量。 */
+#define PFE_WORKSPACE_FILE pm_file(PM_FILE_PFE_WORKSPACE)
 #define PFE_WORKSPACE_MAGIC "PFEWS01"   /* 文件头魔数 */
 
 int pfe_save_workspace(PrefrontalExecutive* pfe, const char* question) {

@@ -3,6 +3,7 @@
  * @brief 内感受自检 — 检测不健康指标 → 调度器自动干预
  */
 
+#include "pivotmind_paths.h"
 #include "health_monitor.h"
 #include "feature_io.h"
 #include "cross_edge_io.h"
@@ -51,9 +52,9 @@ static void _emergency_save(MasterTopology* master) {
         LOG_ERROR("[内感受] 跳过紧急存盘：0 节点，拒绝覆盖有效状态");
         return;
     }
-    int saved = master_save_state(master, "pivotmind_state.dat");
-    if (saved >= 0) save_features(master, "features.bin");
-    save_cross_edges(master, "cross_edges.bin");
+    int saved = master_save_state(master, pm_file(PM_FILE_STATE));
+    if (saved >= 0) save_features(master, pm_file(PM_FILE_FEATURES));
+    save_cross_edges(master, pm_file(PM_FILE_CROSS_EDGES));
 }
 
 static void _aggressive_prune(MasterTopology* master) {

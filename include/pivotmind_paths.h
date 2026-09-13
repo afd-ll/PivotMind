@@ -66,6 +66,24 @@ extern "C" {
 #define PM_DIR_CORPUS  (1u << 5)   /* 书库：默认自动建（作者红线） */
 #define PM_DIR_ALL     (PM_DIR_HOME | PM_DIR_DATA | PM_DIR_LOG | PM_DIR_SESSION | PM_DIR_RUN | PM_DIR_CORPUS)
 
+/* 数据文件登记表（文件名只在此处出现一次）。
+ * 落点 = <home>/data/<name>；调用点一律取 pm_file(PM_FILE_xxx)，
+ * 全仓不得再出现 "pivotmind_state.dat" 这类数据文件名字面量。
+ * 位号 = 数组下标；与 PM_DIR_* 同构：单 bit、非法值 ⇒ NULL。 */
+#define PM_FILE_STATE         (1u << 0)   /* 主状态 pivotmind_state.dat（脑干/健康监控/TrainMode/网关共同落点） */
+#define PM_FILE_BRAIN_CACHE   (1u << 1)   /* 冻结节点缓存 brain_state.dat（脑干运行缓存，退出即删） */
+#define PM_FILE_FEATURES      (1u << 2)   /* 语义特征 features.bin */
+#define PM_FILE_CROSS_EDGES   (1u << 3)   /* 跨拓扑边备份 cross_edges.bin */
+#define PM_FILE_MEMORY_SEED   (1u << 4)   /* 记忆种子 memory_seed.dat（有 D1 防覆盖门卫） */
+#define PM_FILE_EMERGENT_POS  (1u << 5)   /* 涌现词性锚点 emergent_pos.bin（带维度头 v2） */
+#define PM_FILE_CONFIG        (1u << 6)   /* 运行配置 pivotmind_config.json */
+#define PM_FILE_INTENT_BASE   (1u << 7)   /* 意图基座 intent_base.bin */
+#define PM_FILE_PFE_STRATEGY  (1u << 8)   /* PFE 策略 pfe_strategy.bin */
+#define PM_FILE_PFE_WORKSPACE (1u << 9)   /* PFE 工作区 pfe_workspace.bin */
+#define PM_FILE_PRETRAIN_EMB  (1u << 10)  /* 预训练嵌入 pretrain_embeddings.bin */
+#define PM_FILE_TOKEN         (1u << 11)  /* 网关凭据 gw_token（0600；原为编译期宏 GW_TOKEN_FILE） */
+#define PM_FILE_ALL           (0x00000FFFu)  /* 12 个位全置 */
+
 /* ---- 纯查询 ---- */
 
 /** 唯一数据根。永不失败、永不为 NULL/空；解析一次并缓存。 */
@@ -92,6 +110,22 @@ int pm_path(char *buf, size_t n, unsigned which, const char *name);
 
 /** == pm_path(buf, n, PM_DIR_DATA, name) */
 int pm_data_path(char *buf, size_t n, const char *name);
+
+/* ---- 数据文件登记表查询（第 2 步：调用点替换）---- */
+
+/**
+ * 数据文件路径（which 必须是单个 PM_FILE_* 位）：<home>/data/<登记文件名>。
+ * 纯查询：解析一次并缓存，不碰文件系统、永不失败、永不为 NULL/空（与 pm_dir 同构）。
+ * 非法 which（0 / 多 bit / 越界）⇒ NULL —— 调用方必须判，绝不「悄悄返回 home」。
+ */
+const char *pm_file(unsigned which);
+
+/**
+ * 日志文件路径：$PIVOTMIND_LOG_FILE（非空）优先，否则 <home>/log/pivotmind.log。
+ * 纯查询：解析一次并缓存、永不失败、永不为 NULL/空。
+ * 注：$PIVOTMIND_LOG_FILE 是既有的运行时开关，此处收编进 SSOT，不再由调用点各自 getenv。
+ */
+const char *pm_log_path(void);
 
 #ifdef __cplusplus
 }

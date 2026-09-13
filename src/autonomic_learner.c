@@ -22,6 +22,7 @@
  *   - 内存待更新边数超阈值
  */
 
+#include "pivotmind_paths.h"
 #include "error.h"
 #include "autonomic_learner.h"
 #include "common.h"
@@ -248,8 +249,8 @@ static void do_flush_work(AutonomicState* state, MasterTopology* master, time_t 
             }
         }
 
-        char path[PM_PATH_BUF];
-        snprintf(path, sizeof(path), "pivotmind_state.dat");
+        /* 路径 SSOT：落点由 pm_file() 提供（<home>/data/pivotmind_state.dat） */
+        const char* path = pm_file(PM_FILE_STATE);
 
         // 持久化拓扑（单一文件，不备份）
         /* A-P1-4 fix: 0 节点不覆盖已有主状态 */
@@ -265,7 +266,7 @@ static void do_flush_work(AutonomicState* state, MasterTopology* master, time_t 
         }
 
         // 同时保存特征向量, 确保与拓扑状态同步
-        int feat_saved = save_features(master, "features.bin");
+        int feat_saved = save_features(master, pm_file(PM_FILE_FEATURES));
         if (feat_saved > 0) {
             LOG_INFO("[自主学习刷盘] ✓ 已保存特征向量 (%d 节点)", feat_saved);
         }

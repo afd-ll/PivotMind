@@ -52,18 +52,40 @@ static const char *const g_subdir[PM_DIR_COUNT] = {
     "corpus"    /* PM_DIR_CORPUS  —— 书库（默认自动建） */
 };
 
+#define PM_FILE_COUNT 12
+
+/* 位号 = 数组下标；PM_FILE_STATE(1u<<0)..PM_FILE_TOKEN(1u<<11)。
+   数据文件名只在本表出现一次（SSOT）；调用点一律取 pm_file()。 */
+static const char *const g_filename[PM_FILE_COUNT] = {
+    "pivotmind_state.dat",      /* PM_FILE_STATE         —— 主状态（脑干/健康监控/TrainMode/网关） */
+    "brain_state.dat",          /* PM_FILE_BRAIN_CACHE   —— 冻结节点缓存（退出即删） */
+    "features.bin",             /* PM_FILE_FEATURES      —— 语义特征 */
+    "cross_edges.bin",          /* PM_FILE_CROSS_EDGES   —— 跨拓扑边备份 */
+    "memory_seed.dat",          /* PM_FILE_MEMORY_SEED   —— 记忆种子（D1 防覆盖门卫） */
+    "emergent_pos.bin",         /* PM_FILE_EMERGENT_POS  —— 涌现词性锚点（维度头 v2） */
+    "pivotmind_config.json",    /* PM_FILE_CONFIG        —— 运行配置 */
+    "intent_base.bin",          /* PM_FILE_INTENT_BASE   —— 意图基座 */
+    "pfe_strategy.bin",         /* PM_FILE_PFE_STRATEGY  —— PFE 策略 */
+    "pfe_workspace.bin",        /* PM_FILE_PFE_WORKSPACE —— PFE 工作区 */
+    "pretrain_embeddings.bin",  /* PM_FILE_PRETRAIN_EMB  —— 预训练嵌入 */
+    "gw_token"                  /* PM_FILE_TOKEN         —— 网关凭据（0600，跨重启不变） */
+};
+
 static pthread_once_t g_once = PTHREAD_ONCE_INIT;
 static char g_home[PM_PATH_MAX];                  /* 解析结果（pthread_once 内写一次） */
 static char g_dirs[PM_DIR_COUNT][PM_PATH_MAX];    /* 六个目录（同上，纯只读查询） */
+static char g_files[PM_FILE_COUNT][PM_PATH_MAX];  /* 十二个数据文件（同上） */
+static char g_log_path[PM_PATH_MAX];              /* 日志文件（同上；$PIVOTMIND_LOG_FILE 优先） */
 
-/* 单 bit 掩码 ⇒ 位号；非法（0 / 多 bit / 越界）⇒ -1 */
-static int pm_bit_index(unsigned which) {
+/* 单 bit 掩码 ⇒ 位号；非法（0 / 多 bit / 越界 limit）⇒ -1。
+   limit 由调用方给出（PM_DIR_COUNT / PM_FILE_COUNT），两族共用同一套位号规则。 */
+static int pm_bit_index(unsigned which, int limit) {
     unsigned v;
     int i;
     if (which == 0u) return -1;
     if ((which & (which - 1u)) != 0u) return -1;   /* 多于一位 */
     for (v = which, i = 0; (v & 1u) == 0u; v >>= 1, i++) { /* 找最低置位 */ }
-    return (i < PM_DIR_COUNT) ? i : -1;
+    return (i < limit) ? i : -1;
 }
 
 /* 去尾部 '/'（全是 '/' ⇒ 保留一个）；src 为空串/为 NULL ⇒ -1。
@@ -171,6 +193,33 @@ build_dirs:
             memcpy(g_dirs[i], g_home, strlen(g_home) + 1u);
         }
     }
+
+    /* 数据文件 = <home>/data/<登记文件名>（第 2 步：调用点替换后的唯一落点来源） */
+    for (i = 0; i < PM_FILE_COUNT; i++) {
+        if (pm_join(g_files[i], sizeof g_files[i], g_dirs[1], g_filename[i]) != 0) {
+            /* 校验已保证长度余量 ⇒ 理论不可达；仍不静默 */
+            LOG_WARNING("pivotmind_paths: 数据文件 \"%s\" 拼接失败，退化为 data 目录本身（不应发生）",
+                        g_filename[i]);
+            memcpy(g_files[i], g_dirs[1], strlen(g_dirs[1]) + 1u);
+        }
+    }
+
+    /* 日志文件：$PIVOTMIND_LOG_FILE（非空、绝对路径）优先 —— 收编既有运行时开关，
+       不再由调用点各自 getenv；空串/相对路径/超长 ⇒ 视为未设置 + WARN。 */
+    env = getenv("PIVOTMIND_LOG_FILE");
+    if (env != NULL && env[0] != '\0') {
+        if (env[0] != '/' || pm_trim_trailing_slash(g_log_path, sizeof g_log_path, env) != 0) {
+            LOG_WARNING("pivotmind_paths: 忽略 $PIVOTMIND_LOG_FILE=\"%s\""
+                        "（要求绝对路径且长度 < PM_PATH_MAX），改用 <home>/log/pivotmind.log", env);
+            env = NULL;
+        }
+    }
+    if (env == NULL || env[0] == '\0') {
+        if (pm_join(g_log_path, sizeof g_log_path, g_dirs[2], "pivotmind.log") != 0) {
+            LOG_WARNING("pivotmind_paths: 日志路径拼接失败，退化为 home 本身（不应发生）");
+            memcpy(g_log_path, g_home, strlen(g_home) + 1u);
+        }
+    }
 }
 
 /* errno → 文本（strerror_r，线程安全；buf 为本线程栈上缓冲） */
@@ -243,7 +292,7 @@ const char *pm_home(void) {
 }
 
 const char *pm_dir(unsigned which) {
-    int idx = pm_bit_index(which);
+    int idx = pm_bit_index(which, PM_DIR_COUNT);
     if (idx < 0) return NULL;   /* 非法 which：绝不「悄悄返回 home」 */
     pthread_once(&g_once, pm_resolve_once);
     return g_dirs[idx];
@@ -317,4 +366,16 @@ int pm_path(char *buf, size_t n, unsigned which, const char *name) {
 
 int pm_data_path(char *buf, size_t n, const char *name) {
     return pm_path(buf, n, PM_DIR_DATA, name);
+}
+
+const char *pm_file(unsigned which) {
+    int idx = pm_bit_index(which, PM_FILE_COUNT);
+    if (idx < 0) return NULL;   /* 非法 which：绝不「悄悄返回 home」 */
+    pthread_once(&g_once, pm_resolve_once);
+    return g_files[idx];
+}
+
+const char *pm_log_path(void) {
+    pthread_once(&g_once, pm_resolve_once);
+    return g_log_path;
 }

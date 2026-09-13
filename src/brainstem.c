@@ -6,6 +6,7 @@
  * 所有跨脑区通信通过丘脑(Thalamus)信号总线完成。
  */
 
+#include "pivotmind_paths.h"
 #include "brainstem.h"
 #include <malloc.h>   /* v0.5.11: malloc_trim——C 堆 free 后不还给内核，周期 trim 让 RSS 回落 */
 #include "health_monitor.h"
@@ -681,7 +682,7 @@ static void* brainstem_loop(void* arg) {
                  * 导出（不落地内存——thaw_all 的内存峰值替代，已在 multi_topology.c 实现）
                  * 先清理孤立死节点（并发/learn可能产生重复零边节点） */
                 master_prune_dead_nodes(bs->master);
-                int saved = master_save_state(bs->master, "pivotmind_state.dat");
+                int saved = master_save_state(bs->master, pm_file(PM_FILE_STATE));
                 if (saved > 0 && bs->verbose)
                     LOG_INFO("[存盘] tick=%d 已保存 %d 节点", bs->tick_count, saved);
 

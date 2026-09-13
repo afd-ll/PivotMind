@@ -5,6 +5,7 @@
  * 无外部依赖，JSON解析使用内置轻量解析器。
  */
 
+#include "pivotmind_paths.h"
 #include "train_mode.h"
 #include "huarong_topology.h"
 #include "funcword.h"
@@ -1008,7 +1009,7 @@ static void train_do_auto_save(TrainMode* tm, const char* workdir) {
         printf("[训练]   跳过存盘 (0 节点，避免覆盖有效状态)\n");
         return;
     }
-    int saved = master_save_state(tm->topology, "pivotmind_state.dat");
+    int saved = master_save_state(tm->topology, pm_file(PM_FILE_STATE));
     if (saved > 0) printf("[训练]   已保存 %d 节点\n", saved);
 }
 
