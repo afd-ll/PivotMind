@@ -243,7 +243,7 @@ static void test_single_char_predicates(void) {
     CHECK(pm_is_single_char("\x80") == 0, "裸续字节（非法码点）⇒ 0");
     T_END();
 
-    T_START("pm_is_single_nonzh_char: 单个非表意字符（输出层正梁）");
+    T_START("pm_is_single_nonzh_char: 单个非表意字符（三字节区，输出层正梁）");
     CHECK(pm_is_single_nonzh_char("\xE3\x80\x82") == 1, "「。」(CJK 标点/UNKNOWN) ⇒ 1");
     CHECK(pm_is_single_nonzh_char("\xE3\x80\x8C") == 1, "「「」⇒ 1");
     CHECK(pm_is_single_nonzh_char("\xE3\x80\x8D") == 1, "「」」⇒ 1");
@@ -251,15 +251,25 @@ static void test_single_char_predicates(void) {
     CHECK(pm_is_single_nonzh_char("\xE3\x81\x82") == 1, "「あ」(假名/JA) ⇒ 1");
     CHECK(pm_is_single_nonzh_char("\xEF\xBD\xB1") == 1, "「ｱ」(半角片假名/JA) ⇒ 1");
     CHECK(pm_is_single_nonzh_char("\xEA\xB0\x80") == 1, "「가」(谚文/KO) ⇒ 1");
-    CHECK(pm_is_single_nonzh_char("\xF0\x9F\x98\x80") == 1, "「😀」(emoji/OTHER) ⇒ 1");
-    CHECK(pm_is_single_nonzh_char("\xC2\xB7") == 1, "「·」(2字节/UNKNOWN) ⇒ 1");
+    CHECK(pm_is_single_nonzh_char("\xF0\x9F\x98\x80") == 0, "「😀」(4字节) ⇒ 0（覆盖面外）");
+    CHECK(pm_is_single_nonzh_char("\xC2\xB7") == 0, "「·」(2字节) ⇒ 0（覆盖面外）");
     CHECK(pm_is_single_nonzh_char("\xE4\xB8\xAD") == 0, "「中」是汉字 ⇒ 0（归 pm_is_zh_char）");
+    CHECK(pm_is_single_nonzh_char("\xC3\xA9") == 0, "「é」(2字节) ⇒ 0（覆盖面外）");
     CHECK(pm_is_single_nonzh_char("a") == 0, "「a」ASCII 单字符 ⇒ 0（不在本列）");
     CHECK(pm_is_single_nonzh_char("3") == 0, "「3」⇒ 0");
     CHECK(pm_is_single_nonzh_char("hello") == 0, "「hello」多字符 ⇒ 0");
     CHECK(pm_is_single_nonzh_char("\xE4\xB8\xAD\xE6\x96\x87") == 0, "「中文」⇒ 0");
     CHECK(pm_is_single_nonzh_char("") == 0, "空串 ⇒ 0");
     CHECK(pm_is_single_nonzh_char(NULL) == 0, "NULL ⇒ 0");
+    T_END();
+
+    T_START("覆盖面锁：正梁 == 旧判据（首字节>=0x80 且 strlen==3）的非汉字部分");
+    /* 对每个三字节非汉字，正梁必须命中；对每个非三字节单字符，必须不命中。
+     * 这条一旦变红，说明正梁与旧判据的足迹不再一致 ⇒ C 步改口径必然劣化。 */
+    CHECK(pm_is_single_nonzh_char("\xE4\xB8\xAD") == 0, "三字节「中」是汉字 ⇒ 正梁不接（归 pm_is_zh_char）");
+    CHECK(pm_is_single_nonzh_char("\xE3\x80\x82") == 1, "三字节「。」非汉字 ⇒ 正梁接管");
+    CHECK(pm_is_single_nonzh_char("\xC3\xA9") == 0, "二字节「é」⇒ 正梁不接（足迹外）");
+    CHECK(pm_is_single_nonzh_char("\xF0\x9F\x98\x80") == 0, "四字节「😀」⇒ 正梁不接（足迹外）");
     T_END();
 
     T_START("正梁 ∪ 单汉字 = 单个多字节字符（与旧 strlen==3 口径对照）");
