@@ -1,5 +1,78 @@
 # Changelog
 
+## v0.5.30 — 2026-09-13
+
+> 来源：**路径可移植化三段式全部落地（6 笔）+ `digital_life` 复活（1 笔）+ v0.5.29 之后落的 7 笔尾巴**，共 **14 笔**（`6dacf75` / `84176c0` / `1128813` / `d3b30dd` / `7995028` / `0c7a960` / `0c172a2` / `faf7655` / `1a2e873` / `0b6a3fd` / `9fd28f7` / `f500ef2` / `ab1853e` / `2e0bb19`），均已 `commit`；权威工作区 `/home/cx/pm-fix`（Pi 3B）HEAD `2e0bb19`，分支 `feat/paths-callsite-migration`，`main` 未动。完整发布说明（含逐条证据、诚实边界、红线声明、已知未做）见 [changelogs/074-paths-ssot-three-steps.md](changelogs/074-paths-ssot-three-steps.md)。主线是**把「数据文件落在哪儿」从散落各处的字符串字面量与 `getenv` 收成一个唯一真值源，并让目录「默认自建」**。
+
+### Added
+
+**① 路径 SSOT 模块（第 1 步，`faf7655` + `1a2e873`，4 文件 / +975 −5）**
+- 新增 `include/pivotmind_paths.h`（86 行）+ `src/pivotmind_paths.c`（323 行）：`pm_home()` / `pm_dir()` / `pm_file()` / `pm_log_path()` / `pm_path()` / `pm_data_path()` / `pm_ensure_dirs()`。
+- 三条定稿契约：**纯查询**（不碰文件系统、永不失败；`pm_dir(非法 which)` ⇒ `NULL`，绝不「悄悄返回 home」）；**无状态 ensure**（`pm_ensure_dirs()` 是唯一写文件系统的入口，不设缓存、不加锁、`EEXIST` 幂等）；**零分配**（`pm_path()` 缓冲区由调用方提供，模块不 `malloc`）。
+- 目录族 6 位 `PM_DIR_{HOME,DATA,LOG,SESSION,RUN,CORPUS}`；数据文件登记表 12 位 `PM_FILE_*`（11 个数据文件 + `gw_token`）；`PM_FILE_ALL = 0xFFF`。
+- `pm_home()` 解析顺序（`pthread_once` 解析一次并缓存）：`$PIVOTMIND_HOME` → `$HOME/pivotmind` → 编译期 `PM_HOME_DEFAULT`；任一非法值 ⇒ 视为未设置 + **一条 WARN（不许静默）**。
+- `1a2e873`：Makefile 改为传**裸 token** `-DPM_HOME_DEFAULT_PATH=/var/lib/pivotmind`，引号在头文件里由 C 补齐 ⇒ 无论经过几层 shell 都是字符串字面量；并加硬门（必须是绝对路径，否则 `$(error …)`）。
+- 同笔新增 `tests/unit/test_paths_unit.c`（526 行）。
+
+### Changed
+
+**② 调用点全量替换（第 2 步，`0b6a3fd` + `9fd28f7` + `f500ef2`，累计 32 文件 / +285 −80）**
+- `0b6a3fd`（10 文件 / +129 −18）：`src/` 层 8 文件 13 处改走 `pm_file()` / `pm_log_path()`（brainstem、autonomic_learner、health_monitor、train_mode、emergent_pos、cognitive_controller、prefrontal_executive、json_config）。**门卫逻辑原样保留**。
+- `9fd28f7`（22 文件 / +102 −57）：`demos/` 25 处 + `tools/` 30 处；`pivotmind_gateway.c` 接 `pm_ensure_dirs(PM_DIR_ALL)`；加 `__OPTIMIZE__` 守卫。
+- `f500ef2`（2 文件 / +54 −5）：`tests/test_pfe_unit.c` 收编到私有 `PIVOTMIND_HOME`（`mkdtemp` + `setenv` + `pm_ensure_dirs`，**必须早于任何 `pm_*` 调用**，因为 `pm_home()` 只解析一次并缓存）；`demos/digital_life.c` 的 `main` 补 `pm_ensure_dirs(PM_DIR_ALL)`。
+- **架构决策**：数据文件落点从「相对 CWD」改为 `<home>/data/`；`chdir` 保留但只管语料相对路径 —— **CWD 决定读什么，SSOT 决定写哪儿**。
+
+**③ `tools/` 层「默认自建」（第 3 步，`2e0bb19`，7 文件 / +70）**
+- 7 个「会写 SSOT 路径」的工具在 `main` 开头补 `pm_ensure_dirs(PM_DIR_ALL)`，与 gateway / digital_life 同款：未就绪只逐条 WARN、**不拒绝运行**：`batch_learn` / `build_cross_links` / `compound_promote` / `corpus_train` / `hebbian_pretrain` / `qa_crawler` / `seed_builder`。
+- **按设计不动**：纯只读工具（`batch_test` / `compare_templates` / `debug_load` / `debug_seed` / `eval_templates` / `path_analyze` / `probe_batch_contract` / `quick_chat` / `state_dump` / `seed_teacher`）—— 读不到就是没数据，不该产生 fs 副作用；路径全走 `argv` 的工具（`feed_cli` / `edge_builder` / `merge_state` / `reader` / `template_build`）—— 目录由调用方负责，不属「默认自建」范围。
+
+### Fixed
+
+**④ `digital_life` 复活（`ab1853e`，3 文件 / +260 −28）**
+- `demos/digital_life.c` 仍在引用 `BackgroundClock`，而该类型早在 **`caa6e36`（V0.3.0，2026-06-11）** 就被 `Brainstem` 取代 ⇒ **对 v0.3.0 之后的树根本编译不过，坏了约 3 个月**。`Makefile` 里它有独立规则（`:117` / `:207` / `:224`）却**没进 `all`** ⇒ CI 与本地 `make all` 全都覆盖不到，**这是漏检的机制性原因**。
+- 1:1 证据（非猜测）：`brainstem_create(MasterTopology*, MemorySystem*, CognitiveState*)` 与 `background_clock_create(topology, memory, cognitive_state)` **参数类型/顺序完全一致** ⇒ 纯符号替换、零适配；旧 `background_clock.h/.c` 里**完全没有 thalamus**，而 `brainstem.h` 的 `thalamus` 字段由 `calloc` 置 NULL、且所有 `thalamus_*` 公开函数都判空返回安全默认值 ⇒ **未绑丘脑是安全降级，不崩**。⇒ 映射到 brainstem 是**根因修复**（它是超集），摘除反而会丢掉昼夜节律。
+- 顺带把 `digital-life` 加进 `all:`；`tests/unit/test_paths_unit.c` 由 **10 条补到 13 条**（+250 行）：`t11 pm_file`（12 项登记全量断言 + 与 `pm_path(DATA,name)` 交叉验证 + 指针稳定 + 两两互异 + `PM_FILE_ALL==0xFFF` + 非法位 ⇒ NULL）、`t12 pm_log_path` 默认分支、`t13 $PIVOTMIND_LOG_FILE` 覆盖分支（绝对路径采用 / 尾斜杠规范 / 空串静默回退 / 相对路径 WARN 回退 / 未设置回退）。
+- ⚠ **诚实记录的行为差异**：旧 `BackgroundClock` 内部自建 `self_learner`；新版把自主学习收归丘脑 utility slot（`THAL_UTIL_SELF_LEARNER`），**未绑丘脑时该路径被跳过**。`digital_life` 未装配丘脑 ⇒ 其余节律（tick / 衰减 / 自发激活 / 认知状态漂移 / 周期存盘）与旧一致，自主学习仍由 `ActiveLearner` 承担。
+
+**⑤ v0.5.29 之后落的 7 笔尾巴**
+- `6dacf75` / `1128813`：删两个死函数 —— `remove_cross_topology_link`（破坏新契约、零调用者）与 `insert_cross_topology_link`（自首个提交起从未被调用）。
+- `84176c0`：`emergent_pos.bin` 加**维度头**，并**拒绝**无法推断维度的文件（治 v0.5.28 降维 512→256 之后旧文件被静默错读的风险）。
+- `d3b30dd`：`cross_hit_hash` 改用**无符号**算术（治溢出）。
+- `7995028`：加载期把**被当作重复吸收**的跨链引用**记账**（续 v0.5.29「把静默变成会喊」的主线）。
+- `0c7a960`：RNN 层的权重槽初始化 + 释放自身持有的张量。
+- `0c172a2`：两份 README 挂 CI 状态，并写明 CI **覆盖什么、不覆盖什么**。
+
+### Quality
+
+- **双架构三机**（均为 `make debug`，即 `-O0`、无 LTO）：
+
+| 机器 | 架构 / 编译器 | `make debug` | 7 工具逐个编译 | `make test` | 空 home 冒烟 |
+|---|---|---|---|---|---|
+| WSL | x86_64 / **gcc 15.2.0**（20 核） | rc=0，0 error，11 warning（全为既有），1s | 7/7 rc=0，0 error，**0 新增警告** | **27 通过 / 0 失败** | 6 目录自动建出（0700） |
+| armbian-1 | aarch64 / **gcc 13.3.0**（6 核） | rc=0，0 error，13 warning（全为既有），3s | 7/7 rc=0，0 error，**0 新增警告** | **27 通过 / 0 失败** | 6 目录自动建出（0700） |
+| astar728-1 (Pi 3B) | aarch64 / **gcc 14.2.0** | 不跑（905 Mi，`-O2`/LTO 会挂机） | `gcc -fsyntax-only -Wall -Wextra` 7/7 rc=0 | — | — |
+
+- **`make test` 内含两道门禁且均 PASS**：`check-locks`（锁纪律静态检查）与 `check-version`（版本号一致性）。
+- **「默认自建」的运行时铁证**（WSL + armbian 双份）：以空 `PIVOTMIND_HOME` 跑 `build_cross_links`，输出 `[paths] 数据根: <H>` 之后报 `× 找不到状态文件: <H>/data/pivotmind_state.dat` —— **路径正确落在 SSOT 的 `<home>/data/` 下，且目录先于它被建好**；`find -maxdepth 1` 显示 `corpus/ data/ log/ run/ session/` 五子目录 + home 全部 `drwx------`（0700）。
+- **既有警告清单**（非本版引入，两架构一致）：`tools/build_cross_links.c:91` `unused variable 'CROSS_WEIGHT'`；`tools/corpus_train.c:185` `-Wformat-truncation`。
+
+### Known Issues
+
+- **🔴 新发现：6/7 工具不在构建系统里。** `Makefile` 的 `all: $(LIB_NAME) seed-builder debug-seed gateway digital-life` 只含 `seed-builder`；`corpus_train` / `qa_crawler` / `batch_learn` 有规则但**不在 `all`**；`build_cross_links` / `compound_promote` / `hebbian_pretrain` **连编译规则都没有**。⇒ 本版第 3 步的 7 个改动里，**只有 `seed_builder` 会被 CI / `make all` 编译**，其余 6 个靠本轮手工逐个编译覆盖。机制上与 ④ 同类（`digital_life` 坏了 3 个月没人发现）。**未做处理，留给作者拍板**（补规则 + 进 CI，还是明确标废弃）。
+- **`tools/batch_learn.c:576`** 的 `char path[512]` + `snprintf(…, 511, …)` 装完整 SSOT 路径，理论可截断（低风险，宜放宽到 `PM_PATH_MAX`）。**未改。**
+- **`include/json_config.h:83`** 注释「NULL 则尝试 pivotmind_config.json」已不准确。**未改。**
+- **`tools/template_build.c`** 的输出文件默认仍是相对 CWD 的字面量 `pivotmind_state_with_templates.dat` —— **有意保留**（一次性产物，非跨进程共享文件），故第 3 步未给它插 `pm_ensure_dirs`。
+- **部署前置（承接，仍有效）**：真实 `fmt_ver=9` 载荷会被状态闸门**有意拒绝** ⇒ 直接部署 = 「启动即拒绝、空壳运行」，**不可用开关绕过**；且数据文件落点已从 `<home>/` 改到 `<home>/data/`，部署时需 `mv <home>/*.dat <home>/*.bin <home>/data/`，否则空壳启动（旧文件不丢，只是被忽略）。
+- **未做**：本版**未跑 ASan/UBSan/TSan**、**未做端到端真实数据演练**、**未部署**，也**未开 PR 到 `main`**（唯一能触发 CI 的途径 —— `ci.yml` 的 `push` 只监听 `main`/`master`/`develop`，推 feat 分支实测 `total_count: 0`）。
+
+### Notes
+
+- **版本说明**：本版真值源 = **`0.5.30`**（`include/pivotmind_version.h`）；`README.md` / `README.zh-CN.md` / `ARCHITECTURE.md` 三份活文档 / 7 处锚点由 `make sync-version` 生成器改写，`make check-version` **PASS**。历史节与 `changelogs/**` 不参与一致性判定。
+- **红线声明**：本版只动「路径落点」+ 两个死函数 + 一处维度头 + 一处无符号算术 + 一处加载期记账；**限边 / 截断 / 周期性稀疏化 / 跨拓扑上限 / 队列满丢任务**逻辑一律未触碰；`pm_ensure_dirs()` 是**幂等无状态**的 `mkdir`（`0700`），**已存在的目录绝不 chmod**，只读环境下只报未就绪位、不拒绝启动。
+- **新增文件**：`changelogs/074-paths-ssot-three-steps.md` + 根 `CHANGELOG.md` 顶部本条 + `include/pivotmind_version.h` bump 至 `0.5.30`。
+
+---
+
 ## v0.5.29 — 2026-09-12
 
 > 来源：**跨链一致性整批（5 笔）+ 版本号单一真值源 + 两道回归护栏 + `f280cfa` 并带的五条尾巴补记**，共 **7 笔提交**（`d31a212` / `a16b74a` / `12271b9` / `d9a871f` / `6b668fd` / `d8b9828` / `25b2bdc`）均已 `commit` 并推送，权威树 HEAD `6b668fd`。主线仍是**把「静默」变成「会喊」**：这一批的对象是**跨链引用**——从「越界就悄悄丢、错位就静默指错、踩到空槽就崩、剪枝后旧 id 就失配」变成「**能映射、能分类计数、能判空跳过、能重映射、能压缩**」。完整发布说明（含逐条证据、诚实边界、红线声明、已知未修问题）见 [changelogs/073-xlink-consistency-version-ssot.md](changelogs/073-xlink-consistency-version-ssot.md)。
