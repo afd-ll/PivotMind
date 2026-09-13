@@ -56,10 +56,12 @@ int main(int argc, char** argv) {
      *   缺   ⇒ 首次运行 / 空脑，属正常路径（RC=0），但必须显式告知，别让人以为失忆；
      *   损坏 ⇒ multi_topology 已 fail-loud（RC=1）。
      * multi_topology 对「打不开」也打 ERROR，故这里补一句上下文。 */
+    int state_present = 0;
     {
         FILE* probe = (state_path != NULL) ? fopen(state_path, "rb") : NULL;
         if (probe != NULL) {
             fclose(probe);
+            state_present = 1;
         } else {
             printf("提示: 状态文件不存在（%s）—— 将以【空脑】启动（首次运行属正常）\n",
                    (state_path != NULL) ? state_path : "?");
@@ -67,7 +69,12 @@ int main(int argc, char** argv) {
     }
     int loaded = master_load_state(master, state_path);
     printf("%d 节点\n\n", loaded);
-    if (loaded <= 10) { printf("× 状态加载异常\n"); return 1; }
+    if (loaded <= 10) {
+        /* 「文件在、却几乎没加载出东西」才是真异常；
+         * 「文件不在」是首次运行，上面已经说明过，不该再按异常收场（RC 语义要与提示一致）。 */
+        if (state_present) { printf("× 状态加载异常\n"); return 1; }
+        printf("（首次运行：空脑启动，属正常路径，不按加载异常处理）\n");
+    }
 
     master_get_thread_pool(master);
 

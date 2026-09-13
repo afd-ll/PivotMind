@@ -79,7 +79,7 @@ int main(int argc, char** argv) {
     }
     setbuf(stdout, NULL);
 
-    ui_frame_title(43, "  词涌现器 (字拓扑→概念拓扑) 阈值=%.1f 上限=%d",
+    ui_frame_title(0, "  词涌现器 (字拓扑→概念拓扑) 阈值=%.1f 上限=%d",
                    threshold, max_words);
     printf("\n");
 

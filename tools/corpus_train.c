@@ -508,7 +508,7 @@ int main(int argc, char* argv[]) {
 
     printf("\n");
     ui_frame_begin(42);
-    ui_frame_row("训练完成");
+    ui_frame_row("          训练完成");   /* 保留原框内的居中缩进 */
     ui_frame_sep();
     ui_frame_row("  总节点:  %-6d", total_nodes);
     ui_frame_row("  总边数:  %-6d", total_edges / 2);

@@ -76,7 +76,9 @@ FILE* ui_frame_stream(FILE* out);
 /** 开框：╔ + inner_w 个 ═ + ╗。inner_w = 内容区列数（不含左右边框）。 */
 void ui_frame_begin(int inner_w);
 
-/** 框内一行（printf 语义）：按显示宽度右补空格到 inner_w；超宽不截断、原样输出。 */
+/** 框内一行（printf 语义）：按显示宽度右补空格到 inner_w；
+ *  超宽 ⇒ 在【码点边界】按显示列截断、末位打 U+2026 '…' 明示被截
+ *        （右边框永不推走；不做静默截断）。 */
 void ui_frame_row(const char* fmt, ...);
 
 /** 分隔行 ╠═══╣ / 带居中标签的 ╠══ 标签 ══╣。 */

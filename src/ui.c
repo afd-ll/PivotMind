@@ -147,26 +147,34 @@ static int ui_cp_width(unsigned cp) {
     return 1;
 }
 
+/* UTF-8 解出一个码点：返回其占用字节数（>=1），码点写入 *out。
+ * 非法/不完整序列 ⇒ 返回 1、*out = 0（宽度按 0 计，不污染列数）。 */
+static int ui_utf8_decode(const char* s, unsigned* out) {
+    const unsigned char* u = (const unsigned char*)s;
+    unsigned char c = u[0];
+    unsigned cp;
+    int len, i;
+    if (c < 0x80u)                 { cp = c;          len = 1; }
+    else if ((c & 0xE0u) == 0xC0u) { cp = c & 0x1Fu;  len = 2; }
+    else if ((c & 0xF0u) == 0xE0u) { cp = c & 0x0Fu;  len = 3; }
+    else if ((c & 0xF8u) == 0xF0u) { cp = c & 0x07u;  len = 4; }
+    else { *out = 0u; return 1; }             /* 非法首字节 */
+    for (i = 1; i < len; i++) {
+        if ((u[i] & 0xC0u) != 0x80u) { len = i; break; }
+        cp = (cp << 6) | (unsigned)(u[i] & 0x3Fu);
+    }
+    if (len < 1) len = 1;
+    *out = cp;
+    return len;
+}
+
 int ui_disp_width(const char* s) {
     int w = 0;
     if (s == NULL) return 0;
     while (*s != '\0') {
-        const unsigned char* u = (const unsigned char*)s;
-        unsigned char c = u[0];
         unsigned cp;
-        int len, i;
-        if (c < 0x80u)                 { cp = c;          len = 1; }
-        else if ((c & 0xE0u) == 0xC0u) { cp = c & 0x1Fu;  len = 2; }
-        else if ((c & 0xF0u) == 0xE0u) { cp = c & 0x0Fu;  len = 3; }
-        else if ((c & 0xF8u) == 0xF0u) { cp = c & 0x07u;  len = 4; }
-        else { s++; continue; }               /* 非法首字节：跳过、不计宽 */
-        for (i = 1; i < len; i++) {
-            if ((u[i] & 0xC0u) != 0x80u) { len = i; break; }
-            cp = (cp << 6) | (unsigned)(u[i] & 0x3Fu);
-        }
-        if (len < 1) len = 1;
-        if (cp == 0u) break;
-        w += ui_cp_width(cp);
+        int len = ui_utf8_decode(s, &cp);
+        w += ui_cp_width(cp);        /* 非法序列 cp=0 ⇒ 0 列 */
         s += len;
     }
     return w;
@@ -230,11 +238,26 @@ void ui_frame_row(const char* fmt, ...) {
     va_end(ap);
     w = ui_disp_width(buf);
     fputs("║", fp);
-    fputs(buf, fp);
-    if (w < g_frame_w) {
+    if (w <= g_frame_w) {
+        fputs(buf, fp);
         for (i = w; i < g_frame_w; i++) fputc(' ', fp);
     } else {
-        fputc(' ', fp);                /* 超宽：不截断，留一格再收边 */
+        /* 超宽：按【显示列】在码点边界截断，末位打 '…' 明示「有内容被截」。
+         * 刻意【不】让整行溢出 —— 那会把右边框推走，正是本版要治的病；
+         * 也不静默丢数据 —— 省略号就是「这里被切了」的凭证。 */
+        const char* p = buf;
+        int acc = 0, keep = g_frame_w - 1;      /* 留 1 列给省略号 */
+        while (*p != '\0') {
+            unsigned cp;
+            int len = ui_utf8_decode(p, &cp);
+            int cw  = ui_cp_width(cp);
+            if (acc + cw > keep) break;
+            fwrite(p, 1, (size_t)len, fp);
+            acc += cw;
+            p += len;
+        }
+        for (i = acc; i < keep; i++) fputc(' ', fp);
+        fputs("…", fp);                          /* U+2026，按 1 列计 */
     }
     fputs("║", fp);
     fputc('\n', fp);

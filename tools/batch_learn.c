@@ -673,8 +673,9 @@ int main(int argc, char* argv[]) {
     ui_frame_sep_label("拓扑健康度");
     ui_frame_row("  置信度分布: [低] %.0f%% [中] %.0f%% [高] %.0f%%",
            conf_low_rpt, conf_med_rpt, conf_high_rpt);
-    ui_frame_row("  权重饱和: %.0f%% | 孤立节点: %.0f%% | 平均度: %.1f",
-           sat_ratio_rpt, zero_deg_rpt, avg_deg_rpt);
+    ui_frame_row("  权重饱和: %.0f%%", sat_ratio_rpt);
+    ui_frame_row("  孤立节点: %.0f%% | 平均度: %.1f",
+           zero_deg_rpt, avg_deg_rpt);
     ui_frame_row("  跨拓扑密度: %.1f%% (%d/%d)",
            total_internal > 0 ? (float)master->cross_link_count / (total_internal + master->cross_link_count) * 100.0f : 0.0f,
            master->cross_link_count, total_internal + master->cross_link_count);

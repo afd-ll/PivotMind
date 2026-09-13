@@ -158,7 +158,7 @@ int main(int argc, char* argv[]) {
     
     printf("\n");
     ui_frame_begin(43);
-    ui_frame_row("完成！");
+    ui_frame_row("  完成！");
     ui_frame_sep();
     ui_frame_row("  跨拓扑连接: %d", master->cross_link_count);
     ui_frame_end();
