@@ -472,7 +472,7 @@ test: test-cc-full test-tensor test-tensor-broadcast test-model test-metrics tes
 	else \
 		echo "  FAIL  check-version"; FAILED=$$((FAILED+1)); \
 	fi; \
-	echo "── 接线门禁 check-wiring（秒级；列「有定义/声明、零调用点」的函数）──"; \
+	echo "── 接线门禁 check-wiring（秒级；零引用 / 悬空声明 / 显式丢弃）──"; \
 	if python3 tools/check_wiring.py; then \
 		echo "  PASS  check-wiring"; PASSED=$$((PASSED+1)); \
 	else \
@@ -545,15 +545,32 @@ sync-version:
 check-version:
 	@python3 tools/check_version_consistency.py
 
-# ========== 接线门禁（v0.5.37 起接入 `test:` 与两个 CI job）================
-# 列「有定义/声明、零调用点」的函数（疑似「写了一半没接线」的死代码）：
-# 复核消除启发式误报 + 白名单豁免；有未豁免命中则退出码非 0。
-# 历史：v0.5.36 建成时**刻意不接** `test:`/CI —— 首次运行必然报出已知的真死函数，
-#   「先清死代码还是先加白名单」当时由负责人定。v0.5.37 清完 6 个死函数（另 2 个
-#   为真功能接线）后本门禁**全绿（0 命中 / RC=0）**，故正式接入 `test:` 与两个 CI job。
-# 已知盲区（本次不扩命名族，仅登记）：非 init_*/ensure_*/*_from_env/*_config 命名的
-#   函数族不扫；函数指针 / 回调 / 宏展开出的调用点静态扫描看不见。
-# 手工跑：make check-wiring   或   python3 tools/check_wiring.py
+# ========== 接线门禁（v0.5.37 起接入 `test:` 与两个 CI job；2026-09-13 扩判据）====
+# 列三类「看着接了、其实没接」的静默空转：
+#   A 零引用    —— 有定义，全仓找不到任何引用点；
+#   D 悬空声明  —— 只有 `;` 声明、全仓无定义（一调就链接失败）；
+#   B 显式丢弃  —— 函数体里 `(void)形参;`（接线了但没用上）。
+# 双档处置：
+#   tools/wiring_whitelist.txt —— **有意为之**（结论：这样是对的）⇒ ① 豁免；
+#   tools/wiring_baseline.txt  —— **已知欠账**（知道，还没处置）⇒ ② 静默。
+#   **两者都不在的命中 ⇒ ③ 新增 ⇒ 退出码 1。** 基线条目不再命中 ⇒ ④ 提示过期。
+#   理由：不把已知欠账谎称「有意豁免」，门禁又对**新增**回归有牙齿。
+# 历史：v0.5.36 建成时**刻意不接** `test:`/CI（首次运行必然报出已知真死函数，
+#   「先清死代码还是先加白名单」由负责人定）。v0.5.37 清完 6 个 + 2 个接线后全绿，
+#   正式接入 `test:` 与两个 CI job。
+# 2026-09-13 关掉两个已登记盲区（**首跑命中 70 个，全部登记进基线**）：
+#   ① 命名族只认 init_*/ensure_*/*_from_env/*_config ⇒ 放宽为「名字含
+#      init|ensure|config|setup|create|default|build|make」（旧判据漏检
+#      `pretrain_config_create_default` 这类关键词在中间的）；
+#   ② 函数指针 / 取地址引用（无括号，如 `pthread_once(&k, activation_key_init)`）
+#      旧判据看不见 ⇒ 误报成零引用。现改为「任何非声明/非定义的出现都算引用」。
+# 判据 B 的由来：静态检测「恒返回常量」在本仓**不可行**（实测只捞到 2 个 OpenMP
+#   兜底桩，真案例 `is_valid_query` 漏掉 —— 它有循环有真逻辑，只是判据恒假）。
+#   能捞到真案例的是 `(void)形参;` 丢弃扫描（`perception_tick` 即由此发现）。
+# ⚠️ 仍存的盲区：宏展开出的引用点、多行函数签名、字符串里同名的字面量。
+# 可证伪性：2026-09-13 实测塞入 `static` 零引用函数 + `(void)形参;` 各一 ⇒ RC=1。
+# 手工跑：make check-wiring   或   python3 tools/check_wiring.py [--verbose]
+#        重生成基线草稿：python3 tools/check_wiring.py --emit-baseline
 check-wiring:
 	@python3 tools/check_wiring.py
 

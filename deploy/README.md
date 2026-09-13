@@ -83,14 +83,38 @@ export PIVOTMIND_ALLOW_LEGACY_LAYOUT=1     # 显式放行，日志仍会 WARN
 
 ## 三、systemd 服务
 
-见 `pivotmind.service`。**必须显式设置 `PIVOTMIND_HOME`**，否则服务会落到
-`$HOME/pivotmind`（root 下即 `/root/pivotmind`），与你手敲命令时的数据根可能不是同一个。
+⚠️ **两回事，别混**：
+
+| | 是什么 | 在哪 |
+|---|---|---|
+| **线上真身** | 正在跑的 unit，**权威** | `/etc/systemd/system/pivotmind-gateway.service`（**root-only 0600**） |
+| `deploy/pivotmind.service` | **通用部署模板**，仅作新机起点 | 本目录 |
+
+线上真身 2026-09-13 实取核对（`systemctl show` 可读，cx 用户 `systemctl cat` 会 Permission denied）：
 
 ```ini
 [Service]
-Environment=PIVOTMIND_HOME=/home/cx/pivotmind
+ExecStart=/bin/bash -c 'exec /home/cx/pivotmind/build/bin/pivotmind_gateway 8080 >> /tmp/pv62.log 2>&1'
 WorkingDirectory=/home/cx/pivotmind
+User=cx
+MemoryMax=2726297600            # 2600 MiB
+Restart=on-failure
+# drop-in：pivotmind-gateway.service.d/jemalloc.conf
+#   Environment=LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2
 ```
+
+状态：`active` / **`disabled`**（**未开开机自启** —— 重启机器后不会自己起来）。
+
+🔴 **数据根靠 `WorkingDirectory`（cwd）解析，线上<ins>不设</ins> `PIVOTMIND_HOME`。**
+（`pm_home()` 的第二顺位就是 `$HOME`，而 unit 的 `User=cx` ⇒ `$HOME=/home/cx`。）
+模板里那句「必须显式设置 `PIVOTMIND_HOME`」是**早期写法的遗留**，**与线上相反**，别再照抄。
+
+**给新机部署**：从模板起步时，先在**非 8080 端口**做一次落点复检（cwd = 数据根、不设
+`PIVOTMIND_HOME`、带 jemalloc），确认读写真的落在预期目录，再起服务。
+
+**改线上 unit**：直接改 `/etc/systemd/system/pivotmind-gateway.service`（需 root），
+改完 `systemctl daemon-reload`。**改错文件的典型后果**：以为改了配置、其实动的是仓库里
+那份不起作用的模板。
 
 ## 四、长跑 / 压测脚本的隔离铁律
 

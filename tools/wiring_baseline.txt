@@ -1,0 +1,116 @@
+# tools/wiring_baseline.txt —— `make check-wiring` 的**已知欠账基线**
+#
+# 与 wiring_whitelist.txt 的区别（别混用）：
+#   · whitelist = 「**结论：这样是对的**」——有意为之的零引用（对外 API / 回调 / 宏注册）；
+#   · baseline  = 「**知道，还没处置**」——真需要接线或删除，只是今天还没做。
+#
+# 命中基线 ⇒ ② 静默（只计数，不计退出码）；
+# **不在白名单、也不在基线的命中 ⇒ ③ 新增 ⇒ 退出码 1**。
+# 基线条目若已不再命中 ⇒ ④ 打印「过期，建议删除」，不失败。
+# ⇒ 本门禁对**新增**回归有牙齿，又不必把已知欠账谎称「有意豁免」。
+#
+# 格式：`<类> <键>`，`#` 起为理由（可省）。四类：
+#   A  零引用：有定义、全仓零引用（判据 A）
+#   D  悬空声明：**只有声明、全仓无定义**（一调就链接失败，比 A 更硬）
+#   B  显式丢弃：函数体里 `(void)形参;`（判据 B）
+#
+# ⚠️ 本文件由 `python3 tools/check_wiring.py --emit-baseline` 生成草稿，
+#    再逐条补理由。**加条目前先想清楚：能接线/能删就别往这儿塞。**
+# 建立于 2026-09-13（A1/A6：命名族放宽 + 引用认定修正 + 显式丢弃判据首跑）。
+
+# ══════════════════════════════════════════════════════════════════
+# A · src/nn 子库（16）—— 子库整体编入 CORE_SRC（Makefile:77）却未接入引擎
+#     性质：不是「忘了接线」，是**整套 NN 子库还没有调用方**。
+#     处置：与待办 A2（pretrain「从零训练」半边）合并评估 —— 要么接入，要么从构建里摘掉。
+# ══════════════════════════════════════════════════════════════════
+A bahdanau_attention_create      # src/nn/attention.c:57 —— nn 子库未接入
+A gen_vocab_create               # src/nn/generative_model.c:7 —— nn 子库未接入
+A gru_init_state                 # src/nn/layer_gru.c:257 —— nn 子库未接入
+A gru_layer_create               # src/nn/layer_gru.c:7 —— nn 子库未接入
+A lstm_init_gradients            # src/nn/layer_lstm.c:123 —— nn 子库未接入
+A lstm_init_state                # src/nn/layer_lstm.c:337 —— nn 子库未接入
+A lstm_layer_create              # src/nn/layer_lstm.c:7 —— nn 子库未接入
+A luong_attention_create         # src/nn/attention.c:143 —— nn 子库未接入
+A multihead_attention_create     # src/nn/attention.c:295 —— nn 子库未接入
+A optimizer_create_sgd           # src/nn/optimizer.c:7 —— nn 子库未接入
+A pretrain_config_create_default # src/nn/pretrain.c:32 —— nn 子库未接入（＝待办 A2）
+A pretrain_config_create_quality # src/nn/pretrain.c:66 —— nn 子库未接入（＝待办 A2）
+A pretrain_config_destroy        # src/nn/pretrain.c:100 —— nn 子库未接入
+A pretrain_state_init_advanced   # src/nn/pretrain.c:161 —— nn 子库未接入（＝待办 A2）
+A scheduler_create               # src/nn/scheduler.c:21 —— nn 子库未接入
+A self_attention_create          # src/nn/attention.c:218 —— nn 子库未接入
+
+# ══════════════════════════════════════════════════════════════════
+# A · 核心模块里的未接线公开 API（12）—— 不在 src/nn，属「机制写了一半」
+# ══════════════════════════════════════════════════════════════════
+A abstraction_rule_create            # src/concept_abstraction.c:710
+A cluster_manager_create             # src/memory_consolidation.c:338
+A config_write_default               # src/json_config.c:322
+A consolidation_config_destroy       # src/memory_consolidation.c:60
+A continual_learning_create          # src/catastrophic_forgetting.c:1132
+A edge_weight_create                 # src/cognitive_params.c:154
+A knowledge_domain_create            # src/catastrophic_forgetting.c:645
+A master_rebuild_edges_by_similarity # src/multi_topology.c:3631
+A online_kq_init                     # src/topo_eval.c:654
+A tokenizer_create                   # src/chinese.c:11
+A topology_growth_config_destroy     # src/topology_growth.c:119
+A vocab_build_from_files             # src/vocab.c:379
+
+# ══════════════════════════════════════════════════════════════════
+# D · 悬空声明（2）—— **只有 `;` 声明、全仓找不到定义**
+#     性质：一旦有人照头文件调用，直接链接失败。属「接口先写了、实现没写」。
+# ══════════════════════════════════════════════════════════════════
+D dict_init                          # include/dictionary_v2.h:38 —— 全仓无定义
+D gru_init_weights                   # include/nn/layer_gru.h:90 —— 全仓无定义
+
+# ══════════════════════════════════════════════════════════════════
+# A · 测试里**故意停用**的函数（1）
+# ══════════════════════════════════════════════════════════════════
+A test_tensor_create_negative_size   # tests/unit/test_tensor.c:145 —— 被 test_tensor.c:505 注释停用（-5 转 size_t 会过大分配）
+
+# ══════════════════════════════════════════════════════════════════
+# B · 显式丢弃 `(void)形参;`（39）
+#     绝大多数是**签名固定、参数本就该丢**（main 的 argv / 信号处理函数的 signum /
+#     线程入口的 arg / 回调的 ctx）⇒ 属于「消 -Wunused-parameter」的正常写法。
+#     🔴 但其中 `perception_tick throttle` 是**真缺陷**（上游注意信号被主动丢弃，
+#     见待办 A7）—— 这正是本判据存在的理由。
+# ══════════════════════════════════════════════════════════════════
+B main argc                                # main 签名固定
+B main argv                                # main 签名固定
+B signal_handler signum                    # 信号处理函数签名固定
+B gw_signal_handler signum                 # 信号处理函数签名固定
+B _learn_worker arg                        # 线程入口签名固定
+B sleep_task arg                           # 线程入口签名固定
+B test_callback stats                      # 回调签名固定
+B dummy_encoder ctx                        # 故意的哑实现（dummy）
+B dummy_encoder path                       # 故意的哑实现（dummy）
+B handle_root gw                           # 参数暂未用
+B nc_write_node_at net                     # 参数暂未用
+B template_group_triplets node_count       # 参数暂未用
+B template_group_triplets nodes            # 参数暂未用
+B arena_score_goal_fit master              # 参数暂未用
+B auto_learn_concepts str_pool             # 参数暂未用
+B cc_pattern_match_score topo_id           # 参数暂未用
+B dequantize_model config                  # 参数暂未用
+B discover_on_snapshot window_size         # 参数暂未用
+B dream_cycle memory                       # 参数暂未用
+B emergent_pos_update_dist_sig pos_flags   # 参数暂未用
+B emotion_consistency seq                  # 参数暂未用
+B master_find_template_for_pair_nolock vocab_topo_id   # 参数暂未用
+B master_propagate_parallel max_concurrent # 参数暂未用
+B node_cache_export_frozen_edges master    # 参数暂未用
+B pfe_assess_complexity pfe                # 参数暂未用
+B pfe_synthesize_answer pfe                # 参数暂未用
+B prefrontal_feedback response             # 参数暂未用
+B prepare_quantized_aware_training config  # 参数暂未用
+B process_book_file master                 # 参数暂未用
+B topo_node_coverage recent_count          # 参数暂未用
+B topology_growth_get_stats master         # 参数暂未用
+B topology_growth_reset_stats master       # 参数暂未用
+B topology_walk_beam master                # 参数暂未用
+B topology_walk_beam visited               # 参数暂未用
+B topology_walk_cross query_anchor         # 参数暂未用
+B train_do_auto_save workdir               # 参数暂未用
+B unified_free tag                         # 参数暂未用
+B unified_realloc tag                      # 参数暂未用
+B perception_tick throttle                 # 🔴 真缺陷：上游注意信号被主动丢弃（待办 A7）

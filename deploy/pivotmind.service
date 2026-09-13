@@ -1,3 +1,29 @@
+# ══════════════════════════════════════════════════════════════════════════
+# ⚠️ 本文件是**通用部署模板**，**不是线上实际在跑的 unit**。别照抄去覆盖线上！
+#
+# 线上真身（armbian-1，2026-09-13 实取核对）：
+#   · 路径：/etc/systemd/system/pivotmind-gateway.service
+#     —— 注意**名字不同**（`pivotmind-gateway`，不是 `pivotmind`）；
+#     **不存在** /etc/systemd/system/pivotmind.service。
+#   · 权限 0600 root-only ⇒ cx 用户 `systemctl cat` 也会 Permission denied；
+#     看关键字段用 `systemctl show pivotmind-gateway -p ExecStart -p WorkingDirectory ...`。
+#   · ExecStart=/bin/bash -c 'exec <home>/build/bin/pivotmind_gateway 8080 >> /tmp/pv62.log 2>&1'
+#   · WorkingDirectory=/home/cx/pivotmind ⇒ **home 靠 cwd 解析，线上不设 PIVOTMIND_HOME**
+#   · MemoryMax=2726297600（2600 MiB）
+#   · 状态 active / **disabled**（未开开机自启）
+#   · 另有 drop-in：pivotmind-gateway.service.d/jemalloc.conf
+#         [Service]
+#         Environment=LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2
+#
+# 与本模板的三处**实质差异**（照抄会出问题）：
+#   ① 本模板给 ExecStart **多传一个 argv（home 路径）**；线上靠 cwd，不传。
+#   ② 本模板 MemoryMax=2G；线上 2600M。
+#   ③ 本模板 ExecStopPost 用 `fuser -k 8080/tcp`；线上用 `pkill -9 -f pivotmind_gateway`。
+#
+# 🔴 因此：**改线上 unit 请直接改 /etc/systemd/system/pivotmind-gateway.service**，
+#    本文件仅作新机部署的起点参考。详见 deploy/README.md §三。
+# ══════════════════════════════════════════════════════════════════════════
+
 [Unit]
 Description=PivotMind Cognitive Engine Gateway
 After=network-online.target
