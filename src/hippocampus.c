@@ -40,7 +40,7 @@ void hippocampus_destroy(Hippocampus* hc) {
 void hippocampus_log_dialog(Hippocampus* hc, const char* input, const char* response) {
     if (!hc || !input || !response) return;
     int slot = hc->log_pos;
-    snprintf(hc->dialog_log[slot], 1023, "%s|%s", input, response);
+    snprintf(hc->dialog_log[slot], sizeof(hc->dialog_log[slot]), "%s|%s", input, response);
     hc->log_pos = (hc->log_pos + 1) % 4;
     if (hc->log_count < 4) hc->log_count++;
 }

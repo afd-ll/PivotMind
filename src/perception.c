@@ -1422,7 +1422,7 @@ int perception_expand_query(Perception* p, const char* concept,
 
     int count = 0;
     for (int i = 0; i < rc && count < max; i++) {
-        snprintf(expanded[count], 128, "%s", related[i].word);
+        snprintf(expanded[count], sizeof(expanded[count]), "%s", related[i].word);
         count++;
     }
     return count;

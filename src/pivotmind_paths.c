@@ -382,3 +382,81 @@ const char *pm_log_path(void) {
     pthread_once(&g_once, pm_resolve_once);
     return g_log_path;
 }
+
+/* ============================================================================
+ * 旧扁平布局审计（v0.5.33 新增；契约见 include/pivotmind_paths.h）
+ *
+ * 背景：v0.5.30 把数据落点从「<home>/xxx」改成「<home>/data/xxx」。线上旧部署的
+ *   数据文件仍在 <home> 根目录 —— 换上新二进制后引擎找不到 data/<name>，会
+ *   【新建空状态并正常启动】（不报错），表现为「升级后玄枢失忆」。
+ *   这里只做审计与 fail-loud，不自动搬文件（搬数据是部署动作，交给
+ *   deploy/migrate-home-layout.sh，需人工确认）。
+ * ============================================================================ */
+
+int pm_legacy_layout_report(char *report, size_t cap) {
+    int i, hits = 0;
+    size_t used = 0;
+    char legacy[PM_PATH_MAX];
+
+    if (report != NULL && cap > 0u) report[0] = '\0';
+    pthread_once(&g_once, pm_resolve_once);
+
+    for (i = 0; i < PM_FILE_COUNT; i++) {
+        struct stat st;
+        size_t nl;
+
+        /* SSOT 落点已存在 ⇒ 该文件不在旧布局里（含「两边都有」的情况） */
+        if (stat(g_files[i], &st) == 0) continue;
+        if (pm_join(legacy, sizeof legacy, g_home, g_filename[i]) != 0) continue;
+        if (stat(legacy, &st) != 0) continue;   /* 旧落点也没有 ⇒ 干净 */
+
+        hits++;
+        if (report == NULL || cap == 0u) continue;
+        nl = strlen(g_filename[i]);
+        /* "  · "(5B) + name + '\n'(1) + '\0'(1) = nl + 7；留 1B 余量。整行放不下则不写。 */
+        if (used + nl + 8u <= cap) {
+            used += (size_t)snprintf(report + used, cap - used,
+                                     "  \xc2\xb7 %s\n", g_filename[i]);
+        }
+    }
+    return hits;
+}
+
+int pm_legacy_layout_guard(const char *who, int refuse) {
+    char list[512];
+    struct stat st;
+    const char *tag = (who != NULL && who[0] != '\0') ? who : "pivotmind";
+    const char *env;
+    int hits, state_missing;
+
+    hits = pm_legacy_layout_report(list, sizeof list);
+    if (hits <= 0) return 0;   /* 干净 ⇒ 静默 */
+
+    pthread_once(&g_once, pm_resolve_once);
+    /* g_files[0] 即 PM_FILE_STATE：主状态是否已在 SSOT 落点就位 */
+    state_missing = (stat(g_files[0], &st) != 0);
+    env = getenv("PIVOTMIND_ALLOW_LEGACY_LAYOUT");
+
+    if (!state_missing) {
+        /* 主状态已就位：旧文件只是残留（当前被忽略），提示即可 */
+        LOG_WARNING("[%s] 检测到 %d 个数据文件仍留在【旧扁平布局】%s/ 下，而路径 SSOT 只读 %s/data/"
+                    " —— 当前以 SSOT 为准（旧文件被忽略）：\n%s"
+                    "            迁移/清理：deploy/migrate-home-layout.sh --home \"%s\"",
+                    tag, hits, g_home, g_home, list, g_home);
+        return 0;
+    }
+
+    if (env != NULL && env[0] == '1') {
+        LOG_WARNING("[%s] 旧扁平布局命中 %d 个文件，但 PIVOTMIND_ALLOW_LEGACY_LAYOUT=1"
+                    " ⇒ 允许按【空状态】启动（已显式放行）：\n%s",
+                    tag, hits, list);
+        return 0;
+    }
+
+    LOG_ERROR("[%s] 拒绝启动：数据文件仍在【旧扁平布局】%s/，而 SSOT 主状态 %s 不存在。\n"
+              "            继续启动会【静默从空脑开始】（不报错）= 玄枢失忆，故此处 fail-loud。\n%s"
+              "            ① 迁移（推荐）：deploy/migrate-home-layout.sh --home \"%s\" --yes\n"
+              "            ② 确要用空状态启动：PIVOTMIND_ALLOW_LEGACY_LAYOUT=1",
+              tag, g_home, g_files[0], list, g_home);
+    return refuse ? 1 : 0;
+}

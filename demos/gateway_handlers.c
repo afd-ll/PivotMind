@@ -615,6 +615,6 @@ void handle_qa(GatewaySystem* gw, int fd, const char* body) {
         if(ql>0&&ql<1024&&al>0&&al<1024){memcpy(q,qv,ql);memcpy(a,av,al); if(qa_memory_add(qam,q,a)==0)added++;}
         p=ae+1;
     }
-    char rs[128]; snprintf(rs,128,"{\"result\":\"ok\",\"added\":%d,\"total\":%d}",added,qa_memory_count(qam));
+    char rs[128]; snprintf(rs,sizeof(rs),"{\"result\":\"ok\",\"added\":%d,\"total\":%d}",added,qa_memory_count(qam));
     http_json(fd,200,rs);
 }

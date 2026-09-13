@@ -127,6 +127,31 @@ const char *pm_file(unsigned which);
  */
 const char *pm_log_path(void);
 
+/* ---- 旧扁平布局审计（v0.5.33 新增；给「启动即静默失忆」兜底）---- */
+
+/**
+ * 审计「旧扁平布局」残留：对 PM_FILE_ALL 里每个登记文件，若
+ *   (a) SSOT 落点 <home>/data/<name> 【不存在】，且
+ *   (b) 旧落点   <home>/<name>      【存在】，
+ * 则计为命中（= 原地升级后会被静默忽略的数据）。
+ * 纯查询：只 stat，不写、不改、不搬；无状态、可重复调用（与 pm_dir/pm_file 同族）。
+ * report 可为 NULL；命中清单以「  · <文件名>\n」逐行写入 report，容量不足则整行不写。
+ * 返回命中件数（0 = 无旧布局残留）。
+ */
+int pm_legacy_layout_report(char *report, size_t cap);
+
+/**
+ * 旧布局 fail-loud 门（v0.5.33 新增）：
+ *   无命中                        ⇒ 静默返回 0（不打印）
+ *   有命中，且 SSOT 主状态已就位  ⇒ WARN 清单（纯残留），返回 0
+ *   有命中，且 SSOT 主状态缺失    ⇒ ERROR 清单；refuse != 0 时返回 1
+ *        （= 典型「原地升级」场景：继续跑会从空脑开始且【不报错】）
+ * escape：环境变量 PIVOTMIND_ALLOW_LEGACY_LAYOUT=1 ⇒ 显式放行（返回 0）。
+ * who：调用方标签（如 "gateway"），仅用于日志前缀，可为 NULL。
+ * 返回 0 = 可继续；1 = 调用方应拒绝启动（仅 refuse != 0 且未放行时）。
+ */
+int pm_legacy_layout_guard(const char *who, int refuse);
+
 #ifdef __cplusplus
 }
 #endif

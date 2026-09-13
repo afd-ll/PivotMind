@@ -13,7 +13,11 @@
 #
 # 选项：
 #   --bin PATH        被测二进制（必填，或用 $PIVOTMIND_GATEWAY）
-#   --data DIR        沙箱数据目录（默认 $HOME/pm-lockguard/<tag>）；绝不许指向线上数据目录
+#   --data DIR        沙箱数据目录（默认 $HOME/pm-lockguard/<tag>）；绝不许指向线上数据目录。
+#                     ⚠ 本脚本会把它 export 成 PIVOTMIND_HOME —— v0.5.30 起数据落点由
+#                       pm_home() 决定，argv 只喂给 chdir()（语料相对路径）。不设
+#                       PIVOTMIND_HOME 时引擎会读写 $HOME/pivotmind（= 线上数据目录），
+#                       脚本自以为的「沙箱」就是假的（v0.5.33 修）。
 #   --port N          监听端口（默认 8421，与线上 8080 隔离）
 #   --minutes M       最长跑多久（默认 17）
 #   --tick-target N   tick 目标（默认 900）
@@ -82,14 +86,19 @@ case "$DATA" in
         echo "拒绝运行: 沙箱目录 $DATA 落在线上/坏盘数据目录内。" >&2; exit 2 ;;
 esac
 
+# ---- 隔离铁律（v0.5.33）：把路径 SSOT 钉死在沙箱上 -------------------------
+# 数据落点由 pm_home() 决定，argv 只喂 chdir()。不设 PIVOTMIND_HOME 时引擎会
+# 读写 $HOME/pivotmind（= 线上数据目录），本脚本的「沙箱」形同虚设。
+export PIVOTMIND_HOME="$DATA"
+
 LOG="$DATA/gw.log"
 SAMPLES="$DATA/samples.txt"
 : > "$LOG"
 : > "$SAMPLES"
 
-# ---- 令牌文件存在性检查（本项目的 GW_TOKEN_FILE 是编译期绝对路径）------------
-# 起网关时它会 load(token)；若文件不存在就会**新建**，那会写进线上数据目录。
-TOKEN_FILE="/home/cx/pivotmind/gw_token"
+# ---- 令牌文件存在性检查（v0.5.33 更正：不再是编译期绝对路径）----------------
+# GW_TOKEN_FILE 现在 = pm_file(PM_FILE_TOKEN) = <pm_home()>/data/gw_token，即沙箱内。
+TOKEN_FILE="$DATA/data/gw_token"
 if [ ! -r "$TOKEN_FILE" ] && [ "$USE_STATUS" = "1" ]; then
     echo "警告: 令牌文件 $TOKEN_FILE 不可读，--use-status 将被禁用（token=[REDACTED]）" >&2
     USE_STATUS=0
@@ -98,6 +107,7 @@ fi
 echo "════════════════════════════════════════════════════════════════════"
 echo " 长跑监护  bin=$BIN"
 echo "           沙箱=$DATA  端口=$PORT  目标 tick>=$TICK_TARGET  最长 ${MINUTES}min"
+echo "           PIVOTMIND_HOME=$PIVOTMIND_HOME（SSOT 已钉在沙箱；argv 只喂 chdir）"
 echo "           采样=${INTERVAL}s  停滞容忍=${STALL_TOL}s  令牌=[REDACTED]"
 echo "════════════════════════════════════════════════════════════════════"
 

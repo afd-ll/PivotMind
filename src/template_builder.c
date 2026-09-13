@@ -1013,7 +1013,7 @@ int template_build_from_pos_patterns(MasterTopology* master,
             const char* conn = pos_connector_map(
                 pat->pos_seq[k], pat->pos_seq[k+1]);
             if (conn && conn[0])
-                snprintf(tn->tpl_connectors[k], 8, "%s", conn);
+                snprintf(tn->tpl_connectors[k], sizeof(tn->tpl_connectors[k]), "%s", conn);
             else
                 tn->tpl_connectors[k][0] = '\0';
         }

@@ -276,6 +276,9 @@ int main(int argc, char* argv[]) {
         else
             printf("[paths] 数据根: %s\n", pm_home());
     }
+
+    /* 旧扁平布局审计（v0.5.33）：只告警不拒绝。 */
+    (void)pm_legacy_layout_guard("batch_learn", 0);
     // 原先有硬编码上限 100，已移除以支持大规模训练
     // if (epochs > 100) epochs = 100;
 

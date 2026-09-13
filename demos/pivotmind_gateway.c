@@ -233,7 +233,7 @@ static void handle_connection_inner(GatewaySystem* gw, int client_fd, HttpReques
                                    * K8s/systemd 探针配 /healthz 永远拿 404 */
             handle_health(gw, client_fd);
         } else if (strcmp(req->path, "/qa") == 0) {
-            char rs[64]; snprintf(rs, 64, "{\"count\":%d}", gw->qa_memory ? qa_memory_count(gw->qa_memory) : 0);
+            char rs[64]; snprintf(rs, sizeof(rs), "{\"count\":%d}", gw->qa_memory ? qa_memory_count(gw->qa_memory) : 0);
             http_json(client_fd, 200, rs);
         } else if (strcmp(req->path, "/status") == 0) {
             if (!gw->engine_ready) {
@@ -497,6 +497,11 @@ int main(int argc, char* argv[]) {
         else
             printf("[gateway] 数据根: %s\n", pm_home());
     }
+
+    /* 旧扁平布局 fail-loud 门（v0.5.33）：数据文件仍在 <home>/ 而 SSOT 只读 <home>/data/
+     * 时，继续启动会【静默从空脑开始】（不报错）= 失忆，故此处拒绝启动。
+     * 显式放行：PIVOTMIND_ALLOW_LEGACY_LAYOUT=1。 */
+    if (pm_legacy_layout_guard("gateway", 1) != 0) return 1;
 
     /* C1: GatewaySystem 放到堆上（旧版是 main 的栈对象，连接线程、学习 worker、
      * 初始化线程三方同时持有它的地址，关闭期一拆就是 use-after-free）。

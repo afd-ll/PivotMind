@@ -670,6 +670,9 @@ int main(int argc, char* argv[]) {
             printf("[溯智] 数据根: %s\n", pm_home());
     }
 
+    /* 旧扁平布局审计（v0.5.33）：前台程序只告警不拒绝，操作者当场可见。 */
+    (void)pm_legacy_layout_guard("digital_life", 0);
+
     // 创建系统
     DigitalLifeSystem* sys = digital_life_create();
     if (!sys) {

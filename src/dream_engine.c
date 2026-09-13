@@ -81,8 +81,8 @@ static int dream_dequeue_replay(int max_pairs,
     for (int i = 0; i < g_replay_count && dequeued < max_pairs; i++) {
         int idx = (start + i) % PM_DREAM_REPLAY_MAX;
         if (g_replay_buf[idx].count >= 3) continue;  /* 已重放 3 次，跳过 */
-        snprintf(questions[dequeued], 512, "%s", g_replay_buf[idx].question);
-        snprintf(answers[dequeued], 2048, "%s", g_replay_buf[idx].answer);
+        snprintf(questions[dequeued], sizeof(questions[dequeued]), "%s", g_replay_buf[idx].question);
+        snprintf(answers[dequeued], sizeof(answers[dequeued]), "%s", g_replay_buf[idx].answer);
         g_replay_buf[idx].count++;
         dequeued++;
     }

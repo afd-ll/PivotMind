@@ -16,6 +16,9 @@ int main(int argc, char** argv) {
     const char* question   = argc > 2 ? argv[2] : "你好，介绍下你自己";
 
     setbuf(stdout, NULL);
+
+    /* 旧扁平布局审计（v0.5.33）：交互式工具，只告警不拒绝。 */
+    (void)pm_legacy_layout_guard("quick_chat", 0);
     printf("=== 玄枢对话测试 ===\n\n状态: %s\n问题: %s\n\n", state_path, question);
 
     MasterTopology* master = master_topology_create(11);

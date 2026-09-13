@@ -1613,8 +1613,8 @@ char* dialog_process(DialogSystem* sys, const char* user_input, DialogReasoning*
                 if (sys->memory) {
                     for (int i = 0; i < causal_count && i < 3; i++) {
                         char cause_key[256], effect_key[256];
-                        snprintf(cause_key, 255, "%s_cause_%d", user_input, i);
-                        snprintf(effect_key, 255, "%.2f", causal_results[i].total_strength);
+                        snprintf(cause_key, sizeof(cause_key), "%s_cause_%d", user_input, i);
+                        snprintf(effect_key, sizeof(effect_key), "%.2f", causal_results[i].total_strength);
                         memory_store_causal_rule(sys->memory, cause_key,
                             effect_key, causal_results[i].total_strength, NULL);
                     }
@@ -1689,7 +1689,7 @@ char* dialog_process(DialogSystem* sys, const char* user_input, DialogReasoning*
             /* 意图结果写入记忆（用于自适应调整调度器策略） */
             if (sys->controller->memory) {
                 char intent_key[128];
-                snprintf(intent_key, 127, "last_intent:%s", user_input);
+                snprintf(intent_key, sizeof(intent_key), "last_intent:%s", user_input);
                 memory_store(sys->controller->memory, intent_key,
                     strdup((char*)intent_name[sem->intent.intent]),
                     strlen(intent_name[sem->intent.intent])+1, MEMORY_TYPE_STRING, sem->intent.confidence);
@@ -1913,7 +1913,7 @@ char* dialog_process(DialogSystem* sys, const char* user_input, DialogReasoning*
                 /* 主动学习：不满意时压制走错的边 */
                 if (sys->learner && sys->controller && sys->last_knowledge_quality < 0.5f) {
                     char fb[64];
-                    snprintf(fb, 63, "low_quality=%.2f", sys->last_knowledge_quality);
+                    snprintf(fb, sizeof(fb), "low_quality=%.2f", sys->last_knowledge_quality);
                     feedback_correct(sys->learner, user_input, response, fb);
                 }
             }

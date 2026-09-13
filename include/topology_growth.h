@@ -326,7 +326,7 @@ float topology_health_score(MasterTopology* master, int topo_id);
  * 诊断拓扑状态
  * @param master 主拓扑
  * @param topo_id 拓扑ID
- * @param report 输出报告 (可为 NULL)
+ * @param report 输出报告 (可为 NULL；**非 NULL 时缓冲区至少 256 字节**)
  * @return 状态码 (0=健康, 1=需增长, 2=需收缩, 3=异常)
  */
 int diagnose_topology(MasterTopology* master, int topo_id, char* report);
