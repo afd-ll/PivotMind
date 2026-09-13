@@ -158,22 +158,6 @@ PretrainState* pretrain_state_create(Vocab* vocab, int embedding_dim) {
     return state;
 }
 
-// 使用指定配置创建预训练状态
-PretrainState* pretrain_state_create_with_config(Vocab* vocab, PretrainConfig* config) {
-    if (!vocab || !config) return NULL;
-
-    PretrainState* state = pretrain_state_create(vocab, config->embedding_dim);
-    if (!state) return NULL;
-
-    state->mode = config->mode;
-    state->current_lr = config->learning_rate;
-
-    // 计算预热步数
-    state->warmup_steps = (int)(config->batch_size * config->epochs * config->warmup_ratio);
-
-    return state;
-}
-
 int pretrain_state_init_advanced(PretrainState* state, PretrainConfig* config) {
     if (!state || !config) return -1;
 

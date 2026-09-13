@@ -68,13 +68,6 @@ ConsolidationConfig* consolidation_get_default_config(void) {
     return g_default_config;
 }
 
-void consolidation_set_default_config(ConsolidationConfig* config) {
-    if (g_default_config) {
-        consolidation_config_destroy(g_default_config);
-    }
-    g_default_config = config;
-}
-
 // ==================== 相似度计算 ==========
 
 float compute_similarity(HuarongTopologyNet* net, int node_a_id, int node_b_id,

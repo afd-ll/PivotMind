@@ -121,11 +121,6 @@ void topobrain_destroy(TopologyBrain* tb) {
     free(tb);
 }
 
-void topobrain_set_config(TopologyBrain* tb, TopoBrainConfig* cfg) {
-    if (!tb || !cfg) return;
-    tb->cfg = *cfg;
-}
-
 int topobrain_add_node(TopologyBrain* tb, int node_id) {
     if (!tb) return -2;
     // 查重

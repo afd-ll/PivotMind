@@ -73,33 +73,51 @@ static inline void hebbian_update_contextual(float* a, float* b, int dim,
 }
 
 /**
+ * 显式随机种子标志（唯一定义在 src/random_seed.c，全进程共享）。
+ *
+ * 为什么必须是「跨 TU 共享的 extern」而不是本头文件里的 static：
+ *   common.h 的 inline 函数在每个翻译单元各有一份 static，而 srand() 的种子是
+ *   libc 的进程级全局状态。标志若按 TU 各存一份，A 里 init_random_seed() 置了位，
+ *   B 里的 init_random() 看不见，仍会 srand(time^pid) 把显式种子冲掉 —— 那样
+ *   PIVOTMIND_SEED / init_random_seed() 就还是「装了开关没通电」。
+ */
+extern bool pm_random_seed_explicit;
+
+/**
  * Initialize random number generator (only once)
- * This function uses a static flag to ensure srand() is called only once,
- * preventing repeated initialization that would reduce randomness quality.
+ * 已显式设种（init_random_seed / init_random_from_env / $PIVOTMIND_SEED）时
+ * **不再用 time/pid 覆盖** —— 否则固定种子会被冲掉。未显式设种时行为与旧实现
+ * 逐字节一致（仍在此处 srand(time(NULL) ^ (size_t)&initialized)）。
  */
 static inline void init_random() {
     static bool initialized = false;
     if (!initialized) {
-        srand((unsigned int)(time(NULL) ^ (size_t)&initialized));
+        if (!pm_random_seed_explicit) {
+            srand((unsigned int)(time(NULL) ^ (size_t)&initialized));
+        }
         initialized = true;
     }
 }
 
 /**
- * P2-2：可选固定种子入口（方案 B —— 纯新增，零行为改变；
- * 既有 init_random() 与全部既有调用点均不改动）。
- * 注意：须在任何 init_random() 之前调用，否则 init_random() 会用时间种子覆盖。
+ * 显式固定种子（可复现实验入口）。置位 pm_random_seed_explicit ⇒ 之后的
+ * init_random() 不再覆盖它。
  */
 static inline void init_random_seed(unsigned int seed) {
-    srand(seed);                      /* 显式固定种子：直接覆盖 */
+    srand(seed);
+    pm_random_seed_explicit = true;
 }
 
 /**
- * P2-2：从环境变量 PIVOTMIND_SEED 读取固定种子（已设置且非空时生效）。
+ * 从环境变量 PIVOTMIND_SEED 读取固定种子（已设置且非空时生效）。
+ * 置位 pm_random_seed_explicit ⇒ 之后的 init_random() 不再覆盖它。
  */
 static inline void init_random_from_env(void) {
     const char* env = getenv("PIVOTMIND_SEED");
-    if (env && *env) srand((unsigned int)strtoul(env, NULL, 10));
+    if (env && *env) {
+        srand((unsigned int)strtoul(env, NULL, 10));
+        pm_random_seed_explicit = true;
+    }
 }
 
 /**

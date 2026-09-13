@@ -79,13 +79,6 @@ EWCConfig* ewc_get_default_config(void) {
     return g_default_ewc_config;
 }
 
-void ewc_set_default_config(EWCConfig* config) {
-    if (g_default_ewc_config) {
-        ewc_config_destroy(g_default_ewc_config);
-    }
-    g_default_ewc_config = config;
-}
-
 // ==================== 费雪信息矩阵 ====================
 
 FisherInfoMatrix* fisher_info_create(int capacity, float damping) {

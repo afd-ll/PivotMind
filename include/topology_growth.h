@@ -119,11 +119,6 @@ void topology_growth_config_destroy(TopologyGrowthConfig* config);
  */
 TopologyGrowthConfig* topology_growth_get_default_config(void);
 
-/**
- * 设置全局配置
- */
-void topology_growth_set_default_config(TopologyGrowthConfig* config);
-
 // ========== 动态节点操作 ==========
 
 /**

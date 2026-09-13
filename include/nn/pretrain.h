@@ -296,14 +296,6 @@ void pretrain_print_top_words(PretrainState* state, int top_n);
 // ========== 新增API ==========
 
 /**
- * 使用指定配置创建预训练状态
- * @param vocab 词表
- * @param config 预训练配置
- * @return 预训练状态
- */
-PretrainState* pretrain_state_create_with_config(Vocab* vocab, PretrainConfig* config);
-
-/**
  * 使用CBOW模式训练上下文词预测中心词
  * @param state 预训练状态
  * @param context_ids 上下文词ID数组

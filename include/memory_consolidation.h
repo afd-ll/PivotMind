@@ -119,11 +119,6 @@ void consolidation_config_destroy(ConsolidationConfig* config);
  */
 ConsolidationConfig* consolidation_get_default_config(void);
 
-/**
- * 设置默认配置
- */
-void consolidation_set_default_config(ConsolidationConfig* config);
-
 // ========== 相似度计算 ==========
 
 /**
