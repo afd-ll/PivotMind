@@ -19,6 +19,7 @@
 #include "node_hash.h"
 #include "ui.h"
 #include "cognitive_params.h"
+#include "lang.h"
 #ifdef _WIN32
 #include "network_tool.h"
 #endif
@@ -769,7 +770,7 @@ DialogReasoning* dialog_reason(DialogInput* input, MasterTopology* master,
                         /* 过滤垃圾概念：纯大写乱码不搜索 */
                         int has_cjk = 0, has_vowel = 0;
                         for (const char* pc = new_node->concept; *pc; pc++) {
-                            if ((unsigned char)*pc >= 0xC0) { has_cjk = 1; break; }
+                            if (pm_is_nonascii(pc)) { has_cjk = 1; break; }
                             if (*pc=='a'||*pc=='e'||*pc=='i'||*pc=='o'||*pc=='u'||
                                 *pc=='A'||*pc=='E'||*pc=='I'||*pc=='O'||*pc=='U') has_vowel = 1;
                         }

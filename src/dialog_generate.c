@@ -16,6 +16,7 @@
 #include "string_pool.h"
 #include "common.h"
 #include "error.h"
+#include "lang.h"
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -493,7 +494,7 @@ int concept_is_printable(const char* concept) {
         unsigned char c = (unsigned char)*p;
         /* 多字节 UTF-8 continuation byte (10xxxxxx) — 安全跳过 */
         if ((c & 0xC0) == 0x80) continue;
-        if (c >= 0x80) continue;                      /* CJK/全角字符 */
+        if (pm_is_nonascii(p)) continue;                      /* CJK/全角字符 */
         if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) continue;
         if (c >= '0' && c <= '9') continue;
         if (c == ',' || c == '.' || c == '!' || c == '?' || c == ';' || c == ':') continue;

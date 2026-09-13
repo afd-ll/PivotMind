@@ -1574,7 +1574,7 @@ static int binding_other_is_noise(MasterTopology* master, int o_topo, int o_node
         for (size_t i = 0; on->concept[i]; i++) {
             unsigned char ch = (unsigned char)on->concept[i];
             if ((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z')) has_letter = 1;
-            else if (ch >= 0x80) has_cjk = 1;
+            else if (pm_is_nonascii(on->concept + i)) has_cjk = 1;
         }
         if (!has_letter && !has_cjk) return 1;
     }

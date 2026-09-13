@@ -1805,8 +1805,8 @@ int diffusion_generate(DiffusionCtx* ctx,
                 }
                 if (tpl) continue;
             }
-            if (lang_dom > 0 && (unsigned char)word_prio[p][0] < 0x80) continue;
-            if (lang_dom < 0 && (unsigned char)word_prio[p][0] >= 0x80) continue;
+            if (lang_dom > 0 && !pm_is_nonascii(word_prio[p])) continue;
+            if (lang_dom < 0 && pm_is_nonascii(word_prio[p])) continue;
             /* 中文单字不输出（v0.6：口语至少 2 字词，"出大的只了"类噪声） */
             if ((unsigned char)word_prio[p][0] >= 0x80 && strlen(word_prio[p]) == 3) continue;
             int dup = 0;
@@ -1829,8 +1829,8 @@ int diffusion_generate(DiffusionCtx* ctx,
             if (final[i].word[0] == '@' || final[i].word[0] == '?' ||
                 (final[i].word[0] == 'H' && final[i].word[1] == 'e')) continue;
             if (!concept_is_outputtable(final[i].word)) continue;   /* semantic_growth 匿名节点 */
-            if (lang_dom > 0 && (unsigned char)final[i].word[0] < 0x80) continue;  /* 中文主导：过滤英文词 */
-            if (lang_dom < 0 && (unsigned char)final[i].word[0] >= 0x80) continue; /* 英文主导：过滤中文词 */
+            if (lang_dom > 0 && !pm_is_nonascii(final[i].word)) continue;  /* 中文主导：过滤英文词 */
+            if (lang_dom < 0 && pm_is_nonascii(final[i].word)) continue; /* 英文主导：过滤中文词 */
             /* 话题分级（v0.6）：relevance<0.3 的候选是"高频噪声激活"
              * （如"时间"被无关输入激活），不进入主输出——话题聚焦 */
             if (final[i].relevance < 0.3f) continue;
@@ -1869,8 +1869,8 @@ int diffusion_generate(DiffusionCtx* ctx,
                     ReasoningNode* nb = anchor->edges[e].target;
                     if (!nb || !nb->concept || strlen(nb->concept) < 2) continue;
                     if (is_function_word(nb->concept)) continue;
-                    if (lang_dom > 0 && (unsigned char)nb->concept[0] < 0x80) continue;
-                    if (lang_dom < 0 && (unsigned char)nb->concept[0] >= 0x80) continue;
+                    if (lang_dom > 0 && !pm_is_nonascii(nb->concept)) continue;
+                    if (lang_dom < 0 && pm_is_nonascii(nb->concept)) continue;
                     /* 中文单字不输出（v0.6） */
                     if ((unsigned char)nb->concept[0] >= 0x80 && strlen(nb->concept) == 3) continue;
                     int dup = 0;
@@ -1916,8 +1916,8 @@ int diffusion_generate(DiffusionCtx* ctx,
         for (int p = 0; p < word_prio_count && out_fallback < max_output; p++) {
             if (!word_prio[p] || strlen(word_prio[p]) < 2) continue;
             if (is_function_word(word_prio[p])) continue;
-            if (lang_dom > 0 && (unsigned char)word_prio[p][0] < 0x80) continue;
-            if (lang_dom < 0 && (unsigned char)word_prio[p][0] >= 0x80) continue;
+            if (lang_dom > 0 && !pm_is_nonascii(word_prio[p])) continue;
+            if (lang_dom < 0 && pm_is_nonascii(word_prio[p])) continue;
             if ((unsigned char)word_prio[p][0] >= 0x80 && strlen(word_prio[p]) == 3) continue;  /* 中文单字 */
             output_words[out_fallback++] = word_prio[p];
             selected[sel++] = word_prio[p];
@@ -1945,8 +1945,8 @@ int diffusion_generate(DiffusionCtx* ctx,
             }
             if (inhibited) continue;
             /* 语言一致性：fallback 也过滤跨语言词（避免中文输入输出英文） */
-            if (lang_dom > 0 && (unsigned char)final[i].word[0] < 0x80) continue;
-            if (lang_dom < 0 && (unsigned char)final[i].word[0] >= 0x80) continue;
+            if (lang_dom > 0 && !pm_is_nonascii(final[i].word)) continue;
+            if (lang_dom < 0 && pm_is_nonascii(final[i].word)) continue;
 
             /* 模板连接词: 每2个实词插一次 */
             if (out_fallback > 0 && (out_fallback % 3 == 0)) {

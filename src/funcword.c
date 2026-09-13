@@ -34,6 +34,7 @@
 #include "emergent_pos.h"
 #include "error.h"
 #include "funcword.h"
+#include "lang.h"
 
 /* ==================== FuncwordSet（涌现功能词名单）==================== */
 
@@ -170,8 +171,7 @@ static void funcword_compound_scan(HuarongTopologyNet* vnet,
         if (!nd || !nd->concept) continue;
         int len = (int)strlen(nd->concept);
         if (len <= 3) continue;                 /* 只看多字 CJK 词 */
-        unsigned char c0 = (unsigned char)nd->concept[0];
-        if ((c0 & 0x80) == 0) continue;         /* 非 CJK 跳过 */
+        if (!pm_is_nonascii(nd->concept)) continue;         /* 非 CJK 跳过 */
         float max_w = 0.0f;
         for (int e = 0; e < nd->edge_count; e++) {
             if (nd->edges && nd->edges[e].weight > max_w)
@@ -275,7 +275,7 @@ FuncClass funcword_classify_node(ReasoningNode* nd,
 
     /* ---- 多字词 ---- */
     if (len > 3) {
-        if ((c0 & 0x80) == 0) return FC_VOID;   /* 英文/其他 */
+        if (!pm_is_nonascii(nd->concept)) return FC_VOID;   /* 英文/其他 */
         float max_w = agg ? agg->max_w : 0.0f;
         if (!agg) {
             for (int e = 0; e < nd->edge_count; e++)

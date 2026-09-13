@@ -114,7 +114,7 @@ void handle_chat(GatewaySystem* gw, int fd, const char* body) {
         int cjk_cnt = 0, punct_cnt = 0;
         for (const char* p = response; *p; p++) {
             unsigned char c = (unsigned char)*p;
-            if (c >= 0x80) {
+            if (pm_is_nonascii(p)) {
                 /* CJK 标点按 UTF-8 序列识别（。、，！）；不能用多字节字符常量
                  * 与单字节 char 比较（恒为 false）。cjk_cnt 仍逐字节计数，
                  * 除以 3 得汉字数（含标点容差），与旧逻辑一致。 */
