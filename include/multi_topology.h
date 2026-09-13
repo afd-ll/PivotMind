@@ -351,8 +351,25 @@ void master_decay_activations(MasterTopology* master, float decay_rate);
 
 void master_consolidate_confidence(MasterTopology* master, float boost_factor);
 
+/**
+ * 自我验证：由【边证据】重估单个节点的置信度（v0.5.40 · A22）。
+ *
+ * 口径：evidence = Σ 出边 weight；无出边 ⇒ 最低档。详细理由见
+ * `src/multi_topology.c` 的 evidence_to_confidence() 注释块。
+ *
+ * ⚠️ `ReasoningNode.confidence` 现在是**派生量**（由边图决定），
+ *    **不落盘**（存盘/加载路径都不含它）—— 加载收尾由 batch_self_verify()
+ *    统一建立基准。**不要把它当成持久化的学习量。**
+ * ⚠️ 调用方若同时要叠加 `master_consolidate_confidence()` 的反馈加成，
+ *    必须让本函数**先**执行（覆盖写在先），否则加成会被抹掉。
+ */
 void knowledge_self_verify(MasterTopology* master, int topo_id, int node_id);
 
+/**
+ * 自我验证（批量）：对全部子拓扑逐节点重估置信度，见上。
+ * 调用点：① `master_load_state()` 收尾（建立基准）
+ *        ② `dialog_system.c` 推理收尾（与 master_consolidate_confidence 配对，注意次序）
+ */
 void batch_self_verify(MasterTopology* master);
 
 // ========== 生成式推理 ==========

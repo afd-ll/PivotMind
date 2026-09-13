@@ -1202,95 +1202,104 @@ void master_consolidate_confidence(MasterTopology* master, float boost_factor) {
     }
 }
 
-/* 边置信度→支持分 阶梯评分（复用） */
-static float edge_conf_to_support(float edge_conf) {
-    if (edge_conf > 0.7f)      return 1.0f;
-    else if (edge_conf > 0.3f) return 0.5f;
-    else if (edge_conf > 0.0f) return -0.3f;
-    return 0.0f;
+/* ================================================================
+ * 自我验证：由【边证据】重估节点置信度（v0.5.40 · 待办 A22）
+ * ================================================================
+ * 病灶（实测）：原实现读 `edges[i].confidence` 求均值当"一致性"，而该字段在
+ * 真实状态里**恒为 0.5**（建边时硬编码 —— huarong_topology.c:646；全仓另有
+ * 更新路径，但线上这批状态没走过）⇒ `edge_conf_to_support(0.5f) ≡ 0.5` ⇒
+ * `consistency ≡ 0.5 > 0.3` ⇒ **只加不减**（实测 2375 个有边节点：升 2375 / 降 0）。
+ * 叠加「节点 confidence **从不落盘**」（存盘/加载路径都不含它，每次加载吃新建
+ * 节点默认 0.5）⇒ 线上 3894 个样本 min = max = avg = 0.5000。
+ * 后果：感知区三条知识缺口判据（`src/perception.c` 的 `_gap_*_queries`）要求
+ * `<0.25 / <0.4 / <0.1` **一个都不可满足** ⇒ 三维度缺口驱动结构性空转。
+ *
+ * 口径（对齐本仓既有惯用法 —— template_builder.c:1023「按观测频率分档定置信度」）：
+ *   证据量 evidence = Σ weight_i   ← **活的量**（线上 33433 条边权 0.35–0.99 有真分布）
+ *   无证据（0 条边）⇒ 最低档；证据越多档位越高 ⇒ 置信度成为「掌握程度」的派生视图，
+ *   低度 / 弱边的知识自动低置信 —— 这正是「知识缺口」的定义。
+ *   刻度以「典型边」为单位（线上边权中位数 ≈ 0.6），档位 = 1 / 2.5 / 5 / 10 / 20 条。
+ *
+ * ⚠️ 本函数只读 `weight`（活）与 `edge_count`，**不读 `edge.confidence`**（死）。
+ * ⚠️ confidence 在此是**派生量**：不落盘（维持现状，无需改 state 格式）；
+ *    故 `master_load_state()` 收尾会调一次 `batch_self_verify()` 建立基准。
+ * ================================================================ */
+
+/* 证据刻度：1 条「典型边」的证据量（线上边权中位数 ≈ 0.6） */
+#define PV_EVIDENCE_TYPICAL   0.6f
+#define PV_CONF_FLOOR         0.05f   /* 零证据下限（孤岛） */
+#define PV_CONF_CEIL          0.95f   /* 钳位上限（与 master_consolidate_confidence 一致） */
+
+/** 由边证据量定置信度。deg <= 0 ⇒ 最低档（没有任何证据）。 */
+static float evidence_to_confidence(float evidence, int deg) {
+    if (deg <= 0)                                return PV_CONF_FLOOR;
+    if (evidence >= 20.0f * PV_EVIDENCE_TYPICAL) return 0.90f;   /* ≥20 条典型边 */
+    if (evidence >= 10.0f * PV_EVIDENCE_TYPICAL) return 0.75f;   /* 10–20 条 */
+    if (evidence >=  5.0f * PV_EVIDENCE_TYPICAL) return 0.62f;   /* 5–10 条 */
+    if (evidence >=  2.5f * PV_EVIDENCE_TYPICAL) return 0.50f;   /* 2.5–5 条 */
+    if (evidence >=       PV_EVIDENCE_TYPICAL)   return 0.35f;   /* 1–2.5 条 */
+    return 0.20f;                                                /* <1 条典型边 */
+}
+
+/** 汇总节点的边证据（只读 weight；跳过悬垂边）。out_deg 返回有效边数（可传 NULL）。 */
+static float node_edge_evidence(const ReasoningNode* node, int* out_deg) {
+    float evidence = 0.0f;
+    int deg = 0;
+    if (node && node->edges) {
+        for (int i = 0; i < node->edge_count; i++) {
+            if (!node->edges[i].target) continue;
+            evidence += node->edges[i].weight;
+            deg++;
+        }
+    }
+    if (out_deg) *out_deg = deg;
+    return evidence;
 }
 
 void knowledge_self_verify(MasterTopology* master, int topo_id, int node_id) {
     if (!master) return;
     if (topo_id < 0 || topo_id >= master->sub_topo_count) return;
-    
+
     SubTopology* sub = master->sub_topologies[topo_id];
     if (!sub || !sub->net) return;
     if (node_id < 0 || node_id >= sub->net->node_count) return;
-    
+
     ReasoningNode* node = sub->net->nodes[node_id];
     if (!node) return;
-    
-    float support_score = 0.0f;
-    int edge_count = 0;
-    
-    for (int i = 0; i < node->edge_count; i++) {
-        if (!node->edges[i].target) continue;
-        support_score += edge_conf_to_support(node->edges[i].confidence);
-        edge_count++;
-    }
-    
-    if (edge_count == 0) return;
-    
-    float consistency = support_score / edge_count;
-    
+
+    int deg = 0;
+    float evidence = node_edge_evidence(node, &deg);
+
     float old_conf = node->confidence;
-    
-    if (consistency > 0.3f) {
-        node->confidence += 0.02f;
-    } else if (consistency < -0.2f) {
-        node->confidence -= 0.05f;
-    }
-    
-    if (node->confidence > 0.95f) node->confidence = 0.95f;
-    if (node->confidence < 0.05f) node->confidence = 0.05f;
-    
-    if (fabs(node->confidence - old_conf) > 0.01f) {
-        LOG_INFO("[自验证] 节点 %s: 置信度 %.3f → %.3f (一致性: %.2f)",
-               node->concept, old_conf, node->confidence, consistency);
+    node->confidence = evidence_to_confidence(evidence, deg);
+    if (node->confidence > PV_CONF_CEIL)  node->confidence = PV_CONF_CEIL;
+    if (node->confidence < PV_CONF_FLOOR) node->confidence = PV_CONF_FLOOR;
+
+    if (fabsf(node->confidence - old_conf) > 0.01f) {
+        LOG_INFO("[自验证] 节点 %s: 置信度 %.3f → %.3f (证据 %.2f / %d 条边)",
+                 node->concept, old_conf, node->confidence, evidence, deg);
     }
 }
 
 void batch_self_verify(MasterTopology* master) {
     if (!master) return;
-    
-    int verified_count = 0;
-    
+
     for (int t = 0; t < master->sub_topo_count; t++) {
         SubTopology* sub = master->sub_topologies[t];
         if (!sub || !sub->net) continue;
-        
+
         for (int n = 0; n < sub->net->node_count; n++) {
             ReasoningNode* node = sub->net->nodes[n];
-            if (!node || node->edge_count == 0) continue;
-            
-            float old_conf = node->confidence;
-            
-            float support_score = 0.0f;
-            int edge_count = 0;
-            
-            for (int i = 0; i < node->edge_count; i++) {
-                if (!node->edges[i].target) continue;
-                support_score += edge_conf_to_support(node->edges[i].confidence);
-                edge_count++;
-            }
-            
-            if (edge_count == 0) continue;
-            
-            float consistency = support_score / edge_count;
-            
-            if (consistency > 0.3f) {
-                node->confidence += 0.01f;
-            } else if (consistency < -0.2f) {
-                node->confidence -= 0.02f;
-            }
-            
-            if (node->confidence > 0.95f) node->confidence = 0.95f;
-            if (node->confidence < 0.05f) node->confidence = 0.05f;
-            
-            if (fabs(node->confidence - old_conf) > 0.005f) {
-                verified_count++;
-            }
+            if (!node) continue;
+
+            int deg = 0;
+            float evidence = node_edge_evidence(node, &deg);
+
+            float new_conf = evidence_to_confidence(evidence, deg);
+            if (new_conf > PV_CONF_CEIL)  new_conf = PV_CONF_CEIL;
+            if (new_conf < PV_CONF_FLOOR) new_conf = PV_CONF_FLOOR;
+
+            node->confidence = new_conf;
         }
     }
 }
@@ -6111,6 +6120,15 @@ int master_load_state(MasterTopology* master, const char* file_path) {
     /* TAIL-EDGE-1（结构半）: 映射表只在本函数生命周期内需要，两个出口都要归还，
      * 否则每次加载泄漏（最坏 32 × 2,000,000 × 4B）。此处不改变任何加载行为。 */
     xlink_idmap_free(xlink_f2m, xlink_f2m_cap);
+
+    /* v0.5.40（待办 A22）：节点 confidence 是**派生量**（存盘/加载路径都不含它，
+     * 见 master_serialize_batch 的节点段），加载后各节点还停在新建默认 0.5。
+     * 这里按边证据把基准建立起来，否则感知区的三维度知识缺口判据
+     * （perception.c 的 _gap_*_queries，要求 conf < 0.25 / 0.4 / 0.1）
+     * 在第一拍看到的是一个假分布 ⇒ 缺口驱动结构性空转。
+     * 本函数只在加载收尾调用（启动期单线程），与既有 master_load_state 的
+     * 无锁节点遍历口径一致。 */
+    batch_self_verify(master);
 
     return loaded_nodes;
 

@@ -909,10 +909,14 @@ DialogReasoning* dialog_reason(DialogInput* input, MasterTopology* master,
         }
     }
     
-    master_consolidate_confidence(master, 0.1f);
-    
+    /* v0.5.40（待办 A22）：**顺序不能反** —— batch_self_verify() 现在按边证据
+     * **重估**节点置信度（覆盖写）。若它排在 master_consolidate_confidence() 之后，
+     * 后者刚加上去的反馈加成会在同一轮被立刻抹掉 ⇒ 该机制沦为聋子的耳朵。
+     * 正确次序：先按证据立基准，再叠加「刚用过且用得对」的加成。 */
     batch_self_verify(master);
-    
+
+    master_consolidate_confidence(master, 0.1f);
+
     return reasoning;
 }
 

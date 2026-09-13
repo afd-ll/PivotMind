@@ -50,7 +50,11 @@ typedef enum {
 /** 感觉皮层配置 */
 typedef struct {
     int   max_searches_per_cycle;    /* 每次搜索周期最多搜几个概念 (默认5) */
-    int   min_confidence_for_search;  /* 置信度低于此值才搜 (默认0.3) */
+    /* 🔴 v0.5.40 修 bug：原声明为 `int`，而 PERCEPTION_DEFAULT_CONFIG 给的是
+     * `0.1f` ⇒ **截断为 0** ⇒ `node->confidence < 0` 恒假 ⇒ 拓扑缺口判据
+     * 在结构上永不命中（与 is_valid_query 恒假同类，见工程纪律档案 §7.24）。
+     * 语义上它本来就是「阈值」，必须是 float。 */
+    float min_confidence_for_search;  /* 置信度低于此值才搜 (默认0.1) */
     int   search_timeout_ms;         /* 单次搜索超时(ms) (默认5000) */
     int   cycle_interval_ticks;      /* 搜索周期间隔(脑干tick数) (默认300) */
     int   fallback_interval_ticks;   /* 保底触发间隔 — 无论多忙必搜 (默认1200=20分钟) */
