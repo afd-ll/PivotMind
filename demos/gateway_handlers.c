@@ -7,6 +7,7 @@
  */
 
 #include "gateway_internal.h"
+#include "lang.h"
 
 // ==================== 请求处理 ====================
 
@@ -101,15 +102,9 @@ void handle_chat(GatewaySystem* gw, int fd, const char* body) {
      * PFE/graph 合成路径可能混入英文节点名，此处统一拦截，
      * 丢弃后走 prefrontal_chat / 默认回复路径。 */
     if (response) {
-        int msg_cjk = 0;
-        for (const char* p = msg; *p; p++)
-            if ((unsigned char)*p >= 0x80) { msg_cjk = 1; break; }
-        if (msg_cjk) {
-            int resp_cjk = 0;
-            for (const char* p = response; *p; p++)
-                if ((unsigned char)*p >= 0x80) { resp_cjk = 1; break; }
-            if (!resp_cjk) { free(response); response = NULL; }
-        }
+        /* v0.5.35：改走语种 SSOT。原实现按「有无非 ASCII 字节」判中文 ——
+         * emoji / 假名 / 带音标的拉丁字母都会被算成中文。现按【存在中文码点】判。 */
+        if (pm_has_zh(msg) && !pm_has_zh(response)) { free(response); response = NULL; }
     }
 
     /* 功能词兜底（v0.6）：回复若只有"很+X"类功能词组合（很大/很快）

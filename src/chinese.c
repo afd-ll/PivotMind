@@ -1,4 +1,5 @@
 #include "chinese.h"
+#include "lang.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -75,29 +76,10 @@ int get_char_bytes(const char* str) {
     return 1; // 默认1字节
 }
 
-// 判断是否为中文字符
+// 判断是否为中文字符 —— v0.5.35 起走语种 SSOT（见 include/lang.h）
+// ⚠ 盘点（2026-09-13）：本函数全仓【无调用者】，仅保留以不破坏 chinese.h 的既有 API。
 int is_chinese_char(const char* str) {
-    if (!str) return 0;
-
-    CharType type = get_char_type(str);
-
-    // 3字节UTF-8通常表示中文字符
-    if (type == CH_UTF8_3BYTE) {
-        // 检查是否在中文Unicode范围内
-        unsigned char c1 = (unsigned char)str[0];
-        unsigned char c2 = (unsigned char)str[1];
-        unsigned char c3 = (unsigned char)str[2];
-
-        // 转换为Unicode码点
-        int codepoint = ((c1 & 0x0F) << 12) | ((c2 & 0x3F) << 6) | (c3 & 0x3F);
-
-        // 基本汉字范围: 0x4E00 - 0x9FFF
-        if (codepoint >= 0x4E00 && codepoint <= 0x9FFF) {
-            return 1;
-        }
-    }
-
-    return 0;
+    return pm_is_zh_char(str);
 }
 
 // 判断是否为标点符号

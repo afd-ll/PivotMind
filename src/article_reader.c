@@ -17,6 +17,7 @@
 #include "topology_growth.h"
 #include "common.h"
 #include "chinese.h"
+#include "lang.h"
 #include "thalamus.h"
 #include "emergent_pos.h"
 #include "error.h"
@@ -515,7 +516,7 @@ static int _ar_register_word_node(ArticleReader* ar, SubTopology* topo,
 
     /* v0.5.7: 英文垃圾词过滤（请求参数/cookie 名/乱码——实测
      * 抽查 67 个新词 ~90% 是 _G/SID/wXMLH 这类） */
-    if ((unsigned char)text[0] < 0x80) {  /* ASCII 词 */
+    if (pm_is_ascii_text(text)) {  /* ASCII 词（v0.5.35 起走语种 SSOT） */
         const char* w = text;
         size_t wl = strlen(w);
         int has_vowel = 0, has_underscore = 0, has_digit = 0, has_lower = 0;

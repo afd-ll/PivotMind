@@ -9,6 +9,7 @@
 #include "multi_topology.h"
 #include "dict_loader.h"
 #include "pivotmind_paths.h"
+#include "lang.h"
 
 /* 复制自 demos/pivotmind_gateway.c:860 — CJK 字符间插空格 */
 static void _cjk_insert_spaces(const char* src, char* dst, int dst_sz) {
@@ -54,8 +55,9 @@ static int cc_is_void_char(const char* s) {
     return 0;
 }
 
+/* v0.5.35：改走语种 SSOT（原为「只看首字节」，混合串 "abc中" 会误判为 ASCII） */
 static int is_ascii_token(const char* s) {
-    return (unsigned char)s[0] < 0x80;
+    return pm_is_ascii_text(s);
 }
 
 /* 英文词过滤：纯字母（允许内部 - '），长度 2-24

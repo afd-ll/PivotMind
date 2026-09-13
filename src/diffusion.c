@@ -10,6 +10,7 @@
 #include "emergent_pos.h"
 #include "cognitive_controller.h"
 #include "node_cache.h"   /* v0.5.10: 按需解冻 node_cache_thaw */
+#include "lang.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -986,8 +987,9 @@ static int word_prio_add(const char** word_prio, int* count, const char* w,
 
 #define LANG_BOOST_SAME  1.3f   /* 同语言邻居激活增强（原 :1177，上移供 _lang_mult 复用） */
 #define LANG_BOOST_CROSS 0.4f   /* 跨语言邻居激活衰减（原 :1178） */
-/* 判断节点的语言类型 */
-#define NODE_IS_CJK(n) ((n) && (n)->concept && (unsigned char)(n)->concept[0] >= 0x80)
+/* 判断节点的语言类型 —— v0.5.35 起走语种 SSOT：
+ * 原实现「首字节高位」把假名/谚文/emoji/CJK 标点全算成 CJK，现按码点判 CJK 表意。 */
+#define NODE_IS_CJK(n) ((n) && (n)->concept && (pm_lang_of((n)->concept) == PM_LANG_ZH))
 
 /* 竞争前沿/候选池条目：节点 + 它在本跳拿到的累计强度 */
 typedef struct { int node_id; float strength; } SpreadEntry;
@@ -1306,7 +1308,11 @@ int diffusion_generate(DiffusionCtx* ctx,
     for (int a = 0; a < active_count; a++) {
         ReasoningNode* an = ctx->vocab->net->nodes[active_ids[a]];
         if (!an || !an->concept) continue;
-        if ((unsigned char)an->concept[0] >= 0x80) cjk_nodes++; else ascii_nodes++;
+        switch (pm_lang_of(an->concept)) {     /* v0.5.35 语种 SSOT（其余语种不计票） */
+            case PM_LANG_ZH: cjk_nodes++;   break;
+            case PM_LANG_EN: ascii_nodes++; break;
+            default: break;
+        }
     }
     /* dominant: +1=CJK优先, -1=ASCII优先, 0=混合 */
     int lang_dom = (cjk_nodes > ascii_nodes * 2) ? 1 :

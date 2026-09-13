@@ -23,6 +23,7 @@
  */
 
 #include "pivotmind_paths.h"
+#include "lang.h"
 #include "error.h"
 #include "autonomic_learner.h"
 #include "common.h"
@@ -1345,11 +1346,10 @@ int main() {
 /* 全局可调阈值（后续调参用）：词巩固相对强度阈值 */
 float g_compound_threshold = CC_THRESHOLD_DEF;
 
+/* v0.5.35：改走语种 SSOT。原实现「3 字节即汉字」会把 CJK 标点（。）、
+ * 平假名/片假名（あ）、谚文都误判成汉字。 */
 static int cc_is_cjk_char(const char* s) {
-    unsigned char c = (unsigned char)s[0];
-    if (c >= 0xE0 && c <= 0xEF)
-        return (s[1] != 0 && s[2] != 0 && s[3] == 0) ? 1 : 0;
-    return 0;
+    return pm_is_zh_char(s);
 }
 
 /* 纯虚字表：这些字参与的"词"大多是虚词/短语噪声（的武/你是/很大），

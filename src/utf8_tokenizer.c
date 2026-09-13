@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include "lang.h"
 
 // UTF-8字符长度判断
 int utf8_char_len(unsigned char c) {
@@ -17,10 +18,11 @@ int utf8_char_len(unsigned char c) {
     return 1;
 }
 
-// 检查是否是中文字符
+// 「非 ASCII」粗判 —— v0.5.35 起走语种 SSOT（见 include/lang.h）
+// ⚠ 本函数是【字节级粗判】，不含语种语义（法文 é / 假名 / emoji 都是「非 ASCII」）。
+//   要语种语义请用 pm_lang_of()。
 int is_chinese(const char* p) {
-    unsigned char c = (unsigned char)*p;
-    return (c & 0x80) != 0;  // 高位为1，可能是中文
+    return pm_is_nonascii(p);
 }
 
 // 提取单个UTF-8字符

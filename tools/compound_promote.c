@@ -15,6 +15,7 @@
  */
 #include "ui.h"
 #include "pivotmind_paths.h"
+#include "lang.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -31,13 +32,9 @@ typedef struct {
     float strength;       /* 相对强度（双向取最小） */
 } WordCandidate;
 
+/* v0.5.35：改走语种 SSOT（原「3 字节即汉字」会误收 CJK 标点/假名/谚文） */
 static int is_cjk_char(const char* s) {
-    /* UTF-8 汉字 = 3 字节，且首字节 E4-EF（中文基本区） */
-    unsigned char c = (unsigned char)s[0];
-    if (c >= 0xE0 && c <= 0xEF) {
-        return (s[1] != 0 && s[2] != 0 && s[3] == 0) ? 1 : 0;
-    }
-    return 0;
+    return pm_is_zh_char(s);
 }
 
 static int cmp_candidate(const void* a, const void* b) {

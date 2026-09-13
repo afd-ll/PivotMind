@@ -9,6 +9,7 @@
 #include "multi_topology.h"
 #include "cognitive_controller.h"
 #include "constants.h"
+#include "lang.h"
 
 int main(int argc, char** argv) {
     const char* path = (argc > 1) ? argv[1] : pm_file(PM_FILE_STATE);
@@ -121,6 +122,31 @@ int main(int argc, char** argv) {
         printf("%-12s %6d %8d %8.1f %8.4f %7.1f%% %8.4f  (最活跃:%s=%.3f)\n",
                sub->name, nc, total_edges, avg_deg, avg_conf, high_conf_pct, avg_a,
                max_concept, max_act);
+    }
+
+    /* ---- 语种分布（v0.5.35）----------------------------------------------
+     * 口径 = pm_lang_of()（语种 SSOT，见 include/lang.h）。
+     * 作用：为「多语种分离」提供数据依据 —— 先看清各语种到底占多少，再决定怎么分。 */
+    printf("\n--- 语种分布 (按概念节点, 口径=pm_lang_of) ---\n");
+    {
+        int lang_cnt[PM_LANG_COUNT];
+        int lang_total = 0;
+        int i, t, n;
+        for (i = 0; i < PM_LANG_COUNT; i++) lang_cnt[i] = 0;
+        for (t = 0; t < master->sub_topo_count; t++) {
+            SubTopology* sub2 = master->sub_topologies[t];
+            if (!sub2 || !sub2->net) continue;
+            for (n = 0; n < sub2->net->node_count; n++) {
+                ReasoningNode* node2 = sub2->net->nodes[n];
+                if (!node2 || !node2->concept || !node2->concept[0]) continue;
+                lang_cnt[pm_lang_of(node2->concept)]++;
+                lang_total++;
+            }
+        }
+        for (i = 0; i < PM_LANG_COUNT; i++)
+            printf("  %-8s %8d  (%5.1f%%)\n", pm_lang_name((PmLang)i), lang_cnt[i],
+                   lang_total > 0 ? lang_cnt[i] * 100.0f / lang_total : 0.0f);
+        printf("  %-8s %8d\n", "合计", lang_total);
     }
 
     // 置信度分布

@@ -1,4 +1,5 @@
 #include "pivotmind_paths.h"
+#include "lang.h"
 #include "common.h"
 /**
  * @file cognitive_controller.c
@@ -1530,12 +1531,9 @@ static int str_ends_with(const char* str, const char* suffix) {
     return str_ends_with_fast(str, (int)strlen(str), suffix);
 }
 
-/** 判断是否为纯 ASCII 词（含字母） */
+/** 判断是否为纯 ASCII 词（含字母）—— v0.5.35 起走语种 SSOT（见 include/lang.h） */
 static int is_ascii_word(const char* word) {
-    if (!word || !word[0]) return 0;
-    for (const char* p = word; *p; p++)
-        if ((unsigned char)*p > 0x7F) return 0;
-    return 1;
+    return pm_is_ascii_text(word);
 }
 
 /** 英文 POS 查找 — 规则 + 小词典 */
