@@ -173,10 +173,15 @@ char* prefrontal_chat(Prefrontal* pf, const char* input) {
                         }
                         if (best_nid >= 0 && best_nid < vocab->net->node_count) {
                             ReasoningNode* answer = vocab->net->nodes[best_nid];
-                            if (answer && answer->concept && concept_is_outputtable(answer->concept)) {
+                            /* 用户可见输出判据：主体/答案都是节点 concept，
+                             * 直接拼进「X是Y色的。」→ 回复文本，两者都要过判据。 */
+                            if (answer && answer->concept &&
+                                concept_is_outputtable(answer->concept) &&
+                                subj_node->concept &&
+                                concept_is_outputtable(subj_node->concept)) {
                                 char buf[256];
                                 snprintf(buf, sizeof(buf), "%s是%s色的。",
-                                         subj_node->concept ? subj_node->concept : "",
+                                         subj_node->concept,
                                          answer->concept);
                                 return strdup(buf);
                             }

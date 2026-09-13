@@ -19,6 +19,7 @@
 #include "utf8_tokenizer.h"
 #include "cognitive_params.h"
 #include "constants.h"
+#include "cognitive_controller.h"   /* concept_is_outputtable() */
 
 // 本地防回声辅助函数
 static int char_in_avoid_set(const char* ch, const char* set) {
@@ -368,6 +369,9 @@ char* generate_from_associations(AssociativeEngine* engine, int max_len,
                 if (!t_sub || !t_sub->net || nid < 0 || nid >= t_sub->net->node_count) continue;
                 ReasoningNode* node = t_sub->net->nodes[nid];
                 if (!node || !node->concept) continue;
+                /* 用户可见输出判据：跨拓扑走边会走到语义拓扑的匿名节点
+                 * sem_<x>_<n>（semantic_growth 产出），绝不可进回复文本。 */
+                if (!concept_is_outputtable(node->concept)) continue;
                 // 防回声：跳过已被之前路径输出过的字符
                 if (ac > 0 && char_in_avoid_set(node->concept, avoid_chars)) continue;
                 pos += snprintf(result + pos, max_len - pos, "%s", node->concept);
@@ -401,6 +405,8 @@ char* generate_from_associations(AssociativeEngine* engine, int max_len,
                 if (nid < 0 || nid >= sub->net->node_count) continue;
                 ReasoningNode* node = sub->net->nodes[nid];
                 if (!node || !node->concept) continue;
+                /* 用户可见输出判据（本拓扑贪心分支同上）：拒内部匿名节点。 */
+                if (!concept_is_outputtable(node->concept)) continue;
                 pos += snprintf(result + pos, max_len - pos, "%s", node->concept);
             }
         }
@@ -410,7 +416,10 @@ char* generate_from_associations(AssociativeEngine* engine, int max_len,
     }
 
     // 兜底：跨拓扑走边没走出结果
-    if (pos == 0 && engine->assoc_count > 0) {
+    /* 判据在兜底处也必须过一遍：即便上面两条路径都被过滤空，
+     * 这里也不能把 associations[0]（可能是 sem_ 匿名节点）原样吐出去。 */
+    if (pos == 0 && engine->assoc_count > 0 &&
+        concept_is_outputtable(engine->associations[0].concept)) {
         snprintf(result, max_len, "%s", engine->associations[0].concept);
     }
 

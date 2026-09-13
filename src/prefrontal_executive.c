@@ -656,7 +656,10 @@ int pfe_solve_subgoal(PrefrontalExecutive* pfe, int goal_index) {
                             if (vocab && vocab->net && topo_id >= 0 &&
                                 topo_id < vocab->net->node_count &&
                                 vocab->net->nodes[topo_id] &&
-                                vocab->net->nodes[topo_id]->concept) {
+                                vocab->net->nodes[topo_id]->concept &&
+                                /* 用户可见输出判据：因果链节点名直接进 answer_text→回复，
+                                 * 内部匿名节点（sem_<x>_<n>）必须挡在这里，留 "?"。 */
+                                concept_is_outputtable(vocab->net->nodes[topo_id]->concept)) {
                                 name = vocab->net->nodes[topo_id]->concept;
                             }
                         }
@@ -1693,6 +1696,9 @@ static int pfe_semantic_field_answer(PrefrontalExecutive* pfe, const char* subje
         if (skip) continue;
         /* 中文单字不输出 */
         if ((unsigned char)nb->concept[0] >= 0x80 && strlen(nb->concept) == 3) continue;
+        /* 用户可见输出判据：语义场词直接拼进 PFE answer_text → 回复。
+         * 语义场的邻居可能落在内部匿名节点上（sem_<x>_<n>），必须拒。 */
+        if (!concept_is_outputtable(nb->concept)) continue;
         pos += snprintf(out + pos, (size_t)(out_sz - pos), "%s", nb->concept);
         cnt++;
         if (cnt < 3) pos += snprintf(out + pos, (size_t)(out_sz - pos), " ");

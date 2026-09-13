@@ -960,6 +960,10 @@ static int words_share_char(const char* a, const char* b) {
 static int word_prio_add(const char** word_prio, int* count, const char* w,
                          int cap) {
     if (!w || !w[0]) return 0;
+    /* 用户可见输出判据：word_prio 是「词锚定/语义场优先输出队列」，其元素最终
+     * 原样进 output_words → 回复文本。内部匿名节点 sem_<x>_<n> 在此一次挡掉，
+     * 覆盖三个 source（词锚定命中 wnode / 词节点邻居 wnb / 语义场成员 mw）。 */
+    if (!concept_is_outputtable(w)) return 0;
     for (int k = 0; k < *count; k++) {
         const char* ex = word_prio[k];
         if (!ex) continue;
@@ -1873,6 +1877,9 @@ int diffusion_generate(DiffusionCtx* ctx,
                     for (int w2 = 0; w2 < word_count; w2++)
                         if (strcmp(nb->concept, word_buf[w2]) == 0) { dup = 1; break; }
                     if (dup) continue;
+                    /* 用户可见输出判据：次相关窗口邻居直接进 word_buf →
+                     * output_words → 回复文本，必须拒内部匿名节点 sem_<x>_<n>。 */
+                    if (!concept_is_outputtable(nb->concept)) continue;
                     word_buf[word_count] = nb->concept;
                     word_pos[word_count] = emergent_pos_tag(
                         ctx->emergent_pos, ctx->master, nb->concept);
