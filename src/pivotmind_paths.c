@@ -453,10 +453,22 @@ int pm_legacy_layout_guard(const char *who, int refuse) {
         return 0;
     }
 
-    LOG_ERROR("[%s] 拒绝启动：数据文件仍在【旧扁平布局】%s/，而 SSOT 主状态 %s 不存在。\n"
-              "            继续启动会【静默从空脑开始】（不报错）= 玄枢失忆，故此处 fail-loud。\n%s"
-              "            ① 迁移（推荐）：deploy/migrate-home-layout.sh --home \"%s\" --yes\n"
-              "            ② 确要用空状态启动：PIVOTMIND_ALLOW_LEGACY_LAYOUT=1",
+    if (refuse) {
+        LOG_ERROR("[%s] 拒绝启动：数据文件仍在【旧扁平布局】%s/，而 SSOT 主状态 %s 不存在。\n"
+                  "            继续启动会【静默从空脑开始】（不报错）= 玄枢失忆，故此处 fail-loud。\n%s"
+                  "            ① 迁移（推荐）：deploy/migrate-home-layout.sh --home \"%s\" --yes\n"
+                  "            ② 确要用空状态启动：PIVOTMIND_ALLOW_LEGACY_LAYOUT=1",
+                  tag, g_home, g_files[0], list, g_home);
+        return 1;
+    }
+
+    /* refuse == 0：本入口只告警、不拒绝（前台 / 交互式工具，操作者当场可见）。
+       文案必须与行为一致 —— 不许说「拒绝启动」却继续往下跑（那是另一种「说一套做一套」）。 */
+    LOG_ERROR("[%s] 警告：数据文件仍在【旧扁平布局】%s/，而 SSOT 主状态 %s 不存在 ——\n"
+              "            照此启动会【静默从空脑开始】（不报错）= 玄枢失忆。\n"
+              "            本入口【不拒绝启动】（只有 gateway 会硬拒），请尽快处理：\n%s"
+              "            迁移（推荐）：deploy/migrate-home-layout.sh --home \"%s\" --yes\n"
+              "            确要用空状态启动：PIVOTMIND_ALLOW_LEGACY_LAYOUT=1",
               tag, g_home, g_files[0], list, g_home);
-    return refuse ? 1 : 0;
+    return 0;
 }

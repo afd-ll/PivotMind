@@ -149,6 +149,8 @@ int pm_legacy_layout_report(char *report, size_t cap);
  * escape：环境变量 PIVOTMIND_ALLOW_LEGACY_LAYOUT=1 ⇒ 显式放行（返回 0）。
  * who：调用方标签（如 "gateway"），仅用于日志前缀，可为 NULL。
  * 返回 0 = 可继续；1 = 调用方应拒绝启动（仅 refuse != 0 且未放行时）。
+ * 注：消息文案随 refuse 变化 —— refuse != 0 说「拒绝启动」，refuse == 0 说「不拒绝启动，仅告警」。
+ *     二者必须一致，杜绝「打印『拒绝启动』却继续往下跑」的自相矛盾。
  */
 int pm_legacy_layout_guard(const char *who, int refuse);
 
