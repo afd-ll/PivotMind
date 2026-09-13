@@ -18,6 +18,8 @@
 #include <string.h>
 #include <math.h>
 #include "prefrontal_executive.h"
+#include "pivotmind_paths.h"
+#include <errno.h>
 
 /* ================================================================
  *  测试框架
@@ -60,6 +62,37 @@ static int tests_failed = 0;
         tests_failed++; return; \
     } } while(0)
 
+/* ---- 路径 SSOT 隔离（契约见 include/pivotmind_paths.h）----
+ * 本测试会真实读写 pfe_strategy.bin / pfe_workspace.bin。SSOT 落地后这两个文件的
+ * 【默认落点】= <home>/data/，不再跟随 CWD。故测试必须：
+ *   ① 在任何 pm_* 调用【之前】setenv 一个私有 home —— pm_home() 只解析一次并缓存；
+ *   ② 用 pm_ensure_dirs()（SSOT 唯一写入口）预建目录树；
+ *   ③ 所有 remove/fopen 一律走 pm_file()，与生产代码同源。
+ * mkdtemp 保证每次运行世界干净 ⇒ 用例之间不再互相污染。 */
+static char g_test_home[256];
+
+static int setup_test_home(void) {
+    const char* tpl = "/tmp/pm-pfe-unit-XXXXXX";
+    snprintf(g_test_home, sizeof g_test_home, "%s", tpl);
+    if (mkdtemp(g_test_home) == NULL) {
+        fprintf(stderr, "[test] mkdtemp 失败: %s\n", strerror(errno));
+        return -1;
+    }
+    if (setenv("PIVOTMIND_HOME", g_test_home, 1) != 0) {
+        fprintf(stderr, "[test] setenv 失败: %s\n", strerror(errno));
+        return -1;
+    }
+    {
+        unsigned bad = pm_ensure_dirs(PM_DIR_ALL);
+        if (bad != 0u) {
+            fprintf(stderr, "[test] pm_ensure_dirs 未就绪 mask=0x%x\n", bad);
+            return -1;
+        }
+    }
+    printf("  [setup] 测试数据根: %s\n", pm_home());
+    return 0;
+}
+
 /* ================================================================
  *  辅助：创建最小 PFE 用于 Phase 3 算法测试
  *  不经过 pfe_create()，直接分配并手动设置字段，
@@ -82,8 +115,8 @@ static PrefrontalExecutive* make_minimal_pfe(void) {
 
 static void destroy_minimal_pfe(PrefrontalExecutive* pfe) {
     if (pfe) {
-        remove("pfe_strategy.bin");
-        remove("pfe_workspace.bin");
+        remove(pm_file(PM_FILE_PFE_STRATEGY));
+        remove(pm_file(PM_FILE_PFE_WORKSPACE));
         free(pfe);
     }
 }
@@ -356,7 +389,7 @@ void test_strategy_weight_load_missing(void) {
     PrefrontalExecutive* pfe = make_minimal_pfe();
 
     /* 确保文件不存在 */
-    remove("pfe_strategy.bin");
+    remove(pm_file(PM_FILE_PFE_STRATEGY));
 
     /* 加载应返回 -1，权重保持默认均匀 */
     int ret = pfe_load_strategy_weights(pfe);
@@ -560,7 +593,7 @@ void test_workspace_load_missing(void) {
     PrefrontalExecutive* pfe = make_minimal_pfe();
     ASSERT_TRUE(pfe != NULL, "create pfe");
 
-    remove("pfe_workspace.bin");
+    remove(pm_file(PM_FILE_PFE_WORKSPACE));
 
     char qbuf[512] = {0};
     int ret = pfe_load_workspace(pfe, qbuf, sizeof(qbuf));
@@ -576,7 +609,7 @@ void test_workspace_load_corrupt(void) {
     ASSERT_TRUE(pfe != NULL, "create pfe");
 
     /* 写入一个杂散文件 */
-    FILE* f = fopen("pfe_workspace.bin", "wb");
+    FILE* f = fopen(pm_file(PM_FILE_PFE_WORKSPACE), "wb");
     if (f) {
         const char garbage[] = "not a valid workspace";
         fwrite(garbage, 1, sizeof(garbage), f);
@@ -637,6 +670,12 @@ void test_cycle_and_satisfaction(void) {
  * ================================================================ */
 
 int main(void) {
+    /* 路径 SSOT 隔离：必须早于任何 pm_* 调用（pm_home 只解析一次并缓存） */
+    if (setup_test_home() != 0) {
+        fprintf(stderr, "FATAL: 测试环境初始化失败（路径 SSOT 隔离）\n");
+        return 2;
+    }
+
     printf("===========================================\n");
     printf("  PFE Unit Tests — Phase 3 Full Coverage\n");
     printf("===========================================\n\n");

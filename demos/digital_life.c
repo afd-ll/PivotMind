@@ -660,6 +660,16 @@ int main(int argc, char* argv[]) {
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
     
+    /* 路径 SSOT：数据/日志/会话/运行/语料目录默认自建（未就绪则加载/存盘会失败）。
+     * 与 gateway main 同款处理；不拒绝启动（只读环境下仍可做只读查询）。 */
+    {
+        unsigned bad = pm_ensure_dirs(PM_DIR_ALL);
+        if (bad != 0u)
+            fprintf(stderr, "[溯智] ⚠ 部分数据目录未就绪 (mask=0x%x)：加载/存盘会失败\n", bad);
+        else
+            printf("[溯智] 数据根: %s\n", pm_home());
+    }
+
     // 创建系统
     DigitalLifeSystem* sys = digital_life_create();
     if (!sys) {
