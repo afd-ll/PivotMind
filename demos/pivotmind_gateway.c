@@ -443,7 +443,10 @@ int main(int argc, char* argv[]) {
         if (strcmp(argv[i], "--train-mode") == 0) {
             train_mode_flag = 1;
             if (!train_config.corpus_path)
-                train_config.corpus_path = "data/hermes_knowledge_base.json";
+                /* P1-B 双根修复：默认语料走路径 SSOT（绝对路径），
+                 * 不再相对 argv[2] 解析。原实现下「语料读 <workdir>/data/」
+                 * 而「状态写 <pm_home>/data/」，同一进程读写落在两个不同根上。 */
+                train_config.corpus_path = pm_asset(PM_ASSET_QA_CORPUS);
         } else if (strcmp(argv[i], "--corpus") == 0 && i+1 < argc) {
             train_config.corpus_path = argv[++i];
         } else if (strcmp(argv[i], "--rounds") == 0 && i+1 < argc) {

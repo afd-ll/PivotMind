@@ -5,6 +5,7 @@
  * 用法: ./build/bin/build_cross_links [状态文件]
  *       默认: pivotmind_state.dat
  */
+#include "ui.h"
 #include "pivotmind_paths.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -26,9 +27,8 @@ int main(int argc, char* argv[]) {
             printf("[paths] 数据根: %s\n", pm_home());
     }
     
-    printf("╔═══════════════════════════════════════════╗\n");
-    printf("║    跨拓扑连接构建工具 v1.0                ║\n");
-    printf("╚═══════════════════════════════════════════╝\n\n");
+    ui_frame_title(43, "    跨拓扑连接构建工具 v1.0");
+    printf("\n");
     
     // 创建拓扑
     MasterTopology* master = master_topology_create(10);
@@ -156,11 +156,12 @@ int main(int argc, char* argv[]) {
         printf("  ✓ 已保存 %d 节点, %d 跨拓扑连接到 %s\n", saved, master->cross_link_count, state_path);
     }
     
-    printf("\n╔═══════════════════════════════════════════╗\n");
-    printf("║  完成！                                   ║\n");
-    printf("╠═══════════════════════════════════════════╣\n");
-    printf("║  跨拓扑连接: %d                            ║\n", master->cross_link_count);
-    printf("╚═══════════════════════════════════════════╝\n");
+    printf("\n");
+    ui_frame_begin(43);
+    ui_frame_row("完成！");
+    ui_frame_sep();
+    ui_frame_row("  跨拓扑连接: %d", master->cross_link_count);
+    ui_frame_end();
     
     master_topology_destroy(master);
     return 0;

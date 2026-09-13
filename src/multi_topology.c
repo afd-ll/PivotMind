@@ -5325,6 +5325,13 @@ int master_load_state(MasterTopology* master, const char* file_path) {
 
     int loaded_nodes = 0;
     int loaded_links = 0;
+    /* v0.5.34「丢弃必须记账」：拓扑在目标 master 里未注册 ⇒ 节点无处可放、被丢弃。
+     * 原实现在 !target_topo 分支里 loaded_nodes++ —— 把「丢弃」记成「已加载」，
+     * 于是「完成: N 节点」是谎报（实测：未注册任何子拓扑的调用方报 N 而实际加载 0）。
+     * 这里分开记，收尾逐 topo_type 报出，并让 loaded_nodes 只反映真进脑的节点。 */
+    int skipped_unknown_topo = 0;
+    int skipped_by_type[256];
+    for (int _i = 0; _i < 256; _i++) skipped_by_type[_i] = 0;
     time_t last_report = t0;
 
     /* TAIL-EDGE-1（结构半）: 文件 node_id -> 内存 node_id 映射（见上方辅助函数块）。
@@ -5431,7 +5438,9 @@ int master_load_state(MasterTopology* master, const char* file_path) {
             }
         }
         if (!target_topo) {
-            loaded_nodes++;
+            /* 丢弃必须记账（见 loaded_nodes 处的说明）：不计入 loaded_nodes。 */
+            skipped_unknown_topo++;
+            if (topo_type >= 0 && topo_type < 256) skipped_by_type[topo_type]++;
             if (fmt_ver == 1) continue;
             // v2: 跳过连接数据 (每连接: int+3float = 16 bytes)
             if (conn_count > 0) SKIP(conn_count * (int)(sizeof(int) + 3 * sizeof(float)));
@@ -6024,8 +6033,25 @@ int master_load_state(MasterTopology* master, const char* file_path) {
                  xlink_mapped_ok - xlink_dup_absorbed, xlink_dup_absorbed,
                  master->cross_link_count);
     }
-    fprintf(stderr, "[状态加载] 完成: %d 节点, %d 链接, 耗时 %ld 秒\n",
-            loaded_nodes, loaded_links, (long)(t1 - t0));
+    if (skipped_unknown_topo > 0) {
+        char sk_detail[256];
+        size_t du = 0;
+        sk_detail[0] = '\0';
+        for (int t = 0; t < 256; t++) {
+            if (skipped_by_type[t] == 0) continue;
+            if (du + 24u <= sizeof sk_detail) {
+                du += (size_t)snprintf(sk_detail + du, sizeof sk_detail - du, "%s%d:%d",
+                                       (du > 0u) ? " " : "", t, skipped_by_type[t]);
+            }
+        }
+        LOG_WARNING("[状态持久化] 加载期丢弃 %d 条节点记录：其 topo_type 在目标 master 中"
+                    "【未注册】（类型:计次 = %s）—— 这些节点【未进入大脑】，故不计入已加载数。"
+                    "请核对调用方的 master_add_sub_topology() 清单是否覆盖该文件里的全部拓扑。",
+                    skipped_unknown_topo, sk_detail);
+    }
+    fprintf(stderr, "[状态加载] 完成: %d 节点, %d 链接, 耗时 %ld 秒%s\n",
+            loaded_nodes, loaded_links, (long)(t1 - t0),
+            skipped_unknown_topo > 0 ? "（另有节点被丢弃，见上条 WARN）" : "");
     LOG_INFO("[状态持久化] 已从 %s 加载 (节点=%d, 链接=%d)",
            file_path, loaded_nodes, loaded_links);
     master_save_set_baseline(loaded_nodes);   /* v0.5.12: 加载即设防呆基准 */

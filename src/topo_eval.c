@@ -10,6 +10,7 @@
  * - 复用已有的 calculate_semantic_similarity, cosine_similarity 等函数
  * - 每个指标独立，按需调用
  */
+#include "ui.h"
 #include "topo_eval.h"
 #include "common.h"
 #include "associative_reasoning.h"
@@ -823,30 +824,30 @@ TopoHealthReport topo_health_report(MasterTopology* master) {
 void topo_health_report_print(const TopoHealthReport* report) {
     if (!report) return;
 
-    printf("╔═══════════════════════════════════════════╗\n");
-    printf("║  玄枢拓扑健康度报告                        ║\n");
-    printf("╠═══════════════════════════════════════════╣\n");
-    printf("║  综合健康分: %.1f / 100  [%s]           ║\n",
-           report->health_score, report->health_label ? report->health_label : "?");
-    printf("╠═══════════ 训练时指标 ═══════════╣\n");
-    printf("║  边增长率:       %.2f                   ║\n", report->edge_growth_rate);
-    printf("║  置信度分布熵:   %.4f                   ║\n", report->confidence_entropy);
-    printf("║  节点覆盖度:     %.1f%%                  ║\n", report->node_coverage * 100.0f);
-    printf("║  边密度:         %.4f%%                 ║\n", report->edge_density);
-    printf("╠═══════════ 推理时指标 ═══════════╣\n");
-    printf("║  跳转成功率:     %.1f%%                  ║\n", report->jump_success_rate * 100.0f);
-    printf("║  联想多样性:     %.4f                   ║\n", report->associative_diversity);
-    printf("║  语义连贯性:     %.4f                   ║\n", report->semantic_coherence);
-    printf("║  跨拓扑比:       %.2f%%                  ║\n", report->cross_topo_ratio * 100.0f);
-    printf("║  推理稳定度:     %.2f%%                  ║\n", report->inference_stability * 100.0f);
-    printf("║  平均步长:       %.1f (±%.1f)          ║\n",
-           report->path_stats.mean, report->path_stats.stddev);
-    printf("╠═══════════ 长期指标 ═════════════╣\n");
-    printf("║  遗忘率:         %.2f%%                  ║\n", report->forgetting_rate * 100.0f);
-    printf("║  知识泛化度:     %.2f%%                  ║\n", report->knowledge_generalization * 100.0f);
-    printf("║  记忆迁移率:     %.2f%%                  ║\n", report->memory_promotion_rate * 100.0f);
-    printf("║  域间干扰:       %.2f                    ║\n", report->domain_interference);
-    printf("╚═══════════════════════════════════════════╝\n");
+    ui_frame_begin(43);
+    ui_frame_row("  玄枢拓扑健康度报告");
+    ui_frame_sep();
+    ui_frame_row("  综合健康分: %.1f / 100  [%s]",
+                 report->health_score, report->health_label ? report->health_label : "?");
+    ui_frame_sep_label("训练时指标");
+    ui_frame_row("  边增长率:       %.2f", report->edge_growth_rate);
+    ui_frame_row("  置信度分布熵:   %.4f", report->confidence_entropy);
+    ui_frame_row("  节点覆盖度:     %.1f%%", report->node_coverage * 100.0f);
+    ui_frame_row("  边密度:         %.4f%%", report->edge_density);
+    ui_frame_sep_label("推理时指标");
+    ui_frame_row("  跳转成功率:     %.1f%%", report->jump_success_rate * 100.0f);
+    ui_frame_row("  联想多样性:     %.4f", report->associative_diversity);
+    ui_frame_row("  语义连贯性:     %.4f", report->semantic_coherence);
+    ui_frame_row("  跨拓扑比:       %.2f%%", report->cross_topo_ratio * 100.0f);
+    ui_frame_row("  推理稳定度:     %.2f%%", report->inference_stability * 100.0f);
+    ui_frame_row("  平均步长:       %.1f (±%.1f)",
+                 report->path_stats.mean, report->path_stats.stddev);
+    ui_frame_sep_label("长期指标");
+    ui_frame_row("  遗忘率:         %.2f%%", report->forgetting_rate * 100.0f);
+    ui_frame_row("  知识泛化度:     %.2f%%", report->knowledge_generalization * 100.0f);
+    ui_frame_row("  记忆迁移率:     %.2f%%", report->memory_promotion_rate * 100.0f);
+    ui_frame_row("  域间干扰:       %.2f", report->domain_interference);
+    ui_frame_end();
 }
 
 void topo_eval_print_all(MasterTopology* master) {

@@ -20,6 +20,7 @@
  * 用法: ./build/bin/reader 书.txt [epochs]
  */
 
+#include "ui.h"
 #include "pivotmind_paths.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -280,9 +281,8 @@ int main(int argc, char* argv[]) {
     setbuf(stdout, NULL);
     srand((unsigned)time(NULL));
 
-    printf("╔═══════════════════════════════════════════╗\n");
-    printf("║     PivotMind 读书工具 v0.2              ║\n");
-    printf("╚═══════════════════════════════════════════╝\n\n");
+    ui_frame_title(43, "     PivotMind 读书工具 v0.2");
+    printf("\n");
 
     const char* book_path = argc > 1 ? argv[1] : NULL;
     int epochs = argc > 2 ? atoi(argv[2]) : MAX_EPOCHS;

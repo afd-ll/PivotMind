@@ -13,6 +13,7 @@
  *       默认: pivotmind_state.dat  data/hermes_knowledge_base.json  1
  */
 
+#include "ui.h"
 #include "pivotmind_paths.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -263,7 +264,7 @@ static void collect_topo_health(MasterTopology* master,
 
 int main(int argc, char* argv[]) {
     const char* state_path = argc > 1 ? argv[1] : pm_file(PM_FILE_STATE);
-    const char* qa_path = argc > 2 ? argv[2] : "data/hermes_knowledge_base.json";
+    const char* qa_path = argc > 2 ? argv[2] : pm_asset(PM_ASSET_QA_CORPUS);
     int epochs = argc > 3 ? atoi(argv[3]) : 1;
     if (epochs < 1) epochs = 1;
 
@@ -284,9 +285,8 @@ int main(int argc, char* argv[]) {
 
     setbuf(stdout, NULL);
 
-    printf("╔═══════════════════════════════════════════╗\n");
-    printf("║    玄枢 批量学习工具 v%-14s║\n", PIVOTMIND_VERSION);
-    printf("╚═══════════════════════════════════════════╝\n\n");
+    ui_frame_title(43, "    玄枢 批量学习工具 v%s", PIVOTMIND_VERSION);
+    printf("\n");
 
     // 1. 加载或创建拓扑
     printf("[1/4] 加载拓扑...\n");
@@ -327,7 +327,7 @@ int main(int argc, char* argv[]) {
 
     // 加载外部词典（词→词性标注，如果存在）
     {
-        const char* dict_path = "data/jieba_dict.txt";
+        const char* dict_path = pm_asset(PM_ASSET_JIEBA_DICT);
         FILE* df = fopen(dict_path, "r");
         if (df) {
             fclose(df);
@@ -659,30 +659,31 @@ int main(int argc, char* argv[]) {
     int total_internal = 0;
     for (int t = 0; t < topo_count_rpt; t++) total_internal += topo_edges_rpt[t];
 
-    printf("\n╔═══════════════════════════════════════════╗\n");
-    printf("║  完成！                                   ║\n");
-    printf("╠═══════════════════════════════════════════╣\n");
-    printf("║  处理: %d 条 QA x %d epoch = %d 次         ║\n", qa_count, epochs, total_pairs);
-    printf("║  耗时: %.0f 秒                            ║\n", total_time);
-    printf("║  词汇拓扑节点: %d                          ║\n", vocab ? vocab->net->node_count : 0);
-    printf("║  词汇拓扑边: %d                            ║\n", vocab_edges);
-    printf("║  平均置信度: %.3f                          ║\n", vocab_conf);
-    printf("║  总边(含跨拓扑): %d                        ║\n", final_edges);
-    printf("║  跨拓扑连接: %d                              ║\n", master->cross_link_count);
-    printf("╠═══════ 拓扑健康度 ═════════════════════════╣\n");
-    printf("║  置信度分布: [低] %.0f%% [中] %.0f%% [高] %.0f%%   ║\n",
+    printf("\n");
+    ui_frame_begin(43);
+    ui_frame_row("  完成！");
+    ui_frame_sep();
+    ui_frame_row("  处理: %d 条 QA x %d epoch = %d 次", qa_count, epochs, total_pairs);
+    ui_frame_row("  耗时: %.0f 秒", total_time);
+    ui_frame_row("  词汇拓扑节点: %d", vocab ? vocab->net->node_count : 0);
+    ui_frame_row("  词汇拓扑边: %d", vocab_edges);
+    ui_frame_row("  平均置信度: %.3f", vocab_conf);
+    ui_frame_row("  总边(含跨拓扑): %d", final_edges);
+    ui_frame_row("  跨拓扑连接: %d", master->cross_link_count);
+    ui_frame_sep_label("拓扑健康度");
+    ui_frame_row("  置信度分布: [低] %.0f%% [中] %.0f%% [高] %.0f%%",
            conf_low_rpt, conf_med_rpt, conf_high_rpt);
-    printf("║  权重饱和: %.0f%% | 孤立节点: %.0f%% | 平均度: %.1f ║\n",
+    ui_frame_row("  权重饱和: %.0f%% | 孤立节点: %.0f%% | 平均度: %.1f",
            sat_ratio_rpt, zero_deg_rpt, avg_deg_rpt);
-    printf("║  跨拓扑密度: %.1f%% (%d/%d)                  ║\n",
+    ui_frame_row("  跨拓扑密度: %.1f%% (%d/%d)",
            total_internal > 0 ? (float)master->cross_link_count / (total_internal + master->cross_link_count) * 100.0f : 0.0f,
            master->cross_link_count, total_internal + master->cross_link_count);
-    printf("╠═══════ 各拓扑边数 ═════════════════════════╣\n");
+    ui_frame_sep_label("各拓扑边数");
     for (int t = 0; t < topo_count_rpt && t < 20; t++) {
-        printf("║  %-12s: %-6d                     ║\n",
+        ui_frame_row("  %-12s: %-6d",
                topo_names_rpt[t], topo_edges_rpt[t]);
     }
-    printf("╚═══════════════════════════════════════════╝\n");
+    ui_frame_end();
 
     // 清理
     autonomic_stop_async_flush(&state);

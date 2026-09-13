@@ -120,6 +120,33 @@ int pm_data_path(char *buf, size_t n, const char *name);
  */
 const char *pm_file(unsigned which);
 
+/* ---- 资产文件登记表（v0.5.34 新增）----
+ *
+ * 为什么不能塞进 PM_FILE_*：PM_FILE_ALL 是「**状态**文件」集合，
+ * pm_legacy_layout_report() 会遍历它做旧扁平布局审计。词典/语料是【输入资产】，
+ * 混进去会让审计把「资产没搬」也报成「玄枢失忆」，语义被污染；而且会改变
+ * fail-loud 门的触发条件。故单独一表。
+ *
+ * 落点 = <home>/<登记相对路径>（相对路径不含前导 '/'，也不含 ".." 段）。
+ * 与 PM_FILE_* 同构：单 bit、位号 = 数组下标、非法值 ⇒ NULL（调用方必须判）。 */
+#define PM_ASSET_JIEBA_DICT   (1u << 0)   /* data/jieba_dict.txt        —— 结巴词典（词→词性） */
+#define PM_ASSET_QA_CORPUS    (1u << 1)   /* data/hermes_knowledge_base.json —— QA 语料（hermes） */
+#define PM_ASSET_KB           (1u << 2)   /* data/knowledge_base.json   —— 早期知识库 */
+#define PM_ASSET_XIAOHUANGJI  (1u << 3)   /* corpus/xiaohuangji_pipe.txt —— 小黄鸡 QA 语料 */
+#define PM_ASSET_COUNT        4
+
+/**
+ * 资产文件路径（which 必须是单个 PM_ASSET_* 位）。
+ * 纯查询：解析一次并缓存，不碰文件系统、永不失败、永不为 NULL/空（与 pm_file 同构）；
+ * 非法 which（0 / 多 bit / 越界）⇒ NULL。
+ *
+ * 背景（v0.5.34）：v0.5.30 的路径 SSOT 只收编了 12 个【状态】文件，词典/语料这批
+ * 【资产】仍是硬编码相对路径 —— 以 **cwd** 为基准。quick_chat / feed_cli / batch_learn
+ * 都不做 chdir，从数据根以外启动时 fopen 失败后【静默降级】（无 else / 无告警），
+ * 分词质量下降却看不出来。此表把它们收敛到 <home> 之下，与状态同源。
+ */
+const char *pm_asset(unsigned which);
+
 /**
  * 日志文件路径：$PIVOTMIND_LOG_FILE（非空）优先，否则 <home>/log/pivotmind.log。
  * 纯查询：解析一次并缓存、永不失败、永不为 NULL/空。

@@ -71,10 +71,22 @@ static const char *const g_filename[PM_FILE_COUNT] = {
     "gw_token"                  /* PM_FILE_TOKEN         —— 网关凭据（0600，跨重启不变） */
 };
 
+#define PM_ASSET_COUNT 4
+
+/* 位号 = 数组下标；路径【相对 <home>】（无前导 '/'、无 ".." 段）。
+   ⚠ 与 g_filename 分表：不进 PM_FILE_ALL ⇒ 不影响旧布局审计与 pm_ensure_dirs。 */
+static const char *const g_asset_rel[PM_ASSET_COUNT] = {
+    "data/jieba_dict.txt",              /* PM_ASSET_JIEBA_DICT  —— 结巴词典（词→词性） */
+    "data/hermes_knowledge_base.json",  /* PM_ASSET_QA_CORPUS   —— QA 语料（hermes） */
+    "data/knowledge_base.json",         /* PM_ASSET_KB          —— 早期知识库 */
+    "corpus/xiaohuangji_pipe.txt"       /* PM_ASSET_XIAOHUANGJI —— 小黄鸡 QA 语料 */
+};
+
 static pthread_once_t g_once = PTHREAD_ONCE_INIT;
 static char g_home[PM_PATH_MAX];                  /* 解析结果（pthread_once 内写一次） */
 static char g_dirs[PM_DIR_COUNT][PM_PATH_MAX];    /* 六个目录（同上，纯只读查询） */
 static char g_files[PM_FILE_COUNT][PM_PATH_MAX];  /* 十二个数据文件（同上） */
+static char g_assets[PM_ASSET_COUNT][PM_PATH_MAX]; /* 四个资产文件（同上） */
 static char g_log_path[PM_PATH_MAX];              /* 日志文件（同上；$PIVOTMIND_LOG_FILE 优先） */
 
 /* 单 bit 掩码 ⇒ 位号；非法（0 / 多 bit / 越界 limit）⇒ -1。
@@ -201,6 +213,16 @@ build_dirs:
             LOG_WARNING("pivotmind_paths: 数据文件 \"%s\" 拼接失败，退化为 data 目录本身（不应发生）",
                         g_filename[i]);
             memcpy(g_files[i], g_dirs[1], strlen(g_dirs[1]) + 1u);
+        }
+    }
+
+    /* 资产文件 = <home>/<登记相对路径>（v0.5.34：词典/语料不再是 cwd 相对路径） */
+    for (i = 0; i < PM_ASSET_COUNT; i++) {
+        if (pm_join(g_assets[i], sizeof g_assets[i], g_home, g_asset_rel[i]) != 0) {
+            /* 校验已保证长度余量 ⇒ 理论不可达；仍不静默 */
+            LOG_WARNING("pivotmind_paths: 资产文件 \"%s\" 拼接失败，退化为 home 本身（不应发生）",
+                        g_asset_rel[i]);
+            memcpy(g_assets[i], g_home, strlen(g_home) + 1u);
         }
     }
 
@@ -376,6 +398,13 @@ const char *pm_file(unsigned which) {
     if (idx < 0) return NULL;   /* 非法 which：绝不「悄悄返回 home」 */
     pthread_once(&g_once, pm_resolve_once);
     return g_files[idx];
+}
+
+const char *pm_asset(unsigned which) {
+    int idx = pm_bit_index(which, PM_ASSET_COUNT);
+    if (idx < 0) return NULL;   /* 非法 which：绝不「悄悄返回 home」 */
+    pthread_once(&g_once, pm_resolve_once);
+    return g_assets[idx];
 }
 
 const char *pm_log_path(void) {

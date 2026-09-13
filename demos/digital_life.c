@@ -12,6 +12,7 @@
  * 特点: 持续学习，可长期运行
  */
 
+#include "ui.h"
 #include "pivotmind_paths.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -107,9 +108,8 @@ DigitalLifeSystem* digital_life_create() {
 #endif
     
     printf("\n");
-    printf("╔═══════════════════════════════════════════════════════════════╗\n");
-    printf("║            PivotMind 溯智系统 - 初始化                   ║\n");
-    printf("╚═══════════════════════════════════════════════════════════════╝\n\n");
+    ui_frame_title(63, "            PivotMind 溯智系统 - 初始化");
+    printf("\n");
     
     // 1. 创建记忆系统
     printf("[1/6] 创建记忆系统...\n");
@@ -349,9 +349,8 @@ DigitalLifeSystem* digital_life_create() {
     g_system = sys;
     
     printf("\n");
-    printf("╔═══════════════════════════════════════════════════════════════╗\n");
-    printf("║                 溯智系统初始化完成!                       ║\n");
-    printf("╚═══════════════════════════════════════════════════════════════╝\n\n");
+    ui_frame_title(63, "                 溯智系统初始化完成!");
+    printf("\n");
     
     return sys;
 }

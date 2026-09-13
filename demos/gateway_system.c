@@ -90,11 +90,17 @@ static int gw_system_init(GatewaySystem* gw) {
     printf("[gateway]   前额叶就绪\n");
 
     // 5b. QA 记忆检索（扩散/prefrontal 无产出时的兜底）
-    gw->qa_memory = qa_memory_create("corpus/xiaohuangji_pipe.txt", 500000);
-    if (!gw->qa_memory) {
-        printf("[gateway]   QA记忆: 未找到语料或加载失败，继续运行\n");
-    } else {
-        printf("[gateway]   QA记忆就绪 (%d 对)\n", qa_memory_count(gw->qa_memory));
+    {
+        /* 路径 SSOT：语料 = <home>/corpus/xiaohuangji_pipe.txt，不再以 cwd 为基准。
+         * 失败时把【具体路径】打出来 —— 原实现只说「未找到」，排障时无从下手。 */
+        const char* qa_corpus = pm_asset(PM_ASSET_XIAOHUANGJI);
+        gw->qa_memory = (qa_corpus != NULL) ? qa_memory_create(qa_corpus, 500000) : NULL;
+        if (!gw->qa_memory) {
+            printf("[gateway]   QA记忆: 未找到语料或加载失败，继续运行 (缺 %s)\n",
+                   (qa_corpus != NULL) ? qa_corpus : "<pm_asset=NULL>");
+        } else {
+            printf("[gateway]   QA记忆就绪 (%d 对)\n", qa_memory_count(gw->qa_memory));
+        }
     }
 
     // 脑干

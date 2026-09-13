@@ -14,6 +14,7 @@
  * 用法: ./build/bin/seed_teacher [memory_seed.dat]
  */
 
+#include "ui.h"
 #include "pivotmind_paths.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -105,9 +106,8 @@ static const char* patterns[][2] = {
 int main(int argc, char* argv[]) {
     const char* seed_path = argc > 1 ? argv[1] : pm_file(PM_FILE_MEMORY_SEED);
     
-    printf("╔═══════════════════════════════════════════╗\n");
-    printf("║     PivotMind 对话种子注入工具           ║\n");
-    printf("╚═══════════════════════════════════════════╝\n\n");
+    ui_frame_title(43, "     PivotMind 对话种子注入工具");
+    printf("\n");
 
     // 创建记忆系统
     MemorySystem* memory = memory_system_create(100, 500, 5000);

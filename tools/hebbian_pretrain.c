@@ -12,6 +12,7 @@
  *   字 A 和字 B 在同一组 QA 中同时出现 → 它们的特征向量互相拉近
  *   多次拉近后，同类上下文中的字自然聚类 → 语义空间浮现
  */
+#include "ui.h"
 #include "pivotmind_paths.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -166,7 +167,7 @@ static void init_features(ReasoningNode* node) {
 
 int main(int argc, char* argv[]) {
     const char* state_path = argc > 1 ? argv[1] : pm_file(PM_FILE_STATE);
-    const char* qa_path = argc > 2 ? argv[2] : "data/hermes_knowledge_base.json";
+    const char* qa_path = argc > 2 ? argv[2] : pm_asset(PM_ASSET_QA_CORPUS);
     int epochs = argc > 3 ? atoi(argv[3]) : 10;
 
     /* 路径 SSOT：数据目录默认自建（未就绪则加载/存盘会失败）。
@@ -182,9 +183,8 @@ int main(int argc, char* argv[]) {
 
     srand((unsigned int)time(NULL));
 
-    printf("╔═══════════════════════════════════════════╗\n");
-    printf("║    Hebbian 语义预训练 v1.0               ║\n");
-    printf("╚═══════════════════════════════════════════╝\n\n");
+    ui_frame_title(43, "    Hebbian 语义预训练 v1.0");
+    printf("\n");
 
     // 1. 加载拓扑
     printf("[1/4] 加载拓扑...\n");
@@ -370,8 +370,7 @@ int main(int argc, char* argv[]) {
     free(answers);
     master_topology_destroy(master);
 
-    printf("\n╔═══════════════════════════════════════════╗\n");
-    printf("║  完成！语义向量已训练                      ║\n");
-    printf("╚═══════════════════════════════════════════╝\n");
+    printf("\n");
+    ui_frame_title(43, "  完成！语义向量已训练");
     return 0;
 }

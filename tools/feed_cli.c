@@ -8,6 +8,7 @@
 #include <string.h>
 #include "multi_topology.h"
 #include "dict_loader.h"
+#include "pivotmind_paths.h"
 
 /* 复制自 demos/pivotmind_gateway.c:860 — CJK 字符间插空格 */
 static void _cjk_insert_spaces(const char* src, char* dst, int dst_sz) {
@@ -205,16 +206,20 @@ int main(int argc, char** argv) {
     master_add_sub_topology(master, TOPO_MASTER,     "", 100, 0);
     master_add_sub_topology(master, TOPO_TEMPLATE,   "", 20000, 8);
 
-    FILE* df = fopen("data/jieba_dict.txt", "r");
-    if (df) {
-        fclose(df);
-        DictTable* d = dict_table_create(524288);
-        if (dict_load_jieba(d, "data/jieba_dict.txt") > 0) {
-            master->ext_dict = (struct ExternalDict*)d;
-            printf("词典加载 OK\n");
+    {
+        const char* dict_path = pm_asset(PM_ASSET_JIEBA_DICT);
+        FILE* df = (dict_path != NULL) ? fopen(dict_path, "r") : NULL;
+        if (df) {
+            fclose(df);
+            DictTable* d = dict_table_create(524288);
+            if (dict_load_jieba(d, dict_path) > 0) {
+                master->ext_dict = (struct ExternalDict*)d;
+                printf("词典加载 OK (%s)\n", dict_path);
+            }
+        } else {
+            printf("无词典，逐字模式 (缺 %s)\n",
+                   (dict_path != NULL) ? dict_path : "<pm_asset=NULL>");
         }
-    } else {
-        printf("无词典，逐字模式\n");
     }
 
     int loaded = master_load_state(master, state_path);

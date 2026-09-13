@@ -13,6 +13,7 @@
  *
  * 用法: compound_promote <state.dat> [threshold=3.0] [max_words=500]
  */
+#include "ui.h"
 #include "pivotmind_paths.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -78,9 +79,9 @@ int main(int argc, char** argv) {
     }
     setbuf(stdout, NULL);
 
-    printf("╔═══════════════════════════════════════════╗\n");
-    printf("║  词涌现器 (字拓扑→概念拓扑) 阈值=%.1f 上限=%d ║\n", threshold, max_words);
-    printf("╚═══════════════════════════════════════════╝\n\n");
+    ui_frame_title(43, "  词涌现器 (字拓扑→概念拓扑) 阈值=%.1f 上限=%d",
+                   threshold, max_words);
+    printf("\n");
 
     MasterTopology* master = master_topology_create(11);
     master_add_sub_topology(master, TOPO_VOCABULARY, "词汇拓扑", 100000, 10);

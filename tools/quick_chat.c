@@ -34,10 +34,37 @@ int main(int argc, char** argv) {
     master_add_sub_topology(master, TOPO_MASTER,     "", 100, 0);
     master_add_sub_topology(master, TOPO_TEMPLATE,   "", 4000, 8);
 
-    FILE* df = fopen("data/jieba_dict.txt", "r");
-    if (df) { fclose(df); DictTable* d = dict_table_create(524288); dict_load_jieba(d,"data/jieba_dict.txt"); master->ext_dict = (struct ExternalDict*)d; }
+    {
+        /* 路径 SSOT：词典落点是 <home>/data/jieba_dict.txt，不再以 cwd 为基准。
+         * 原实现 fopen 失败后【静默跳过】—— 词典缺失会让分词退化为逐字，必须说出来。 */
+        const char* dict_path = pm_asset(PM_ASSET_JIEBA_DICT);
+        FILE* df = (dict_path != NULL) ? fopen(dict_path, "r") : NULL;
+        if (df) {
+            fclose(df);
+            DictTable* d = dict_table_create(524288);
+            dict_load_jieba(d, dict_path);
+            master->ext_dict = (struct ExternalDict*)d;
+            printf("词典已加载: %s\n", dict_path);
+        } else {
+            fprintf(stderr, "[quick_chat] ⚠ 词典不存在: %s（逐字模式，分词质量会下降）\n",
+                    (dict_path != NULL) ? dict_path : "<pm_asset 返回 NULL>");
+        }
+    }
 
     printf("加载状态...\n");
+    /* P2：「缺文件」与「文件损坏」语义要分开说：
+     *   缺   ⇒ 首次运行 / 空脑，属正常路径（RC=0），但必须显式告知，别让人以为失忆；
+     *   损坏 ⇒ multi_topology 已 fail-loud（RC=1）。
+     * multi_topology 对「打不开」也打 ERROR，故这里补一句上下文。 */
+    {
+        FILE* probe = (state_path != NULL) ? fopen(state_path, "rb") : NULL;
+        if (probe != NULL) {
+            fclose(probe);
+        } else {
+            printf("提示: 状态文件不存在（%s）—— 将以【空脑】启动（首次运行属正常）\n",
+                   (state_path != NULL) ? state_path : "?");
+        }
+    }
     int loaded = master_load_state(master, state_path);
     printf("%d 节点\n\n", loaded);
     if (loaded <= 10) { printf("× 状态加载异常\n"); return 1; }

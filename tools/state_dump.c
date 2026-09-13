@@ -14,8 +14,30 @@ int main(int argc, char** argv) {
     const char* path = (argc > 1) ? argv[1] : pm_file(PM_FILE_STATE);
     printf("=== 玄枢状态分析: %s ===\n\n", path);
 
-    MasterTopology* master = master_topology_create(0);
+    /* ⚠ 必须先注册【全部 12 个子拓扑】再加载。
+     * master_load_state 是按 topo_type 找目标子拓扑、把节点放进去的；找不到就丢弃
+     * （v0.5.34 起会记账为「跳过」并 WARN）。原实现一个都不注册 ⇒ 每个节点都无处可放：
+     * 加载器把丢弃数谎报成「N 节点」，而子拓扑数/总节点数/各拓扑明细全是 0
+     * —— 本工具因此 100% 失效（实测：115KB 的真实状态报「2 节点」+ 全 0）。 */
+    MasterTopology* master = master_topology_create(16);
     if (!master) { fprintf(stderr, "FAIL: 创建 MasterTopology\n"); return 1; }
+    master_add_sub_topology(master, TOPO_VOCABULARY, "词汇拓扑", 30000, 10);
+    master_add_sub_topology(master, TOPO_SEMANTIC,   "语义拓扑", 12000, 9);
+    master_add_sub_topology(master, TOPO_EMOTION,    "情绪拓扑", 4000, 8);
+    master_add_sub_topology(master, TOPO_SYNTAX,     "语法拓扑", 1000, 7);
+    master_add_sub_topology(master, TOPO_CONTEXT,    "上下文拓扑", 1000, 6);
+    master_add_sub_topology(master, TOPO_DOMAIN,     "领域拓扑", 1000, 5);
+    master_add_sub_topology(master, TOPO_PRAGMA,     "语用拓扑", 1000, 4);
+    master_add_sub_topology(master, TOPO_CULTURE,    "文化拓扑", 1000, 3);
+    master_add_sub_topology(master, TOPO_CONCEPT,    "概念拓扑", 12000, 9);
+    master_add_sub_topology(master, TOPO_MASTER,     "主拓扑", 100, 0);
+    master_add_sub_topology(master, TOPO_TEMPLATE,   "模板拓扑", 4000, 8);
+    master_add_sub_topology(master, TOPO_VISUAL,     "视觉拓扑", 4000, 7);
+    if (master->sub_topo_count <= 0) {
+        fprintf(stderr, "FAIL: 未注册任何子拓扑 —— 加载会丢弃全部节点（工具配置错误）\n");
+        master_topology_destroy(master);
+        return 1;
+    }
     int loaded = master_load_state(master, path);
     if (loaded < 0) {
         fprintf(stderr, "FAIL: 加载状态文件失败 (返回 %d)\n", loaded);

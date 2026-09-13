@@ -17,6 +17,7 @@
  *     这样走边时会偏向顺着语序走
  */
 
+#include "ui.h"
 #include "pivotmind_paths.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -36,8 +37,13 @@
 #define MAX_CHARS 4096
 #define MAX_QA 500000
 #define MAX_LINE 65536
-#define CORPUS_DIR "~/本地书库"
-#define QA_PATH "data/hermes_knowledge_base.json"
+/* 书库与 QA 语料都收进路径 SSOT（v0.5.34）：
+ *   CORPUS_DIR 原为 "~/本地书库" —— 字面 '~' 不会被 opendir/fopen 展开，
+ *   等于【永远打不开】，而 process_corpus_dir 只打一行 ⚠ 就返回 0（静默）；
+ *   QA_PATH 原为相对路径，以 cwd 为基准，换个目录启动就找不到。
+ * 书库语义 = PM_DIR_CORPUS(<home>/corpus)，语料 = <home>/data/…，二者同源。 */
+#define CORPUS_DIR pm_dir(PM_DIR_CORPUS)
+#define QA_PATH pm_asset(PM_ASSET_QA_CORPUS)
 #define BOOK_WEIGHT_FWD 0.3f
 #define BOOK_WEIGHT_REV 0.1f
 #define QA_WEIGHT_FWD 0.8f
@@ -406,9 +412,8 @@ int main(int argc, char* argv[]) {
     srand((unsigned)time(NULL));
     setbuf(stdout, NULL); // 无缓冲，实时输出日志
 
-    printf("╔══════════════════════════════════════════╗\n");
-    printf("║      玄枢 语料训练工具 v1              ║\n");
-    printf("╚══════════════════════════════════════════╝\n\n");
+    ui_frame_title(42, "      玄枢 语料训练工具 v1");
+    printf("\n");
 
     // 1. 创建主拓扑
     printf("[1/5] 创建多拓扑认知网络...\n");
@@ -501,15 +506,16 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    printf("\n╔══════════════════════════════════════════╗\n");
-    printf("║          训练完成                         ║\n");
-    printf("╠══════════════════════════════════════════╣\n");
-    printf("║  总节点:  %-6d                       ║\n", total_nodes);
-    printf("║  总边数:  %-6d                       ║\n", total_edges / 2);
-    printf("║  书库边:  %-6d                       ║\n", book_edges);
-    printf("║  QA 边:   %-6d                       ║\n", qa_edges);
-    printf("║  耗时:    %-6.0f 秒                    ║\n", book_elapsed);
-    printf("╚══════════════════════════════════════════╝\n");
+    printf("\n");
+    ui_frame_begin(42);
+    ui_frame_row("训练完成");
+    ui_frame_sep();
+    ui_frame_row("  总节点:  %-6d", total_nodes);
+    ui_frame_row("  总边数:  %-6d", total_edges / 2);
+    ui_frame_row("  书库边:  %-6d", book_edges);
+    ui_frame_row("  QA 边:   %-6d", qa_edges);
+    ui_frame_row("  耗时:    %-6.0f 秒", book_elapsed);
+    ui_frame_end();
 
     double total_elapsed = difftime(time(NULL), t0);
     printf("\n总耗时: %.0f 秒\n", total_elapsed);

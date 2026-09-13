@@ -3,6 +3,7 @@
  * @brief 路径模板构建器 — 前缀分组 + 软聚类 + 模板节点生成
  */
 
+#include "ui.h"
 #include "template_builder.h"
 #include "string_pool.h"
 #include "common.h"
@@ -1381,14 +1382,15 @@ int template_diagnose_pos_coherence(MasterTopology* master) {
     /* ---- 阶段 4: 诊断报告 ---- */
 
     fprintf(stderr, "\n");
-    fprintf(stderr, "╔══════════════════════════════════════════════════════════════╗\n");
-    fprintf(stderr, "║ 模板 POS 槽位化诊断报告                                    ║\n");
-    fprintf(stderr, "╠══════════════════════════════════════════════════════════════╣\n");
-    fprintf(stderr, "║ 总模板节点: %-5d  有POS+特征: %-5d  POS组数: %-3d       ║\n",
+    FILE* _pm_frame_prev = ui_frame_stream(stderr);
+    ui_frame_begin(62);
+    ui_frame_row(" 模板 POS 槽位化诊断报告");
+    ui_frame_sep();
+    ui_frame_row(" 总模板节点: %-5d  有POS+特征: %-5d  POS组数: %-3d",
             tn, report.total_templates, report.pos_pair_count);
-    fprintf(stderr, "╠══════════════════════════════════════════════════════════════╣\n");
-    fprintf(stderr, "║ POS组   组内sim均值  sim标准差  连接词一致性  建议         ║\n");
-    fprintf(stderr, "╠══════════════════════════════════════════════════════════════╣\n");
+    ui_frame_sep();
+    ui_frame_row(" POS组   组内sim均值  sim标准差  连接词一致性  建议");
+    ui_frame_sep();
 
     for (int g = 0; g < gc; g++) {
         if (groups[g].count < DIAG_MIN_GROUP_SIZE) continue;
@@ -1403,7 +1405,7 @@ int template_diagnose_pos_coherence(MasterTopology* master) {
         else
             tag = "粒度不够";
 
-        fprintf(stderr, "║ [%s][%s]  %5.2f       %5.3f       %5.1f%% (%s)  %-14s║\n",
+        ui_frame_row(" [%s][%s]  %5.2f       %5.3f       %5.1f%% (%s)  %-14s",
                 pa_name, pb_name,
                 groups[g].sim_mean, groups[g].sim_std,
                 cr * 100.0f,
@@ -1411,36 +1413,37 @@ int template_diagnose_pos_coherence(MasterTopology* master) {
                 tag);
     }
 
-    fprintf(stderr, "╠══════════════════════════════════════════════════════════════╣\n");
-    fprintf(stderr, "║ 全局组内 sim 均值: %.3f  标准差: %.3f                      ║\n",
+    ui_frame_sep();
+    ui_frame_row(" 全局组内 sim 均值: %.3f  标准差: %.3f",
             report.overall_intra_mean, report.overall_intra_std);
-    fprintf(stderr, "║ 组间/组内 sim 比值 (最大): %.3f                           ║\n",
+    ui_frame_row(" 组间/组内 sim 比值 (最大): %.3f",
             report.worst_inter_intra);
-    fprintf(stderr, "╠══════════════════════════════════════════════════════════════╣\n");
+    ui_frame_sep();
 
     /* 建议决策 */
     if (report.pos_pair_count == 0) {
         report.recommendation = 0;
-        fprintf(stderr, "║ 建议: 数据不足，推迟决策                                  ║\n");
+        ui_frame_row(" 建议: 数据不足，推迟决策");
     } else if (report.safe_merge_groups >= report.pos_pair_count * 0.7f
                && report.worst_inter_intra < DIAG_INTER_INTRA_RATIO) {
         report.recommendation = DIAG_POS_SAFE_MERGE;
-        fprintf(stderr, "║ 建议: 纯POS合并 — 70%%+组同构，组间区分度良好              ║\n");
+        ui_frame_row(" 建议: 纯POS合并 — 70%%+组同构，组间区分度良好");
     } else if (report.subcluster_groups > 0
                && report.overall_intra_mean > 0.5f) {
         report.recommendation = DIAG_POS_WITH_SUBCLUSTER;
-        fprintf(stderr, "║ 建议: POS+特征子聚类 — 组内多峰但POS仍有区分力             ║\n");
+        ui_frame_row(" 建议: POS+特征子聚类 — 组内多峰但POS仍有区分力");
     } else {
         report.recommendation = DIAG_POS_INSUFFICIENT;
-        fprintf(stderr, "║ 建议: POS粒度不够 — 需要额外信号（边共现/拓扑上下文）     ║\n");
+        ui_frame_row(" 建议: POS粒度不够 — 需要额外信号（边共现/拓扑上下文）");
     }
 
-    fprintf(stderr, "╠══════════════════════════════════════════════════════════════╣\n");
-    fprintf(stderr, "║ 可纯POS合并: %-3d组   需子聚类: %-3d组   粒度不够: %-3d组  ║\n",
+    ui_frame_sep();
+    ui_frame_row(" 可纯POS合并: %-3d组   需子聚类: %-3d组   粒度不够: %-3d组",
             report.safe_merge_groups, report.subcluster_groups,
             report.insufficient_groups);
-    fprintf(stderr, "╚══════════════════════════════════════════════════════════════╝\n");
+    ui_frame_end();
     fprintf(stderr, "\n");
+    ui_frame_stream(_pm_frame_prev);
 
     /* 清理 */
     for (int g = 0; g < max_grps; g++) free(groups[g].tpl_ids);

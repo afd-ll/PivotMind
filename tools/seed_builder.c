@@ -13,6 +13,7 @@
  * 用法: ./build/bin/seed_builder [knowledge_base.json]
  */
 
+#include "ui.h"
 #include "pivotmind_paths.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -298,11 +299,10 @@ static void seed_memory(MemorySystem* memory, const char* question, const char* 
 
 // ========== 主函数 ==========
 int main(int argc, char* argv[]) {
-    printf("╔═══════════════════════════════════════════╗\n");
-    printf("║     PivotMind v0.2 种子模型构建器        ║\n");
-    printf("╚═══════════════════════════════════════════╝\n\n");
+    ui_frame_title(43, "     PivotMind v0.2 种子模型构建器");
+    printf("\n");
 
-    const char* kb_file = argc > 1 ? argv[1] : "data/knowledge_base.json";
+    const char* kb_file = argc > 1 ? argv[1] : pm_asset(PM_ASSET_KB);
 
     /* 路径 SSOT：数据目录默认自建（未就绪则加载/存盘会失败）。
      * 与 gateway / digital_life main 同款处理；不拒绝运行（只读环境下仍可做只读查询）。 */
