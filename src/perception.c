@@ -5,6 +5,7 @@
  */
 
 #include "perception.h"
+#include "lang.h"          /* v0.5.40: 语种 SSOT —— is_valid_query() 不再裸写字节比较 */
 #include "web_search.h"
 #include "web_fetch.h"
 #include "active_learner.h"
@@ -52,12 +53,6 @@ static SearchEngine g_default_engines[] = {
 #define CACHE_MAX_ENTRIES  256
 /* 最大拼接文本长度 */
 #define MAX_SEARCH_TEXT 65536
-
-/* 简单本地 RNG */
-static unsigned int _perception_rand(unsigned int* seed) {
-    *seed = *seed * 1103515245 + 12345;
-    return (*seed >> 16) & 0x7FFF;
-}
 
 /* URL 编码（仅中文和特殊字符） */
 static int _url_encode(const char* src, char* dst, int dst_sz) {
@@ -654,23 +649,66 @@ static int search_and_learn(Perception* p, const char* concept, PerceptionSource
 
 /* ================================================================
  *  三维度知识缺口检测（替代原好奇心随机采样）
+ *
+ *  v0.5.40（B-1）：这三个函数此前带 __attribute__((unused))、**全仓零调用**
+ *  —— 设计写好了却没接线，tick 里跑的是纯随机。现在由 perception_tick()
+ *  按 cfg.gap_weights 配额调用，属性已摘掉。
+ *
+ *  ⚠️ 已知：三维度的判据都要求「低置信度」，而节点置信度目前**只升不降**
+ *  （唯一能降它的 knowledge_self_verify() 也零调用）⇒ 在线上状态上三者都
+ *  返回 0。即：缺口这条路要真正出词，还得把「自我验证」接上（单列，等裁决）。
  * ================================================================ */
 
 /**
- * 维度 1：对话缺口 — 从海马体获取用户最近提到的未知概念
+ * 按 gap_weights 把本轮配额分给三个维度（最大余数法，保证配额之和 == max）。
+ * 权重和不为 1 时先归一；全部权重 ≤ 0 时退化为平均分。
  */
-__attribute__((unused))
-static int _gap_dialog_queries(Perception* p, const char** out_queries,
+static void _gap_quota(const float* w, int max_searches, int q[GAP_COUNT]) {
+    int i, sum = 0;
+    float frac[GAP_COUNT];
+    float wt = 0.0f;
+
+    for (i = 0; i < GAP_COUNT; i++) { q[i] = 0; frac[i] = 0.0f; }
+    if (max_searches <= 0) return;
+
+    for (i = 0; i < GAP_COUNT; i++) if (w[i] > 0.0f) wt += w[i];
+    for (i = 0; i < GAP_COUNT; i++) {
+        float share = (wt > 0.0f)
+                    ? ((w[i] > 0.0f ? w[i] : 0.0f) / wt)
+                    : (1.0f / (float)GAP_COUNT);
+        float x = share * (float)max_searches;
+        q[i]    = (int)x;
+        frac[i] = x - (float)q[i];
+        sum    += q[i];
+    }
+    while (sum < max_searches) {          /* 余数从大到小补齐 */
+        int best = 0;
+        for (i = 1; i < GAP_COUNT; i++) if (frac[i] > frac[best]) best = i;
+        q[best]++;
+        frac[best] = -1.0f;
+        sum++;
+    }
+}
+
+/**
+ * 维度 1：对话缺口 — 从海马体获取用户最近提到的未知概念
+ * @param start  扫描起始下标（环绕），由 p->gap_cursor 逐轮前移
+ */
+static int _gap_dialog_queries(Perception* p, int start, const char** out_queries,
                                int max_n) {
     /* 对话缺口：词汇拓扑中最近激活但低置信度的节点 */
     /* 这表明系统在对话中遇到了这个词但不理解它 */
-    if (!p->topology) return 0;
+    if (!p->topology || max_n <= 0) return 0;
 
     SubTopology* vocab = master_get_sub_topology_by_type(p->topology, TOPO_VOCABULARY);
     if (!vocab || !vocab->net) return 0;
+    int n = vocab->net->node_count;
+    if (n <= 0) return 0;
+    start = ((start % n) + n) % n;
 
     int count = 0;
-    for (int i = 0; i < vocab->net->node_count && count < max_n; i++) {
+    for (int k = 0; k < n && count < max_n; k++) {
+        int i = (start + k) % n;
         ReasoningNode* node = vocab->net->nodes[i];
         if (!node || !node->concept) continue;
         /* 最近被激活过 (activation > 0.3) + 低置信度 = 对话中遇到但没理解 */
@@ -686,18 +724,22 @@ static int _gap_dialog_queries(Perception* p, const char** out_queries,
 
 /**
  * 维度 2：模板缺口 — POS 模式缺失对应模板
+ * @param start  扫描起始下标（环绕）
  */
-__attribute__((unused))
-static int _gap_template_queries(Perception* p, const char** out_queries,
+static int _gap_template_queries(Perception* p, int start, const char** out_queries,
                                  int max_n) {
-    if (!p->topology || !p->topology->use_template_voting) return 0;
+    if (!p->topology || !p->topology->use_template_voting || max_n <= 0) return 0;
 
     /* 找词汇拓扑中的高频词（可能代表重要但未模板化的概念） */
     SubTopology* vocab = master_get_sub_topology_by_type(p->topology, TOPO_VOCABULARY);
     if (!vocab || !vocab->net) return 0;
+    int n = vocab->net->node_count;
+    if (n <= 0) return 0;
+    start = ((start % n) + n) % n;
 
     int count = 0;
-    for (int i = 0; i < vocab->net->node_count && count < max_n; i++) {
+    for (int k = 0; k < n && count < max_n; k++) {
+        int i = (start + k) % n;
         ReasoningNode* node = vocab->net->nodes[i];
         if (!node || !node->concept) continue;
 
@@ -713,15 +755,21 @@ static int _gap_template_queries(Perception* p, const char** out_queries,
 
 /**
  * 维度 3：拓扑缺口 — 词汇孤岛（低连接 + 低置信度）
+ * @param start  扫描起始下标（环绕）
  */
-__attribute__((unused))
-static int _gap_topology_queries(Perception* p, const char** out_queries,
+static int _gap_topology_queries(Perception* p, int start, const char** out_queries,
                                  int max_n) {
+    if (!p->topology || max_n <= 0) return 0;
+
     SubTopology* vocab = master_get_sub_topology_by_type(p->topology, TOPO_VOCABULARY);
     if (!vocab || !vocab->net) return 0;
+    int n = vocab->net->node_count;
+    if (n <= 0) return 0;
+    start = ((start % n) + n) % n;
 
     int count = 0;
-    for (int i = 0; i < vocab->net->node_count && count < max_n; i++) {
+    for (int k = 0; k < n && count < max_n; k++) {
+        int i = (start + k) % n;
         ReasoningNode* node = vocab->net->nodes[i];
         if (!node || !node->concept || node->is_cooled) continue;
 
@@ -741,7 +789,15 @@ static int _gap_topology_queries(Perception* p, const char** out_queries,
  * ================================================================ */
 
 /* v0.5.7: 合法查询词检查——防垃圾词污染（FDCDF 乱码/数字串）。
- * 中文：2-6 字；英文：纯字母 3-20 长度 + 含元音（FDCDF 无元音=乱码）。 */
+ * 中文：2-6 字；英文：纯字母 + 含元音（FDCDF 无元音=乱码）。
+ *
+ * 🔴 v0.5.40 修 bug：旧实现逐【字节】查 `b >= 0x80 && (b < 0xC0 || b > 0xEF)`。
+ *   UTF-8 续字节恒为 0x80..0xBF，全部落在 `b < 0xC0` 上 ⇒ **任何含多字节字符
+ *   的串（即所有中文词）恒返回 0**。实测后果：perception_tick 选词 100% 失败、
+ *   searched 恒 0 ⇒ 感知区纯白烧，且丘脑那条「刹车线」
+ *   （thalamus.c 的 `if (fb_percept_searched > 0)`）永不触发。
+ *   现改为走语种 SSOT（include/lang.h）：按【码点】判语种、按【码点数】计数。
+ *   （v0.5.35 契约「禁写裸判据」—— 本条顺手收编。） */
 static int is_valid_query(const char* c) {
     if (!c || !c[0]) return 0;
     size_t len = strlen(c);
@@ -749,16 +805,26 @@ static int is_valid_query(const char* c) {
     if (strstr(c, "//") || strstr(c, "http") || strstr(c, "www.")) return 0;
     char ch0 = c[0];
     if (ch0 == '/' || ch0 == '.' || ch0 == '-' || ch0 == '_' || ch0 == '\\' || ch0 == '#') return 0;
-    /* 中文（UTF-8 首字节 >= 0x80） */
-    if ((unsigned char)c[0] >= 0x80) {
-        for (size_t i = 0; i < len; i++) {
-            unsigned char b = (unsigned char)c[i];
-            if (b >= 0x80 && (b < 0xC0 || b > 0xEF)) return 0;  /* 非中文 UTF-8 */
+
+    /* 中文：2-6 个【码点】（旧实现拿字节数 len<=18 近似「6 字」）。
+     * ⚠ 口径变化：日文假名 / 韩文谚文 / 其它文字过去被这条「歪打正着」放行
+     *   （旧代码本意是「非中文 UTF-8 ⇒ 拒绝」，但判据写错了位置），现在一律拒绝。 */
+    if (pm_lang_of_text(c) == PM_LANG_ZH) {
+        int cps = 0;
+        const char* s = c;
+        unsigned int cp = 0;
+        while (*s) {
+            int w = pm_utf8_decode(s, &cp);
+            if (w <= 0) break;
+            cps++;
+            s += w;
         }
-        return len >= 2 && len <= 18;  /* 2-6 个中文字 */
+        return cps >= 2 && cps <= 6;
     }
+
     /* 英文：纯字母 + 含元音 + 不全大写乱码（FBFDABDDA 类漏网——
-     * 全大写 5+ 多为缩写/乱码串） */
+     * 全大写 5+ 多为缩写/乱码串）。要求整串 ASCII，拉丁扩展在此直接出局。 */
+    if (!pm_is_ascii_text(c)) return 0;
     int has_vowel = 0, has_lower = 0;
     for (size_t i = 0; i < len; i++) {
         char b = c[i];
@@ -816,55 +882,66 @@ int perception_request_concept(Perception* p, int node_id) {
     return _perception_enqueue(p, node->concept);
 }
 
-int perception_tick(Perception* p, float throttle) {
-    (void)throttle;  /* 纯随机模式不再需要 throttle 抽签 */
+int perception_tick(Perception* p, float throttle, float curiosity) {
     if (!p) return 0;
+
+    /* ── 闸门：丘脑的答案优先 ──────────────────────────────────────────
+     * 丘脑 throttle[THAL_PERCEPTION] 就是「此刻该不该向外看」。此前本函数首行是
+     * `(void)throttle;`（注释写「纯随机模式不再需要 throttle 抽签」）——「闸门」
+     * 这条线被主动剪断了。口径对齐 visual_cortex_tick()：
+     * `if (throttle < 0.1f) return 0;`。
+     * 写成 !(throttle > MIN) 是为了同时对 NaN 安全。 */
+    if (!(throttle > PERCEPT_THROTTLE_MIN)) return 0;
 
     /* v0.5.8: 主循环不再持 p->mutex、不再同步搜索——
      * 只选词入队立即返回，网络慢/挂起绝不阻塞脑干。 */
-
     p->tick_counter++;
 
-    /* 按配置的周期（默认60秒）触发一次纯随机搜索 */
-    if (p->tick_counter < p->cfg.cycle_interval_ticks) return 0;
+    /* ── 动机：好奇心调制节律 ──────────────────────────────────────────
+     * 基线 drive_curiosity = 0.5 ⇒ 倍率 1.0 ⇒ 原周期；好奇心高 ⇒ 周期变短
+     * （问得勤），低 ⇒ 拉长（懒得问）。上下限防止极端值把周期压到 0 或拖过长。 */
+    float ratio = curiosity / PERCEPT_CURIOSITY_BASELINE;
+    if (ratio < 0.25f) ratio = 0.25f;
+    if (ratio > 2.0f)  ratio = 2.0f;
+    int eff_ticks = (int)((float)p->cfg.cycle_interval_ticks / ratio + 0.5f);
+    if (eff_ticks < 5) eff_ticks = 5;
+    if (p->tick_counter < eff_ticks) return 0;
     p->tick_counter = 0;
 
-    /* v0.5.7: 分层爬取——50% 词库（概念拓扑实义词，丰富已有概念），
-     * 50% 词汇拓扑（过滤后合法节点，扩充新数据）。垃圾词过滤防污染。 */
+    /* ── 目标：取自知识缺口，不再自己随机造词 ──────────────────────────
+     * v0.5.7 的「每 cycle_interval_ticks 拍随机挑词」自定闹钟已拆掉：感知区不该
+     * 自己给自己派活。三维度缺口按 cfg.gap_weights 配额取词；没有缺口就本轮不搜
+     * （待搜词应由上游点单或真实缺口给出 —— 上游点单走 perception_request_concept
+     *  / perception_enqueue_search，与本函数无关，不受影响）。 */
     SubTopology* vocab = master_get_sub_topology_by_type(p->topology, TOPO_VOCABULARY);
-    if (!vocab || !vocab->net || vocab->net->node_count == 0) return 0;
-    SubTopology* concept = master_get_sub_topology_by_type(p->topology, TOPO_CONCEPT);
+    if (!vocab || !vocab->net) return 0;
+    int node_count = vocab->net->node_count;
+    if (node_count <= 0) return 0;
 
     int max_searches = p->cfg.max_searches_per_cycle;
     if (max_searches < 1) max_searches = 1;
-    if (max_searches > 5) max_searches = 5;
+    if (max_searches > PERCEPT_MAX_SEARCHES_PER_CYCLE)
+        max_searches = PERCEPT_MAX_SEARCHES_PER_CYCLE;
 
+    const char* candidates[PERCEPT_MAX_SEARCHES_PER_CYCLE];
+    int quota[GAP_COUNT];
+    _gap_quota(p->cfg.gap_weights, max_searches, quota);
+
+    int start = ((p->gap_cursor % node_count) + node_count) % node_count;
+    int got = 0;
+    got += _gap_dialog_queries  (p, start, candidates + got, quota[GAP_DIALOG]);
+    got += _gap_template_queries(p, start, candidates + got, quota[GAP_TEMPLATE]);
+    got += _gap_topology_queries(p, start, candidates + got, quota[GAP_TOPOLOGY]);
+
+    /* 游标前移：下一轮从别处起扫，尾部节点也有机会被看见 */
+    p->gap_cursor = (start + 1 + got) % node_count;
+
+    /* 入队（队列满则丢弃本次，绝不阻塞主循环） */
     int searched = 0;
-    unsigned int rng = (unsigned int)time(NULL) ^ (unsigned int)(uintptr_t)p;
-    for (int i = 0; i < max_searches && searched < max_searches; i++) {
-        ReasoningNode* node = NULL;
-        int tries = 0;
-        while (tries++ < 32) {
-            if ((i % 2 == 0) && concept && concept->net && concept->net->node_count > 0) {
-                /* 词库层：随机概念词 */
-                int idx = _perception_rand(&rng) % concept->net->node_count;
-                ReasoningNode* cn = concept->net->nodes[idx];
-                if (cn && cn->concept && is_valid_query(cn->concept)) { node = cn; break; }
-            } else {
-                /* 词汇拓扑层：随机节点（过滤垃圾） */
-                int idx = _perception_rand(&rng) % vocab->net->node_count;
-                ReasoningNode* vn = vocab->net->nodes[idx];
-                if (vn && vn->concept && is_valid_query(vn->concept)) { node = vn; break; }
-            }
-        }
-        if (!node || !node->concept) continue;
-
-        /* 入队（队列满则丢弃本次，绝不阻塞主循环） */
-        if (_perception_enqueue(p, node->concept)) {
-            searched++;
-        }
+    for (int i = 0; i < got; i++) {
+        if (!is_valid_query(candidates[i])) continue;
+        if (_perception_enqueue(p, candidates[i])) searched++;
     }
-
     return searched;
 }
 

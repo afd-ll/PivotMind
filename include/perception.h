@@ -132,6 +132,9 @@ typedef struct Perception {
 
     /* 状态 */
     int   tick_counter;               /* tick 计数（由外部递增） */
+    int   gap_cursor;                 /* v0.5.40: 缺口扫描游标。三个 _gap_* 都从
+                                       * 节点 start 起环绕扫描；游标每轮前移，避免
+                                       * 反复挑同一批词（否则尾部节点永远轮不到）。 */
 
     /* v0.5.8: 异步搜索队列——主循环只入队不阻塞网络。
      * 修复：perception_tick 原在主循环同步执行 search_and_learn（HTTP 请求），
@@ -158,11 +161,38 @@ Perception* perception_create(MasterTopology* topology,
 void perception_destroy(Perception* p);
 
 /**
- * 每次脑干 tick 调用，根据 throttle 决定是否执行搜索
+ * 每次脑干 tick 调用：丘脑闸门 + 好奇心节律 + 从知识缺口选词。
+ *
+ * v0.5.40（B-1 感知区三路驱动）——此前本函数把 throttle 与好奇心两条线都丢了，
+ * 自己定了「每 cycle_interval_ticks 拍随机挑词」的闹钟（原实现首行即
+ * `(void)throttle;`）。现按「动机 / 闸门 / 目标」三路驱动：
+ *
+ *   闸门  throttle ≤ PERCEPT_THROTTLE_MIN ⇒ 本轮不向外看（丘脑的答案优先）
+ *   动机  drive_curiosity 调制周期：好奇心越强，问得越勤
+ *   目标  待搜词取自知识缺口（对话缺口 / 模板缺口 / 拓扑孤岛，按 gap_weights
+ *         配额）；**不再自己随机造词** —— 没有缺口就不搜
+ *
+ * 🔴 入队后立即返回，网络由 perception worker 线程串行执行（v0.5.8 契约，
+ *    绝不能在主循环里同步跑 HTTP）。
+ *
  * @param throttle  丘脑给 THAL_PERCEPTION 的 throttle 值 (0.0~1.0)
- * @return 本次实际搜索次数（用于反馈上报）
+ * @param curiosity 下丘脑 drive_curiosity 当前值 (0.05~0.95，基线 0.5)
+ * @return 本次实际入队的概念数（0 = 闸门关 / 未到周期 / 无缺口）。
+ *         该值由脑干经 thalamus_send_feedback 上报，构成感知区那条「刹车线」。
  */
-int perception_tick(Perception* p, float throttle);
+int perception_tick(Perception* p, float throttle, float curiosity);
+
+/** 感知区闸门下限：throttle 低于此值即认定「此刻不该向外看」。
+ *  口径与 visual_cortex_tick() 的 `throttle < 0.1f ⇒ return 0` 对齐。 */
+#define PERCEPT_THROTTLE_MIN 0.1f
+
+/** 好奇心基线（= src/hypothalamus.c 的 DRIVE_BASELINE_CURIOSITY）。
+ *  curiosity / 本值 = 节律倍率：1.0 = 原周期，>1 更勤，<1 更疏。 */
+#define PERCEPT_CURIOSITY_BASELINE 0.5f
+
+/** 一轮最多入队几个概念（原实现里写死的 `if (max_searches > 5) … = 5;`）。
+ *  同时决定 perception_tick 里候选数组的长度。 */
+#define PERCEPT_MAX_SEARCHES_PER_CYCLE 5
 
 /**
  * 被动触发：对话中遇到一个未知概念，立即搜索学习

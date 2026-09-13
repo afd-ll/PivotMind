@@ -384,7 +384,16 @@ static int brainstem_tick_perception(Brainstem* bs) {
         }
     }
 
-    if (p) work = perception_tick(p, p_throttle);
+    /* v0.5.40（B-1）：好奇心 = 动机（下丘脑）。此前 hypothalamus_get_drive()
+     * 全仓零调用 ——「动机」这条线本来就断在这里，现由感知区第一个接上。
+     * 下丘脑未启用 / 取不到时退回基线值 ⇒ 节律倍率 1.0（等同改动前节律）。 */
+    float p_curiosity = PERCEPT_CURIOSITY_BASELINE;
+    if (thalamus_is_region_enabled(th, THAL_HYPOTHALAMUS)) {
+        Hypothalamus* hypo = (Hypothalamus*)thalamus_get_region(th, THAL_HYPOTHALAMUS);
+        if (hypo) p_curiosity = hypothalamus_get_drive(hypo, HYPOTHALAMUS_DRIVE_CURIOSITY);
+    }
+
+    if (p) work = perception_tick(p, p_throttle, p_curiosity);
 
     /* 每小时搜一次 Bing 新闻头条（3600 ticks ≈ 1h） */
     if (p && bs->tick_count % 3600 == 0) {

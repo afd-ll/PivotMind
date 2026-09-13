@@ -50,6 +50,17 @@ typedef struct Hypothalamus {
     float last_circadian;           /* 上一次的 circadian 值 */
 } Hypothalamus;
 
+/** 需求索引 —— hypothalamus_get_drive() 的 drive_index 取值。
+ *  ⚠ 与 src/hypothalamus.c 里 switch 分派的 case 编号一一对应，
+ *    改一处必须同步改另一处（此前调用方只能写裸数字 0..3）。 */
+typedef enum {
+    HYPOTHALAMUS_DRIVE_CURIOSITY = 0,  /* 好奇心：想探索新事物 */
+    HYPOTHALAMUS_DRIVE_HUNGER    = 1,  /* 饥饿：想获取资源 */
+    HYPOTHALAMUS_DRIVE_SOCIAL    = 2,  /* 社交：想互动 */
+    HYPOTHALAMUS_DRIVE_COMFORT   = 3,  /* 舒适：想保持现状 */
+    HYPOTHALAMUS_DRIVE_COUNT     = 4
+} HypothalamusDrive;
+
 /**
  * 创建下丘脑
  * @param state  认知状态指针（由 DialogSystem 管理生命周期）
