@@ -1722,7 +1722,17 @@ int diffusion_generate(DiffusionCtx* ctx,
         }
     }
     if (rel2_ok) memset(rel2_map, 0, sizeof(float) * (size_t)vn);
-    if (rel2_ok && _rel2_decay > 0.0f) {
+
+    /* v0.7·批1 第5步：两个开关分开（修正第4步的语义错误）。
+     *   PIVOTMIND_WALK_REL=0     ⇒ 整个 relevance 关掉（rel2_map 全 0 ⇒ 乘子恒 0.3）
+     *   PIVOTMIND_WALK_REL_DECAY ⇒ 只控制【两跳】权重；0 ⇒ 仅单跳（= 真正的旧行为）
+     * 上一版把两者耦合在一起，导致 REL_DECAY=0 变成了"全关"。 */
+    int _rel_on = 1;
+    {
+        const char* _r0 = getenv("PIVOTMIND_WALK_REL");
+        if (_r0 && _r0[0] == '0') _rel_on = 0;
+    }
+    if (rel2_ok && _rel_on) {
         for (int _a = 0; _a < active_count; _a++) {
             int _aid = active_ids[_a];
             if (_aid < 0 || _aid >= vn) continue;
@@ -1735,6 +1745,7 @@ int diffusion_generate(DiffusionCtx* ctx,
                 if (_m < 0 || _m >= vn) continue;
                 float _w1 = _an->edges[_e].weight;          /* 一跳边权 */
                 if (_w1 > rel2_map[_m]) rel2_map[_m] = _w1;
+                if (_rel2_decay <= 0.0f) continue;   /* 只关两跳；单跳始终有效 */
                 if (!_mid->edges || _w1 <= 0.0f) continue;
                 for (int _e2 = 0; _e2 < _mid->edge_count; _e2++) {
                     ReasoningNode* _t = _mid->edges[_e2].target;
