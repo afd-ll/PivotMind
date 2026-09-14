@@ -1147,6 +1147,15 @@ static void _spread_release(int** seen, SpreadEntry** front, SpreadEntry** pool)
 }
 
 /* v0.7·批1 第12步：锚定诊断开关（一次性，默认关）*/
+static int _anchor_guard(void) {
+    static int cached = -1;
+    if (cached < 0) {
+        const char* e = getenv("PIVOTMIND_WALK_ANCHOR_GUARD");
+        cached = (e && e[0]) ? 1 : 0;
+    }
+    return cached;
+}
+
 static int _anchor_dbg(void) {
     static int cached = -1;
     if (cached < 0) {
@@ -1308,7 +1317,11 @@ int diffusion_generate(DiffusionCtx* ctx,
                     if (!dup) active_ids[active_count++] = vid;
                 }
             }
-            if (active_count > 0) break;  /* 长词优先 */
+            /* v0.7·批1 第17步：段A 命中后是否短路段B。
+             * guard 开 ⇒ 不 break，继续走段B（去重已有）。
+             * 依据：段A 用的 8→0 桥 rel 全是 "seed"，语义是「概念↔概念关联」，
+             * 而段A 的注释语义是「词 → 组成字」⇒ 语义不匹配。默认关。 */
+            if (active_count > 0 && !_anchor_guard()) break;  /* 长词优先 */
         }
     }
 
