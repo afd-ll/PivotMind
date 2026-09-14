@@ -1809,6 +1809,10 @@ int diffusion_generate(DiffusionCtx* ctx,
         }
         final[final_cnt].total_score    = vocab_scores[i] * degree_penalty *
                                           (_rel_base + _rel_gain * _rel_eff);
+        /* v0.7·批1 第9步：留一份**原始值**备查。
+         * 借用 `emotion_score`（全程恒 0 且后续两段重排序不会改它）。
+         * 用途：DUMP 同时打 raw 与 total ⇒ 一次量出中间被加了多少。 */
+        final[final_cnt].emotion_score  = final[final_cnt].total_score;
         final[final_cnt].relevance      = relevance;
         final[final_cnt].word = n->concept;
         final[final_cnt].used = 0;
@@ -1899,10 +1903,12 @@ int diffusion_generate(DiffusionCtx* ctx,
             int _nid = final[_d].node_id;
             int _deg = (_nid >= 0 && _nid < vn && ctx->vocab->net->nodes[_nid])
                        ? ctx->vocab->net->nodes[_nid]->edge_count : -1;
-            printf("  #%02d %-12s deg=%-4d vs=%.4f rel=%.3f total=%.4f\n",
+            printf("  #%02d %-12s deg=%-4d vs=%.4f raw=%.4f rel=%.3f total=%.4f delta=%.4f\n",
                    _d, final[_d].word ? final[_d].word : "?",
                    _deg, (double)final[_d].vocab_score,
-                   (double)final[_d].relevance, (double)final[_d].total_score);
+                   (double)final[_d].emotion_score,
+                   (double)final[_d].relevance, (double)final[_d].total_score,
+                   (double)(final[_d].total_score - final[_d].emotion_score));
         }
     }
     const char* tpl_pattern = NULL;
