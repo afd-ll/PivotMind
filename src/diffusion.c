@@ -1603,11 +1603,29 @@ int diffusion_generate(DiffusionCtx* ctx,
          *   度归一化 1/sqrt(deg) 罚的是**出度**，对目标节点的**入度**无效。
          * 边界：alpha>=1 或 <=0 时本块不生效（等价旧行为）。 */
         if (ctx->restart_alpha > 0.0f && ctx->restart_alpha < 1.0f) {
-            float back = (1.0f - ctx->restart_alpha) * cur_decay;
+            /* v0.7·② 第2步：改成【归一化的概率混合】，不是"加常数"。
+             * 第1步加常数 back=(1-alpha)*cur_decay≈0.105，而 hub 一侧 358 条边
+             * 累加 ≈7.9（相差 ~75 倍）⇒ 被淹没，A/B 实测中性。
+             * 正解：保持总量 S 不变，把 (1-alpha) 的**相对份额**集中给锚定集：
+             *     scores[i] *= alpha            （全体等比缩放）
+             *     anchor   += (1-alpha)*S/|A|   （把份额分给锚定节点）
+             * 这样 alpha 是"回到锚定集的概率"，与量纲无关。 */
             int _vn = ctx->vocab->net->node_count;
-            for (int _a = 0; _a < active_count; _a++) {
-                int _aid = active_ids[_a];
-                if (_aid >= 0 && _aid < _vn) vocab_scores[_aid] += back;
+            double _sum = 0.0;
+            for (int _i = 0; _i < _vn; _i++)
+                if (vocab_scores[_i] > 0.0f) _sum += (double)vocab_scores[_i];
+
+            if (_sum > 1e-9 && active_count > 0) {
+                float _al = ctx->restart_alpha;
+                for (int _i = 0; _i < _vn; _i++)
+                    vocab_scores[_i] = (float)(vocab_scores[_i] * (double)_al);
+
+                double _share = (1.0 - (double)_al) * _sum / (double)active_count;
+                for (int _a = 0; _a < active_count; _a++) {
+                    int _aid = active_ids[_a];
+                    if (_aid >= 0 && _aid < _vn)
+                        vocab_scores[_aid] += (float)_share;
+                }
             }
         }
 
