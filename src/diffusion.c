@@ -1154,8 +1154,13 @@ static int _anchor_stage_a(void) {
          * 依据：段A 用的 8→0 桥 rel 全是 "seed"，语义是「概念↔概念关联」，
          * 与段A 注释的「词 → 组成字」不匹配 ⇒ 产出的是与输入零共享的噪声节点。
          * 显式设 PIVOTMIND_WALK_ANCHOR_STAGE_A=0 可跳过段A（直接走段B）。 */
+        /* v0.7·批1 第21步：**改为默认关**。
+         * 依据（同一快照 A/B）：开 ⇒ 有边 49.6% / 尘立 45.9%（锚定集含噪声节点）；
+         *                    关 ⇒ 有边 46.7% / 尘立 45.9%（锚定集 100% 干净）；
+         * 净效果 ≈ 零，仅“有边 ↔ 共邻”内部重分配 ⇒ 干净起点优先。
+         * 设 PIVOTMIND_WALK_ANCHOR_STAGE_A=1 可重新打开。 */
         const char* e = getenv("PIVOTMIND_WALK_ANCHOR_STAGE_A");
-        cached = (!e) ? 1 : (e[0] == '0' ? 0 : 1);
+        cached = (e && e[0] != '0') ? 1 : 0;
     }
     return cached;
 }
