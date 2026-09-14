@@ -224,6 +224,10 @@ typedef struct MasterTopology {
     // ========== 全局认知状态（情绪/动机/探索率） ==========
     void* cognitive_state_ptr;                     // CognitiveState* — 运行时注入，不持久化
 
+    // ========== 生成端在线反馈（v0.6.3）==========
+    // GenerationFeedback* — 运行时注入，**不持久化**（照 cognitive_state_ptr 的先例）
+    void* feedback_ptr;
+
     // ========== 上下文拓扑追踪 ==========
     // 已迁移至 InferenceContext.last_context_node（每会话独立，多线程安全）
     // 保留字段用于二进制兼容，不再直接使用
@@ -260,6 +264,15 @@ static inline float master_get_valence(const MasterTopology* m) {
 static inline float master_get_explore_rate(const MasterTopology* m) {
     if (!m || !m->cognitive_state_ptr) return 0.5f;
     return ((const CognitiveState*)m->cognitive_state_ptr)->explore_rate;
+}
+#endif
+
+/* v0.6.3 便捷访问：生成端在线反馈（需外部包含 generation_feedback.h 后可用）。
+ * 返回 NULL ⇒ 调用方必须判（机制未注入 / 编译期未包含）。 */
+#ifdef HAS_GENERATION_FEEDBACK
+static inline const GenerationFeedback* master_get_feedback(const MasterTopology* m) {
+    if (!m || !m->feedback_ptr) return NULL;
+    return (const GenerationFeedback*)m->feedback_ptr;
 }
 #endif
 

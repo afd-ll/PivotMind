@@ -178,6 +178,7 @@ void handle_feedback(GatewaySystem* gw, int fd, const char* body);
 void handle_media_feed(GatewaySystem* gw, int fd, const char* body);
 void handle_media_status(GatewaySystem* gw, int fd);
 void handle_status(GatewaySystem* gw, int fd);
+void handle_reach(GatewaySystem* gw, int fd);   /* v0.6.3 */
 void handle_root(GatewaySystem* gw, int fd);
 void handle_scheduler(GatewaySystem* gw, int fd);
 void handle_scheduler_self_stats(GatewaySystem* gw, int fd);

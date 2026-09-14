@@ -1433,6 +1433,10 @@ int diffusion_generate(DiffusionCtx* ctx,
 
     /* ── Jaccard 邻接相似度激活重加权 ── */
     /* 对被激活的节点，计算其与输入锚点集的邻居重叠率，提升语义精准度 */
+    /* v0.6.3 反馈：走过的边数 = 两跳候选池条目数（每条候选 = 一条被走过的边）。
+     * 只数 vocab 层这条主扩散路径；跨层 spread 不计入（保持口径唯一）。 */
+    ctx->spread_edges_out = spread1_cand + spread2_cand;
+
     int total_spread = spread1_count + spread2_count;
     for (int si = 0; si < total_spread; si++) {
         int nid = front[si].node_id;   /* (N17) 前沿改为 SpreadEntry 数组 */

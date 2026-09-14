@@ -8,6 +8,7 @@
 
 #include "gateway_internal.h"
 #include "lang.h"
+#include "generation_feedback.h"   /* v0.6.3：GET /reach 读数 */
 
 // ==================== 请求处理 ====================
 
@@ -582,6 +583,40 @@ void handle_health(GatewaySystem* gw, int fd) {
     } else {
         http_json(fd, 503, "{\"status\":\"loading\",\"message\":\"engine initializing\"}");
     }
+}
+
+/* GET /reach - 生成端在线反馈 / 内调节 读数（v0.6.3）。
+ * 机制未启用（PIVOTMIND_NO_FEEDBACK=1）或未注入 ⇒ 503。
+ * ⚠️ 纯诊断读数，不加锁：可能与写者并发，读到的是瞬值（不做一致性保证）。 */
+void handle_reach(GatewaySystem* gw, int fd) {
+    const GenerationFeedback* fb =
+        (gw && gw->topology && gw->topology->feedback_ptr)
+            ? (const GenerationFeedback*)gw->topology->feedback_ptr : NULL;
+    if (!fb) {
+        http_json(fd, 503, "{\"error\":\"feedback not available\"}");
+        return;
+    }
+    char json[512];
+    snprintf(json, sizeof(json),
+        "{"
+        "\"enabled\":%d,"
+        "\"samples\":%lu,"
+        "\"reach_edges\":%d,"
+        "\"reach_words\":%d,"
+        "\"reach\":%.4f,"
+        "\"reach_mu\":%.4f,"
+        "\"reach_sigma\":%.4f,"
+        "\"regulation\":%.4f"
+        "}",
+        fb->enabled,
+        fb->samples,
+        fb->reach_edges,
+        fb->reach_words,
+        (double)fb->reach,
+        (double)fb->reach_mu,
+        (double)fb->reach_sigma,
+        (double)fb->regulation);
+    http_json(fd, 200, json);
 }
 
 void handle_qa(GatewaySystem* gw, int fd, const char* body) {

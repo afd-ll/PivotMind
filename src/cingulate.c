@@ -8,6 +8,8 @@
 
 #include "cingulate.h"
 #include "huarong_topology.h"
+#include "multi_topology.h"      /* v0.6.3：要写 master->feedback_ptr（需完整结构） */
+#include "generation_feedback.h" /* v0.6.3：生成端在线反馈 + 内调节 */
 #include "diffusion.h"
 #include "utf8_tokenizer.h"
 #include <stdio.h>
@@ -244,6 +246,17 @@ int cingulate_diffusion_evaluate(MasterTopology* topo,
     for (int i = 0; i < n && i < MAX_GENERATED_WORDS; i++)
         out_seq->words[i] = words[i];
     out_seq->count = n < MAX_GENERATED_WORDS ? n : MAX_GENERATED_WORDS;
+
+    /* v0.6.3 反馈（在线）：把「这次生成走出去了多远」就地写进注入位。
+     *   边数 = dctx.spread_edges_out（diffusion_generate 刚算出）
+     *   词数 = n（本函数的返回值，也是 out_seq->count 的来源）
+     * ⚠️ 只写、不消费 —— 本轮只落「反馈 / 内调节」两条量；情绪→参数那一环不动。
+     * ⚠️ 不在 dmn 路径写（做梦不算"这次对话走出多远"）⇒ 来源天然分开。 */
+    if (topo->feedback_ptr) {
+        generation_feedback_observe((GenerationFeedback*)topo->feedback_ptr,
+                                    dctx.spread_edges_out, n);
+    }
+
     cingulate_evaluate(out_seq, topo, input, 5);
 
     diffusion_cleanup(&dctx);

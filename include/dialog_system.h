@@ -148,6 +148,11 @@ typedef struct {
     float activation_threshold;
     float decay_rate;
     CognitiveState* cognitive_state;
+
+    /* v0.6.3 生成端在线反馈 + 内调节（reach / 稳态带 / 纠正力）。
+     * 与 cognitive_state 同处创建与销毁；由 gateway 注入到 master->feedback_ptr。
+     * ⚠️ 用 struct 前向声明，不引头文件。 */
+    struct GenerationFeedback* feedback;
     float last_knowledge_quality;
     CognitiveController* controller;
     BpttLearner* bptt;               // RNN BPTT 在线学习器

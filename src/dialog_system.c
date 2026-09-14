@@ -10,6 +10,7 @@
  */
 
 #include "dialog_system.h"
+#include "generation_feedback.h"   /* v0.6.3：生成端在线反馈 + 内调节 */
 #include "multi_topology.h"
 #include "memory_system.h"
 #include "huarong_topology.h"
@@ -1213,6 +1214,14 @@ DialogSystem* dialog_system_create(MasterTopology* master, MemorySystem* memory,
     sys->decay_rate = 0.7f;
 
     sys->cognitive_state = cognitive_state_create();
+
+    /* v0.6.3：生成端在线反馈 + 内调节。
+     * ⚠️ 开关：环境变量 PIVOTMIND_NO_FEEDBACK 非空 ⇒ 不创建，机制整体旁路。 */
+    if (getenv("PIVOTMIND_NO_FEEDBACK")) {
+        sys->feedback = NULL;
+    } else {
+        sys->feedback = generation_feedback_create();
+    }
     if (sys->cognitive_state) {
         cognitive_state_init(sys->cognitive_state);
         LOG_INFO("[对话系统] 认知状态（情感/动机系统）: 已就绪");
@@ -1282,6 +1291,10 @@ void dialog_system_destroy(DialogSystem* sys) {
     }
     if (sys->cognitive_state) {
         cognitive_state_destroy(sys->cognitive_state);
+    }
+    if (sys->feedback) {
+        generation_feedback_destroy(sys->feedback);
+        sys->feedback = NULL;
     }
     if (sys->controller) {
         cognitive_controller_destroy(sys->controller);

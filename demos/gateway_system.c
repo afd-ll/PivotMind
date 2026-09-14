@@ -161,6 +161,11 @@ static int gw_system_init(GatewaySystem* gw) {
     /* 将认知状态指针注入拓扑，供所有模块通过 master->cognitive_state_ptr 访问 */
     gw->topology->cognitive_state_ptr = gw->dialog->cognitive_state;
 
+    /* v0.6.3：生成端在线反馈（reach / 稳态带 / 纠正力）同处注入。
+     * 写者 = cingulate_diffusion_evaluate；读者 = GET /reach。
+     * ⚠️ 生命周期与 cognitive_state 一致 ⇒ 无需单独释放。 */
+    gw->topology->feedback_ptr = gw->dialog->feedback;
+
     /* ── v0.3 新脑区 ── */
     // 前额叶执行器（推理编排引擎 — 任务分解/子目标调度）
     fprintf(stderr, "[gateway]   创建前额叶执行器 (v0.3)...\n");

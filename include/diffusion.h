@@ -74,6 +74,12 @@ typedef struct {
 
     /* EmergentPOS* — 涌现式词类系统引用，用于输出词性标注和句式重排（NULL=不启用） */
     struct EmergentPOS* emergent_pos;
+
+    /* v0.6.3 反馈：本次扩散【走过的边数】。
+     * 写者 = diffusion_generate；读者 = cingulate_diffusion_evaluate（转写进
+     * master->feedback_ptr）。⚠️ 纯结构化计数（vocab 层两跳的候选池条目数），
+     * 不做统计、不落盘 ⇒ 口径唯一。0 = 本轮没有扩散。 */
+    int spread_edges_out;
 } DiffusionCtx;
 
 /** 从输入文本生成序列 */

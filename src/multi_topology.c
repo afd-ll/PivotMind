@@ -73,6 +73,7 @@ MasterTopology* master_topology_create(int max_sub_topos) {
     master->node_cache = NULL;
     master->ext_dict = NULL;
     master->cognitive_state_ptr = NULL;
+    master->feedback_ptr = NULL;   /* v0.6.3：生成端在线反馈，运行期注入（照上一行的先例） */
     master->_pad_parallel_mode = 0;
 
     int capacity = (max_sub_topos > 0) ? max_sub_topos : INITIAL_SUB_TOPO_CAPACITY;

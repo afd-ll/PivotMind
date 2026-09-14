@@ -270,6 +270,8 @@ static void handle_connection_inner(GatewaySystem* gw, int client_fd, HttpReques
             }
         } else if (strcmp(req->path, "/media/status") == 0) {
             handle_media_status(gw, client_fd);
+        } else if (strcmp(req->path, "/reach") == 0) {
+            handle_reach(gw, client_fd);
         } else if (strcmp(req->path, "/debug") == 0) {
             /* 调试端点 */
             SubTopology* vocab = NULL;
