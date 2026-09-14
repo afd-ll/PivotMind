@@ -80,6 +80,13 @@ typedef struct {
      * master->feedback_ptr）。⚠️ 纯结构化计数（vocab 层两跳的候选池条目数），
      * 不做统计、不落盘 ⇒ 口径唯一。0 = 本轮没有扩散。 */
     int spread_edges_out;
+
+    /* v0.7 走边生成·②：回跳（restart）强度 alpha ∈ [0,1]。
+     * 每跳把 (1-alpha) 的权重重新计给【锚定集】（输入命中的节点），
+     * 压制"到处都能到"的枢纽节点 —— 度归一化罚的是**出度**，
+     * 对目标节点的**入度**无效（实测线上 24 个输入输出高度同质）。
+     * 0 = 关闭（等价旧行为）。env: PIVOTMIND_WALK_ALPHA（默认 0.85）。 */
+    float restart_alpha;
 } DiffusionCtx;
 
 /** 从输入文本生成序列 */

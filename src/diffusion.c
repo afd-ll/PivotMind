@@ -725,6 +725,18 @@ int diffusion_init(DiffusionCtx* ctx, MasterTopology* master) {
     ctx->temperature = 0.03f;
     ctx->emergent_pos = NULL;  /* 调用者可选注入 (cingulate_diffusion_evaluate) */
 
+    /* v0.7·②：回跳 alpha（0.85 = PPR 惯例；0 = 关）。env 可配。 */
+    ctx->restart_alpha = 0.85f;
+    {
+        const char* _ra = getenv("PIVOTMIND_WALK_ALPHA");
+        if (_ra && _ra[0]) {
+            float _v = (float)atof(_ra);
+            if (_v < 0.0f) _v = 0.0f;
+            if (_v > 1.0f) _v = 1.0f;
+            ctx->restart_alpha = _v;
+        }
+    }
+
     for (int t = 0; t < master->sub_topo_count; t++) {
         SubTopology* sub = master->sub_topologies[t];
         if (!sub || !sub->net) continue;
@@ -1582,6 +1594,22 @@ int diffusion_generate(DiffusionCtx* ctx,
         /* 词汇层自身扩散 */
         diffusion_spread(ctx->vocab, cur_ids, cur_count,
                          vocab_scores, cur_decay, ctx->temperature);
+
+        /* v0.7 走边生成·②：回跳（restart）= RWR/PPR 的 teleport 项。
+         * 每跳把 (1-alpha) 的权重重新计给【锚定集】(active_ids)，
+         * 压制"到处都能到"的枢纽节点。
+         * 依据：armbian 实测（线上只读快照，vocab 度数 top24 输入）——
+         *   24 个**不同**输入输出高度同质（几乎都吐 "悟空 / 道「 / 祖師"）；
+         *   度归一化 1/sqrt(deg) 罚的是**出度**，对目标节点的**入度**无效。
+         * 边界：alpha>=1 或 <=0 时本块不生效（等价旧行为）。 */
+        if (ctx->restart_alpha > 0.0f && ctx->restart_alpha < 1.0f) {
+            float back = (1.0f - ctx->restart_alpha) * cur_decay;
+            int _vn = ctx->vocab->net->node_count;
+            for (int _a = 0; _a < active_count; _a++) {
+                int _aid = active_ids[_a];
+                if (_aid >= 0 && _aid < _vn) vocab_scores[_aid] += back;
+            }
+        }
 
         /* 跨到语义层（名称匹配） */
         if (ctx->semantic && sem_scores) {
