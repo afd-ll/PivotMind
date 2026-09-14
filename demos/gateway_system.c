@@ -242,7 +242,9 @@ static int gw_system_init(GatewaySystem* gw) {
          * 锚点 0 激活 → POS 从未工作（实测"0 硬编码锚点"）。
          * 加载后词汇拓扑就绪，立即用种子词初始化中心向量 */
         if (loaded > 0) {
-            int pos_init = cc_init_emergent_pos(gw->prefrontal->controller, "zh");
+            /* v0.6 步 3：不再写死语种串 —— NULL ⇒ 走引擎默认语种（中文）。
+             * 多语种由 cc_emergent_pos_for(cc, lang) 按需取实例。 */
+            int pos_init = cc_init_emergent_pos(gw->prefrontal->controller, NULL);
             fprintf(stderr, "[gateway] POS 锚点初始化: %d 个\n", pos_init);
         }
         if (loaded >= 0) fprintf(stderr, "[gateway]   加载拓扑状态: %d 节点\n", loaded);

@@ -95,10 +95,11 @@ EmergentPOS* emergent_pos_create(const char* lang) {
     ep->classify_count = 0;
     ep->anchor_count   = 0;
 
-    /* 选择语言种子表 */
+    /* 选择语言种子表（v0.6 步 3：同时把语种记进实例，供持久化路径闸门用） */
     const char* (*seed_table)[POS_ANCHOR_MAX_SEEDS];
     int is_en = (lang && lang[0] == 'e');
     seed_table = is_en ? POS_EN_SEEDS : POS_CN_SEEDS;
+    ep->lang = is_en ? PM_LANG_EN : PM_LANG_ZH;
 
     pthread_mutex_init(&ep->lock, NULL);
 
@@ -791,6 +792,13 @@ static unsigned long g_ep_legacy_dim_inferred = 0;
 
 int emergent_pos_save(EmergentPOS* ep, const char* filepath) {
     if (!ep) return -1;
+    /* v0.6 步 3：默认路径**只属于中文实例**。其它语种的实例必须显式给 filepath，
+     * 否则多实例会共用同一条默认路径 ⇒ 互相静默覆盖（非中文实例当前无默认落点）。 */
+    if (!filepath && ep->lang != PM_LANG_ZH) {
+        fprintf(stderr, "[EmergentPOS] 拒绝用默认路径保存非中文实例(lang=%s)"
+                        " —— 请显式传 filepath\n", pm_lang_name(ep->lang));
+        return -1;
+    }
     const char* path = filepath ? filepath : EMERGENT_POS_DEFAULT_FILE;
 
     /* A-P1-5 fix: tmp+rename 原子写 + fsync，杜绝半写文件；临时名带 pid+序号防互踩 */
@@ -954,6 +962,12 @@ static void ep_load_centroid(float* dst, const unsigned char* src,
 
 int emergent_pos_load(EmergentPOS* ep, const char* filepath) {
     if (!ep) return 0;
+    /* v0.6 步 3：与 save 同一条闸门 —— 别让非中文实例去读中文锚点文件。 */
+    if (!filepath && ep->lang != PM_LANG_ZH) {
+        fprintf(stderr, "[EmergentPOS] 拒绝用默认路径加载非中文实例(lang=%s)"
+                        " —— 请显式传 filepath\n", pm_lang_name(ep->lang));
+        return -1;
+    }
     const char* path = filepath ? filepath : EMERGENT_POS_DEFAULT_FILE;
 
     FILE* f = fopen(path, "rb");

@@ -18,6 +18,7 @@
 #define EMERGENT_POS_H
 
 #include "constants.h"
+#include "lang.h"                 /* PmLang / pm_lang_name —— 实例的语种属性（v0.6 步 3） */
 #include "cognitive_controller.h"
 
 /* ================================================================
@@ -105,6 +106,11 @@ typedef struct EmergentPOS {
     } extra_classes[16];
     int extra_class_count;                  /* 当前涌现出的额外词类数 */
     int emerge_check_counter;               /* 涌现检查计时器 */
+
+    /* v0.6 语言分流·步 3（B5）：本实例所属语种 —— 唯一决定用哪张种子表。
+     * 一个实例只装一种语言的种子锚点 ⇒ 「支持多语种」靠【多实例】承载
+     * （见 CognitiveController.emergent_pos_slots）。 */
+    PmLang    lang;
 
     /* 统计 */
     int       total_classifications;        /* 总分类次数 */

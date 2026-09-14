@@ -14,6 +14,7 @@
 
 #include "multi_topology.h"
 #include "memory_system.h"
+#include "lang.h"          /* PmLang / PM_LANG_COUNT —— 涌现词类按语种分槽（v0.6 步 3） */
 #include <stdbool.h>
 
 /** 前向声明: 涌现词类系统（定义在 emergent_pos.h） */
@@ -201,7 +202,13 @@ typedef struct CognitiveController {
     float nn_confidence;                 // BPTT 神经网络置信度 (0.0~1.0, 0=未训练)
 
     // ========== 10. 涌现式词类系统 ==========
-    EmergentPOS* emergent_pos;           // 种子锚点 + 特征向量聚类词类系统
+    EmergentPOS* emergent_pos;           // 种子锚点 + 聚类词类系统（= 主导语种那一槽的别名，兼容旧取用点）
+    /* v0.6 语言分流·步 3（B5）：**按语种**一个实例。
+     * 「实例的语种」唯一决定种子表 ⇒ 「支持多语种」= 持有多个实例，
+     * 而不是让一个实例塞两套种子。下标即 PmLang（PM_LANG_ZH=1 / PM_LANG_EN=2）。
+     * NULL = 尚未创建（懒建，见 cc_emergent_pos_for）。
+     * ⚠️ 只有中文槽能用默认路径持久化（emergent_pos_save 里有闸门）。 */
+    EmergentPOS* emergent_pos_slots[PM_LANG_COUNT];
 
 } CognitiveController;
 
@@ -482,6 +489,15 @@ int concept_is_outputtable(const char* concept);
  * @return 成功初始化的锚点数
  */
 int cc_init_emergent_pos(CognitiveController* cc, const char* lang);
+
+/**
+ * 取（必要时创建）指定语种的涌现词类实例 —— v0.6 步 3「按语种实例化」的唯一入口。
+ *
+ * lang 必须是**有种子表**的语种（PM_LANG_ZH / PM_LANG_EN）；其余返回 NULL。
+ * 幂等：同一 lang 重复调用返回同一指针。实例同时挂在 cc->emergent_pos_slots[lang]。
+ * 调用方不得持有到 cc 销毁之后。
+ */
+EmergentPOS* cc_emergent_pos_for(CognitiveController* cc, PmLang lang);
 
 /**
  * 涌现式词性标注（双层路由）

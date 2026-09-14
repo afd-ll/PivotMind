@@ -74,8 +74,10 @@ CognitiveController* cognitive_controller_create(MasterTopology* master,
     cc->nn_confidence = 0.0f;    // BPTT 未训练时置信度为 0
     cc->prev_satisfaction = 0.0f;
 
-    /* 涌现式词类系统: 轻量创建，尝试加载持久化中心，失败则懒初始化 */
-    cc->emergent_pos = emergent_pos_create("zh");
+    /* 涌现式词类系统: 轻量创建，尝试加载持久化中心，失败则懒初始化。
+     * v0.6 步 3：改走「按语种取实例」入口 —— 默认语种（中文）实例仍落在
+     * <home>/data/emergent_pos.bin，**文件与行为都不变**。 */
+    cc->emergent_pos = cc_emergent_pos_for(cc, PM_LANG_ZH);
     if (cc->emergent_pos) {
         int loaded = emergent_pos_load(cc->emergent_pos, NULL);
         if (loaded > 0) {
@@ -103,11 +105,15 @@ void cognitive_controller_destroy(CognitiveController* cc) {
         }
         free(cc->patterns);
     }
-    // 释放涌现词类系统
-    if (cc->emergent_pos) {
-        emergent_pos_destroy(cc->emergent_pos);
-        cc->emergent_pos = NULL;
+    // 释放涌现词类系统（v0.6 步 3：按槽遍历 —— cc->emergent_pos 只是其中一个槽的别名，
+    // 只放它会漏掉其它语种的实例）
+    for (int i = 0; i < PM_LANG_COUNT; i++) {
+        if (cc->emergent_pos_slots[i]) {
+            emergent_pos_destroy(cc->emergent_pos_slots[i]);
+            cc->emergent_pos_slots[i] = NULL;
+        }
     }
+    cc->emergent_pos = NULL;
     free(cc);
 }
 
@@ -1744,14 +1750,34 @@ POSTag pos_tag_chinese(const char* word) {
  *  涌现式词类系统 API — 锚点中心分类
  * ================================================================ */
 
+/* "zh"/"en" 这类外部串 → PmLang。NULL/空 ⇒ 默认中文（保持旧调用点的语义）。 */
+static PmLang _lang_from_str(const char* s) {
+    if (!s || !s[0]) return PM_LANG_ZH;
+    if (s[0] == 'e' || s[0] == 'E') return PM_LANG_EN;
+    if (s[0] == 'z' || s[0] == 'Z') return PM_LANG_ZH;
+    return PM_LANG_UNKNOWN;
+}
+
+EmergentPOS* cc_emergent_pos_for(CognitiveController* cc, PmLang lang) {
+    if (!cc) return NULL;
+    if (lang < 0 || lang >= PM_LANG_COUNT) return NULL;
+    /* 只有**有种子表**的语种建得出实例（中文 / 英文）；其余无种子 ⇒ NULL。 */
+    if (lang != PM_LANG_ZH && lang != PM_LANG_EN) return NULL;
+    if (cc->emergent_pos_slots[lang]) return cc->emergent_pos_slots[lang];
+    EmergentPOS* ep = emergent_pos_create(pm_lang_name(lang));
+    if (!ep) return NULL;
+    cc->emergent_pos_slots[lang] = ep;
+    return ep;
+}
+
 int cc_init_emergent_pos(CognitiveController* cc, const char* lang) {
     if (!cc) return 0;
-    if (!cc->emergent_pos) {
-        cc->emergent_pos = emergent_pos_create(lang ? lang : "zh");
-        if (!cc->emergent_pos) return 0;
-    }
+    EmergentPOS* ep = cc_emergent_pos_for(cc, _lang_from_str(lang));
+    if (!ep) return 0;
+    /* 兼容旧语义：被初始化的这一槽同时作为「当前主导语种」的快捷指针 */
+    cc->emergent_pos = ep;
     if (!cc->master) return 0;
-    return emergent_pos_init_centroids(cc->emergent_pos, cc->master);
+    return emergent_pos_init_centroids(ep, cc->master);
 }
 
 POSTag pos_tag_emergent(CognitiveController* cc, const char* word) {
