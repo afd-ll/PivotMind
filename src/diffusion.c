@@ -999,6 +999,23 @@ static int word_prio_add(const char** word_prio, int* count, const char* w,
 typedef struct { int node_id; float strength; } SpreadEntry;
 
 /* 语言偏好乘子（原 :1226-1230 与 :1267-1270 两处逐字重复，此处合一，行为逐字等价） */
+/* v0.6 语言分流·步 2（B5）：输出期语种过滤的【唯一实现】。
+ * 此前 5 处各写一对 `lang_dom>0 && !pm_is_nonascii(...)` / `lang_dom<0 && pm_is_nonascii(...)`，
+ * 判据是**字节级粗判**（首字节 & 0x80）—— 法文 é、日文假名、韩文谚文、CJK 标点、emoji
+ * 全被当成「中文」（见 v0.6 设计方案 §1.2 真缺陷 2）。现统一走语种 SSOT（include/lang.h）。
+ *
+ * 口径（老大 2026-09-14 定）：**白名单只丢英文** ——
+ *   中文主导（lang_dom>0）⇒ 只丢弃【pm_lang_of == EN】的 token；标点/数字落 UNKNOWN ⇒ 保留。
+ *   英文主导（lang_dom<0）⇒ 只保留 EN + UNKNOWN。
+ * ⚠️ 与旧判据的差异：旧实现「中文主导 ⇒ 丢弃一切 ASCII」（标点/数字也丢），
+ *    新实现保留 ASCII 里的 UNKNOWN。差异已在 180 例 A/B 中观测并记录。 */
+static int _lang_keep(const char* w, int lang_dom) {
+    if (lang_dom == 0 || !w || !w[0]) return 1;
+    PmLang l = pm_lang_of(w);
+    if (lang_dom > 0) return (l != PM_LANG_EN);
+    return (l == PM_LANG_EN || l == PM_LANG_UNKNOWN);
+}
+
 static float _lang_mult(const ReasoningNode* nb, int lang_dom) {
     if (lang_dom == 0 || !nb) return 1.0f;
     if (NODE_IS_CJK(nb))
@@ -1805,8 +1822,7 @@ int diffusion_generate(DiffusionCtx* ctx,
                 }
                 if (tpl) continue;
             }
-            if (lang_dom > 0 && !pm_is_nonascii(word_prio[p])) continue;
-            if (lang_dom < 0 && pm_is_nonascii(word_prio[p])) continue;
+            if (!_lang_keep(word_prio[p], lang_dom)) continue;
             /* 中文单字不输出（v0.6：口语至少 2 字词，"出大的只了"类噪声） */
             if ((unsigned char)word_prio[p][0] >= 0x80 && strlen(word_prio[p]) == 3) continue;
             int dup = 0;
@@ -1829,8 +1845,7 @@ int diffusion_generate(DiffusionCtx* ctx,
             if (final[i].word[0] == '@' || final[i].word[0] == '?' ||
                 (final[i].word[0] == 'H' && final[i].word[1] == 'e')) continue;
             if (!concept_is_outputtable(final[i].word)) continue;   /* semantic_growth 匿名节点 */
-            if (lang_dom > 0 && !pm_is_nonascii(final[i].word)) continue;  /* 中文主导：过滤英文词 */
-            if (lang_dom < 0 && pm_is_nonascii(final[i].word)) continue; /* 英文主导：过滤中文词 */
+            if (!_lang_keep(final[i].word, lang_dom)) continue;
             /* 话题分级（v0.6）：relevance<0.3 的候选是"高频噪声激活"
              * （如"时间"被无关输入激活），不进入主输出——话题聚焦 */
             if (final[i].relevance < 0.3f) continue;
@@ -1869,8 +1884,7 @@ int diffusion_generate(DiffusionCtx* ctx,
                     ReasoningNode* nb = anchor->edges[e].target;
                     if (!nb || !nb->concept || strlen(nb->concept) < 2) continue;
                     if (is_function_word(nb->concept)) continue;
-                    if (lang_dom > 0 && !pm_is_nonascii(nb->concept)) continue;
-                    if (lang_dom < 0 && pm_is_nonascii(nb->concept)) continue;
+                    if (!_lang_keep(nb->concept, lang_dom)) continue;
                     /* 中文单字不输出（v0.6） */
                     if ((unsigned char)nb->concept[0] >= 0x80 && strlen(nb->concept) == 3) continue;
                     int dup = 0;
@@ -1916,8 +1930,7 @@ int diffusion_generate(DiffusionCtx* ctx,
         for (int p = 0; p < word_prio_count && out_fallback < max_output; p++) {
             if (!word_prio[p] || strlen(word_prio[p]) < 2) continue;
             if (is_function_word(word_prio[p])) continue;
-            if (lang_dom > 0 && !pm_is_nonascii(word_prio[p])) continue;
-            if (lang_dom < 0 && pm_is_nonascii(word_prio[p])) continue;
+            if (!_lang_keep(word_prio[p], lang_dom)) continue;
             if ((unsigned char)word_prio[p][0] >= 0x80 && strlen(word_prio[p]) == 3) continue;  /* 中文单字 */
             output_words[out_fallback++] = word_prio[p];
             selected[sel++] = word_prio[p];
@@ -1945,8 +1958,7 @@ int diffusion_generate(DiffusionCtx* ctx,
             }
             if (inhibited) continue;
             /* 语言一致性：fallback 也过滤跨语言词（避免中文输入输出英文） */
-            if (lang_dom > 0 && !pm_is_nonascii(final[i].word)) continue;
-            if (lang_dom < 0 && pm_is_nonascii(final[i].word)) continue;
+            if (!_lang_keep(final[i].word, lang_dom)) continue;
 
             /* 模板连接词: 每2个实词插一次 */
             if (out_fallback > 0 && (out_fallback % 3 == 0)) {
