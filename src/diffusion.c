@@ -1703,6 +1703,51 @@ int diffusion_generate(DiffusionCtx* ctx,
         }
     }
 
+    /* v0.7 走边生成·批1 第4步：relevance 的【多跳预计算表】。
+     * 根因（三轮实测+读码）：输出 = 输入的**一跳**邻居里分最高的几个；
+     *   扩散虽走 2 跳，但两跳候选 relevance 恒 0 ⇒ 乘子只有 0.3（单跳 2.0）
+     *   ⇒ 两跳候选永远进不了输出 ⇒ 「走了第二步却不算数」。
+     * 口径：rel(n) = max( max_a w(a→n),  max_a max_m w(a→m)*w(m→n)*decay )
+     *   预计算一次 O(|A|·deg²)（在 final 循环之外，不随候选数放大），候选查表 O(1)。
+     *   decay 默认 0.7（env PIVOTMIND_WALK_REL_DECAY；<=0 ⇒ 退化为旧单跳行为）。 */
+    enum { REL2_MAXN = 4096 };
+    float rel2_map[REL2_MAXN];
+    int   rel2_ok = (vn > 0 && vn <= REL2_MAXN);
+    float _rel2_decay = 0.7f;
+    {
+        const char* _rd = getenv("PIVOTMIND_WALK_REL_DECAY");
+        if (_rd && _rd[0]) {
+            float _v = (float)atof(_rd);
+            if (_v >= 0.0f && _v <= 1.0f) _rel2_decay = _v;
+        }
+    }
+    if (rel2_ok) memset(rel2_map, 0, sizeof(float) * (size_t)vn);
+    if (rel2_ok && _rel2_decay > 0.0f) {
+        for (int _a = 0; _a < active_count; _a++) {
+            int _aid = active_ids[_a];
+            if (_aid < 0 || _aid >= vn) continue;
+            ReasoningNode* _an = ctx->vocab->net->nodes[_aid];
+            if (!_an || !_an->edges) continue;
+            for (int _e = 0; _e < _an->edge_count; _e++) {
+                ReasoningNode* _mid = _an->edges[_e].target;
+                if (!_mid) continue;
+                int _m = _mid->node_id;
+                if (_m < 0 || _m >= vn) continue;
+                float _w1 = _an->edges[_e].weight;          /* 一跳边权 */
+                if (_w1 > rel2_map[_m]) rel2_map[_m] = _w1;
+                if (!_mid->edges || _w1 <= 0.0f) continue;
+                for (int _e2 = 0; _e2 < _mid->edge_count; _e2++) {
+                    ReasoningNode* _t = _mid->edges[_e2].target;
+                    if (!_t) continue;
+                    int _tid = _t->node_id;
+                    if (_tid < 0 || _tid >= vn) continue;
+                    float _v = _w1 * _mid->edges[_e2].weight * _rel2_decay;
+                    if (_v > rel2_map[_tid]) rel2_map[_tid] = _v;
+                }
+            }
+        }
+    }
+
     DiffusionCandidate final[DIFF_MAX_CANDIDATES];
     int final_cnt = 0;
     for (int i = 0; i < vn && final_cnt < DIFF_MAX_CANDIDATES; i++) {
@@ -1729,18 +1774,10 @@ int diffusion_generate(DiffusionCtx* ctx,
          * 话题聚焦：强边邻居（三国→演义/关羽）相关性高 → 主输出；
          * 高频噪声（时间）与锚定集无强边 → 相关性低 → 降权。
          * 联想发散：弱边/两跳候选相关性低但保留（扩散激活兜底）。 */
-        float relevance = 0.0f;
-        for (int a = 0; a < active_count; a++) {
-            ReasoningNode* anchor = ctx->vocab->net->nodes[active_ids[a]];
-            if (!anchor || !anchor->edges) continue;
-            for (int e = 0; e < anchor->edge_count; e++) {
-                if (anchor->edges[e].target == n) {
-                    float w = anchor->edges[e].weight;
-                    if (w > relevance) relevance = w;
-                    break;
-                }
-            }
-        }
+        /* v0.7·批1 第4步：relevance 改查【预计算的多跳关联表】（含两跳路径权）。
+         * 旧实现只认单跳直接边 ⇒ 两跳候选恒 0 ⇒ 被 ×0.3 压死
+         * ⇒ 输出永远是一跳邻居（三轮 A/B 中性的根因）。 */
+        float relevance = rel2_ok ? rel2_map[i] : 0.0f;
         /* v0.7·批1 第3步：两跳候选（relevance==0）不再被 0.3 的乘子压死 */
         float _rel_eff = relevance;
         if (_rel_eff <= 0.0f && _peak > 1e-9f && _hop2_credit > 0.0f) {
