@@ -1774,8 +1774,12 @@ int cc_init_emergent_pos(CognitiveController* cc, const char* lang) {
     if (!cc) return 0;
     EmergentPOS* ep = cc_emergent_pos_for(cc, _lang_from_str(lang));
     if (!ep) return 0;
-    /* 兼容旧语义：被初始化的这一槽同时作为「当前主导语种」的快捷指针 */
-    cc->emergent_pos = ep;
+    /* v0.6.0 质检修（BUG-1）：**只有还没设定主导语种时才接管**。
+     * 原版（v0.5.41）是幂等的「已有实例就不重建」；我上一版误写成**无条件覆盖** ⇒
+     * 任何 `cc_init_emergent_pos(cc, "en")` 都会把主导指针切到英文实例，
+     * 而全仓 112 处取用点都走 `cc->emergent_pos` ⇒ 中文主路径被静默切走。
+     * 修复后语义回到「首次设定即主导」，与 cc_emergent_pos_for()（只取不抢）一致。 */
+    if (!cc->emergent_pos) cc->emergent_pos = ep;
     if (!cc->master) return 0;
     return emergent_pos_init_centroids(ep, cc->master);
 }

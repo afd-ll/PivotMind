@@ -912,7 +912,14 @@ DialogReasoning* dialog_reason(DialogInput* input, MasterTopology* master,
     /* v0.5.40（待办 A22）：**顺序不能反** —— batch_self_verify() 现在按边证据
      * **重估**节点置信度（覆盖写）。若它排在 master_consolidate_confidence() 之后，
      * 后者刚加上去的反馈加成会在同一轮被立刻抹掉 ⇒ 该机制沦为聋子的耳朵。
-     * 正确次序：先按证据立基准，再叠加「刚用过且用得对」的加成。 */
+     * 正确次序：先按证据立基准，再叠加「刚用过且用得对」的加成。
+     *
+     * 🔴 v0.6.0 质检（待办 A28）补一条**必须说清**的边界：`confidence` 既然是
+     * **派生量**，那么 master_consolidate_confidence() 加的那 0.1 **只在本轮有效** ——
+     * 下一轮 batch_self_verify() 会按边证据把它**重新算掉**（覆盖，不叠加）。
+     * ⇒ 该机制已从「**学习量累积**」退化为「**单轮临时偏置**」；
+     *   「用得对就记住」**不再发生在这里** —— 真正的记忆载体是**边权 `weight`**。
+     *   （要不要把反馈改写成 `weight` 增量，是独立决策，见待办 A28。） */
     batch_self_verify(master);
 
     master_consolidate_confidence(master, 0.1f);
