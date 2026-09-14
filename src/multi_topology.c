@@ -1191,12 +1191,23 @@ void master_consolidate_confidence(MasterTopology* master, float boost_factor) {
         
         for (int n = 0; n < sub->net->node_count; n++) {
             ReasoningNode* node = sub->net->nodes[n];
-            if (node && node->activation > 0.3f) {
-                if (node->confidence < 0.95f) {
-                    node->confidence += boost_factor;
-                    if (node->confidence > 0.95f) node->confidence = 0.95f;
-                    boosted_count++;
-                }
+            if (!node || node->activation <= 0.3f) continue;
+
+            /* v0.6.2 修 BUG-2（质检修）：`confidence` 已是**派生量**（= f(Σ 出边 weight)），
+             * 直接给它 `+= boost_factor` 会在**下一轮** batch_self_verify() 被覆盖
+             * —— 实测该反馈只活一轮，机制从「学习量累积」退化为「单轮临时偏置」。
+             * 正解 = 把反馈写进它**唯一的真值源**：出边权重。
+             * 语义：这节点刚被用过且用得对 ⇒ 它跟邻居的连接更强；
+             *       下一轮重算 confidence 时这份反馈被自然算进去 ⇒ 重新变成累积的。
+             * ⚠️ weight 是**持久化**的（落盘）⇒ 反馈从此有记忆，不再是临时偏置。 */
+            if (!node->edges || node->edge_count <= 0) continue;
+
+            float share = boost_factor / (float)node->edge_count;
+            for (int e = 0; e < node->edge_count; e++) {
+                if (!node->edges[e].target) continue;
+                node->edges[e].weight += share;
+                if (node->edges[e].weight > 1.0f) node->edges[e].weight = 1.0f;
+                boosted_count++;
             }
         }
     }
