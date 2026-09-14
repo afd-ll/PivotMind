@@ -940,10 +940,23 @@ int perception_tick(Perception* p, float throttle, float curiosity) {
     /* 游标前移：下一轮从别处起扫，尾部节点也有机会被看见 */
     p->gap_cursor = (start + 1 + got) % node_count;
 
-    /* 入队（队列满则丢弃本次，绝不阻塞主循环） */
-    int searched = 0;
+    /* 入队（队列满则丢弃本次，绝不阻塞主循环）
+     * v0.5.40 A26：三条判据扫的是【同一个 vocab 拓扑 + 同一个 start】，且判据
+     * 区间重叠（对话缺口 confidence<0.25 ⊂ 模板缺口 <0.4）⇒ 同一节点会被多条
+     * 同时命中，同一个词被重复入队、白耗搜索配额（实测 tick 200/250/300/350/400
+     * 每轮入队 2 个同一个词）。故在一次入队前先做「过滤 + 去重」。 */
+    int uniq = 0;
     for (int i = 0; i < got; i++) {
         if (!is_valid_query(candidates[i])) continue;
+        int dup = 0;
+        for (int j = 0; j < uniq; j++) {
+            if (strcmp(candidates[j], candidates[i]) == 0) { dup = 1; break; }
+        }
+        if (!dup) candidates[uniq++] = candidates[i];
+    }
+
+    int searched = 0;
+    for (int i = 0; i < uniq; i++) {
         if (_perception_enqueue(p, candidates[i])) searched++;
     }
     return searched;
