@@ -725,7 +725,7 @@ int diffusion_init(DiffusionCtx* ctx, MasterTopology* master) {
     ctx->temperature = 0.03f;
     ctx->emergent_pos = NULL;  /* 调用者可选注入 (cingulate_diffusion_evaluate) */
 
-    /* v0.7·②：回跳 alpha（0.85 = PPR 惯例；0 = 关）。env 可配。 */
+    /* v0.6.3·②：回跳 alpha（0.85 = PPR 惯例；0 = 关）。env 可配。 */
     ctx->restart_alpha = 0.85f;
     {
         const char* _ra = getenv("PIVOTMIND_WALK_ALPHA");
@@ -1146,15 +1146,15 @@ static void _spread_release(int** seen, SpreadEntry** front, SpreadEntry** pool)
     free(*pool);   *pool  = NULL;
 }
 
-/* v0.7·批1 第12步：锚定诊断开关（一次性，默认关）*/
+/* v0.6.3·批1 第12步：锚定诊断开关（一次性，默认关）*/
 static int _anchor_stage_a(void) {
     static int cached = -1;
     if (cached < 0) {
-        /* v0.7·批1 第20步：段A（概念桥 → 组成字）开关。**默认开**。
+        /* v0.6.3·批1 第20步：段A（概念桥 → 组成字）开关。**默认开**。
          * 依据：段A 用的 8→0 桥 rel 全是 "seed"，语义是「概念↔概念关联」，
          * 与段A 注释的「词 → 组成字」不匹配 ⇒ 产出的是与输入零共享的噪声节点。
          * 显式设 PIVOTMIND_WALK_ANCHOR_STAGE_A=0 可跳过段A（直接走段B）。 */
-        /* v0.7·批1 第21步：**改为默认关**。
+        /* v0.6.3·批1 第21步：**改为默认关**。
          * 依据（同一快照 A/B）：开 ⇒ 有边 49.6% / 尘立 45.9%（锚定集含噪声节点）；
          *                    关 ⇒ 有边 46.7% / 尘立 45.9%（锚定集 100% 干净）；
          * 净效果 ≈ 零，仅“有边 ↔ 共邻”内部重分配 ⇒ 干净起点优先。
@@ -1168,7 +1168,7 @@ static int _anchor_stage_a(void) {
 static int _anchor_guard(void) {
     static int cached = -1;
     if (cached < 0) {
-        /* v0.7·批1 第19步：**默认开**。
+        /* v0.6.3·批1 第19步：**默认开**。
          * 依据：同一快照内 A/B（第18步 jitter）——
          *   关：有边 34.1% / 孤立 59.1%；开：有边 49.6% / 孤立 45.9%（有边 +15.5pt）。
          * 显式设 PIVOTMIND_WALK_ANCHOR_GUARD=0 可回退到旧行为。 */
@@ -1340,7 +1340,7 @@ int diffusion_generate(DiffusionCtx* ctx,
                     if (!dup) active_ids[active_count++] = vid;
                 }
             }
-            /* v0.7·批1 第17步：段A 命中后是否短路段B。
+            /* v0.6.3·批1 第17步：段A 命中后是否短路段B。
              * guard 开 ⇒ 不 break，继续走段B（去重已有）。
              * 依据：段A 用的 8→0 桥 rel 全是 "seed"，语义是「概念↔概念关联」，
              * 而段A 的注释语义是「词 → 组成字」⇒ 语义不匹配。默认关。 */
@@ -1391,7 +1391,7 @@ int diffusion_generate(DiffusionCtx* ctx,
                 }
             }
         }
-        /* v0.7·批1 第18步（方案B）：段B 的 break 也受 GUARD 控制。
+        /* v0.6.3·批1 第18步（方案B）：段B 的 break 也受 GUARD 控制。
          * 第17步失效原因：本行原为 `if (active_count > 0) break;`，
          * 而 active_count 已被段A 置位 ⇒ 段B 第一轮就退出 ⇒ 段B 从未执行。
          * GUARD 开 ⇒ 完全展开（只靠 dup 去重；上方另有 active_count>=64 上限）。
@@ -1576,7 +1576,7 @@ int diffusion_generate(DiffusionCtx* ctx,
         }
     }
 
-    /* v0.7·批1 第12步：最终锚定集全量 */
+    /* v0.6.3·批1 第12步：最终锚定集全量 */
     if (_anchor_dbg()) {
         fprintf(stderr, "[ANCHOR] === final active_ids (%d) for \"%.60s\" ===\n",
                 active_count, input);
@@ -1681,7 +1681,7 @@ int diffusion_generate(DiffusionCtx* ctx,
         diffusion_spread(ctx->vocab, cur_ids, cur_count,
                          vocab_scores, cur_decay, ctx->temperature);
 
-        /* v0.7 走边生成·②：回跳（restart）= RWR/PPR 的 teleport 项。
+        /* v0.6.3 走边生成·②：回跳（restart）= RWR/PPR 的 teleport 项。
          * 每跳把 (1-alpha) 的权重重新计给【锚定集】(active_ids)，
          * 压制"到处都能到"的枢纽节点。
          * 依据：armbian 实测（线上只读快照，vocab 度数 top24 输入）——
@@ -1689,7 +1689,7 @@ int diffusion_generate(DiffusionCtx* ctx,
          *   度归一化 1/sqrt(deg) 罚的是**出度**，对目标节点的**入度**无效。
          * 边界：alpha>=1 或 <=0 时本块不生效（等价旧行为）。 */
         if (ctx->restart_alpha > 0.0f && ctx->restart_alpha < 1.0f) {
-            /* v0.7·② 第2步：改成【归一化的概率混合】，不是"加常数"。
+            /* v0.6.3·② 第2步：改成【归一化的概率混合】，不是"加常数"。
              * 第1步加常数 back=(1-alpha)*cur_decay≈0.105，而 hub 一侧 358 条边
              * 累加 ≈7.9（相差 ~75 倍）⇒ 被淹没，A/B 实测中性。
              * 正解：保持总量 S 不变，把 (1-alpha) 的**相对份额**集中给锚定集：
@@ -1770,7 +1770,7 @@ int diffusion_generate(DiffusionCtx* ctx,
 
     /* ── 第2步：收敛 → 综合评分（跳过虚词；跨层反馈已通过 _cross_by_name 回流至 vocab_scores） ── */
 
-    /* v0.7 走边生成·批1 第3步：给【两跳候选】一条活路。
+    /* v0.6.3 走边生成·批1 第3步：给【两跳候选】一条活路。
      * 病灶（两次 A/B 中性后读码确证）：final 的乘子是 (0.3 + 1.7*relevance)，
      *   而 relevance 只认【锚定集→候选】的**单跳**直接边 ⇒ 两跳候选 relevance 恒 0
      *   ⇒ 乘子 0.3 vs 2.0（差 6.7 倍）⇒ 「扩散走了 2 跳、评分只认 1 跳」。
@@ -1789,7 +1789,7 @@ int diffusion_generate(DiffusionCtx* ctx,
         }
     }
 
-    /* v0.7 走边生成·批1 第4步：relevance 的【多跳预计算表】。
+    /* v0.6.3 走边生成·批1 第4步：relevance 的【多跳预计算表】。
      * 根因（三轮实测+读码）：输出 = 输入的**一跳**邻居里分最高的几个；
      *   扩散虽走 2 跳，但两跳候选 relevance 恒 0 ⇒ 乘子只有 0.3（单跳 2.0）
      *   ⇒ 两跳候选永远进不了输出 ⇒ 「走了第二步却不算数」。
@@ -1809,7 +1809,7 @@ int diffusion_generate(DiffusionCtx* ctx,
     }
     if (rel2_ok) memset(rel2_map, 0, sizeof(float) * (size_t)vn);
 
-    /* v0.7·批1 第5步：两个开关分开（修正第4步的语义错误）。
+    /* v0.6.3·批1 第5步：两个开关分开（修正第4步的语义错误）。
      *   PIVOTMIND_WALK_REL=0     ⇒ 整个 relevance 关掉（rel2_map 全 0 ⇒ 乘子恒 0.3）
      *   PIVOTMIND_WALK_REL_DECAY ⇒ 只控制【两跳】权重；0 ⇒ 仅单跳（= 真正的旧行为）
      * 上一版把两者耦合在一起，导致 REL_DECAY=0 变成了"全关"。 */
@@ -1845,7 +1845,7 @@ int diffusion_generate(DiffusionCtx* ctx,
         }
     }
 
-    /* v0.7·批1 第6步：relevance 乘子的动态范围可配。
+    /* v0.6.3·批1 第6步：relevance 乘子的动态范围可配。
      * 乘子 = _rel_base + _rel_gain * relevance。
      * 第5步结论：范围越大 ⇒ 产出越高但输出越同质；越小 ⇒ 更聚集但可能无输出。
      * 均为 env 可配（默认 0.3 / 1.7 = 原行为）。 */
@@ -1883,11 +1883,11 @@ int diffusion_generate(DiffusionCtx* ctx,
          * 话题聚焦：强边邻居（三国→演义/关羽）相关性高 → 主输出；
          * 高频噪声（时间）与锚定集无强边 → 相关性低 → 降权。
          * 联想发散：弱边/两跳候选相关性低但保留（扩散激活兜底）。 */
-        /* v0.7·批1 第4步：relevance 改查【预计算的多跳关联表】（含两跳路径权）。
+        /* v0.6.3·批1 第4步：relevance 改查【预计算的多跳关联表】（含两跳路径权）。
          * 旧实现只认单跳直接边 ⇒ 两跳候选恒 0 ⇒ 被 ×0.3 压死
          * ⇒ 输出永远是一跳邻居（三轮 A/B 中性的根因）。 */
         float relevance = rel2_ok ? rel2_map[i] : 0.0f;
-        /* v0.7·批1 第3步：两跳候选（relevance==0）不再被 0.3 的乘子压死 */
+        /* v0.6.3·批1 第3步：两跳候选（relevance==0）不再被 0.3 的乘子压死 */
         float _rel_eff = relevance;
         if (_rel_eff <= 0.0f && _peak > 1e-9f && _hop2_credit > 0.0f) {
             _rel_eff = (vocab_scores[i] / _peak) * _hop2_credit;
@@ -1895,7 +1895,7 @@ int diffusion_generate(DiffusionCtx* ctx,
         }
         final[final_cnt].total_score    = vocab_scores[i] * degree_penalty *
                                           (_rel_base + _rel_gain * _rel_eff);
-        /* v0.7·批1 第9步：留一份**原始值**备查。
+        /* v0.6.3·批1 第9步：留一份**原始值**备查。
          * 借用 `emotion_score`（全程恒 0 且后续两段重排序不会改它）。
          * 用途：DUMP 同时打 raw 与 total ⇒ 一次量出中间被加了多少。 */
         final[final_cnt].emotion_score  = final[final_cnt].total_score;
@@ -1977,7 +1977,7 @@ int diffusion_generate(DiffusionCtx* ctx,
 
     /* ── 第3步：模板导向 → 从 template 层取最佳句式 ── */
 
-    /* v0.7·批1 第7步：候选诊断口（PIVOTMIND_WALK_DUMP 非空时打印）。
+    /* v0.6.3·批1 第7步：候选诊断口（PIVOTMIND_WALK_DUMP 非空时打印）。
      * 位置 = **最后一次 qsort 之后**（即最终排名）。
      * 用途：做"把两跳并入扩散口径"之前，先看清两跳候选（relevance==0）
      * 到底差在哪一项（vocab_score / degree_penalty / relevance）。
