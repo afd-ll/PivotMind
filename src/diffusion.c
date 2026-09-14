@@ -1683,6 +1683,26 @@ int diffusion_generate(DiffusionCtx* ctx,
     }
 
     /* ── 第2步：收敛 → 综合评分（跳过虚词；跨层反馈已通过 _cross_by_name 回流至 vocab_scores） ── */
+
+    /* v0.7 走边生成·批1 第3步：给【两跳候选】一条活路。
+     * 病灶（两次 A/B 中性后读码确证）：final 的乘子是 (0.3 + 1.7*relevance)，
+     *   而 relevance 只认【锚定集→候选】的**单跳**直接边 ⇒ 两跳候选 relevance 恒 0
+     *   ⇒ 乘子 0.3 vs 2.0（差 6.7 倍）⇒ 「扩散走了 2 跳、评分只认 1 跳」。
+     * 口径：两跳的关联用【归一化扩散得分】代理（两跳信息本来就在 vocab_scores 里，
+     *   只是被 0.3 的乘子压死）：rel_eff = relevance>0 ? relevance : (score/peak)*credit。
+     *   credit 默认 0.5，环境变量 PIVOTMIND_WALK_2HOP（0 = 关闭 ⇒ 等价旧行为）。 */
+    float _peak = 0.0f;
+    for (int _i = 0; _i < vn; _i++)
+        if (vocab_scores[_i] > _peak) _peak = vocab_scores[_i];
+    float _hop2_credit = 0.5f;
+    {
+        const char* _h2 = getenv("PIVOTMIND_WALK_2HOP");
+        if (_h2 && _h2[0]) {
+            float _v = (float)atof(_h2);
+            if (_v >= 0.0f && _v <= 1.0f) _hop2_credit = _v;
+        }
+    }
+
     DiffusionCandidate final[DIFF_MAX_CANDIDATES];
     int final_cnt = 0;
     for (int i = 0; i < vn && final_cnt < DIFF_MAX_CANDIDATES; i++) {
@@ -1721,8 +1741,14 @@ int diffusion_generate(DiffusionCtx* ctx,
                 }
             }
         }
+        /* v0.7·批1 第3步：两跳候选（relevance==0）不再被 0.3 的乘子压死 */
+        float _rel_eff = relevance;
+        if (_rel_eff <= 0.0f && _peak > 1e-9f && _hop2_credit > 0.0f) {
+            _rel_eff = (vocab_scores[i] / _peak) * _hop2_credit;
+            if (_rel_eff > 1.0f) _rel_eff = 1.0f;
+        }
         final[final_cnt].total_score    = vocab_scores[i] * degree_penalty *
-                                          (0.3f + 1.7f * relevance);
+                                          (0.3f + 1.7f * _rel_eff);
         final[final_cnt].relevance      = relevance;
         final[final_cnt].word = n->concept;
         final[final_cnt].used = 0;
