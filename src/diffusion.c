@@ -1759,6 +1759,18 @@ int diffusion_generate(DiffusionCtx* ctx,
         }
     }
 
+    /* v0.7·批1 第6步：relevance 乘子的动态范围可配。
+     * 乘子 = _rel_base + _rel_gain * relevance。
+     * 第5步结论：范围越大 ⇒ 产出越高但输出越同质；越小 ⇒ 更聚集但可能无输出。
+     * 均为 env 可配（默认 0.3 / 1.7 = 原行为）。 */
+    float _rel_base = 0.3f, _rel_gain = 1.7f;
+    {
+        const char* _rb = getenv("PIVOTMIND_WALK_REL_BASE");
+        const char* _rg = getenv("PIVOTMIND_WALK_REL_GAIN");
+        if (_rb && _rb[0]) { float _v = (float)atof(_rb); if (_v >= 0.0f && _v <= 4.0f) _rel_base = _v; }
+        if (_rg && _rg[0]) { float _v = (float)atof(_rg); if (_v >= 0.0f && _v <= 4.0f) _rel_gain = _v; }
+    }
+
     DiffusionCandidate final[DIFF_MAX_CANDIDATES];
     int final_cnt = 0;
     for (int i = 0; i < vn && final_cnt < DIFF_MAX_CANDIDATES; i++) {
@@ -1796,7 +1808,7 @@ int diffusion_generate(DiffusionCtx* ctx,
             if (_rel_eff > 1.0f) _rel_eff = 1.0f;
         }
         final[final_cnt].total_score    = vocab_scores[i] * degree_penalty *
-                                          (0.3f + 1.7f * _rel_eff);
+                                          (_rel_base + _rel_gain * _rel_eff);
         final[final_cnt].relevance      = relevance;
         final[final_cnt].word = n->concept;
         final[final_cnt].used = 0;
