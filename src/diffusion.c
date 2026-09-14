@@ -1146,6 +1146,16 @@ static void _spread_release(int** seen, SpreadEntry** front, SpreadEntry** pool)
     free(*pool);   *pool  = NULL;
 }
 
+/* v0.7·批1 第12步：锚定诊断开关（一次性，默认关）*/
+static int _anchor_dbg(void) {
+    static int cached = -1;
+    if (cached < 0) {
+        const char* e = getenv("PIVOTMIND_WALK_ANCHOR");
+        cached = (e && e[0]) ? 1 : 0;
+    }
+    return cached;
+}
+
 int diffusion_generate(DiffusionCtx* ctx,
                         const char* input,
                         const char** output_words,
@@ -1195,6 +1205,9 @@ int diffusion_generate(DiffusionCtx* ctx,
                 sub[byte_len] = 0;
 
                 int cnid = huarong_net_find_concept(ctx->concept->net, sub);
+                if (_anchor_dbg())
+                    fprintf(stderr, "[ANCHOR] A win=%d sub=\"%s\" cnid=%d%s\n",
+                            win_chars, sub, cnid, cnid < 0 ? " (miss)" : "");
                 if (cnid < 0) continue;
 
                 /* 词节点 concept 进优先输出队列（输入直接关联的实义词） */
@@ -1284,6 +1297,14 @@ int diffusion_generate(DiffusionCtx* ctx,
                     int dup = 0;
                     for (int d = 0; d < active_count; d++)
                         if (active_ids[d] == vid) { dup = 1; break; }
+                    if (_anchor_dbg()) {
+                        ReasoningNode* _cn = (cnid >= 0 && cnid < ctx->concept->net->node_count)
+                                             ? ctx->concept->net->nodes[cnid] : NULL;
+                        fprintf(stderr, "[ANCHOR] A bridge cnid=%d(%s) -> vid=%d(%s) w=%.3f uc=%d tr=%.3f\n",
+                                cnid, (_cn && _cn->concept) ? _cn->concept : "?",
+                                vid, vn->concept ? vn->concept : "?",
+                                (double)l->weight, l->use_count, (double)l->transfer_rate);
+                    }
                     if (!dup) active_ids[active_count++] = vid;
                 }
             }
@@ -1318,6 +1339,13 @@ int diffusion_generate(DiffusionCtx* ctx,
                 int dup = 0;
                 for (int d = 0; d < active_count; d++)
                     if (active_ids[d] == nid) { dup = 1; break; }
+                if (_anchor_dbg()) {
+                    ReasoningNode* _vn2 = ctx->vocab->net->nodes[nid];
+                    fprintf(stderr, "[ANCHOR] B win=%d sub=\"%s\" nid=%d(%s) deg=%d\n",
+                            win_chars, sub, nid,
+                            (_vn2 && _vn2->concept) ? _vn2->concept : "?",
+                            _vn2 ? _vn2->edge_count : -1);
+                }
                 if (!dup) {
                     active_ids[active_count++] = nid;
                     ctx->vocab->net->nodes[nid]->activation += 0.2f;
@@ -1501,6 +1529,20 @@ int diffusion_generate(DiffusionCtx* ctx,
                 spread2_cand, spread2_count, spread2_drop, spread2_theta, spread2_peak,
                 total_spread, front_cap, ledger_fail,
                 g_cand1 + g_cand2, g_lit1 + g_lit2, g_drop1 + g_drop2, g_calls, g_fail);
+        }
+    }
+
+    /* v0.7·批1 第12步：最终锚定集全量 */
+    if (_anchor_dbg()) {
+        fprintf(stderr, "[ANCHOR] === final active_ids (%d) for \"%.60s\" ===\n",
+                active_count, input);
+        for (int _i = 0; _i < active_count; _i++) {
+            int _id = active_ids[_i];
+            ReasoningNode* _n = (_id >= 0 && _id < ctx->vocab->net->node_count)
+                                ? ctx->vocab->net->nodes[_id] : NULL;
+            fprintf(stderr, "[ANCHOR]   [%d] id=%d concept=%s deg=%d\n",
+                    _i, _id, (_n && _n->concept) ? _n->concept : "?",
+                    _n ? _n->edge_count : -1);
         }
     }
 
