@@ -1147,6 +1147,19 @@ static void _spread_release(int** seen, SpreadEntry** front, SpreadEntry** pool)
 }
 
 /* v0.7·批1 第12步：锚定诊断开关（一次性，默认关）*/
+static int _anchor_stage_a(void) {
+    static int cached = -1;
+    if (cached < 0) {
+        /* v0.7·批1 第20步：段A（概念桥 → 组成字）开关。**默认开**。
+         * 依据：段A 用的 8→0 桥 rel 全是 "seed"，语义是「概念↔概念关联」，
+         * 与段A 注释的「词 → 组成字」不匹配 ⇒ 产出的是与输入零共享的噪声节点。
+         * 显式设 PIVOTMIND_WALK_ANCHOR_STAGE_A=0 可跳过段A（直接走段B）。 */
+        const char* e = getenv("PIVOTMIND_WALK_ANCHOR_STAGE_A");
+        cached = (!e) ? 1 : (e[0] == '0' ? 0 : 1);
+    }
+    return cached;
+}
+
 static int _anchor_guard(void) {
     static int cached = -1;
     if (cached < 0) {
@@ -1206,7 +1219,8 @@ int diffusion_generate(DiffusionCtx* ctx,
      * 激活其组成字（组合强化）。词从语料统计自己长出来（词巩固），
      * 生成端先词后字：词级语义聚焦，字级细粒度兜底。 */
     if (ctx->concept && ctx->concept->net && ctx->master->cross_link_count > 0) {
-        for (int win_chars = 5; win_chars >= 2 && active_count < 64; win_chars--) {
+        for (int win_chars = 5; win_chars >= 2 && active_count < 64
+                         && _anchor_stage_a(); win_chars--) {
             for (int ci = 0; ci + win_chars <= char_count; ci++) {
                 if (active_count >= 64) break;
                 int byte_start = char_pos[ci];
