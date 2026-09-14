@@ -1886,6 +1886,25 @@ int diffusion_generate(DiffusionCtx* ctx,
     qsort(final, final_cnt, sizeof(DiffusionCandidate), _cand_cmp);
 
     /* ── 第3步：模板导向 → 从 template 层取最佳句式 ── */
+
+    /* v0.7·批1 第7步：候选诊断口（PIVOTMIND_WALK_DUMP 非空时打印）。
+     * 位置 = **最后一次 qsort 之后**（即最终排名）。
+     * 用途：做"把两跳并入扩散口径"之前，先看清两跳候选（relevance==0）
+     * 到底差在哪一项（vocab_score / degree_penalty / relevance）。
+     * 纯只读打印，默认关，不影响行为。 */
+    if (final_cnt > 0 && getenv("PIVOTMIND_WALK_DUMP")) {
+        int _top = final_cnt < 12 ? final_cnt : 12;
+        printf("[\u5019\u9009DUMP] cnt=%d\n", final_cnt);
+        for (int _d = 0; _d < _top; _d++) {
+            int _nid = final[_d].node_id;
+            int _deg = (_nid >= 0 && _nid < vn && ctx->vocab->net->nodes[_nid])
+                       ? ctx->vocab->net->nodes[_nid]->edge_count : -1;
+            printf("  #%02d %-12s deg=%-4d vs=%.4f rel=%.3f total=%.4f\n",
+                   _d, final[_d].word ? final[_d].word : "?",
+                   _deg, (double)final[_d].vocab_score,
+                   (double)final[_d].relevance, (double)final[_d].total_score);
+        }
+    }
     const char* tpl_pattern = NULL;
     if (ctx->template && tpl_scores && tn > 0) {
         float best_tpl_score = 0;
