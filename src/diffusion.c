@@ -1321,6 +1321,9 @@ int diffusion_generate(DiffusionCtx* ctx,
              * guard 开 ⇒ 不 break，继续走段B（去重已有）。
              * 依据：段A 用的 8→0 桥 rel 全是 "seed"，语义是「概念↔概念关联」，
              * 而段A 的注释语义是「词 → 组成字」⇒ 语义不匹配。默认关。 */
+            if (_anchor_dbg())
+                fprintf(stderr, "[ANCHOR] stageA=%d (%s)\n", active_count,
+                        _anchor_guard() ? "guard:继续走段B" : "guard关:短路段B");
             if (active_count > 0 && !_anchor_guard()) break;  /* 长词优先 */
         }
     }
@@ -1365,7 +1368,12 @@ int diffusion_generate(DiffusionCtx* ctx,
                 }
             }
         }
-        if (active_count > 0) break;  /* 长匹配优先 */
+        /* v0.7·批1 第18步（方案B）：段B 的 break 也受 GUARD 控制。
+         * 第17步失效原因：本行原为 `if (active_count > 0) break;`，
+         * 而 active_count 已被段A 置位 ⇒ 段B 第一轮就退出 ⇒ 段B 从未执行。
+         * GUARD 开 ⇒ 完全展开（只靠 dup 去重；上方另有 active_count>=64 上限）。
+         * 容量：active_ids[DIFF_MAX_CANDIDATES=256]，段A≤64 + 段B≤64 ⇒ 安全。 */
+        if (active_count > 0 && !_anchor_guard()) break;  /* 长匹配优先 */
     }
     /* (N17-fix) 本批扩散堆分配在此提前声明：使 active_count==0 等**早退**也
      * 能走统一释放出口（此前释放写在函数中段，早退路径会绕过它）。 */
