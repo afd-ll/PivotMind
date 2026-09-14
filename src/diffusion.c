@@ -1150,8 +1150,12 @@ static void _spread_release(int** seen, SpreadEntry** front, SpreadEntry** pool)
 static int _anchor_guard(void) {
     static int cached = -1;
     if (cached < 0) {
+        /* v0.7·批1 第19步：**默认开**。
+         * 依据：同一快照内 A/B（第18步 jitter）——
+         *   关：有边 34.1% / 孤立 59.1%；开：有边 49.6% / 孤立 45.9%（有边 +15.5pt）。
+         * 显式设 PIVOTMIND_WALK_ANCHOR_GUARD=0 可回退到旧行为。 */
         const char* e = getenv("PIVOTMIND_WALK_ANCHOR_GUARD");
-        cached = (e && e[0]) ? 1 : 0;
+        cached = (!e) ? 1 : (e[0] == '0' ? 0 : 1);
     }
     return cached;
 }
