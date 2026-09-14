@@ -1,5 +1,27 @@
 # Changelog
 
+## v0.5.40 — 2026-09-14
+
+> 来源：老大给的两条判据 —— ①（21:58）「**是好奇心驱动这个部门的职责划错了**」；②（21:23）「**阴阳环**」（油门与刹车必须成对）。上游是 v0.5.39 的「拔线扫描」，它顺带揪出感知区 `perception_tick()` 首行的 `(void)throttle;` —— **闸门那条线被主动剪断了**。本版把这条线接回去，并解掉它下游的**结构性空转**：`confidence` 长期是恒 0.5 的死常量（节点 3894 样本 min=max=avg=0.5），而三条知识缺口判据全部要求「低置信度」⇒ **在真实数据上永不命中**，感知区即使接线完成也搜不出一个字。改法是把 `confidence` 变成**派生量**（证据 = Σ 出边 `weight`），缺口判据随之复活；并清掉暴露出来的**重复点单**。工作区 `/home/cx/pm-fix`（Pi 3B），分支 `feat/a22-derive-node-confidence`，`--ff-only` 合并到 main。完整说明见 [changelogs/083-a22-confidence-derive-and-a26-queue-dedup.md](changelogs/083-a22-confidence-derive-and-a26-queue-dedup.md)。
+
+### 架构 —— `confidence` 由「存量字段」改为「派生量」
+1. `confidence` = **Σ 出边 `weight`**（唯一活量），按观测频率**分档**（口径抄 `template_builder.c`），无出边落最低档 0.05；**不落盘**（每次由边证据现算）。四点接线：`master_load_state` 收尾建基准 / `dialog_system.c` 推理收尾重估且**必须先于** `master_consolidate_confidence` / 头文件登记「不落盘」/ `include/perception.h` 的 `int min_confidence_for_search` → `float`（原被 `0.1f` 截断为 0 ⇒ `< 0` 恒假）。
+2. **为什么不「接上 self_verify」**：`edge_conf_to_support(0.5f)` 落 `>0.3` 档返回 `0.5f` ⇒ `consistency ≡ 0.5` ⇒ 原样接上只会把全库推到 0.95，缺口判据**更不可达**。
+
+### 接线 —— 感知区的三路驱动（闸门 / 动机 / 目标）
+3. `src/perception.c`：① **闸门** —— 拆除 `(void)throttle;`，改为 `if (!(throttle > PERCEPT_THROTTLE_MIN)) return 0;`（口径对齐 `visual_cortex_tick()`，`!(x > MIN)` 对 NaN 安全）；② **动机** —— 节律改由下丘脑 `drive_curiosity` 调制（`hypothalamus_get_drive()` 此前**全仓零调用**）；③ **目标** —— 候选词改由三维度知识缺口路提供（三个 `_gap_*_queries` 此前**只有定义、零调用**），按 `cfg.gap_weights` 配额分配（最大余数法）+ 环形游标 `gap_cursor`；**没有缺口就本轮不搜**。
+4. 顺手修 `is_valid_query()` 的**恒假 bug**：旧实现逐**字节**查 `b >= 0x80 && (b < 0xC0 || b > 0xEF)`，而 UTF-8 续字节恒为 `0x80..0xBF`、全部落在 `b < 0xC0` ⇒ **任何含多字节字符的串（即所有中文词）恒返回 0**。改为走语种 SSOT（`include/lang.h`）按码点判语种、按码点数计数（中文 **0/7 → 7/7**，13 个非中文用例零回归）。
+
+### 修复 —— 缺口判据入队去重（A26）
+5. 三条判据取**同一个 vocab 子拓扑 + 同一个 `start`**、扫描顺序相同，且判据区间**包含**（对话缺口 `confidence < 0.25` ⊂ 模板缺口 `< 0.4`）；`_perception_enqueue()` 只入队、不写 cache ⇒ 同轮内三条全通过 ⇒ **同一节点被重复入队**（实测每轮入队 2 个同样的词，白耗 `max_searches_per_cycle` 配额）。入队前增加「过滤 + `strcmp` 去重」原地压缩；**不动**判据、配额与游标语义。
+
+### Verified
+- **armbian-1（aarch64 / gcc 13.3.0）** 与 **WSL（x86_64 / gcc 15.2.0）**：各 `make clean && make all` **140 编译步 / 0 error / 0 warning**、`make check-tools` ✓ **19/19**、`make check-version` **PASS**、`make test` **32 通过 / 0 失败**。
+- **A22 端到端**：`perception_tick` 改前恒返 0 → 改后**首次出词第 100 拍**；`throttle=0.05` 仍返 0（刹车线有效）、`curiosity=0.15` 推迟到第 200 拍（驱力方向正确）。
+- **A26 行为 A/B**（同一份线上状态只读快照）：400 拍累计入队 **11 → 6 词**，**出词轮次 6 与首次出词第 100 拍均不变**（`11 = 1+2×5`、`6 = 1+1×5` ⇒ 差额恰为 5 个重复项）。
+- **线上数据零接触**：探针只读，跑前跑后线上 `pivotmind_state.dat` 的 md5 一致。
+- ⚠️ **诚实边界**：`confidence` 同时被推理评分乘子消费（`score *= 0.3+0.7*conf`）⇒ **推理排序会变**，本版**只验「缺口判据复活」与「能出词」，未做输出质量 A/B**；A26 **不解决**「三条判据扫描顺序完全相同」。**未上线部署。**
+
 ## v0.5.39 — 2026-09-13
 
 > 来源：老大定的一句话判据 ——「**全部补收件人，我就说嘛，地基绝对不稳**」。全仓三层「拔线」扫描查出：丘脑信号总线定义了 19 种 `THAL_SIG_*`，**只有 1 种被消费**，而 `thalamus_recv_signal()` / `thalamus_has_signal()` **全仓零调用**。根因不是「忘了建收件端」，而是**架构缺位 —— 丘脑自己没有信箱**：`ThalamusSubsystem` 枚举只有 10 个脑区、**没有丘脑自己那一项**，`FEEDBACK_REPORT` 只能靠「遍历全部 10 个脑区队列」来捞自己的信，副作用是**每次丘脑 tick（每 30 拍）把所有人的定向信箱扫荡干净**，定向信号在收件方读到之前就被丢弃。本版做**第 0 步（修信箱）+ 甲档第一条（打通 `CONSOLIDATE_NODE`）**，作为后续 16 种信号的样板。工作区 `/home/cx/pm-fix`（Pi 3B），分支 `feat/signal-bus`。完整说明见 [changelogs/082-signal-bus-self-queue-and-cons-node.md](changelogs/082-signal-bus-self-queue-and-cons-node.md)。
