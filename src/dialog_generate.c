@@ -60,8 +60,11 @@ char* dialog_generate(DialogReasoning* reasoning, const char* input,
         if (vocab && vocab->net && anc_tok_count > 1) {
             for (int t = 0; t < anc_tok_count - 1; t++) {
                 if (!anchor_tokens[t] || !anchor_tokens[t+1]) continue;
-                /* 只对两个连续 CJK 单字尝试组合合并 */
-                if (strlen(anchor_tokens[t]) != 3 || strlen(anchor_tokens[t+1]) != 3) continue;
+                /* 只对两个连续 CJK 单字尝试组合合并
+                 * （B4：原 `strlen==3` 是**按字节数猜「单字」**⇒ 标点/假名也当汉字去合并；
+                 *   改走语种 SSOT 的精确表达 —— 单码点 ∧ 汉字） */
+                if (!pm_is_single_char(anchor_tokens[t])   || !pm_is_zh_char(anchor_tokens[t]) ||
+                    !pm_is_single_char(anchor_tokens[t+1]) || !pm_is_zh_char(anchor_tokens[t+1])) continue;
                 char cname[13];
                 snprintf(cname, sizeof(cname), "%s%s", anchor_tokens[t], anchor_tokens[t+1]);
                 int cnid = huarong_net_find_concept(vocab->net, cname);
@@ -700,7 +703,9 @@ void auto_learn_concepts(MasterTopology* master, const char* text, void* str_poo
      * 虚词（我/你/他/是/在）的位置信号在对话里同样要累积——
      * 否则「我」句首率高的关键信号永远丢失（08-14 实测仅 5 边）。 */
     for (int i = 0; i < token_count && cjk_count < 128; i++) {
-        if (!tokens[i] || strlen(tokens[i]) != 3) continue;
+        /* B4：原 `strlen==3` 是按字节数猜「中文单字」⇒ 假名/谚文也会被当汉字去查节点；
+         * 改走语种 SSOT 的精确表达（单码点 ∧ 汉字）。下游 contains_punctuation 仍保留。 */
+        if (!tokens[i] || !pm_is_single_char(tokens[i]) || !pm_is_zh_char(tokens[i])) continue;
         unsigned char c0 = (unsigned char)tokens[i][0];
         if ((c0 & 0x80) == 0) continue;
         int nid = huarong_net_find_concept(vocab->net, tokens[i]);
