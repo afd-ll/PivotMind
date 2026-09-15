@@ -1206,7 +1206,7 @@ void master_consolidate_confidence(MasterTopology* master, float boost_factor) {
             for (int e = 0; e < node->edge_count; e++) {
                 if (!node->edges[e].target) continue;
                 node->edges[e].weight += share;
-                if (node->edges[e].weight > 1.0f) node->edges[e].weight = 1.0f;
+                if (node->edges[e].weight < 0.0f) node->edges[e].weight = 0.0f;
                 boosted_count++;
             }
         }
