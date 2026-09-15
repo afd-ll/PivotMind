@@ -193,6 +193,8 @@ typedef struct Thalamus {
     int   fb_hippo_consolidated;    /* 海马体本轮巩固连接数 */
     int   fb_percept_searched;      /* 感觉皮层本轮搜索数 */
     int   fb_dmn_dreamed;           /* DMN 梦境边修改数 */
+    int   fb_pfe_reasoning;         /* 前额叶推理事件数（本轮） — A12 步2 */
+    int   fb_vc_media;              /* 视觉/媒体处理事件数（本轮） — A12 步2 */
 
     /* ── 正反馈恢复计数 ── */
     int   idle_ticks;               /* 连续无反馈tick数（用于恢复 throttle） */

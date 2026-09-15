@@ -385,9 +385,24 @@ void thalamus_tick(Thalamus* th) {
             if (sig.data.feedback.dreamed > 0)
                 th->fb_dmn_dreamed += sig.data.feedback.dreamed;
         }
+        /* ── A12 步2：前额叶 / 视觉媒体事件（步1 已把它们从「无主广播」改为投本信箱） ──
+         * 显式列举而非范围判断：将来在枚举中间插值也不会误伤。 */
+        else if (sig.type == THAL_SIG_REASONING_START || sig.type == THAL_SIG_REASONING_END ||
+                 sig.type == THAL_SIG_SUBGOAL_START   || sig.type == THAL_SIG_SUBGOAL_RESULT ||
+                 sig.type == THAL_SIG_IDEA_PROPOSED   || sig.type == THAL_SIG_IDEA_SELECTED) {
+            th->fb_pfe_reasoning++;
+        }
+        else if (sig.type == THAL_SIG_VISUAL_FRAME || sig.type == THAL_SIG_CROSS_MODAL_EDGE ||
+                 sig.type == THAL_SIG_MEDIA_FILE_DONE) {
+            th->fb_vc_media++;
+        }
     }
 
     /* ── 反馈闭环（sigmoid 比例调节替代固定阈值） ── */
+    /* ⚠️ A12 步2 修的既有 bug：原「正反馈恢复」段的 any_feedback 判定写在**计数清零之后**
+     * ⇒ 恒为 0 ⇒ idle_ticks 每 tick 都涨、「连续无产出才恢复」退化成「每 tick 都恢复」
+     * ⇒ 抑制几 tick 就被抹平。改为在闭环块内标记、块外使用。 */
+    int had_feedback = 0;
     {
         /* 海马体巩固：阈值5，每多5个巩固 sigmoid 上升，最大抑制50% */
         if (th->fb_hippo_consolidated > 0) {
@@ -397,6 +412,7 @@ void thalamus_tick(Thalamus* th) {
             if (th->throttle[THAL_HIPPOCAMPUS] < 0.10f)
                 th->throttle[THAL_HIPPOCAMPUS] = 0.10f;
             th->fb_hippo_consolidated = 0;
+            had_feedback = 1;
         }
 
         /* 感知皮层搜索：阈值3，最大抑制35% */
@@ -407,6 +423,7 @@ void thalamus_tick(Thalamus* th) {
             if (th->throttle[THAL_PERCEPTION] < 0.05f)
                 th->throttle[THAL_PERCEPTION] = 0.05f;
             th->fb_percept_searched = 0;
+            had_feedback = 1;
         }
 
         /* DMN 梦境：阈值10，最大抑制55% */
@@ -417,14 +434,41 @@ void thalamus_tick(Thalamus* th) {
             if (th->throttle[THAL_DMN] < 0.05f)
                 th->throttle[THAL_DMN] = 0.05f;
             th->fb_dmn_dreamed = 0;
+            had_feedback = 1;
+        }
+
+        /* ── A12 步2 新增：前额叶推理活跃 ⇒ 抑制 DMN + 感知 ──
+         * 与「对话繁忙」同向：推理时不该做梦、也不该闲逛（真实脑里任务正激活与 DMN 相拮抗）。
+         * 阈值3：一轮内 ≥3 个推理事件才起效，避免单次噪声触发。 */
+        if (th->fb_pfe_reasoning > 0) {
+            float reduction = sigmoid_feedback(
+                (float)th->fb_pfe_reasoning, 3.0f, 0.3f, 0.35f);
+            th->throttle[THAL_DMN] *= (1.0f - reduction);
+            if (th->throttle[THAL_DMN] < 0.05f)
+                th->throttle[THAL_DMN] = 0.05f;
+            th->throttle[THAL_PERCEPTION] *= (1.0f - reduction);
+            if (th->throttle[THAL_PERCEPTION] < 0.05f)
+                th->throttle[THAL_PERCEPTION] = 0.05f;
+            th->fb_pfe_reasoning = 0;
+            had_feedback = 1;
+        }
+
+        /* ── A12 步2 新增：视觉/媒体处理活跃 ⇒ 抑制 DMN ──
+         * 媒体任务在跑就别做梦（资源让给处理链路）；阈值2（媒体事件本就更稀）。 */
+        if (th->fb_vc_media > 0) {
+            float reduction = sigmoid_feedback(
+                (float)th->fb_vc_media, 2.0f, 0.35f, 0.25f);
+            th->throttle[THAL_DMN] *= (1.0f - reduction);
+            if (th->throttle[THAL_DMN] < 0.05f)
+                th->throttle[THAL_DMN] = 0.05f;
+            th->fb_vc_media = 0;
+            had_feedback = 1;
         }
     }
 
     /* ── 正反馈恢复：连续无产出→缓慢恢复 throttle ── */
     {
-        int any_feedback = (th->fb_hippo_consolidated > 0)
-                         | (th->fb_percept_searched > 0)
-                         | (th->fb_dmn_dreamed > 0);
+        int any_feedback = had_feedback;
         if (any_feedback == 0) {
             th->idle_ticks++;
             float restore_rate = 0.005f * (1.0f + th->idle_ticks * 0.01f);
