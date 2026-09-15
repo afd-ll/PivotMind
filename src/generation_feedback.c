@@ -21,9 +21,13 @@
 /* 样本不足时不产生调节力（避免开局乱动） */
 #define GF_MIN_SAMPLES    20
 
-/* 反退化判据：样本够多 + 波动极小 + 均值偏低 ⇒ 视为"贴下界" */
+/* 反退化判据：样本够多 + 波动极小 + 均值偏低 ⇒ 视为"贴下界"
+ * ⚠️ 2026-09-15（A31 配套）：reach 换成"出口效率为主"的新口径后实测 ——
+ *    现场坏例 mu=0.3390、中等 0.4588、正常 ≈0.65。原阈值 0.35 距坏例仅 0.011
+ *    余量，走边数略降就可能重新够不着 ⇒ 抬到 0.40（对坏例余量 0.061，
+ *    离"中等"仍留 0.059 间隔）。注意方向：判据是 mu < THRESH，留余量要**抬**阈值。 */
 #define GF_DEGEN_SAMPLES  200
-#define GF_DEGEN_MU       0.35f
+#define GF_DEGEN_MU       0.40f
 #define GF_DEGEN_PUSH     0.5f
 
 GenerationFeedback* generation_feedback_create(void) {
