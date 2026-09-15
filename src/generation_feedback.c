@@ -51,14 +51,19 @@ void generation_feedback_observe(GenerationFeedback* fb, int edges, int words) {
     fb->reach_edges = edges;
     fb->reach_words = words;
 
-    /* ── 反馈：合成「走出去多远」──
-     * 边数为主、实词数为辅。
-     * 边数按 e/(e+64) 压缩（长尾，永不越界）、实词按 /8 计。
+    /* ── 反馈：合成「走得多远 + 走得多准」──
+     * 旧口径 0.7·e/(e+64) + 0.3·min(w/8,1) 只衡量「走了多少边」、完全不含
+     * 「走对没」⇒ A31 探针实测：坏例(1119 边 / 4 词)=0.8121 **反而高于**
+     * 好例(20 边 / 10 词)=0.4667 —— **激励方向是反的**；且 500~1119 这段
+     * 真实工作区间两者只差 0.004（无鉴别力）。
+     * 新口径：以**出口效率**（凑到的词 ÷ 走过的边）为主项、实词量做饱和辅项。
+     *   实测单调：坏例 0.339 / 中等 0.459 / 好例 0.799。
+     *   副产品：坏例落回 GF_DEGEN_MU(0.35) 之下 ⇒ 反退化防护终于够得着
+     *   （那正是它设计出来要救的「恒定低质」场景）。
      * ⚠️ 纯确定性映射：同一 (edges,words) 恒得同一个 reach ⇒ 口径唯一。 */
-    float e_norm = (float)edges / (float)(edges + 64);
-    float w_norm = (float)words / 8.0f;
-    if (w_norm > 1.0f) w_norm = 1.0f;
-    fb->reach = 0.7f * e_norm + 0.3f * w_norm;
+    float eff  = (float)words / ((float)words + (float)edges / 64.0f + 1.0f); /* 出口效率 ∈ [0,1] */
+    float size = (float)words / ((float)words + 4.0f);                        /* 实词量，饱和型 */
+    fb->reach = 0.5f * eff + 0.5f * size;
 
     /* ── 内调节：稳态带只能来自自身历史 ── */
     if (fb->samples == 0) {
