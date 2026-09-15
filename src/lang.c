@@ -149,6 +149,29 @@ int pm_is_zh_char(const char* s) {
     return (pm_lang_of_cp(cp) == PM_LANG_ZH) ? 1 : 0;
 }
 
+/* v0.5.38：「单字」按码点判，不按字节数判（字节数只是编码长度）。 */
+int pm_is_single_char(const char* s) {
+    unsigned int cp = 0u;
+    int n;
+    if (!s || !s[0]) return 0;
+    n = pm_utf8_decode(s, &cp);
+    if (n < 1) n = 1;
+    return (cp != 0u && s[n] == '\0') ? 1 : 0;
+}
+
+/* v0.5.38：单个非表意字符 —— 不是汉字、却曾被当“单字”的那一类。
+ * 覆盖面**刻意**收窄到 UTF-8 三字节区（码点 U+0800..U+FFFF）：
+ * 旧判据 `首字节>=0x80 && strlen==3` 的足迹就是这三字节区，正梁必须与之逐点等价，
+ * 否则会顺手改掉 2 字节（é/·）与 4 字节（emoji）单字符的既有行为 = 不可归因的劣化。
+ * 「单字」这一半仍按【码点】判（pm_is_single_char），不再用 strlen==3 猜。 */
+int pm_is_single_nonzh_char(const char* s) {
+    unsigned int cp = 0u;
+    if (!pm_is_single_char(s)) return 0;                 /* 不是单字符 */
+    pm_utf8_decode(s, &cp);
+    if (cp < 0x800u || cp > 0xFFFFu) return 0;           /* 只认三字节区 */
+    return (pm_lang_of_cp(cp) != PM_LANG_ZH) ? 1 : 0;    /* 汉字不在此列（归 pm_is_zh_char） */
+}
+
 /* ────────────────────────── 名称映射 ────────────────────────── */
 
 const char* pm_lang_name(PmLang lang) {

@@ -89,6 +89,19 @@ int pm_is_nonascii(const char* s);
 /** 首码点落在 CJK 表意区 —— 承接旧 `strlen==3` 汉字判据，但排除 CJK 标点/假名/谚文。 */
 int pm_is_zh_char(const char* s);
 
+/** 整串恰好一个码点（“单字 token”）。空串 / NULL / 首码点非法 ⇒ 0。
+ *  v0.5.38：把旧判据里的“是不是一个单字”从 `strlen()==3` 的【字节数】口径，
+ *  改成按【码点】判 —— 字节数只是编码长度，不是「字数」。 */
+int pm_is_single_char(const char* s);
+
+/** 单个【非表意】字符：pm_is_single_char() ∧ 码点落在 U+0800..U+FFFF ∧ 不是汉字。
+ *  v0.5.38：旧 `首字节>=0x80 && strlen==3` 歪打正着压制的“3 字节非表意字符”
+ *  （CJK 标点 / 全角形式 / 假名 / 谚文）由本谓词**显式**接管，不再靠字节长度。
+ *  覆盖面**刻意**与旧判据一致（限三字节区）—— 多压 2 字节/4 字节单字符属改契约级
+ *  行为变更，须先单独报告，不在本版顺手做。
+ *  ⚠ 输出层「非表意字符不得进入输出」用的就是它。 */
+int pm_is_single_nonzh_char(const char* s);
+
 /** 全部字节 < 0x80（空串 ⇒ 0）—— 承接旧 is_ascii_word() / is_ascii_token()。 */
 int pm_is_ascii_text(const char* s);
 
