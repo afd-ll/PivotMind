@@ -2073,7 +2073,7 @@ int diffusion_generate(DiffusionCtx* ctx,
             /* 中文单字不输出（v0.6：口语至少 2 字词，"出大的只了"类噪声） */
             /* v0.5.38 正梁：单个非表意字符（CJK 标点/假名/谚文等）不得进入输出 */
             if (pm_is_single_nonzh_char(word_prio[p])) continue;
-            if ((unsigned char)word_prio[p][0] >= 0x80 && strlen(word_prio[p]) == 3) continue;
+            if (pm_is_single_char(word_prio[p]) && pm_is_zh_char(word_prio[p])) continue;
             int dup = 0;
             for (int w = 0; w < word_count; w++) {
                 if (strcmp(word_prio[p], word_buf[w]) == 0) { dup = 1; break; }
@@ -2102,7 +2102,7 @@ int diffusion_generate(DiffusionCtx* ctx,
             /* 中文单字不输出（v0.6） */
             /* v0.5.38 正梁：单个非表意字符（CJK 标点/假名/谚文等）不得进入输出 */
             if (pm_is_single_nonzh_char(final[i].word)) continue;
-            if ((unsigned char)final[i].word[0] >= 0x80 && strlen(final[i].word) == 3) continue;
+            if (pm_is_single_char(final[i].word) && pm_is_zh_char(final[i].word)) continue;
 
             /* 去重 */
             int dup = 0;
@@ -2139,7 +2139,7 @@ int diffusion_generate(DiffusionCtx* ctx,
                     /* 中文单字不输出（v0.6） */
                     /* v0.5.38 正梁：单个非表意字符（CJK 标点/假名/谚文等）不得进入输出 */
                     if (pm_is_single_nonzh_char(nb->concept)) continue;
-                    if ((unsigned char)nb->concept[0] >= 0x80 && strlen(nb->concept) == 3) continue;
+                    if (pm_is_single_char(nb->concept) && pm_is_zh_char(nb->concept)) continue;
                     int dup = 0;
                     for (int w2 = 0; w2 < word_count; w2++)
                         if (strcmp(nb->concept, word_buf[w2]) == 0) { dup = 1; break; }
@@ -2187,7 +2187,7 @@ int diffusion_generate(DiffusionCtx* ctx,
             if (!_lang_keep(word_prio[p], lang_dom)) continue;
             /* v0.5.38 正梁（PR #6）：单个非表意字符不得进入输出 */
             if (pm_is_single_nonzh_char(word_prio[p])) continue;
-            if ((unsigned char)word_prio[p][0] >= 0x80 && strlen(word_prio[p]) == 3) continue;  /* 中文单字 */
+            if (pm_is_single_char(word_prio[p]) && pm_is_zh_char(word_prio[p])) continue;  /* 中文单字 */
             output_words[out_fallback++] = word_prio[p];
             selected[sel++] = word_prio[p];
         }
@@ -2205,7 +2205,7 @@ int diffusion_generate(DiffusionCtx* ctx,
             /* 中文单字不输出（v0.6，降级路径也生效——"时间是"的"是"） */
             /* v0.5.38 正梁：单个非表意字符（CJK 标点/假名/谚文等）不得进入输出 */
             if (pm_is_single_nonzh_char(final[i].word)) continue;
-            if ((unsigned char)final[i].word[0] >= 0x80 && strlen(final[i].word) == 3) continue;
+            if (pm_is_single_char(final[i].word) && pm_is_zh_char(final[i].word)) continue;
 
             int inhibited = 0;
             for (int s = 0; s < sel; s++) {

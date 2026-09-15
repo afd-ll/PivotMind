@@ -759,7 +759,7 @@ int pfe_solve_subgoal(PrefrontalExecutive* pfe, int goal_index) {
                 }
                 /* v0.5.38 正梁：单个非表意字符（CJK 标点/假名/谚文等）不得进入输出 */
                 if (pm_is_single_nonzh_char(w)) continue;
-                if ((unsigned char)w[0] >= 0x80 && strlen(w) == 3) continue;
+                if (pm_is_single_char(w) && pm_is_zh_char(w)) continue;
                 pos += snprintf(best_text + pos, sizeof(best_text) - (size_t)pos,
                                 "%s", w);
                 out_cnt++;
@@ -1700,7 +1700,7 @@ static int pfe_semantic_field_answer(PrefrontalExecutive* pfe, const char* subje
         /* 中文单字不输出 */
         /* v0.5.38 正梁：单个非表意字符（CJK 标点/假名/谚文等）不得进入输出 */
         if (pm_is_single_nonzh_char(nb->concept)) continue;
-        if ((unsigned char)nb->concept[0] >= 0x80 && strlen(nb->concept) == 3) continue;
+        if (pm_is_single_char(nb->concept) && pm_is_zh_char(nb->concept)) continue;
         /* 用户可见输出判据：语义场词直接拼进 PFE answer_text → 回复。
          * 语义场的邻居可能落在内部匿名节点上（sem_<x>_<n>），必须拒。 */
         if (!concept_is_outputtable(nb->concept)) continue;
