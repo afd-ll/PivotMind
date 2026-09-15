@@ -23,7 +23,7 @@
  *   learner_load        — 自学周期累计耗时
  *   hot_node_count      — 当前热节点数
  *   cpu_usage           — CPU 使用率
- *   circadian_phase     — 昼夜阶段（来自脑干）
+ *   circadian_phase     — 昼夜阶段（来自**下丘脑·SCN** —— 非脑干；2026-09-16 A12 修正）
  */
 
 #ifndef THALAMUS_H

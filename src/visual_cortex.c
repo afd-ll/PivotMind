@@ -602,10 +602,10 @@ static int vc_perform_alignment(VisualCortex* vc,
                 BrainSignal sig; memset(&sig, 0, sizeof(sig));
                 sig.type = THAL_SIG_CROSS_MODAL_EDGE;
                 sig.source = THAL_VISUAL_CORTEX;
-                sig.target = -1;
+                sig.target = THAL_SELF_QUEUE;
                 sig.data.consolidate.node_id = cooc[i].vi;
                 sig.data.consolidate.topo_id = ttopo_id;
-                thalamus_send_signal(vc->thalamus, -1, &sig);
+                thalamus_send_signal(vc->thalamus, THAL_SELF_QUEUE, &sig);
             }
         }
     }
@@ -703,9 +703,9 @@ static int vc_process_one_video(VisualCortex* vc, const char* filepath, const ch
         BrainSignal sig; memset(&sig, 0, sizeof(sig));
         sig.type = THAL_SIG_MEDIA_FILE_DONE;
         sig.source = THAL_VISUAL_CORTEX;
-        sig.target = -1;
+        sig.target = THAL_SELF_QUEUE;
         sig.data.feedback.consolidated = edges;
-        thalamus_send_signal(vc->thalamus, -1, &sig);
+        thalamus_send_signal(vc->thalamus, THAL_SELF_QUEUE, &sig);
     }
 
     return edges;
@@ -744,9 +744,9 @@ int visual_cortex_tick(VisualCortex* vc, float throttle) {
             BrainSignal sig; memset(&sig, 0, sizeof(sig));
             sig.type = THAL_SIG_VISUAL_FRAME;
             sig.source = THAL_VISUAL_CORTEX;
-            sig.target = -1;
+            sig.target = THAL_SELF_QUEUE;
             sig.data.search.count = processed;
-            thalamus_send_signal(vc->thalamus, -1, &sig);
+            thalamus_send_signal(vc->thalamus, THAL_SELF_QUEUE, &sig);
         }
     } while (processed < batch_max && vc_queue_pop(vc, &task) == 0);
 

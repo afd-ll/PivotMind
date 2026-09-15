@@ -1008,8 +1008,8 @@ static void pfe_post_process(PrefrontalExecutive* pfe,
                             memset(&sig, 0, sizeof(sig));
                             sig.type   = THAL_SIG_IDEA_SELECTED;
                             sig.source = THAL_PREF_EXEC;
-                            sig.target = -1;
-                            thalamus_send_signal(pfe->thalamus, -1, &sig);
+                            sig.target = THAL_SELF_QUEUE;
+                            thalamus_send_signal(pfe->thalamus, THAL_SELF_QUEUE, &sig);
                         }
                         arena_feedback_to_master(arena, pfe->master);
                     }
@@ -1054,8 +1054,8 @@ static void pfe_post_process(PrefrontalExecutive* pfe,
         memset(&sig, 0, sizeof(sig));
         sig.type   = THAL_SIG_REASONING_END;
         sig.source = THAL_PREF_EXEC;
-        sig.target = -1;
-        thalamus_send_signal(pfe->thalamus, -1, &sig);
+        sig.target = THAL_SELF_QUEUE;
+        thalamus_send_signal(pfe->thalamus, THAL_SELF_QUEUE, &sig);
     }
 }
 
@@ -1169,8 +1169,8 @@ int pfe_reason(PrefrontalExecutive* pfe,
         memset(&sig, 0, sizeof(sig));
         sig.type   = THAL_SIG_REASONING_START;
         sig.source = THAL_PREF_EXEC;
-        sig.target = -1;
-        thalamus_send_signal(pfe->thalamus, -1, &sig);
+        sig.target = THAL_SELF_QUEUE;
+        thalamus_send_signal(pfe->thalamus, THAL_SELF_QUEUE, &sig);
     }
 
     /* 阶段1：复杂度评估 */
@@ -1630,8 +1630,8 @@ int pfe_resume_reason(PrefrontalExecutive* pfe,
         memset(&sig, 0, sizeof(sig));
         sig.type   = THAL_SIG_REASONING_START;
         sig.source = THAL_PREF_EXEC;
-        sig.target = -1;
-        thalamus_send_signal(pfe->thalamus, -1, &sig);
+        sig.target = THAL_SELF_QUEUE;
+        thalamus_send_signal(pfe->thalamus, THAL_SELF_QUEUE, &sig);
     }
 
     int n_goals = ws->goal_count;

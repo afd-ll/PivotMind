@@ -777,9 +777,9 @@ int media_process_file(MediaReader* mr, const char* filepath) {
         memset(&sig, 0, sizeof(sig));
         sig.type   = THAL_SIG_MEDIA_FILE_DONE;
         sig.source = THAL_PERCEPTION;
-        sig.target = -1;
+        sig.target = THAL_SELF_QUEUE;
         sig.data.feedback.consolidated = fed;
-        thalamus_send_signal(mr->thalamus, -1, &sig);
+        thalamus_send_signal(mr->thalamus, THAL_SELF_QUEUE, &sig);
     }
 
     return fed;
