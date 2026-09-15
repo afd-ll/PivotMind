@@ -67,11 +67,17 @@ typedef enum {
 typedef enum {
     THAL_SIG_NONE = 0,
 
-    /* 脑干 → 所有脑区：节律/资源信号 */
-    THAL_SIG_HEARTBEAT,         /* 心跳 tick */
-    THAL_SIG_CIRCADIAN_UPDATE,  /* 昼夜节律更新 */
-    THAL_SIG_PAUSE,             /* 暂停请求 */
-    THAL_SIG_RESUME,            /* 恢复请求 */
+    /* 脑干 → 所有脑区：资源 / 存活信号
+     * ⚠️ 2026-09-16（A12）：「节律」**不属于脑干** —— 按真实脑解剖，主生物钟是
+     *    **下丘脑的视交叉上核（SCN）**，体温等内环境稳态同归**下丘脑视前区（POA）**；
+     *    脑干（延髓 / RAS）管的是心跳、呼吸、觉醒这类**资源 / 存活**节律。
+     *    本仓 `src/hypothalamus.c` 早有 `circadian_modulation` +
+     *    `hypothalamus_set_circadian()` ⇒ 下丘脑侧语义已对齐，此处只纠正归属标注。
+     *    ⚠️ 枚举值顺序**有意保持不动**（防潜在序列化不兼容）。 */
+    THAL_SIG_HEARTBEAT,         /* 心跳 tick —— 脑干·延髓 */
+    THAL_SIG_CIRCADIAN_UPDATE,  /* 昼夜节律更新 —— ⚠️ 归属「下丘脑·SCN」，非脑干 */
+    THAL_SIG_PAUSE,             /* 暂停请求 —— 脑干 */
+    THAL_SIG_RESUME,            /* 恢复请求 —— 脑干 */
 
     /* 丘脑 → 脑区：throttle 更新 */
     THAL_SIG_THROTTLE_UPDATE,   /* throttle 值已重算 */
@@ -100,6 +106,19 @@ typedef enum {
     THAL_SIG_VISUAL_FRAME,      /* 视觉帧已处理 */
     THAL_SIG_CROSS_MODAL_EDGE,  /* 跨模态边已建立 */
     THAL_SIG_MEDIA_FILE_DONE    /* 媒体文件处理完成 */
+
+    /* ══════════════════════════════════════════════════════════════
+     * ⚠️ 2026-09-16（A12 核验）——**全仓零投递清单（9 项）**
+     *    判据：`git grep -c` 全仓求和 = 1（只有本处枚举定义，无任何投递或消费）。
+     *    性质：对应真实脑区的功能，属「**规划中**」而**非死代码** ⇒ **登记不删**。
+     *      HEARTBEAT · CIRCADIAN_UPDATE · PAUSE · RESUME · THROTTLE_UPDATE ·
+     *      SEARCH_RESULT · SUBGOAL_START · SUBGOAL_RESULT · IDEA_PROPOSED
+     *    将来接线时按真实脑解剖定归属：
+     *      节律 / 内环境稳态 → **下丘脑**（SCN / POA）
+     *      心跳 / 唤醒 / 资源   → **脑干**（延髓 / RAS）
+     *      推理 / 子目标 / 想法 → **前额叶执行器**
+     *      throttle 重算        → **丘脑自身**（它本就是这条环路的调节者）
+     * ══════════════════════════════════════════════════════════════ */
 } BrainSignalType;
 
 /* ================================================================
