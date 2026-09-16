@@ -1,5 +1,21 @@
 # Changelog
 
+## v0.6.4 — 2026-09-16
+
+> 来源：批2「改口径」+ BG-09 虚词污染修复。完整说明见 [changelogs/089-v064-b2-bg09.md](changelogs/089-v064-b2-bg09.md)。
+
+### 核心变更
+
+- **B 类判据收敛（B3）**：7 个进输出点的 B 类判据收敛为「单码点 ∧ 汉字」，修掉「按字节数猜汉字」老契约违例（子集分解 A/B 定位的承重点）。
+- **BG-09 虚词污染修复**：修复虚词（功能词）在生成端输出里污染作答的问题。
+- **A12 丘脑总线定向投递**：8 处广播改定向投递，止住「无主信号挤队列」；接通丘脑信号消费；修 `idle_ticks` 恒增既有 bug。
+- **A31 reach 合成式**：改为「出口效率为主」，修掉方向相反的激励；`GF_DEGEN_MU` 0.35 → 0.40 留余量。
+
+### Verified
+
+- armbian-1（gcc 13.3.0）全量 `make -j6 all` + `check-tools` + `check-version`；WSL（gcc 15.2.0）交叉覆盖。
+- 部署：线上 v0.5.34 → v0.6.4，换二进制 + SSOT 布局迁移（阻塞点是布局不是 fmt_ver）。
+
 ## v0.6.3 — 2026-09-14
 
 > 来源：老大「**走边生成」这条线**的第一批 —— 从「调参无效」一路追到「**锚定集不是输入词**」。完整说明见 [changelogs/088-walk-anchor-and-stage-switch.md](changelogs/088-walk-anchor-and-stage-switch.md)。
