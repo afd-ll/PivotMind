@@ -23,7 +23,8 @@
  *   · 故意写脏（T3）：把某节点的 lang 字节改成错值，要求加载后 ① 内存值仍是 SSOT、
  *     ② stderr 出现「lang 一致性: 1 个节点」——这句话只有在「字节确实被读到且不等」
  *     时才会打印，因而能证「读端真的在读」。
- *   · 抽掉字节（T4）：按哨兵位置删掉每节点的 lang 字节、把 fmt_ver 改回 9，要求
+ *   · 抽掉字节（T4）：按哨兵位置删掉每节点的 lang+heat 段（v11 记录尾部共 5 字节）、
+ *     把 fmt_ver 改回 9，要求
  *     加载后仍全部对齐、语言值仍正确 —— 证 fmt_ver<10 分支（旧文件零迁移）。
  */
 
@@ -50,7 +51,11 @@ static int tests_run = 0, tests_passed = 0, tests_failed = 0;
 
 /* ── 落盘格式版本的【契约值】。宏 STATE_FORMAT_VERSION 在 src/multi_topology.c 里
  *    （非头文件），此处固化一份：改版本就必须同步改本单测（= 有意识的变更）。 */
-#define EXPECT_FMT_VER 10
+#define EXPECT_FMT_VER 11
+
+/* v0.6.5 起 [v11]：每节点记录尾部 = dist_sig_count(4) + lang(1) + heat(4)。
+ * T4 要「还原 v9 布局」（既无 lang 也无 heat）⇒ 得连抽 1+4 = 5 字节。 */
+#define TAIL_SEG 5
 
 /* ── 哨兵：把 dist_sig_count 写成独一无二的值，作为「在文件里定位该节点记录尾部」
  *    的锚点。lang 字节恒紧跟在 dist_sig_count 之后（两处写端都是这个次序）。
@@ -394,7 +399,8 @@ static void t4_legacy_v9_still_loads(const char* path, const char* v9_path, cons
         offs[i] = p;
         CHECK(count_sent(b, n, SENT_BASE + i) == 1, "哨兵 0x%08X 重复，抽字节会错位", (unsigned)(SENT_BASE + i));
     }
-    /* 按升序拷贝、在每个 offs[k]+4 处删掉 1 字节（= 去掉 [v10] 段，还原 v9 布局） */
+    /* 按升序拷贝、在每个 offs[k]+4 处删掉 TAIL_SEG 字节
+     * （[v10] lang 1 字节 + [v11] heat 4 字节 ⇒ 共 5 字节，还原 v9 布局） */
     out = (uint8_t*)malloc(n + 1u);
     CHECK(out != NULL, "malloc 失败");
     prev = 0;
@@ -403,7 +409,7 @@ static void t4_legacy_v9_still_loads(const char* path, const char* v9_path, cons
         CHECK(cut >= (size_t)prev && cut <= n, "抽字节偏移越界（cut=%zu, n=%zu）", cut, n);
         memcpy(out + w, b + (size_t)prev, cut - (size_t)prev);
         w += cut - (size_t)prev;
-        prev = (long)cut + 1;
+        prev = (long)cut + TAIL_SEG;
     }
     CHECK((size_t)prev <= n, "尾部拷贝越界");
     memcpy(out + w, b + (size_t)prev, n - (size_t)prev);
@@ -411,8 +417,8 @@ static void t4_legacy_v9_still_loads(const char* path, const char* v9_path, cons
     out_n = w;
     free(b);
 
-    CHECK(out_n + (size_t)NFIX == n, "抽字节后大小 %zu，期望 %zu（原 %zu - %d）",
-          out_n, n - (size_t)NFIX, n, NFIX);
+    CHECK(out_n + (size_t)NFIX * TAIL_SEG == n, "抽字节后大小 %zu，期望 %zu（原 %zu - %d）",
+          out_n, n - (size_t)NFIX * TAIL_SEG, n, NFIX * TAIL_SEG);
     { int v = 9; memcpy(out, &v, sizeof(int)); }   /* 首字段改回 9 */
 
     CHECK(write_all(v9_path, out, out_n) == 0, "写 %s 失败", v9_path);
