@@ -6183,6 +6183,11 @@ buffer_exhausted:
     free(buf);
     xlink_idmap_free(xlink_f2m, xlink_f2m_cap);
     LOG_ERROR("[状态持久化] 错误: 从 %s 读取失败（数据不完整）", file_path);
+    /* [BG-02 ②] 失败出口同样按边证据建基准 —— 否则已解析部分的节点 confidence
+     * 停在新建默认 0.5，而感知区三维度缺口判据（perception.c 的 _gap_*_queries）
+     * 要求 conf < 0.25 / 0.4 / 0.1 ⇒ 三者全不满足 ⇒ 缺口驱动结构性空转。
+     * 与正常出口上方同款调用（batch_self_verify 幂等，只按边证据重算）。 */
+    batch_self_verify(master);
     return -1;
 }
 
