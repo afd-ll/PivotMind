@@ -548,8 +548,14 @@ static int _ar_register_word_node(ArticleReader* ar, SubTopology* topo,
             if (ch=='a'||ch=='e'||ch=='i'||ch=='o'||ch=='u'||
                 ch=='A'||ch=='E'||ch=='I'||ch=='O'||ch=='U') has_vowel = 1;
         }
-        if (wl < 2 || has_underscore || has_digit ||
-            (!has_vowel && wl < 6) || (!has_lower && wl >= 4)) return 0;
+        /* [BG-10 拍板「按校正方案」] 收紧 ASCII 词过滤。
+         * 原判据对「2~3 字母」结构性无效：BJE/RTO/IG/GPI 这类全大写含元音的碎片
+         * 两个条件都不触发（!has_vowel 因含元音为假；wl<4 使 !has_lower 分支也不成立）
+         * ⇒ 实测每次跑混进 18~23 个碎片节点。
+         * 新口径：长度 ≥3 + 含元音 + 含小写（= 看起来才像真英文词）。
+         * 代价（有意取舍）：AI/OK/US/NASA 这类全大写短词一并被拒。 */
+        if (wl < 3 || has_underscore || has_digit ||
+            !has_vowel || !has_lower) return 0;
     }
 
     // insert_node_dynamic：具备自动扩容 + 全局统计
