@@ -4082,7 +4082,7 @@ int master_count_total_nodes(MasterTopology* master) {
     return total;
 }
 
-#define STATE_FORMAT_VERSION 10
+#define STATE_FORMAT_VERSION 11
 /* v0.5.20: 6 = 在每节点记录尾部追加 dist_sig[26]+dist_sig_count（虚词分类器
  * 位置画像，跨重启累积）。加载端向前兼容 v2..v5（旧文件无 dist_sig 段 → 归零）。
  * v0.5.21: 7 = 加载端迁移清洗——fmt_ver==6 状态加载时归零 dist_sig[0..21]
@@ -4129,6 +4129,19 @@ int master_count_total_nodes(MasterTopology* master) {
  *         收尾 WARN 报 lang 一致性——即落盘值只是凭证，权威只有一个。
  * ⚠️ 一旦用 10 存盘，回退到只认 ≤9 的旧二进制会被闸门**显式拒绝**（不是静默误读），
  *    故线上换版前必须备份 v9 状态文件；回退不可逆（见 changelogs/080）。
+ * v0.6.5: 11 = 每节点记录尾部追加 4 字节 float heat（节点热度，会话内冷却信号）。
+ * 背景（BG-01 拍板 A）：heat 此前不落盘 —— 运行期只在走边路径单向衰减
+ * （stepped x decay / winner x 0.995 / selected x decay，floor 0.05），存盘时被整体丢弃
+ * => 每次 master_load_state 后所有节点回到创建默认 1.0，冷却信号不跨会话。
+ * 布局：节点记录尾部 = dist_sig[26] + dist_sig_count(int) + lang(uint8) + heat(float)
+ *   —— 两处写端（流式批 master_serialize_batch + 锁内回退路径）同布局加写。
+ *   读端：fmt_ver>=11 读该 float 并夹取到 [0.05, 1.0]（与运行期 floor 一致；
+ *         NaN/越界视为脏数据 -> 回落 1.0）；Pass 2 同步 SKIP 该段。
+ *         fmt_ver<=10（v2..v10）无此段 -> 保持 huarong_net_add_node 的默认 1.0（零迁移）。
+ * 行为影响（如实登记）：加载后不再「全员满热」。长期不活跃节点的 heat 会停在 floor 0.05
+ *   并被带进下一次会话 => 打分 score *= (0.05 + 0.95*heat) = x0.0975，即跨会话抑制。
+ * 回退：一旦用 11 存盘，回退到只认 <=10 的旧二进制会被闸门显式拒绝 => 换版前备份状态文件。
+ * 与 VF-02 的区别：confidence 是派生量、压根没接线；heat 是真实运行变量的跨会话化。
  * 迁移回退开关：PIVOTMIND_SKIP_DIST_SIG_MIGRATE=1 → 加载 v6 时跳过 dist_sig 归零；
  * PIVOTMIND_SKIP_EDGE_WEIGHT_RESET=1 → 加载 v6 时跳过边权归零（对比实验/回退用）。 */
 
@@ -4218,6 +4231,7 @@ typedef struct SaveNodeSnap {
     float dist_sig[26];
     int   dist_sig_count;
     uint8_t lang;               /* v0.5.36: 语种标签（SSOT 物化缓存），写 1 字节 */
+    float heat;                 /* [v11] 节点热度（会话内冷却信号），跨会话持久化 */
 } SaveNodeSnap;
 
 /* 候选A / SaveTopoSnap & SaveSnapshot 全量快照结构已废弃（见 4.3 流式批化），
@@ -4445,6 +4459,7 @@ if (sc > 3000) sc = 3000;
             memcpy(ns->dist_sig, node->dist_sig, sizeof(node->dist_sig));
             ns->dist_sig_count = node->dist_sig_count;
             ns->lang = node->lang;   /* v0.5.36: 语种标签随快照深拷贝 */
+            ns->heat = node->heat;   /* [v11] 热度随快照深拷贝（跨会话冷却） */
         }
     }
 
@@ -4514,6 +4529,7 @@ static int master_serialize_batch(FILE* fp, MasterTopology* master,
         fwrite(ns->dist_sig, sizeof(float), 26, fp);
         fwrite(&ns->dist_sig_count, sizeof(int), 1, fp);
         fwrite(&ns->lang, sizeof(uint8_t), 1, fp);   /* [v10] 语种标签（1 字节） */
+        fwrite(&ns->heat, sizeof(float), 1, fp);     /* [v11] 热度（4 字节） */
     }
     return 0;
 }
@@ -4832,6 +4848,8 @@ static int master_save_state_locked(MasterTopology* master, const char* file_pat
                                                         : PM_LANG_UNKNOWN);
                 fwrite(&langb, sizeof(uint8_t), 1, fp);
             }
+            /* [v11] 热度：会话内冷却信号跨会话持久化（与流式批写端同布局） */
+            fwrite(&node->heat, sizeof(float), 1, fp);
             
             saved_nodes++;
         }
@@ -5589,6 +5607,17 @@ int master_load_state(MasterTopology* master, const char* file_path) {
             node->lang = (uint8_t)pm_lang_of(node->concept);
         }
 
+        /* [v11] heat 段（每节点记录尾部，4 字节 float）
+         *   fmt_ver>=11 -> 读该值并夹取到 [0.05, 1.0]（与运行期 floor 一致）；
+         *                  NaN/越界视为脏数据 -> 回落新建默认 1.0
+         *   fmt_ver<=10 -> v2..v10 无此段，保持 huarong_net_add_node 默认 1.0（零迁移） */
+        if (fmt_ver >= 11) {
+            float heat_v = 1.0f;
+            READ(&heat_v, sizeof(float));
+            if (!(heat_v >= 0.05f && heat_v <= 1.0f)) heat_v = 1.0f;
+            if (node) node->heat = heat_v;
+        }
+
         loaded_nodes++;
 
         /* 每 5000 个节点报告进度 */
@@ -5727,6 +5756,10 @@ int master_load_state(MasterTopology* master, const char* file_path) {
             // [v10] 跳过 lang 段（Pass 2 只恢复边，lang 已在 Pass 1 应用/现算）
             if (fmt_ver >= 10) {
                 SKIP((int)sizeof(uint8_t));
+            }
+            // [v11] 跳过 heat 段（Pass 2 只恢复边，heat 已在 Pass 1 应用）
+            if (fmt_ver >= 11) {
+                SKIP((int)sizeof(float));
             }
         }
 
