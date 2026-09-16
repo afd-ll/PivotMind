@@ -357,7 +357,11 @@ char* generate_from_associations(AssociativeEngine* engine, int max_len,
                 (input_text && strlen(avoid_chars) > 0) ? avoid_chars : NULL,
                 topo_act,
                 NULL,  // query_anchor
-                NULL); // cc_ptr
+                /* [AR-07 第一步·传递端] 接上 master 的 cc 字段。
+                 * ⚠️ 当前 `master->cognitive_controller` 全局无人注入（恒 NULL，见 AR-12）
+                 * ⇒ 本改动**行为中性**（NULL → NULL），只是把路铺好；
+                 * 真正生效要等「注入端」那一步（AR-12）。 */
+                (engine->topology ? engine->topology->cognitive_controller : NULL)); // cc_ptr
 
             if (path_len <= 1) continue;
 
@@ -398,7 +402,11 @@ char* generate_from_associations(AssociativeEngine* engine, int max_len,
                     ? topo_act[start_topo_id] : 1.0f,
                 engine->topology,
                 NULL,  // query_anchor
-                NULL); // cc_ptr
+                /* [AR-07 第一步·传递端] 接上 master 的 cc 字段。
+                 * ⚠️ 当前 `master->cognitive_controller` 全局无人注入（恒 NULL，见 AR-12）
+                 * ⇒ 本改动**行为中性**（NULL → NULL），只是把路铺好；
+                 * 真正生效要等「注入端」那一步（AR-12）。 */
+                (engine->topology ? engine->topology->cognitive_controller : NULL)); // cc_ptr
             if (path_len <= 1) continue;
             for (int p = 1; p < path_len && pos < max_len - 10; p++) {
                 int nid = path_nodes[p];
