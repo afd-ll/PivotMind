@@ -475,8 +475,22 @@ static inline void atomic_float_add(float* ptr, float val) {
 
 // ==================== 建边并涨置信度 ====================
 
+/* [BG-06 探针] 显式关掉 Hebb 建边/加权（默认开；仅 A/B 对比用，不改默认行为）。
+ * 落点选这里：本文件的 boost 调用（9 处，:778~:964）全部汇聚于此
+ * ⇒ 单点即可覆盖 Hebb 的全部产出路径。
+ * 用法：PIVOTMIND_DISABLE_AUTONOMIC=1 <binary> <port> <dir> */
+static int g_autonomic_boost_disabled = -1;
+static int autonomic_boost_disabled(void) {
+    if (g_autonomic_boost_disabled < 0) {
+        const char* e = getenv("PIVOTMIND_DISABLE_AUTONOMIC");
+        g_autonomic_boost_disabled = (e && strcmp(e, "1") == 0) ? 1 : 0;
+    }
+    return g_autonomic_boost_disabled;
+}
+
 static void boost_connection_weighted(SubTopology* topo, ReasoningNode* a, ReasoningNode* b,
                                       AutonomicState* state, float weight_mult) {
+    if (autonomic_boost_disabled()) return;   /* [BG-06 探针] 关 = 不建边不涨权 */
     if (!a || !b || a == b) return;
 
     HuarongTopologyNet* net = (topo && topo->net) ? topo->net : NULL;
