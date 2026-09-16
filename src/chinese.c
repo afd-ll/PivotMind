@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>   /* [BG-13] is_punctuation 的 ASCII 分支改用 ispunct() */
 #ifdef _WIN32
 #include <windows.h>
 #endif
@@ -89,13 +90,15 @@ int is_punctuation(const char* str) {
     CharType type = get_char_type(str);
 
     if (type == CH_UTF8_1BYTE) {
-        // ASCII标点
+        /* ASCII 标点 —— [BG-13] 原实现是一串硬编码白名单，漏了 `_` 以及
+         * `- + = / \ | ~ % $ # @ ^ & * ` 一整批符号 ⇒ is_punctuation("_")==0
+         * ⇒ 抽字不跳（article_reader.c:452）、建词不拦（:529）
+         * ⇒ 回复里的 `_X_` 骨架被当词建进 vocab（线上实证 `_尊師_` / `_謝_置信度%`）。
+         * 现用 <ctype.h> 的 ispunct() 覆盖**全部** ASCII 标点；
+         * 空白单独判（ispunct 不含空白，与原实现一致）。 */
         char c = *str;
         if (c == ' ' || c == '\t' || c == '\n' || c == '\r') return 1;
-        if (c == ',' || c == '.' || c == '?' || c == '!') return 1;
-        if (c == ';' || c == ':' || c == '\'' || c == '"') return 1;
-        if (c == '(' || c == ')' || c == '[' || c == ']') return 1;
-        if (c == '{' || c == '}' || c == '<' || c == '>') return 1;
+        if (ispunct((unsigned char)c)) return 1;
     } else if (type == CH_UTF8_3BYTE) {
         // 中文标点
         unsigned char c1 = (unsigned char)str[0];
