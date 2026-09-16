@@ -20,6 +20,7 @@
 #include "lang.h"
 #include "thalamus.h"
 #include "emergent_pos.h"
+#include "diffusion.h"
 #include "error.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -366,6 +367,25 @@ static int _ar_expand_word_hash(ArticleReader* ar) {
 /** 查找或添加词到词表（哈希加速 O(1)），哈希满时自动扩容 */
 static WordEntry* _ar_find_or_add_word(ArticleReader* ar, const char* text) {
     if (!ar->word_hash) return NULL;
+
+    /* BG-09/A38 修复：含虚词的组合词不入词表。
+     * 本文件原先完全没有虚词过滤（_ar_extract_chars 只跳空白/数字/ASCII 标点），
+     * 而 perception_feed_learn_text 在每次 /chat 后都会走这条 PMI 词发现路径
+     * => 含虚词的组合词（好的/我们/这是/法真的好的…）被建成 vocab 节点。
+     * 口径与批2 一致：虚词仍进字符统计（PMI 基数不变），只是不产出组合词。 */
+    {
+        const char* _cp = text;
+        while (*_cp) {
+            int _b = get_char_bytes(_cp);
+            if (_b <= 0) _b = 1;
+            if (_b > 1) {
+                char _cbuf[8] = {0};
+                memcpy(_cbuf, _cp, (size_t)(_b < 7 ? _b : 7));
+                if (diffusion_is_stop_word(_cbuf)) return NULL;
+            }
+            _cp += _b;
+        }
+    }
     unsigned int mask = ar->word_hash_mask;
     unsigned int h = _ar_hash(text) & mask;
     for (int i = 0; i < (int)(mask + 1); i++) {

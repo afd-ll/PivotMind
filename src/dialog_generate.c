@@ -695,6 +695,9 @@ void auto_learn_concepts(MasterTopology* master, const char* text, void* str_poo
 
     /* 提取中文单字（跳过标点/停用词），获取或创建节点ID */
     int cjk_pos[128], cjk_ids[128], cjk_count = 0;
+    /* v0.6.3/B2 阶段2：虚词标记 —— 1=虚词（建边参与、不参与组合词晋升） */
+    unsigned char is_func[128];
+    memset(is_func, 0, sizeof(is_func));
     /* v0.5.20: 虚词分类器阶段0——对话路径前置位置累积。
      * 在 is_stop_word 过滤之前累积位置画像（标签无关），
      * 虚词（我/你/他/是/在）的位置信号在对话里同样要累积——
@@ -712,10 +715,14 @@ void auto_learn_concepts(MasterTopology* master, const char* text, void* str_poo
             pthread_rwlock_unlock(&vocab->net->mutex);
             funcword_record_position(wn, (i == 0), (i == token_count - 1));
         }
-        if (contains_punctuation(tokens[i]) || is_stop_word(tokens[i])) continue;
+        /* v0.6.3/B2 阶段2：标点照旧整体跳过；**虚词不再跳过** —— 改打 is_func 标记，
+         * 让虚词进 cjk_ids 参与滑动窗口建边（=连接资本）。 */
+        if (contains_punctuation(tokens[i])) continue;
+        int is_fw = is_stop_word(tokens[i]) ? 1 : 0;
         nid = get_or_create_concept(vocab, tokens[i]);
         if (nid >= 0) {
             cjk_pos[cjk_count] = i;
+            is_func[cjk_count] = (unsigned char)is_fw;
             cjk_ids[cjk_count] = nid;
             cjk_count++;
         }
@@ -727,7 +734,10 @@ void auto_learn_concepts(MasterTopology* master, const char* text, void* str_poo
     for (int i = 0; i < cjk_count; i++) node_ids[node_count++] = cjk_ids[i];
 
     /* ---- 条件概率驱动的组合节点创建 ---- */
+    /* v0.6.3/B2 阶段2：含虚词的相邻对不 record cp_tracker（连 g_single_count 都不累加）
+     * ⇒ 虚词不参与组合词晋升，避免「的了/是我」类污染，也避免稀释条件概率分母。 */
     for (int i = 0; i < cjk_count - 1; i++) {
+        if (is_func[i] || is_func[i + 1]) continue;
         int id_a = cjk_ids[i], id_b = cjk_ids[i + 1];
         cp_tracker_record(id_a, id_b);
         if (!cp_tracker_should_create(id_a, id_b)) continue;
