@@ -12,6 +12,98 @@
 
 // ==================== 请求处理 ====================
 
+/* ============================================================================
+ * [BG-19] 喂料前剥离生成端「格式骨架」
+ *
+ * 病灶：/chat 会把 **AI 回复整段** 喂进学习路径（本文件 `learn_queue_push(response,…)`
+ * 与同步回退分支的 `_learn_tokens(vocab, response,…)`），而回复里混着生成端的
+ * 排版构件（字面量见 `src/prefrontal_executive.c:1108/1117/1137`）：
+ *   · "为了回答这个问题，我分步进行了思考："
+ *   · "N. <子问题> → <答案> (置信度: NN%)"
+ *   · "综合以上分析："  · "（推理模式: …）"
+ * ⇒ 这些构件被 PMI 词发现当词建进 vocab（线上实测：**1075 / 4606 节点含下划线**）。
+ *
+ * 处置：喂料前剥骨架、**保留语义文字**（子问题与答案都留）。
+ * ⚠️ 只作用于「喂给学习的那份副本」，**不影响返回给用户的回复本身**。
+ * 返回新分配的缓冲区，调用方负责 free；分配失败返回 NULL（调用方回退用原文）。
+ * ============================================================================ */
+static char* bg19_strip_scaffold(const char* src) {
+    if (!src) return NULL;
+    size_t n = strlen(src);
+    char* out = (char*)malloc(n + 1);
+    if (!out) return NULL;
+
+    /* ① 整段丢弃的固定构件 */
+    static const char* LEAD[] = {
+        "为了回答这个问题，我分步进行了思考：",
+        "综合以上分析：",
+    };
+    /* ② 变长构件前缀 → 一直吃到闭括号 */
+    static const char* TAIL_OPEN[] = { "（推理模式", "(推理模式" };
+
+    size_t w = 0;
+    const char* p = src;
+
+    while (*p) {
+        int handled = 0;
+        unsigned int cp = 0;
+        int b = 0;
+
+        for (size_t i = 0; i < sizeof(LEAD) / sizeof(LEAD[0]); i++) {
+            size_t L = strlen(LEAD[i]);
+            if (strncmp(p, LEAD[i], L) == 0) { p += L; handled = 1; break; }
+        }
+        if (handled) continue;
+
+        for (size_t i = 0; i < sizeof(TAIL_OPEN) / sizeof(TAIL_OPEN[0]); i++) {
+            size_t L = strlen(TAIL_OPEN[i]);
+            if (strncmp(p, TAIL_OPEN[i], L) == 0) {
+                p += L;
+                while (*p && *p != ')' && *p != '\n') {
+                    b = pm_utf8_decode(p, &cp);
+                    if (b <= 0) b = 1;
+                    p += b;
+                }
+                if (*p == ')') p++;
+                handled = 1;
+                break;
+            }
+        }
+        if (handled) continue;
+
+        /* ③ 箭头 "→"（U+2192，3 字节） */
+        if ((unsigned char)p[0] == 0xE2 && (unsigned char)p[1] == 0x86 &&
+            (unsigned char)p[2] == 0x92) {
+            p += 3;
+            continue;
+        }
+
+        /* ④ "(置信度: NN%)" / "（置信度: NN%）" 整段（含半/全角括号） */
+        if (strncmp(p, "置信度", 9) == 0) {
+            /* 向前吃掉已写入的开括号 */
+            if (w >= 1 && out[w - 1] == '(') {
+                w -= 1;
+            } else if (w >= 3 && (unsigned char)out[w - 3] == 0xEF &&
+                       (unsigned char)out[w - 2] == 0xBC &&
+                       (unsigned char)out[w - 1] == 0x88) {   /* "（" = EF BC 88 */
+                w -= 3;
+            }
+            if (p[9] == ':') p += 10; else p += 9;
+            while (*p && *p != ')' && *p != '\n') {
+                b = pm_utf8_decode(p, &cp);
+                if (b <= 0) b = 1;
+                p += b;
+            }
+            if (*p == ')') p++;
+            continue;
+        }
+
+        out[w++] = *p++;
+    }
+    out[w] = '\0';
+    return out;
+}
+
 // POST /chat - 对话
 void handle_chat(GatewaySystem* gw, int fd, const char* body) {
     char msg[2048] = {0};
@@ -174,16 +266,22 @@ void handle_chat(GatewaySystem* gw, int fd, const char* body) {
                     { vocab = gw->topology->sub_topologies[t]; break; }
             }
             if (vocab && vocab->net && response) {
+                /* [BG-19] 喂料前剥骨架：只把语义文字喂进学习路径，避免生成端
+                 * 排版构件（引导句 / 箭头 / (置信度: NN%)）被当词建进 vocab。
+                 * ⚠️ 只改「喂给学习的副本」，回复本身不受影响。 */
+                char* feed = bg19_strip_scaffold(response);
+                const char* feed_text = feed ? feed : response;
 #if LEARN_ASYNC_CHAT
-                learn_queue_push(response, "", 0);   /* fire-and-forget，忽略返回值 */
+                learn_queue_push(feed_text, "", 0);   /* fire-and-forget，忽略返回值 */
 #else
                 EmergentPOS* ep = (gw->prefrontal && gw->prefrontal->controller)
                                   ? gw->prefrontal->controller->emergent_pos : NULL;
                 int prev_id = -1;
-                int learned = _learn_tokens(vocab, response, &prev_id, ep);
+                int learned = _learn_tokens(vocab, feed_text, &prev_id, ep);
                 if (learned > 0)
                     printf("[gateway] 回复中学习: +%d 个新词\n", learned);
 #endif
+                free(feed);
             }
         }
 
