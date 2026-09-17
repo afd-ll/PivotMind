@@ -525,7 +525,17 @@ int concept_is_printable(const char* concept) {
  *    出口侧必须比入口侧更保守。 */
 static int bg20_is_polluted(const char* s) {
     if (!s || !s[0]) return 0;
-    if (strchr(s, '_')) return 1;
+    /* ① 含 `_` **且含非 ASCII** —— 中文词里出现下划线必为污染
+     *    （实测线上 398 例全是「中文 + `_`(可带 s)」形态：`不幾日_s` / `披掛_` …）。
+     * ⚠️ **纯 ASCII 的 `a_b` / `semantic_growth_3` 必须放行** —— 这是
+     *    tests/unit/test_concept_output.c 锁死的契约（用例 2「'_' 合法且非行首 sem_」），
+     *    **不得为此放宽单测**。故此处加"非 ASCII"前置条件收窄判据。 */
+    if (strchr(s, '_')) {
+        int has_nonascii = 0;
+        for (const unsigned char* p = (const unsigned char*)s; *p; p++)
+            if (*p & 0x80) { has_nonascii = 1; break; }
+        if (has_nonascii) return 1;
+    }
     if (strstr(s, "\xe2\x86\x92")) return 1;                          /* U+2192 → */
     if (strstr(s, "\xe7\xbd\xae\xe4\xbf\xa1\xe5\xba\xa6")) return 1; /* 置信度 */
     for (const unsigned char* p = (const unsigned char*)s; p[0] && p[1] && p[2]; p++) {
