@@ -7,6 +7,7 @@
 #include "huarong_topology.h"
 #include "cognitive_params.h"
 #include "common.h"
+#include "error.h"   /* LOG_INFO */
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
@@ -121,7 +122,17 @@ int semantic_grow_from_topology(MasterTopology* master, int topo_type) {
         }
     }
 
+    /* [BG-24] 阈值：默认用实测 p99 = SG_COSINE_THRESHOLD；
+     * 环境变量 PIVOTMIND_SG_THRESHOLD_LEGACY=1 ⇒ 用回旧值 0.02（对比实验/紧急回退）。 */
+    float thr = SG_COSINE_THRESHOLD;
+    const char* thr_env = getenv("PIVOTMIND_SG_THRESHOLD_LEGACY");
+    int thr_legacy = (thr_env && thr_env[0] == '1');
+    if (thr_legacy) thr = SG_COSINE_THRESHOLD_LEGACY;
+
     int created = 0;
+    int nsizes = 0;
+    int sizes[SG_MAX_NEW_NODES];
+    int skipped_have_sem = 0;      /* 因「已归属语义场」被跳过的采样节点数 */
     for (int i = 0; i < actual && created < SG_MAX_NEW_NODES; i++) {
         if (assigned[i]) continue;
 
@@ -130,7 +141,7 @@ int semantic_grow_from_topology(MasterTopology* master, int topo_type) {
         if (!seed->features) lazy_alloc_node_features(seed);
         if (!seed->features) continue;
         /* 已有语义场的 seed 跳过（重复建簇修复） */
-        if (has_sem_link && has_sem_link[sample_ids[i]]) continue;
+        if (has_sem_link && has_sem_link[sample_ids[i]]) { skipped_have_sem++; continue; }
         float* sf = seed->features;
         float na = norms[i];
 
@@ -155,7 +166,7 @@ int semantic_grow_from_topology(MasterTopology* master, int topo_type) {
                 dot += sf[d] * cf[d];
             float sim = dot / (sqrtf(na) * sqrtf(nb));
 
-            if (sim >= SG_COSINE_THRESHOLD)
+            if (sim >= thr)
                 members[mcnt++] = sample_ids[j];
         }
 
@@ -198,8 +209,23 @@ int semantic_grow_from_topology(MasterTopology* master, int topo_type) {
         for (int m = 0; m < mcnt; m++)
             master_add_cross_link(master, vocab->topo_id, members[m],
                                   sem->topo_id, sn->node_id, 0.65f, "semantic_cluster");
+        if (nsizes < SG_MAX_NEW_NODES) sizes[nsizes++] = mcnt;
         created++;
         free(members);
+    }
+
+    /* [BG-24] 聚类日志 —— 没有这一行就无法判断「阈值改得对不对」
+     * （本次就是因为没有它，只能靠解析 sem_<x>_<N> 的名字反推簇大小）。 */
+    {
+        char sz[200];
+        int pos = 0;
+        sz[0] = '\0';
+        for (int k = 0; k < nsizes && pos < 170; k++)
+            pos += snprintf(sz + pos, sizeof(sz) - (size_t)pos, "%s%d", k ? "," : "", sizes[k]);
+        LOG_INFO("[语义生长] %s 阈值=%.4f%s 采样=%d 有效=%d 已归簇跳过=%d 建簇=%d 各簇大小=[%s]",
+                 (topo_type >= 0 && topo_type < 12) ? TOPOLOGY_TYPE_NAMES[topo_type] : "?",
+                 (double)thr, thr_legacy ? "(legacy)" : "",
+                 sample_n, actual, skipped_have_sem, created, sz);
     }
 
     free(sample_ids);
