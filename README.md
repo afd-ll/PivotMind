@@ -8,7 +8,7 @@
 
 [English](README.md) · [简体中文](README.zh-CN.md)
 
-[![Version](https://img.shields.io/badge/version-v0.6.7-blue.svg)](changelogs/)
+[![Version](https://img.shields.io/badge/version-v0.6.8-blue.svg)](changelogs/)
 [![CI](https://github.com/afd-ll/PivotMind/actions/workflows/ci.yml/badge.svg)](https://github.com/afd-ll/PivotMind/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green.svg)](LICENSE)
 [![Language](https://img.shields.io/badge/C-99%2B-orange.svg)](https://en.wikipedia.org/wiki/C99)
@@ -24,7 +24,7 @@ PivotMind is a cognitive engine written in C. It does not use transformer infere
 
 The project is designed around continuous online learning on modest hardware. Corpus input is the primary learning signal; the generated output is not treated as an independent source of truth.
 
-**Current version: v0.6.7.** This is a research project in the toy stage, not a replacement for a large language model or a production conversational system.
+**Current version: v0.6.8.** This is a research project in the toy stage, not a replacement for a large language model or a production conversational system.
 
 ## Architecture
 
@@ -102,7 +102,7 @@ Measured on the EAIDK-610 board on 2026-08-17. These values are a snapshot of on
 
 | Metric | Value |
 |---|---|
-| Version | `0.6.7` |
+| Version | `0.6.8` |
 | Runtime status | `running`; `/health` returned `ok` |
 | Nodes | `17,105` |
 | Topologies | `12` |
