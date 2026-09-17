@@ -55,15 +55,27 @@ typedef struct {
 int feature_learn_graph_smooth(HuarongTopologyNet* net, int iterations) {
     if (!net || net->node_count <= 0 || iterations <= 0) return -1;
 
+    /* ── [BG-21 治本 A] 全局写锁只用于「补齐 features + 快照节点指针」这一小段 ──
+     * 原实现把 wrlock 持到函数结束 ⇒ 与主学习线程 add_node（同一把写锁）长时间互斥
+     * ⇒ 并行退化为串行（实测 20 核只用 ~1 核、单线程 CPU 仅 37~44%）。
+     * 能提前解锁的依据：
+     *  ① 被搬移的只是 snap[] 指针数组；**节点对象既不搬移也不 free**
+     *     （retire 机制只延迟释放旧数组）⇒ 快照里的 ReasoningNode* 始终有效；
+     *  ② 迭代段只读 edges（已有 node_locks 分片锁）+ 写线程本地缓冲；
+     *  ③ 归一化写回 features 改按节点持 node_locks[i & mask]（与写侧同口径）。 */
     pthread_rwlock_wrlock(&net->mutex);
 
     int total_nodes = net->node_count;
     int dim = NODE_FEATURE_DIM;
 
+    ReasoningNode** snap = (ReasoningNode**)malloc((size_t)total_nodes * sizeof(ReasoningNode*));
+    if (!snap) { pthread_rwlock_unlock(&net->mutex); return -1; }
+
     /* 自动分配缺失的特征向量（首次运行时的延迟初始化） */
     int auto_allocated = 0;
     for (int i = 0; i < total_nodes; i++) {
-        ReasoningNode* node = net->nodes[i];
+        ReasoningNode* node = net->nodes[i];   /* [BG-21] 读源仍是原数组 */
+        snap[i] = node;                        /* 存进快照 */
         if (!node) continue;
         if (!node->features) {
             node->features = (float*)calloc(dim, sizeof(float));
@@ -74,6 +86,8 @@ int feature_learn_graph_smooth(HuarongTopologyNet* net, int iterations) {
             }
         }
     }
+    pthread_rwlock_unlock(&net->mutex);   /* [BG-21] 立刻放锁：后续全在快照上跑 */
+
     if (auto_allocated > 0) {
         printf("[特征学习] 自动初始化 %d 个节点特征向量\n", auto_allocated);
     }
@@ -104,7 +118,7 @@ int feature_learn_graph_smooth(HuarongTopologyNet* net, int iterations) {
     if (!merged_feats || !merged_ws) {
         free(merged_feats); free(merged_ws);
         free(thread_feats); free(thread_ws);
-        pthread_rwlock_unlock(&net->mutex); return -1;
+        free(snap); return -1;   /* [BG-21] */
     }
 
     /* 分配线程局部缓冲区（并行区外分配，一次） */
@@ -133,7 +147,7 @@ int feature_learn_graph_smooth(HuarongTopologyNet* net, int iterations) {
         if (nthreads <= 1) {
             /* 单线程快速路径 */
             for (int i = 0; i < total_nodes; i++) {
-                ReasoningNode* node = net->nodes[i];
+                ReasoningNode* node = snap[i];
                 if (!node || !node->features || node->edge_count <= 0) continue;
                 float* src_feat = node->features;
                 /* R3-2: node->edges[].weight/.confidence 的写方（boost_connection_weighted、
@@ -176,7 +190,7 @@ int feature_learn_graph_smooth(HuarongTopologyNet* net, int iterations) {
             #pragma omp parallel for schedule(dynamic, 50)
             for (int i = 0; i < total_nodes; i++) {
                 int tid = omp_get_thread_num();
-                ReasoningNode* node = net->nodes[i];
+                ReasoningNode* node = snap[i];
                 if (!node || !node->features || node->edge_count <= 0) continue;
                 float* src_feat = node->features;
                 float* loc_f = thread_feats[tid];
@@ -236,9 +250,13 @@ int feature_learn_graph_smooth(HuarongTopologyNet* net, int iterations) {
                 float local_max = 0.0f;
                 #pragma omp for schedule(static)
                 for (int i = 0; i < total_nodes; i++) {
-                    if (merged_ws[i] > 0.001f && net->nodes[i] && net->nodes[i]->features) {
+                    if (merged_ws[i] > 0.001f && snap[i] && snap[i]->features) {
+                        /* [BG-21 治本 A] 已无全局写锁保护 ⇒ 写 features 前按节点持分片锁
+                         * （与 autonomic_learner.c 写侧同口径；只持 1 把 → 不参与锁序）。 */
+                        int nl_w = (snap[i]->node_id) & (PM_NODE_LOCK_COUNT - 1);
+                        pthread_mutex_lock(&net->node_locks[nl_w]);
                         float inv = 1.0f / merged_ws[i];
-                        float* dst = net->nodes[i]->features;
+                        float* dst = snap[i]->features;
                         float* src = merged_feats + i * dim;
                         /* 每 8 个节点检测一次位移（采样 12.5% 节省开销） */
                         if ((i & 7) == 0) {
@@ -247,6 +265,7 @@ int feature_learn_graph_smooth(HuarongTopologyNet* net, int iterations) {
                         }
                         for (int d = 0; d < dim; d++)
                             dst[d] = src[d] * inv;
+                        pthread_mutex_unlock(&net->node_locks[nl_w]);   /* [BG-21] */
                     }
                 }
                 if (tid < 64) delta_buf[tid] = local_max;
@@ -271,7 +290,7 @@ int feature_learn_graph_smooth(HuarongTopologyNet* net, int iterations) {
                 for (int t = 0; t < nthreads; t++) { free(thread_feats[t]); free(thread_ws[t]); }
                 free(thread_feats); free(thread_ws);
             }
-            pthread_rwlock_unlock(&net->mutex); return -1;
+            free(snap); return -1;   /* [BG-21] */
         }
     }
 
@@ -282,7 +301,7 @@ int feature_learn_graph_smooth(HuarongTopologyNet* net, int iterations) {
         free(thread_feats); free(thread_ws);
     }
 
-    pthread_rwlock_unlock(&net->mutex);
+    free(snap)   /* [BG-21] 释放快照 */;
     printf("[特征学习] 图平滑完成 (%d 节点, %d 轮)\n", total_nodes, iter + 1);
     return 0;
 }
