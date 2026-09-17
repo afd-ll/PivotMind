@@ -1,5 +1,32 @@
 # Changelog
 
+## v0.6.6 — 2026-09-17
+
+> 来源：BG-13 / BG-10 两项已拍板修复 + 4 笔基础设施。完整说明见 [changelogs/091-v066-pollution-fixes.md](changelogs/091-v066-pollution-fixes.md)。
+
+### 核心变更（2 处真实行为变化）
+
+- **BG-13 A — `is_punctuation` 的 ASCII 分支改用 `ispunct()`**：原白名单漏了 `_` 等一整批符号，
+  导致 `_` 不被当标点 ⇒ 抽字不跳、建词不拦 ⇒ 回复里的 `_X_` 骨架被建进 vocab
+  （线上实证 `_尊師_` / `_謝_置信度%`）。现覆盖全部 ASCII 标点，空白仍单独判。
+- **BG-10 — ASCII 垃圾词过滤收紧**：原判据对「2~3 字母」结构性无效（每次跑混进 18~23 个碎片）；
+  新口径 = 长度 ≥3 + 含元音 + 含小写，回放五组实测碎片 **18/18 + 23/23 全拦**。
+  代价：`AI` / `OK` / `NASA` 这类全大写短词一并被拒（有意取舍）。
+
+### 行为中性的四笔
+
+- `36ccdff` BG-02②：仅在**加载失败**出口补 `batch_self_verify`（异常路径，线上不触发）；
+- `26d1d83` CI：只改测试文件；
+- `fee69b3` BG-06：新增 `PIVOTMIND_DISABLE_AUTONOMIC` 开关，**默认不设 = 原行为不变**；
+- `e8288ec` AR-07 第一步：`cc_ptr` 由 `NULL` 接到 master 字段，而该字段**恒 NULL** ⇒ 行为中性。
+
+### Verified
+
+- WSL 全量 `make CC=gcc all`：141 gcc 步、0 告警、`check-tools` 19/19、`check-version` PASS。
+- **全量 `make test` 32 通过 / 0 失败**。
+- 沙箱端到端：BG-13 修复后抽查 **0 条带 `_`**；BG-10 修复后 20 条抽查仅剩 **1 个** ASCII 碎片。
+- **状态格式不变（仍 v11）** ⇒ 无需迁状态、回退只需换回旧二进制。
+
 ## v0.6.5 — 2026-09-16
 
 > 来源：工作台 BG-01 拍板 A —— heat 跨会话持久化。完整说明见 [changelogs/090-v065-heat-persist.md](changelogs/090-v065-heat-persist.md)。
