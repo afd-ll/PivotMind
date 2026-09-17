@@ -511,9 +511,33 @@ int concept_is_printable(const char* concept) {
  * 语义拓扑匿名节点（src/semantic_growth.c 产出）命名形如 sem_<x>_<n>，
  * 是内部标识符，绝不能出现在给用户的回复里。
  */
+/* [BG-20] 存量污染「出口闸」—— 入口侧已修（BG-10 收紧 ASCII / BG-13 标点 /
+ * BG-19 剥骨架），但历次累积的脏节点仍在 vocab 里、仍会被走边选中进回复
+ * （实测线上 545 个 / 占全部节点 10.71%）。此处只在**输出端**否决：不删数据、
+ * 不改结构、不动状态格式 ⇒ 影响半径 = 本函数（被 20+ 出口调用，
+ * 含 diffusion.c:978 的走边选词）。
+ * 只加「绝对安全」的三条（正常词句不可能命中）：
+ *   ① 含下划线 `_` —— `_` 在中文词/英文词里都不是词素
+ *      （注：concept_is_printable 原样放行 `_`，这正是污染词的出口）
+ *   ② 含 U+2192 `→` 或生成端骨架词「置信度」
+ *   ③ 含 U+FE50–FE6F 小写变体标点（与 BG-14 同源）
+ * ⚠️ 有意**不**在此套 BG-10 的 ASCII 判据 —— 那会误伤 AI/OK/ID/IN/ON 等真词；
+ *    出口侧必须比入口侧更保守。 */
+static int bg20_is_polluted(const char* s) {
+    if (!s || !s[0]) return 0;
+    if (strchr(s, '_')) return 1;
+    if (strstr(s, "\xe2\x86\x92")) return 1;                          /* U+2192 → */
+    if (strstr(s, "\xe7\xbd\xae\xe4\xbf\xa1\xe5\xba\xa6")) return 1; /* 置信度 */
+    for (const unsigned char* p = (const unsigned char*)s; p[0] && p[1] && p[2]; p++) {
+        if (p[0] == 0xEF && p[1] == 0xB9 && p[2] >= 0x90 && p[2] <= 0xAF) return 1; /* U+FE50-FE6F */
+    }
+    return 0;
+}
+
 int concept_is_outputtable(const char* concept) {
     if (!concept_is_printable(concept)) return 0;
     if (strncmp(concept, "sem_", 4) == 0) return 0;  /* semantic_growth 匿名节点 */
+    if (bg20_is_polluted(concept)) return 0;         /* [BG-20] 存量污染出口闸 */
     return 1;
 }
 

@@ -106,8 +106,17 @@ int is_punctuation(const char* str) {
         unsigned char c3 = (unsigned char)str[2];
         int codepoint = ((c1 & 0x0F) << 12) | ((c2 & 0x3F) << 6) | (c3 & 0x3F);
 
-        // 中文标点范围
+        /* 中文标点范围
+         * [BG-14] 原实现只覆盖 U+3000–303F（CJK 符号）+ U+FF00–FFEF（全角形式），
+         * 漏掉三段同族标点 ⇒ 线上 vocab 出现污染词 `馴﹔`（U+FE54 SMALL SEMICOLON）：
+         *   · U+FE10–FE19  CJK 竖排标点（︐︑︒…）
+         *   · U+FE30–FE4F  CJK 兼容形式（︰﹁﹂﹃﹄…）
+         *   · U+FE50–FE6F  小写变体标点（﹐﹑﹒﹔…）
+         * 三段全是标点形式、不含任何可组词的字符 ⇒ 判为标点零误伤。
+         * 与 BG-20 的出口闸（concept_is_outputtable 判据③）**两端一起收口**：
+         * 此处防「进 vocab」，出口闸防「进回复」。 */
         if (codepoint >= 0x3000 && codepoint <= 0x303F) return 1;
+        if (codepoint >= 0xFE10 && codepoint <= 0xFE6F) return 1;
         if (codepoint >= 0xFF00 && codepoint <= 0xFFEF) return 1;
     }
 
