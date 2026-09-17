@@ -234,14 +234,46 @@ static void do_flush_work(AutonomicState* state, MasterTopology* master, time_t 
                     if (!node) continue;
                     if (!node->features) lazy_alloc_node_features(node);
                     if (!node->features) continue;
+                    /* [BG-21 治本 A 配套] 图平滑拆掉全局写锁后，本循环必须自行加锁 ——
+                     * 否则它与主学习线程（boost_connection_weighted:573，持 node_locks）的
+                     * features 写会从「被掩盖」变成真实 race。
+                     * 口径：与写侧一致用 node_locks 分片锁；hebbian_update **对称写两侧**，
+                     * 故按 node_id 分片**按序**持两把（防 ABBA），同一分片只持一次。 */
                     for (int c = 0; c < node->edge_count; c++) {
                         if (node->edges[c].confidence < 0.6f) continue;
                         ReasoningNode* nb = node->edges[c].target;
                         if (!nb) continue;
-                        if (!nb->features) lazy_alloc_node_features(nb);
-                        if (!nb->features || nb->feature_dim != node->feature_dim) continue;
-                        hebbian_update(node->features, nb->features, node->feature_dim, 0.01f);
-                        attract_count++;
+
+                        HuarongTopologyNet* neth = sub->net;
+                        int ia = (node->node_id) & (PM_NODE_LOCK_COUNT - 1);
+                        int ib = (nb->node_id) & (PM_NODE_LOCK_COUNT - 1);
+                        if (ia == ib) {
+                            pthread_mutex_lock(&neth->node_locks[ia]);
+                        } else if (ia < ib) {
+                            pthread_mutex_lock(&neth->node_locks[ia]);
+                            pthread_mutex_lock(&neth->node_locks[ib]);
+                        } else {
+                            pthread_mutex_lock(&neth->node_locks[ib]);
+                            pthread_mutex_lock(&neth->node_locks[ia]);
+                        }
+
+                        if (!node->features) lazy_alloc_node_features(node);
+                        if (node->features && !nb->features) lazy_alloc_node_features(nb);
+                        if (node->features && nb->features &&
+                            node->feature_dim == nb->feature_dim) {
+                            hebbian_update(node->features, nb->features, node->feature_dim, 0.01f);
+                            attract_count++;
+                        }
+
+                        if (ia == ib) {
+                            pthread_mutex_unlock(&neth->node_locks[ia]);
+                        } else if (ia < ib) {
+                            pthread_mutex_unlock(&neth->node_locks[ib]);
+                            pthread_mutex_unlock(&neth->node_locks[ia]);
+                        } else {
+                            pthread_mutex_unlock(&neth->node_locks[ia]);
+                            pthread_mutex_unlock(&neth->node_locks[ib]);
+                        }
                     }
                 }
             }
