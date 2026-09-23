@@ -523,10 +523,23 @@ void emergent_pos_tag_soft(EmergentPOS* ep, MasterTopology* master,
      * 栈: auto_learn_concepts → huarong_net_add_connection）。 */
     if (node_id >= vocab->net->node_count) return;
 
+    /* BG-29-v3：持 net 读锁取指针 → 把 features 拷到栈上 → 解锁 → 再用。
+     * 原代码一把锁都不持：扩容方（huarong_topology.c:252-282 /
+     * topology_growth.c:483-520）在 net 写锁下 realloc(net->nodes)，
+     * 冻结方（node_cache.c:262-289）在 node_locks 下 free(node->features)，
+     * 两者都会让本处拿到的指针变悬垂 ⇒ 堆损坏。
+     * 锁序：net->mutex(Level2) → node_locks[](Level3)，本处只取 Level2，不会形成环。 */
+    float _feat_copy[PM_NODE_FEATURE_DIM];
+    pthread_rwlock_rdlock(&vocab->net->mutex);
     ReasoningNode* node = vocab->net->nodes[node_id];
-    if (!node || !node->features) return;
+    if (!node || !node->features || node->feature_dim < PM_NODE_FEATURE_DIM) {
+        pthread_rwlock_unlock(&vocab->net->mutex);
+        return;
+    }
+    memcpy(_feat_copy, node->features, sizeof(_feat_copy));
+    pthread_rwlock_unlock(&vocab->net->mutex);
 
-    emergent_pos_classify_soft(ep, node->features, result);
+    emergent_pos_classify_soft(ep, _feat_copy, result);
 
     /* v0.5.10 fix: 移除锁外回写词类到节点。
      * 原代码在 ar->mutex 锁外（article_flush 特意移出锁外避 O(n²) 聚类）
@@ -669,11 +682,17 @@ int emergent_pos_try_emerge(EmergentPOS* ep) {
         if (coherence < EMERGE_COHERENCE_THRESH) {
             fprintf(stderr, "[EmergentPOS] 簇 %d 紧密度 %.3f < %.2f, 放弃\n",
                     ci, coherence, EMERGE_COHERENCE_THRESH);
-            free(cl->members);
+            /* BG-29-v2: 不在中途释放（第二个循环仍要用 members），统一挪到其后 */
             continue;
         }
 
         /* 创建新词类 */
+        /* BG-29: 入口（:580）只在函数开头查一次，而本循环可连开多个类
+         * ⇒ ei 可达 16 ⇒ extra_classes[16] 越界写（会踩到 lock）。循环内再查一次。 */
+        if (ep->extra_class_count >= 16) {
+            fprintf(stderr, "[EmergentPOS] extra_classes 已满(16)，本轮停止新增\n");
+            break;
+        }
         int ei = ep->extra_class_count;
         ep->extra_classes[ei].class_id = POS_COUNT + ei;
         ep->extra_classes[ei].member_count = cl->count;
@@ -708,7 +727,7 @@ int emergent_pos_try_emerge(EmergentPOS* ep) {
             ep->extra_classes[ei].class_id, cl->count, coherence,
             ep->extra_classes[ei].label_hint);
 
-        free(cl->members);
+        /* BG-29-v2: 不在中途释放，统一挪到第二个循环之后 */
     }
 
     /* 从池中移除已聚类的词 */
@@ -747,6 +766,18 @@ int emergent_pos_try_emerge(EmergentPOS* ep) {
             }
             ep->unclassified_count = dst;
             free(keep);
+        }
+    }
+
+    /* BG-29-v2: 统一释放簇成员数组。
+     * 原先在第一个循环里逐个 free，而第二个循环
+     * （从池中移除已聚类词）仍会遍历 clusters[ci].members
+     * ⇒ ASan 实锤 heap-use-after-free @ :724。挪到这里最安全：
+     * 此后 :758 会清池，members 不再被使用。 */
+    for (int _ci = 0; _ci < nclusters; _ci++) {
+        if (clusters[_ci].members) {
+            free(clusters[_ci].members);
+            clusters[_ci].members = NULL;
         }
     }
 

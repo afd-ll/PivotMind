@@ -11,11 +11,18 @@
 /* 中文预处理：连续 CJK 字符间插入空格，使 strtok 能切出单字 */
 static void _cjk_insert_spaces(const char* src, char* dst, int dst_sz) {
     int wi = 0;
+    /* BG-29-v4：追踪源下标，用于防「截断的多字节序列」越界读。
+     * 原则：多字节长度只按首字节判定（c>=0xE0→blen=3），
+     * 不验证后续字节是否还在串内 ⇒ 末尾剩半个汉字时读出界。
+     * ASan 实锤：heap-buffer-overflow READ @ gateway_learn.c:14（旧行号）。 */
+    int src_len = (int)strlen(src);
+    int si = 0;
     for (const char* p = src; *p && wi < dst_sz - 4; ) {
         unsigned char c = (unsigned char)*p;
         int blen = 1;
         if (c >= 0xE0 && c <= 0xEF) blen = 3;
         else if (c >= 0xC0 && c <= 0xDF) blen = 2;
+        if (si + blen > src_len) blen = 1;   /* BG-29-v4：截断的多字节按单字节处理 */
 
         /* 多字节字符必须完整写入：检查是否有足够空间放 字符+空格+null */
         if (blen > 1 && wi + blen + 2 >= dst_sz) break;
@@ -28,6 +35,7 @@ static void _cjk_insert_spaces(const char* src, char* dst, int dst_sz) {
             dst[wi++] = p[b];
         dst[wi] = '\0';
         p += blen;
+        si += blen;
     }
     /* 确保 null 结尾 */
     if (wi < dst_sz) dst[wi] = '\0';
