@@ -269,17 +269,23 @@ TripletPrefixGroup* template_group_triplets(
         TripletPrefixGroup* grp = &groups[gi];
         if (grp->size >= grp->capacity) {
             int new_cap = grp->capacity * 2;
+            /* BG-30-A3: 逐个 realloc, 成功即赋回字段。
+             * 原写法三次 realloc 各自独立 + 统一判空: 若 nc 成功而 ir 失败,
+             * realloc 已释放旧 node_c_list, 但 grp->node_c_list 仍指该已释放块,
+             * 继而 free(nc) 丢弃新块, template_free_groups() 又 free 旧字段
+             * (= 悬挂指针) ⇒ double free。改为逐项处理: realloc 失败时不释放
+             * 原块, 字段恒为 NULL 或有效; 成功则立即赋回。
+             * 这样 template_free_groups() 释放的永远是当前有效指针。 */
             int*   nc = (int*)realloc(grp->node_c_list, (size_t)new_cap * sizeof(int));
-            float* ir = (float*)realloc(grp->ir_ratios, (size_t)new_cap * sizeof(float));
-            int*   ct = (int*)realloc(grp->counts, (size_t)new_cap * sizeof(int));
-            if (!nc || !ir || !ct) {
-                free(nc); free(ir); free(ct);
-                template_free_groups(groups, gcount); return NULL;
-            }
+            if (!nc) { template_free_groups(groups, gcount); return NULL; }
             grp->node_c_list = nc;
-            grp->ir_ratios   = ir;
-            grp->counts      = ct;
-            grp->capacity    = new_cap;
+            float* ir = (float*)realloc(grp->ir_ratios, (size_t)new_cap * sizeof(float));
+            if (!ir) { template_free_groups(groups, gcount); return NULL; }
+            grp->ir_ratios = ir;
+            int*   ct = (int*)realloc(grp->counts, (size_t)new_cap * sizeof(int));
+            if (!ct) { template_free_groups(groups, gcount); return NULL; }
+            grp->counts = ct;
+            grp->capacity = new_cap;
         }
         grp->node_c_list[grp->size] = r->node_c;
         grp->ir_ratios[grp->size]   = r->ir_ratio;

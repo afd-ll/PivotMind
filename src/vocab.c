@@ -325,17 +325,15 @@ int vocab_build_from_file(Vocab* vocab, const char* filepath, int min_freq) {
             while (*answer == ' ' || *answer == '\t') answer++;
 
             // 分词并统计词频
-            char qbuf[4096] = {0};
-            char abuf[4096] = {0};
-            int qpos = 0, apos = 0;
+            // BG-30-A8: 移除「写后即弃」的定长栈缓冲 qbuf/abuf。
+            //   原实现 char qbuf[4096], abuf[4096] 配合无界 strcpy(qbuf + qpos, token)，
+            //   单行分词累计超 4096 字节即栈溢出；而二者在本函数内全无读取点（纯死写）。
+            //   故直接删除缓冲与其写语句，分词/词频统计逻辑与执行顺序保持不变。
 
             // 问句：按空格分词
             char* saveptr;
             char* token = strtok_r(question, " \t", &saveptr);
             while (token) {
-                if (qpos > 0) qbuf[qpos++] = ' ';
-                strcpy(qbuf + qpos, token);
-                qpos += strlen(token);
                 vocab_inc_freq(vocab, token);
                 added++;
                 token = strtok_r(NULL, " \t", &saveptr);
@@ -344,9 +342,6 @@ int vocab_build_from_file(Vocab* vocab, const char* filepath, int min_freq) {
             // 答句：按空格分词
             token = strtok_r(answer, " \t", &saveptr);
             while (token) {
-                if (apos > 0) abuf[apos++] = ' ';
-                strcpy(abuf + apos, token);
-                apos += strlen(token);
                 vocab_inc_freq(vocab, token);
                 added++;
                 token = strtok_r(NULL, " \t", &saveptr);

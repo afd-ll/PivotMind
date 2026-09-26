@@ -389,13 +389,21 @@ void* object_pool_acquire(ObjectPool* pool) {
 
     pool->free_list = new_list;
 
-    // 分配新对象（v0.5.18 fix: 统计实际增长数 grown——
-    // 原实现 total_capacity 先更新导致 free_count=0，取块时
-    // free_list[--free_count] 越界；部分 malloc 失败也不覆盖容量）
+    int old_total = pool->total_capacity;
     int grown = 0;
-    for (int i = pool->total_capacity; i < new_capacity; i++) {
-        pool->free_list[i] = malloc(pool->object_size);
-        if (pool->free_list[i] == NULL) break;
+    // BG-35 (2026-09-23): 新对象写入头部 [0, grown)，恢复全局不变量
+    // 「空闲区 = free_list[0, free_count)」。
+    // 依据：进此分支时 free_count == 0（全部对象已发出），free_list[0, old_total)
+    // 里全是已发出对象的陈旧副本，覆盖无副作用；realloc 已保证容量 2*old_total，
+    // 又 grown <= old_total，故写 [0, grown) 不越界。
+    // v0.5.18 旧写法把新对象写到尾部 [old_total, new_capacity)，却仍按头部语义
+    // 取 free_list[--free_count] 拿到 free_list[old_total-1]——那是第 1 次 acquire
+    // 就已发出的对象 ⇒ 同一指针发放两次 ⇒ causal_graph_destroy 对同一指针双重
+    // release → object_pool_destroy 双重 free（ASan: attempting double-free, 64B）。
+    for (int i = 0; i < old_total; i++) {          // BG-35: 新对象写入头部，恢复 [0,free_count) 不变量
+        void* obj = malloc(pool->object_size);
+        if (obj == NULL) break;
+        pool->free_list[i] = obj;
         grown++;
     }
     if (grown == 0) return NULL;
@@ -405,14 +413,11 @@ void* object_pool_acquire(ObjectPool* pool) {
     // 再取 free_list[--free_count] = free_list[-1] 越界读返回垃圾指针——
     // infer 建图边数超过池容量(128)时 acquire 返回悬垂地址，调用方写入
     // 即 SIGSEGV（"薛定谔的猫"类因果查询偶发崩溃的真正根因）。
-    // 逻辑等价（扩容时 free_count 必为 0），保留 grown==0 提前返回以免 used_count 误增。
-    pool->free_count += grown;
-    pool->total_capacity += grown;
+    // 本次修正：取头部（而非尾部）避免重复发放；令 free_count = grown 恢复空闲区语义。
+    pool->free_count     = grown;
+    pool->total_capacity = old_total + grown;
     pool->used_count++;
 
-    if (pool->free_count <= 0) return NULL;
-
-    // 取最后一个（新分配对象）
     return pool->free_list[--pool->free_count];
 }
 

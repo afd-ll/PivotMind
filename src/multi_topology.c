@@ -3418,7 +3418,15 @@ int topology_walk_cross(MasterTopology* master,
                         if ((unsigned char)*cp >= 0xC0 && (unsigned char)*cp < 0xE0) clen = 2;
                         else if ((unsigned char)*cp >= 0xE0 && (unsigned char)*cp < 0xF0) clen = 3;
                         else if ((unsigned char)*cp >= 0xF0) clen = 4;
-                        for (int b = 0; b < clen && used_len < 250; b++)
+                        /* BG-38: 逐字节拷贝，遇 NUL 即止。原写法无条件读满 clen 字节——
+                         * 末字符为截断的多字节序列（如 3 字节前导但只剩 1 字节）时会越过
+                         * strdup 分配的末尾，读到 NUL 之后 1 字节（ASan: heap-buffer-overflow,
+                         * READ of size 1 @ multi_topology.c:3416）。
+                         * 判据用 *cp（当前字节），**不是** cp[b]：cp 在循环体里自增，
+                         * cp[b] 会读成 orig[2b]（越读越远、反而制造新越界）；
+                         * *cp 恒读当前位，最多读到那个 NUL（仍在分配内）
+                         * ⇒ 任何一次读取都落在 [0, strlen]。 */
+                        for (int b = 0; b < clen && used_len < 250 && *cp; b++)
                             used_chars[used_len++] = *cp++;
                     }
                 }

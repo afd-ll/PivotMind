@@ -1522,10 +1522,10 @@ int causal_pattern_add_instance(CausalPattern* pattern, const char* cause,
         char** new_cause = (char**)realloc(pattern->instance_cause,
                                            new_max * sizeof(char*));
         if (!new_cause) return -1;
+        pattern->instance_cause = new_cause;  /* BG-30-A4: 旧块已被 realloc 释放，必须立刻赋回 */
         char** new_effect = (char**)realloc(pattern->instance_effect,
                                             new_max * sizeof(char*));
-        if (!new_effect) { free(new_cause); return -1; }
-        pattern->instance_cause = new_cause;
+        if (!new_effect) return -1;  /* BG-30-A4: instance_cause 已是新块，不得 free(new_cause) */
         pattern->instance_effect = new_effect;
         pattern->max_instances = new_max;
     }

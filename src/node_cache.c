@@ -323,6 +323,21 @@ int node_cache_thaw(NodeCache* nc, HuarongTopologyNet* net, ReasoningNode* node,
 
     if (nread < NC_NODE_HDR_SZ) { free(buf); return -1; }
 
+    /* BG-30-A5 (v0.6.6): 本函数按文件声明维度读取前的**统一上界 + 剩余字节**校验。
+     * 缺陷：concept_len / feat_dim / conn_count 三个长度此前**全部取自文件、
+     * 零校验**（:337-339），截断/损坏文件会导致 p += concept_len+1 越界、
+     * memcpy(..., feat_dim*4) 越界读、calloc(feat_dim,...) 巨量分配、
+     * conn_count 循环越界读。
+     * 对照（同类校验的既有写法）：
+     *   - src/multi_topology.c:5439-5488 状态加载循环（H1 修复）逐段做
+     *     `p + N > end` 边界判断 —— 本补丁剩余字节校验与之同源；
+     *   - 本文件兄弟函数 node_cache_export_frozen_edges(:456) 与
+     *     node_cache_export_frozen_edges_snap(:529) 已有逐字同款口径
+     *     `concept_len < 0 || concept_len > 4096 || conn_count < 0 ||
+     *      conn_count > 65536` —— 本补丁沿用之。
+     * nc_end 取实际读到的 nread（nread 可能 < size，用 nread 更紧）。 */
+    const uint8_t* nc_end = buf + (size_t)nread;
+
     /* v0.5.10 fix: 重建段持 node_locks——与 freeze（node_cache.c:259）
      * 对称。thaw 写 node->features/edges/conn_hash 期间，brainstem freeze
      * 或学习线程（autonomic_learner 持 node_locks 加边）并发作用于同一
@@ -338,10 +353,35 @@ int node_cache_thaw(NodeCache* nc, HuarongTopologyNet* net, ReasoningNode* node,
     memcpy(&feat_dim,    p, 4);  p += 4;
     memcpy(&conn_count,  p, 4);  p += 4;
 
-    /* concept（已在内存，跳过比对 — 文件中的和 struct 中的应该一致） */
+    /* concept（已在内存，跳过比对 — 文件中的和 struct 中的应该一致）
+     * BG-30-A5: 上界(0..4096，本文件 :456/:529 既有口径) + 剩余字节校验。
+     * ⚠️ 口径差异：本文件盘上 concept_len 是 **strlen，不含 NUL**
+     * （nc_serialize_node:151/166 写 concept_len+1 字节），故 0 **合法**
+     * （concept 为空串）；这与 multi_topology.c:5442 的 concept_len(**含
+     * NUL**) 用 `<= 0 || > 4096` 拒绝 0 的口径**不同**。 */
+    if (concept_len < 0 || concept_len > 4096 ||
+        (int64_t)(nc_end - p) < (int64_t)concept_len + 1) {
+        pthread_mutex_unlock(&net->node_locks[li]);
+        free(buf);
+        return -1;
+    }
     p += concept_len + 1;
 
-    /* features（v0.5.13: restore_features=0 时跳过——对话路径只走边） */
+    /* features（v0.5.13: restore_features=0 时跳过——对话路径只走边）
+     * BG-30-A5: feat_dim 上界 + 剩余字节校验。写/读两侧全仓以
+     * PM_NODE_FEATURE_DIM(=256, constants.h:37 全仓唯一真值源) 为界
+     * （multi_topology.c:4420 按 NODE_FEATURE_DIM 截断、:5375 校验、
+     *  :5461 read_dim = min(feat_dim, NODE_FEATURE_DIM)），
+     * 故文件值 > 256 即损坏；负值同样非法。
+     * 分配仍沿用**文件值** feat_dim（<=256 ⇒ <=1KB），不再是 OOM 炸弹。
+     * [未核实] 本文件 :456/:529 两个兄弟函数未校验 feat_dim —— 视为既有
+     *          遗漏，此处补上，上界取全仓 SSOT，不自行编造数字。 */
+    if (feat_dim < 0 || feat_dim > PM_NODE_FEATURE_DIM ||
+        (int64_t)(nc_end - p) < (int64_t)feat_dim * (int64_t)sizeof(float)) {
+        pthread_mutex_unlock(&net->node_locks[li]);
+        free(buf);
+        return -1;
+    }
     if (restore_features && feat_dim > 0 && !node->features) {
         node->features = (float*)calloc(feat_dim, sizeof(float));
         if (node->features) {
@@ -352,6 +392,18 @@ int node_cache_thaw(NodeCache* nc, HuarongTopologyNet* net, ReasoningNode* node,
     p += feat_dim * sizeof(float);
 
     /* 重建 connections 数组 */
+    /* BG-30-A5: conn_count 上界(0..65536，本文件 :456/:529 既有口径) +
+     * 剩余字节校验 —— **必须在下方 calloc 之前**，否则损坏的 conn_count
+     * 会先触发巨量分配。每条边盘上恰 16B（nc_serialize_node:191-194，
+     * 4 个 4B 字段），故 `剩余字节 / 16` 是硬上界；写盘侧
+     * nc_write_node_at:204 另有「单节点数据块 <= 16MB」上限
+     * （65536 * 16 = 1MB < 16MB，两口径自洽）。 */
+    if (conn_count < 0 || conn_count > 65536 ||
+        (int64_t)conn_count * 16 > (int64_t)(nc_end - p)) {
+        pthread_mutex_unlock(&net->node_locks[li]);
+        free(buf);
+        return -1;
+    }
     if (conn_count > 0) {
         if (node->edges) free(node->edges);   /* v0.5.13 fix: 防泄漏——学习线程可能已分配 */
         int cap = conn_count + 4;  /* 留一点扩容空间 */

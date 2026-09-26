@@ -677,9 +677,11 @@ int pfe_solve_subgoal(PrefrontalExecutive* pfe, int goal_index) {
                 g->status = PFE_GOAL_SOLVED;
                 g->answer_len = (causal_count > 0) ? 1 : 0;
 
-                causal_search_results_free(results, causal_count);
+                /* BG-37: LOG_INFO 必须在 causal_search_results_free 之前——
+                 * 原写法先 free 再读 results[0].total_strength ⇒ heap-use-after-free。 */
                 LOG_INFO("[PFE] 因果搜索求解子目标%d 成功 (%d条路径, 最高强度=%.2f)",
                          goal_index, causal_count, results[0].total_strength);
+                causal_search_results_free(results, causal_count);
                 return 0;
             }
 

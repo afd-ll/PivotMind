@@ -5,6 +5,7 @@
 
 #include "common.h"
 #include "memory_system.h"
+#include "memory_arena.h"   /* BG-35: object_pool 扩容去重回归 */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -161,6 +162,48 @@ void test_seed_save_load_empty(void) {
     TEST_END();
 }
 
+/* BG-35 (2026-09-23): object_pool 扩容分支去重回归。
+ * 扩容（free_count==0 走 realloc 分支）时必须返回「空闲区头部」，
+ * 绝不能与已发出的对象重复。修复前的 v0.5.18 写法从尾部取
+ * free_list[grown-1] == free_list[old_total-1]，那是第 1 次 acquire 就已发出的对象，
+ * 导致同一指针发放两次 → causal_graph_destroy 对同一指针双重 release
+ * → object_pool_destroy 双重 free（ASan: attempting double-free, 64B）。
+ * 容量 4、连取 10 次必然跨两次扩容，足以拦下该 bug。 */
+void test_object_pool_grow_no_dup(void) {
+    TEST_START("object_pool grow: no duplicate pointers");
+    ObjectPool* pool = object_pool_create(sizeof(void*), 4);
+    ASSERT_NOT_NULL(pool, "object_pool_create failed");
+
+    void* ptrs[10];
+    for (int i = 0; i < 10; i++) {
+        ptrs[i] = object_pool_acquire(pool);
+        ASSERT_NOT_NULL(ptrs[i], "acquire returned NULL");
+    }
+    /* 两两互不相同：扩容后不得重复发放 */
+    for (int i = 0; i < 10; i++) {
+        for (int j = i + 1; j < 10; j++) {
+            ASSERT_TRUE(ptrs[i] != ptrs[j], "duplicate pointer across grows");
+        }
+    }
+    for (int i = 0; i < 10; i++) object_pool_release(pool, ptrs[i]);
+
+    /* 全部归还后再取 10 次，仍须两两不同 */
+    void* ptrs2[10];
+    for (int i = 0; i < 10; i++) {
+        ptrs2[i] = object_pool_acquire(pool);
+        ASSERT_NOT_NULL(ptrs2[i], "second-round acquire returned NULL");
+    }
+    for (int i = 0; i < 10; i++) {
+        for (int j = i + 1; j < 10; j++) {
+            ASSERT_TRUE(ptrs2[i] != ptrs2[j], "duplicate pointer in second round");
+        }
+    }
+    for (int i = 0; i < 10; i++) object_pool_release(pool, ptrs2[i]);
+
+    object_pool_destroy(pool);   /* ASan 下必须无 double-free / 无泄漏 */
+    TEST_END();
+}
+
 int main(void) {
     printf("\n=== PivotMind Memory System Unit Tests ===\n\n");
 
@@ -170,6 +213,7 @@ int main(void) {
     test_memory_store_multiple();
     test_seed_save_load_roundtrip();
     test_seed_save_load_empty();
+    test_object_pool_grow_no_dup();   /* BG-35 */
 
     printf("\n=== Results: %d run, %d passed, %d failed ===\n",
            tests_run, tests_passed, tests_failed);

@@ -1055,8 +1055,8 @@ void task_snapshot_destroy(TaskSnapshot* snapshot) {
                 NodeParams* np = (NodeParams*)snapshot->node_params[i];
                 if (np) {
                     if (np->weights) free(np->weights);
+                    np->weights = NULL; // BG-30-A2: 置空防二次释放
                     if (np->biases) free(np->biases);
-                    if (np->weights) free(np->weights);
                     free(np);
                 }
             }
