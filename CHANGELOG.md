@@ -1,5 +1,34 @@
 # Changelog
 
+## v0.6.10 — 2026-09-26
+
+> 来源：工作台 **BG-29 / BG-30-A2~A8 / BG-35 / BG-37 / BG-38**（同一轮内存审计）。
+> 完整说明见 [changelogs/095-v0610-mem-safety.md](changelogs/095-v0610-mem-safety.md)。
+
+### 核心变更（**0 处行为变化**，10 项内存安全缺陷）
+
+**状态格式不变（仍 v11）** ⇒ 线上数据文件可直接加载；回退 = 换回旧二进制。
+
+| 编号 | 位置 | 缺陷（ASan 标签） |
+|---|---|---|
+| BG-29 | `src/emergent_pos.c` | 簇成员数组 heap-use-after-free；`extra_classes[]` 循环内越界写；`features` 读写竞态 |
+| BG-35 | `src/nn/memory_arena.c` | 扩容从尾部取对象 ⇒ **同一指针发放两次** ⇒ double-free (64B) |
+| BG-38 | `src/multi_topology.c` | 截断多字节序列 heap-buffer-overflow (READ 1 @:3416) |
+| BG-37 | `src/prefrontal_executive.c` | free 后读 `results[0]` ⇒ heap-use-after-free |
+| BG-30-A2 | `src/catastrophic_forgetting.c` | `np->weights` 双重 free |
+| BG-30-A3 | `src/template_builder.c` | 三次 realloc 统一判空 ⇒ 悬挂字段 ⇒ double-free |
+| BG-30-A4 | `src/causal_reasoning.c` | realloc 未赋回 ⇒ 失败分支释放已生效新块 |
+| BG-30-A5 | `src/node_cache.c` | 三个长度零校验 ⇒ 越界读 / 巨量分配（读端补上界+剩余字节） |
+| BG-30-A8 | `src/vocab.c` | 定长栈缓冲 + 无界 strcpy ⇒ 栈溢出（纯死写，直接删） |
+| — | `tests/unit/test_memory.c` | 新增 BG-35 扩容去重回归 |
+
+### 验证状态
+
+- 本机/armbian 构建：`0 error / 0 warning`；
+- 预飞行（隔离数据 + 8099 端口，2026-09-26）：状态加载正常、`clock_ticks` 在涨、`[ERROR]` = 0；
+- 部署：armbian 线上网关换二进制，`NRestarts` 无增长、数据规模与备份口径一致。
+
+
 ## v0.6.9 — 2026-09-17
 
 > 来源：工作台 **BG-24**（语义聚类阈值失配）。完整说明见
