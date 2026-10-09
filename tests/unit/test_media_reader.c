@@ -222,7 +222,15 @@ void test_media_reader_null_config(void) {
 
 void test_ffmpeg_availability(void) {
     TEST_START("ffmpeg binary availability");
+    /* 与 src/media_reader.c 的 C1 修复对齐：原写法是无保护的 "> NUL 2>&1"，
+       Windows 下 NUL 是空设备，Linux 下却会在【当前目录】生成一个名为 NUL 的
+       普通文件（内容 = "sh: 1: ffmpeg: not found"），每次 make test 都重新生成，
+       污染工作区并混进 git status（该文件历史上确实被误提交过一次）。 */
+#ifdef _WIN32
     int ret = system("ffmpeg -version > NUL 2>&1");
+#else
+    int ret = system("ffmpeg -version > /dev/null 2>&1");
+#endif
     /* 这只是一个信息性测试 — 环境可能没有 ffmpeg */
     printf("ffmpeg %s - ", (ret == 0) ? "available" : "not available");
     /* 不作为 pass/fail，仅作为信息 */
