@@ -611,10 +611,10 @@ static void t9_pm_dir_invalid_which(void) {
 /* ============================ 用例 11 ============================ */
 
 static void t11_pm_file_contract(void) {
-    /* 12 个登记文件名在此【固化一份】：SSOT 的表内容必须被测试锁死，改表就得同步改本用例
+    /* 13 个登记文件名在此【固化一份】：SSOT 的表内容必须被测试锁死，改表就得同步改本用例
        （= 有意识的变更）。「文件名只在本表出现一次」的红线约束的是**调用点**，
        不约束作为「表校验器」的本单测。 */
-    static const char *const want_name[12] = {
+    static const char *const want_name[13] = {
         "pivotmind_state.dat",      /* PM_FILE_STATE         */
         "brain_state.dat",          /* PM_FILE_BRAIN_CACHE   */
         "features.bin",             /* PM_FILE_FEATURES      */
@@ -626,8 +626,16 @@ static void t11_pm_file_contract(void) {
         "pfe_strategy.bin",         /* PM_FILE_PFE_STRATEGY  */
         "pfe_workspace.bin",        /* PM_FILE_PFE_WORKSPACE */
         "pretrain_embeddings.bin",  /* PM_FILE_PRETRAIN_EMB  */
-        "gw_token"                  /* PM_FILE_TOKEN         */
+        "gw_token",                 /* PM_FILE_TOKEN         */
+        "transitions.bin"           /* PM_FILE_TRANSITIONS   */
     };
+    /* 编译期护栏（本用例第 11 支曾有过的真实崩溃）：
+       数组项数必须覆盖到 PM_FILE_TRANSITIONS 所在的位号，**漏项直接编译失败**，
+       而不是像修复前那样用 `for (i = 0; i < 13; i++)` 越界读到垃圾指针、
+       在 snprintf 的 strlen 里 SIGSEGV。13 = PM_FILE_TRANSITIONS 位号(12) + 1。 */
+    typedef char want_name_must_cover_all_file_bits[
+        (sizeof want_name / sizeof want_name[0]) >= 13u ? 1 : -1];
+    (void)sizeof(want_name_must_cover_all_file_bits);
     const char *data = pm_dir(PM_DIR_DATA);
     char want[PM_PATH_MAX];
     char buf[PM_PATH_MAX];
