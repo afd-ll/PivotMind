@@ -702,7 +702,14 @@ static void* brainstem_loop(void* arg) {
         }
 
         /* 定期存盘：每 60 tick (≈17min) 持久化，防重启丢数据 */
-        /* 空启动保护：总节点数 < SAVE_MIN_TOTAL_NODES (50) 时跳过，防止覆盖有效存盘 */
+        /* 空启动保护：总节点数 < SAVE_MIN_TOTAL_NODES 时跳过，防止覆盖有效存盘。
+         * 阈值真身见 include/multi_topology.h（= 1000）。此处曾误写 (50) —— 
+         * 注释与实际差 20 倍，2026-10-09 由 BG-56 勘正；**改值请只改头文件那一处**，
+         * 本注释不再复述数字，避免再次漂移。
+         * ⚠ 已知缺口（BG-56 遗留，未修）：判据是绝对节点数，**无逃生门** ——
+         *   一旦活跃图长期低于阈值（如 BG-51 冻结收缩、或 BG-58 那类空 home 事故），
+         *   周期性存盘会永久跳过，期间任何新学习都不落盘。
+         *   另注：**停机路径不经此门卫，无条件存**（停机会把退化的小图写下去）。 */
         if (bs->tick_count % 60 == 0) {
             if (master_count_total_nodes(bs->master) >= SAVE_MIN_TOTAL_NODES) {
                 /* v0.5.7: 冻结边由 master_save_state 内 node_cache_export_frozen_edges
