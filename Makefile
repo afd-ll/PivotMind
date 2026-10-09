@@ -255,8 +255,8 @@ asan:
 # ASan/UBSan 下运行核心单测（不依赖网络/终端的子集）。
 # 泄漏检测：CI 通过 ASAN_OPTIONS=detect_leaks=1 打开（本配方不写死，保持本地默认）；
 # Linux 下 ASan 默认 detect_leaks=1，故本地 `make asan-test` 同样会查泄漏。
-ASAN_TEST_TARGETS = test-tensor test-tensor-broadcast test-model test-metrics test-memory-unit test-topology-unit test-dialog-unit test-learner-unit test-causal-unit test-forgetting-unit test-paths-unit test-lang-unit test-lang-persist-unit test-concept-output test-random-seed-unit
-ASAN_TEST_BINS = $(BUILD_DIR)/test_tensor $(BUILD_DIR)/test_tensor_broadcast $(BUILD_DIR)/test_model $(BUILD_DIR)/test_metrics $(BUILD_DIR)/test_memory_unit $(BUILD_DIR)/test_topology_unit $(BUILD_DIR)/test_dialog_unit $(BUILD_DIR)/test_learner_unit $(BUILD_DIR)/test_causal_unit $(BUILD_DIR)/test_forgetting_unit $(BUILD_DIR)/test_paths_unit $(BUILD_DIR)/test_lang_unit $(BUILD_DIR)/test_lang_persist_unit $(BUILD_DIR)/test_concept_output $(BUILD_DIR)/test_random_seed_unit
+ASAN_TEST_TARGETS = test-tensor test-tensor-broadcast test-model test-metrics test-memory-unit test-topology-unit test-dialog-unit test-learner-unit test-causal-unit test-forgetting-unit test-paths-unit test-lang-unit test-lang-persist-unit test-concept-output test-random-seed-unit test-transition-model-unit
+ASAN_TEST_BINS = $(BUILD_DIR)/test_tensor $(BUILD_DIR)/test_tensor_broadcast $(BUILD_DIR)/test_model $(BUILD_DIR)/test_metrics $(BUILD_DIR)/test_memory_unit $(BUILD_DIR)/test_topology_unit $(BUILD_DIR)/test_dialog_unit $(BUILD_DIR)/test_learner_unit $(BUILD_DIR)/test_causal_unit $(BUILD_DIR)/test_forgetting_unit $(BUILD_DIR)/test_paths_unit $(BUILD_DIR)/test_lang_unit $(BUILD_DIR)/test_lang_persist_unit $(BUILD_DIR)/test_concept_output $(BUILD_DIR)/test_random_seed_unit $(BUILD_DIR)/test_transition_model_unit
 
 asan-test:
 	$(MAKE) clean
@@ -377,6 +377,9 @@ $(BUILD_DIR)/test_concept_output: tests/unit/test_concept_output.c $(LIB_NAME)
 $(BUILD_DIR)/test_random_seed_unit: tests/unit/test_random_seed_unit.c $(LIB_NAME)
 	$(CC) $(CFLAGS) -I. -o $@ tests/unit/test_random_seed_unit.c -L. -lpivotmind $(LDFLAGS)
 
+$(BUILD_DIR)/test_transition_model_unit: tests/unit/test_transition_model.c $(LIB_NAME)
+	$(CC) $(CFLAGS) -I. -o $@ tests/unit/test_transition_model.c -L. -lpivotmind $(LDFLAGS)
+
 $(BUILD_DIR)/test_media_reader: tests/unit/test_media_reader.c $(LIB_NAME)
 	$(CC) $(CFLAGS) -I. -o $@ tests/unit/test_media_reader.c -L. -lpivotmind $(LDFLAGS)
 
@@ -427,6 +430,7 @@ test-lang-unit: $(BUILD_DIR)/test_lang_unit                  # 语种 SSOT 契�
 test-lang-persist-unit: $(BUILD_DIR)/test_lang_persist_unit  # 语种标签落盘契约单测（第 29 支）
 test-concept-output: $(BUILD_DIR)/test_concept_output  # 用户可见输出判据契约单测（第 30 支）
 test-random-seed-unit: $(BUILD_DIR)/test_random_seed_unit  # 固定随机种子契约单测（第 31 支）
+test-transition-model-unit: $(BUILD_DIR)/test_transition_model_unit  # PROB-ASSIST 转移概率单测（第 32 支）
 test-media-reader: $(BUILD_DIR)/test_media_reader        # v0.5
 test-visual-cortex: $(BUILD_DIR)/test_visual_cortex       # v0.5
 test-pure: $(BUILD_DIR)/test_pure                           # 纯函数单元测试
@@ -453,7 +457,7 @@ test-runner: $(BUILD_DIR)/test_runner
 TEST_BINS = $(BUILD_DIR)/test_tensor $(BUILD_DIR)/test_tensor_broadcast $(BUILD_DIR)/test_model $(BUILD_DIR)/test_metrics $(BUILD_DIR)/test_trainer $(BUILD_DIR)/test_chinese $(BUILD_DIR)/test_web_fetch $(BUILD_DIR)/test_dialog_unit $(BUILD_DIR)/test_diffusion_unit $(BUILD_DIR)/test_topology_unit $(BUILD_DIR)/test_memory_unit $(BUILD_DIR)/test_learner_unit $(BUILD_DIR)/test_causal_unit $(BUILD_DIR)/test_forgetting_unit $(BUILD_DIR)/test_media_reader $(BUILD_DIR)/test_visual_cortex $(BUILD_DIR)/test_pure $(BUILD_DIR)/test_search $(BUILD_DIR)/test_pfe_unit $(BUILD_DIR)/test_regression $(BUILD_DIR)/test_semantic_growth $(BUILD_DIR)/test_integration $(BUILD_DIR)/test_cognitive_controller $(BUILD_DIR)/test_cognitive_full $(BUILD_DIR)/test_paths_unit $(BUILD_DIR)/test_lang_unit $(BUILD_DIR)/test_lang_persist_unit $(BUILD_DIR)/test_concept_output $(BUILD_DIR)/test_random_seed_unit
 TEST_FAST_BINS = $(BUILD_DIR)/test_model $(BUILD_DIR)/test_metrics $(BUILD_DIR)/test_visual_cortex $(BUILD_DIR)/test_dialog_unit $(BUILD_DIR)/test_diffusion_unit $(BUILD_DIR)/test_topology_unit $(BUILD_DIR)/test_memory_unit $(BUILD_DIR)/test_learner_unit $(BUILD_DIR)/test_causal_unit $(BUILD_DIR)/test_tensor_broadcast $(BUILD_DIR)/test_forgetting_unit $(BUILD_DIR)/test_media_reader $(BUILD_DIR)/test_pure $(BUILD_DIR)/test_search $(BUILD_DIR)/test_pfe_unit $(BUILD_DIR)/test_regression
 
-test: test-cc-full test-tensor test-tensor-broadcast test-model test-metrics test-trainer test-chinese test-web-fetch test-dialog-unit test-diffusion-unit test-topology-unit test-memory-unit test-learner-unit test-causal-unit test-forgetting-unit test-media-reader test-visual-cortex test-pure test-search test-pfe-unit test-regression test-semantic-growth test-integration test-cc test-paths-unit test-lang-unit test-lang-persist-unit test-concept-output test-random-seed-unit
+test: test-cc-full test-tensor test-tensor-broadcast test-model test-metrics test-trainer test-chinese test-web-fetch test-dialog-unit test-diffusion-unit test-topology-unit test-memory-unit test-learner-unit test-causal-unit test-forgetting-unit test-media-reader test-visual-cortex test-pure test-search test-pfe-unit test-regression test-semantic-growth test-integration test-cc test-paths-unit test-lang-unit test-lang-persist-unit test-concept-output test-random-seed-unit test-transition-model-unit
 	@echo ""
 	@echo "╔══════════════════════════════════════╗"
 	@echo "║  运行单元测试...                     ║"

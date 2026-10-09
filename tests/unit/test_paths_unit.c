@@ -633,10 +633,13 @@ static void t11_pm_file_contract(void) {
     char buf[PM_PATH_MAX];
     int i, j;
 
-    T_START("11. pm_file(合法位) ⇒ <home>/data/<登记名>，与 pm_path 一致、指针稳定、12 项互异；非法位 ⇒ NULL");
+    /* [PROB-ASSIST v0.6.11] 登记表扩至 13 项（+PM_FILE_TRANSITIONS）。
+     * 注意 PM_FILE_ALL 仍是低 12 位：第 13 位刻意不进 ALL（独立存盘，
+     * 不参与 master_save_state 位图），故「互异」遍历到 13 而 ALL 断言不变。 */
+    T_START("11. pm_file(合法位) ⇒ <home>/data/<登记名>，与 pm_path 一致、指针稳定、13 项互异；非法位 ⇒ NULL");
     CHECK(data != NULL && data[0] == '/', "pm_dir(PM_DIR_DATA) 非法: %s", data ? data : "(NULL)");
 
-    for (i = 0; i < 12; i++) {
+    for (i = 0; i < 13; i++) {
         unsigned bit = 1u << i;
         const char *f = pm_file(bit);
 
@@ -655,9 +658,9 @@ static void t11_pm_file_contract(void) {
               i, (const void *)f, (const void *)pm_file(bit));
     }
 
-    /* 12 项两两互异（同一位表重复登记会立刻暴露） */
-    for (i = 0; i < 12; i++) {
-        for (j = i + 1; j < 12; j++) {
+    /* 13 项两两互异（同一位表重复登记会立刻暴露） */
+    for (i = 0; i < 13; i++) {
+        for (j = i + 1; j < 13; j++) {
             CHECK(strcmp(pm_file(1u << i), pm_file(1u << j)) != 0,
                   "1u<<%d 与 1u<<%d 撞车: %s", i, j, pm_file(1u << i));
         }
@@ -666,9 +669,11 @@ static void t11_pm_file_contract(void) {
     /* 位表自洽：PM_FILE_ALL = 12 位全置；相邻位号必须落在 data/ 下 */
     CHECK(PM_FILE_ALL == 0x00000FFFu, "PM_FILE_ALL 应为 0x00000FFF，实际 0x%08x", PM_FILE_ALL);
 
-    /* 非法 which ⇒ NULL（与 pm_dir 同构，绝不「悄悄返回 home」） */
+    /* 非法 which ⇒ NULL（与 pm_dir 同构，绝不「悄悄返回 home」）。
+     * 1u<<12 现在是合法位（PM_FILE_TRANSITIONS）⇒ 越界位从 13 起。 */
     CHECK(pm_file(0u) == NULL, "pm_file(0) 应为 NULL");
-    CHECK(pm_file(1u << 12) == NULL, "pm_file(1u<<12) 应为 NULL（越界位）");
+    CHECK(pm_file(1u << 12) != NULL, "pm_file(1u<<12) 应为合法（PM_FILE_TRANSITIONS）");
+    CHECK(pm_file(1u << 13) == NULL, "pm_file(1u<<13) 应为 NULL（越界位）");
     CHECK(pm_file(1u << 31) == NULL, "pm_file(1u<<31) 应为 NULL（越界位）");
     CHECK(pm_file(PM_FILE_STATE | PM_FILE_TOKEN) == NULL, "pm_file(多 bit) 应为 NULL");
     CHECK(pm_file(0xffffffffu) == NULL, "pm_file(全 1) 应为 NULL");

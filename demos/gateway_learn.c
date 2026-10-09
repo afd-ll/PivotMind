@@ -7,6 +7,7 @@
  */
 
 #include "gateway_internal.h"
+#include "transition_model.h"   /* [PROB-ASSIST v0.6.11] 喂料语料的 bigram 计数 */
 
 /* 中文预处理：连续 CJK 字符间插入空格，使 strtok 能切出单字 */
 static void _cjk_insert_spaces(const char* src, char* dst, int dst_sz) {
@@ -89,6 +90,14 @@ int _learn_tokens(SubTopology* vocab, const char* text,
                         }
                     }
                     huarong_net_add_connection(vocab->net, *p_prev_id, nid, edge_w);
+                    /* [PROB-ASSIST v0.6.11] 转移计数与连边同一判据（自环/负 id
+                     * 在 tm_observe_pair 内再次守卫）。用户输入与 AI 回复在
+                     * gateway_handlers 连续喂料 ⇒ 表内天然含「输入尾词 → 回复
+                     * 首词」的对话转移，这正是沟通所需的条件概率。
+                     * 开关关闭（PIVOTMIND_PROB_ASSIST=0）时 tm_global() 返回
+                     * NULL，判空即整体回退，零成本。 */
+                    TransitionModel* tm = tm_global();
+                    if (tm) tm_observe_pair(tm, *p_prev_id, nid);
                 }
                 *p_prev_id = nid;
             }

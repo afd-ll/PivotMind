@@ -8,6 +8,7 @@
 
 #include "pivotmind_paths.h"
 #include "gateway_internal.h"
+#include "transition_model.h"   /* [PROB-ASSIST v0.6.11] 关闭时存转移计数 */
 #include <sys/stat.h>   /* stat：判定既有种子是否有内容 */
 
 /* D1: 记忆种子加载状态。加载失败后，任何"用空内存覆盖有效种子"的存盘都要被拦下。
@@ -499,6 +500,12 @@ void gw_system_shutdown(GatewaySystem* gw) {
      * 而下面会对这些对象 destroy → 后台 worker 踩已释放内存（use-after-free）。
      * 必须置于最前：此刻 gw 各对象仍全部有效，worker 可安全排空在队任务。 */
     learn_queue_shutdown();
+
+    /* [PROB-ASSIST v0.6.11] 学习 worker 已停（计数静止），此刻存转移计数
+     * 无并发写；置于最前与 learn_queue_shutdown 同理——后面会拆资源，
+     * 而存盘要读的只是 transition_model 自己的两块数组。开关关闭时
+     * g_tm 为 NULL，tm_global_shutdown_save() 空转。 */
+    tm_global_shutdown_save();
 
     // 1. 停止脑干 → 冻结所有活性节点 → 确保状态完整
     if (gw->brainstem) brainstem_stop(gw->brainstem);
