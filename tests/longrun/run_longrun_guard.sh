@@ -8,7 +8,7 @@
 #   600】。它是纯自死锁、无数据竞争 ⇒ TSan/Helgrind 不报；秒级单测结构上也覆盖不到。
 #   所以只能靠这条长跑护栏：跑满 ≥900 tick，断言 tick 越过 600 后持续增长。
 #
-# 用法（**必须在允许运行 PivotMind 产物的机器上跑**，本项目是 armbian）：
+# 用法（**必须在允许运行 PivotMind 产物的机器上跑**，本项目是 vega）：
 #   tests/longrun/run_longrun_guard.sh --bin <pivotmind_gateway 路径> [选项]
 #
 # 选项：
@@ -70,7 +70,7 @@ BIN="$(readlink -f "$BIN")"
 MEM_MB="$(awk '/MemTotal/{printf "%d", $2/1024}' /proc/meminfo 2>/dev/null || echo 99999)"
 if [ "$MEM_MB" -lt 2000 ] && [ "${ALLOW_LOWMEM_RUN:-0}" != "1" ]; then
     echo "拒绝运行: 本机总内存 ${MEM_MB}MB < 2000MB —— 这是受限验证机（Pi），" >&2
-    echo "          禁止在本机运行 PivotMind 产物（只许编译）。请在 armbian 上跑。" >&2
+    echo "          禁止在本机运行 PivotMind 产物（只许编译）。请在 vega 上跑。" >&2
     echo "          确要覆盖请显式 ALLOW_LOWMEM_RUN=1（不推荐）。" >&2
     exit 2
 fi

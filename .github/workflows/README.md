@@ -15,9 +15,9 @@
 
 ## ⚠️ 边界：CI 不替代真机验证
 
-> **CI 跑的是 x86_64 上的快速门禁，不能替代 G15（x86 真实数据 ASan+UBSan）与 armbian（aarch64 生产）的验证。**
+> **CI 跑的是 x86_64 上的快速门禁，不能替代 G15（x86 真实数据 ASan+UBSan）与 vega（aarch64 生产；原名 armbian，2026-10-11 改名）的验证。**
 
-CI 只用仓库自身、不带真实语料，跑的是短时单测。它证的是“能编译、单元门禁不红”，**不**证真实数据下无泄漏，**不**证 aarch64 上的生产行为。G15 与 armbian 上的验证仍须照常执行；CI 绿灯不得被当作它们的替代品。
+CI 只用仓库自身、不带真实语料，跑的是短时单测。它证的是“能编译、单元门禁不红”，**不**证真实数据下无泄漏，**不**证 aarch64 上的生产行为。G15 与 vega 上的验证仍须照常执行；CI 绿灯不得被当作它们的替代品。
 
 ---
 
@@ -41,7 +41,7 @@ CI 只用仓库自身、不带真实语料，跑的是短时单测。它证的�
 
 步骤：`actions/checkout@v4` → 装 `gcc-aarch64-linux-gnu` + `libc6-dev-arm64-cross` → 依次从源码构建 ARM64 的 zlib（v1.3.1）、OpenSSL（3.0.15，`no-asm no-shared` 等精简配置）、libcurl（8.12.1，`--host=aarch64-linux-gnu`，去掉 nghttp2/zstd/brotli/ldap）→ 用 `CC=aarch64-linux-gnu-gcc` 显式传入 `CFLAGS`/`LDFLAGS` 跑 `make linux` → 用 `aarch64-linux-gnu-readelf` 校验产物是 aarch64 ELF 且 `NEEDED` 合理。
 
-它证明的是“能在 aarch64 目标上链接出正确 ELF”，**不**跑真机、**不**跑生产负载。armbian 上的生产验证不在此处。
+它证明的是“能在 aarch64 目标上链接出正确 ELF”，**不**跑真机、**不**跑生产负载。vega 上的生产验证不在此处。
 
 ### 3. `asan-ubsan` —— 内存与未定义行为门禁
 

@@ -277,7 +277,7 @@ tests/longrun/run_longrun_guard.sh --bin <gw> [--data DIR] [--port N] [--minutes
 PASS/FAIL 都把**采样序列**（elapsed / tick / RSS / 每线程 wchan 直方图）打出来；退出码 0 / 非 0。
 结束时**一律 `kill -9`**（强杀不触发退出存盘，不污染沙箱）。
 
-⚠️ **它会真的把网关跑起来**，只能在允许运行产物的机器上跑（本项目：armbian）。
+⚠️ **它会真的把网关跑起来**，只能在允许运行产物的机器上跑（本项目：vega）。
 脚本自带**内存守卫**：内存 < 2G 的机器（本机 Pi / 受限验证机）会直接拒绝执行（退出码 2），
 以免违反「本机只许编译、不许运行 PivotMind 产物」的铁律。
 

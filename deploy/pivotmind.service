@@ -1,7 +1,7 @@
 # ══════════════════════════════════════════════════════════════════════════
 # ⚠️ 本文件是**通用部署模板**，**不是线上实际在跑的 unit**。别照抄去覆盖线上！
 #
-# 线上真身（armbian-1，2026-09-13 实取核对）：
+# 线上真身（vega，原名 armbian-1；2026-09-13 实取核对）：
 #   · 路径：/etc/systemd/system/pivotmind-gateway.service
 #     —— 注意**名字不同**（`pivotmind-gateway`，不是 `pivotmind`）；
 #     **不存在** /etc/systemd/system/pivotmind.service。

@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # ============================================================================
-# G-T4：armbian 全量 23/23（§4.4）
+# G-T4：vega 全量 23/23（§4.4）
 #   构建机 = 树莓派（内存紧：**一律 -j1**，见 falsification.md「环境备注」）
-#   运行机 = armbian（cx@100.107.169.41，aarch64 6 核）
+#   运行机 = vega（原名 armbian-1；cx@100.107.169.41，aarch64 6 核）
 # 判据：PASS=23 FAIL=0 TOTAL=23，汇总 Failed: 0。
 #   23 = Makefile:311 的 TEST_BINS 清单，必须与 Makefile:314 `test:` 的 23 个前置逐项一致。
-# 用法（在本机/Pi 上）：bash tests/round3/run_g_t4_armbian.sh
+# 用法（在 vega 本机）：bash tests/round3/run_g_t4_armbian.sh
 # ============================================================================
 set -u
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -36,7 +36,7 @@ if ! make -j1 test-build 2>/dev/null; then
         test-regression test-semantic-growth test-integration test-cc || exit 2
 fi
 
-# --- 运行：armbian，逐支 + 退出码 ---
+# --- 运行：vega，逐支 + 退出码 ---
 echo "[G-T4] scp -> $HOST:$REMOTE_DIR 并逐支运行"
 ssh "$HOST" "mkdir -p $REMOTE_DIR"
 scp build/bin/test_* "$HOST:$REMOTE_DIR/" || exit 2

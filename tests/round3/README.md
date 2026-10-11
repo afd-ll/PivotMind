@@ -16,7 +16,7 @@ R3 **不碰任何** `src/**`、`include/**`、`demos/**`。
 | `run_g_t1_probe.sh` | G-T1：三条形态（20/9、4/64、2/9）+ 判据 | §4.0、§4.1 |
 | `run_g_t2_tsan.sh` | G-T2：TSan 归零（**在 G15/WSL 跑**），两口径（带/不带 `-fopenmp`）+ 判据合取 | §4.2 |
 | `run_g_t3_asan.sh` | G-T3：ASan 5 支「与基线逐项对比」 | §4.3 |
-| `run_g_t4_armbian.sh` | G-T4：armbian 全量 23/23（Pi 构建 / armbian 运行） | §4.4 |
+| `run_g_t4_armbian.sh` | G-T4：vega 全量 23/23（vega 本机构建 + 运行） | §4.4 |
 | `run_g_t5_n17_ledger.sh` | G-T5：N17 扩散账行逐字不变 + 不变式自检 | §4.5 |
 | `n17_ledger_invariants.py` | G-T5 步骤 3 的逐行解析器（`候选 == 点亮 + 强度落选`） | §4.5 |
 | `negative-controls/README.md` | §4.2.3 的**负控反证命令**（由 R1/R2 所有者执行，R3 只写命令不碰 src） | §4.2.3 |
@@ -26,11 +26,11 @@ R3 **不碰任何** `src/**`、`include/**`、`demos/**`。
 
 | 门禁 | 在哪跑 | 判据 |
 |---|---|---|
-| **G-T1** | G15 / armbian（任一；Pi 内存紧时不建议） | 8 次迭代全 `EXIT=0`，`CONTRACT VIOLATED` 出现 **0** 次 |
+| **G-T1** | G15 / vega（任一） | 8 次迭代全 `EXIT=0`，`CONTRACT VIOLATED` 出现 **0** 次 |
 | **G-T2** | **G15/WSL** `ssh wen@100.104.245.9` | ①本批四类站点计数=0 **且** ②旧 UAF 对=0 **且** ③三条覆盖度正控全部 ≥1 |
-| **G-T3** | G15 / armbian | 退出码与帧集合逐项**不劣化**（3 支 `0`；`test_memory_unit`=134 帧仅在 `tests/unit/test_memory.c:36/69`；`test_topology_unit`=134 帧仅在 `src/multi_topology.c:1909`）。**新增帧 = 0** |
-| **G-T4** | Pi 构建 / armbian `cx@100.107.169.41` 运行 | `PASS=23 FAIL=0 TOTAL=23` |
-| **G-T5** | armbian 或 G15 | `diff` 空 **且** `INVARIANT FAIL`=0 **且** `lines>0` |
+| **G-T3** | G15 / vega | 退出码与帧集合逐项**不劣化**（3 支 `0`；`test_memory_unit`=134 帧仅在 `tests/unit/test_memory.c:36/69`；`test_topology_unit`=134 帧仅在 `src/multi_topology.c:1909`）。**新增帧 = 0** |
+| **G-T4** | vega `cx@100.107.169.41` 本机构建 + 运行 | `PASS=23 FAIL=0 TOTAL=23` |
+| **G-T5** | vega 或 G15 | `diff` 空 **且** `INVARIANT FAIL`=0 **且** `lines>0` |
 
 ### 2.1 与任务书的偏差（必须显式记录，不许"拍脑袋"）
 - ⚠ **任务书写 G-T3「5 支保持绿」，与既有证据不符**：`falsification.md` M3 实测是 **3 绿 + 2 红(EXIT=134)**，
@@ -46,7 +46,7 @@ R3 **不碰任何** `src/**`、`include/**`、`demos/**`。
 ```bash
 # 步骤 1（R3 先落，此时是红的，留档）—— 探针 + 脚本入库
 make -n probe-batch-contract            # 干跑：只打印命令，不构建
-bash tests/round3/run_g_t1_probe.sh     # G-T1（在 G15 / armbian 跑）
+bash tests/round3/run_g_t1_probe.sh     # G-T1（在 G15 / vega 跑）
 
 # 步骤 4（R1/R2 落定后按序跑）
 bash tests/round3/run_g_t2_tsan.sh      # 在 G15 上跑（先 rsync 本级树过去）
