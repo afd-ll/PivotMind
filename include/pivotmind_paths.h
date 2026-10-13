@@ -87,6 +87,7 @@ extern "C" {
  * 由 transition_model 在网关启动/关闭时独立加载/存盘，不参与 master_save_state
  * 位图；legacy 布局审计多看它一眼无害（它没有旧布局位置，不会误报）。 */
 #define PM_FILE_TRANSITIONS   (1u << 12)  /* 转移计数 transitions.bin */
+#define PM_FILE_CHARPAIRS     (1u << 13)  /* 字对计数 charpairs.bin（涌现判据的可读依据；同样不进 PM_FILE_ALL） */
 #define PM_FILE_ALL           (0x00000FFFu)  /* 12 个位全置（不含 TRANSITIONS） */
 
 /* ---- 纯查询 ---- */
