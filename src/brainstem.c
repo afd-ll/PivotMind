@@ -8,6 +8,7 @@
 
 #include "pivotmind_paths.h"
 #include "brainstem.h"
+#include "word_emerge.h"
 #include <malloc.h>   /* v0.5.11: malloc_trim——C 堆 free 后不还给内核，周期 trim 让 RSS 回落 */
 #include "health_monitor.h"
 #include "huarong_topology.h"
@@ -273,6 +274,21 @@ static void brainstem_tick_decay_spontaneous(Brainstem* bs, const CircadianParam
     }
     }
     pthread_rwlock_unlock(&master->rwlock);
+}
+
+/* [段二 · 词涌现] 周期把字对统计里达标的字对晋升为词节点。
+ * 默认【关】（PIVOTMIND_EMERGE=1 才开）：先在离线验证过再开，避免线上长出意外词。
+ * 周期 PIVOTMIND_EMERGE_EVERY（默认 600 tick ≈ 10 分钟）。 */
+static void brainstem_tick_word_emerge(Brainstem* bs) {
+    if (!bs->master) return;
+    const char* e = getenv("PIVOTMIND_EMERGE");
+    if (!(e && e[0] == '1')) return;
+    const char* ev = getenv("PIVOTMIND_EMERGE_EVERY");
+    int every = ev ? atoi(ev) : 600;
+    if (every <= 0) every = 600;
+    if (bs->tick_count % every != 0) return;
+    int n = word_emerge_tick(bs->master);
+    if (n > 0) LOG_INFO("[词涌现] 本轮新增 %d 个词节点 (tick=%d)", n, bs->tick_count);
 }
 
 /* 堆监控 */
@@ -678,6 +694,7 @@ static void* brainstem_loop(void* arg) {
         brainstem_tick_decay_spontaneous(bs, &cp);
         if (!__atomic_load_n(&bs->is_running, __ATOMIC_SEQ_CST)) break;
         brainstem_tick_monitoring(bs);
+        brainstem_tick_word_emerge(bs);
         drift_cognitive_state(bs);
         brainstem_tick_subcortical(bs, &cp);
         int percept_work = brainstem_tick_perception(bs);
