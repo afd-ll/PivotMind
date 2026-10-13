@@ -7,7 +7,8 @@
  */
 
 #include "gateway_internal.h"
-#include "transition_model.h"   /* [PROB-ASSIST v0.6.11] 喂料语料的 bigram 计数 */
+#include "transition_model.h"
+#include "charpair.h"   /* [PROB-ASSIST v0.6.11] 喂料语料的 bigram 计数 */
 
 /* 中文预处理：连续 CJK 字符间插入空格，使 strtok 能切出单字 */
 static void _cjk_insert_spaces(const char* src, char* dst, int dst_sz) {
@@ -115,6 +116,7 @@ struct LearnTask {
     char*  msg;
     char   domain[64];  /* "medical", "legal", "" = default vocab */
     int    flush;       /* 1 = 调用方 wait 并释放；0 = worker 处理后释放 */
+    int    src;         /* [来源标记] LEARN_SRC_USER / LEARN_SRC_AI */
     int    done;        /* 1 = worker 已处理完 _learn_tokens */
     int    abandoned;   /* C3: 1 = 等待者已超时放弃 → 所有权交回 worker/队列 */
     pthread_mutex_t done_mutex;
@@ -180,7 +182,7 @@ static void learn_task_abandon(LearnTask* task) {
 
 /* B4 (v0.5.20): 可复用入队助手——原 handle_learn 内联入队逻辑抽出，供 handle_chat 复用。
  * flush=1 时返回 task 供调用方 wait；OOM 返回 NULL。队列满丢最旧。 */
-LearnTask* learn_queue_push(const char* msg, const char* domain, int flush) {
+LearnTask* learn_queue_push(const char* msg, const char* domain, int flush, int src) {
     /* C3: 队列未初始化 / 已 shutdown 时必须拒收。
      * 旧版没有任何守卫：worker 的退出判定是 "stop && count==0"（见 :195），
      * 一旦 shutdown 后仍有连接线程入队，这条任务就再没有消费者 → LearnTask
@@ -197,6 +199,7 @@ LearnTask* learn_queue_push(const char* msg, const char* domain, int flush) {
     if (domain)
         snprintf(task->domain, sizeof(task->domain), "%s", domain);
     task->flush = flush;
+    task->src   = src;
     task->done = 0;
     pthread_mutex_init(&task->done_mutex, NULL);
     pthread_cond_init(&task->done_cond, NULL);
@@ -297,6 +300,19 @@ static void* _learn_worker(void* arg) {
                 EmergentPOS* ep = (gw->prefrontal && gw->prefrontal->controller)
                                   ? gw->prefrontal->controller->emergent_pos : NULL;
                 _learn_tokens(topo, task->msg, &prev_id, ep);
+                /* [词通路 段一] 字对计数：给「字对涌现为词」提供可数的原始统计。
+                 * 与 _learn_tokens 同源同文本，键是【相邻字】；落点 charpairs.bin。
+                 * 只增计数，不新建节点、不改图。 */
+                if (topo->type == TOPO_VOCABULARY) {
+                    /* [来源] AI 回复默认【不】计入字对统计（PIVOTMIND_FEED_AI_REPLY=1 才开）。
+                     * 理由（CX-11 实测）：回复多为词串，照收等于拿自己的输出当教材。 */
+                    int src = task->src;
+                    int allow_ai = 0;
+                    { const char* e = getenv("PIVOTMIND_FEED_AI_REPLY");
+                      allow_ai = (e && e[0] == '1'); }
+                    if (src == LEARN_SRC_USER || allow_ai)
+                        (void)cp_observe_text(topo, task->msg);
+                }
                 auto_learn_concepts(gw->topology, task->msg, NULL);
                 if (gw->perception) perception_feed_learn_text(gw->perception, task->msg);
                 __sync_fetch_and_add(&gw->total_learning_cycles, 1);

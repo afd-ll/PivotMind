@@ -10,6 +10,65 @@
 #include "lang.h"
 #include "generation_feedback.h"   /* v0.6.3：GET /reach 读数 */
 
+// ==================== 回复喂料质量闸门（v0.6.11+） ====================
+/* 为什么要有这道闸：`/chat` 会把 AI 回复整段喂回学习路径（双向在线学习），
+ * 而当前回复有相当比例是「词串 + 生成端骨架」。照单全收的后果是
+ * **模型拿自己的垃圾当教材**（自我强化回路）：垃圾→喂回→学成"词"→更垃圾。
+ * 本闸门只做一件事：**判断这条回复够不够格当教材**。
+ *
+ * 判据全部可数、且与喂料同一份文本（bg19 剥骨架【之后】的那份）：
+ *   ① 最小长度     汉字数 >= 3            （1~2 字不构成教材）
+ *   ② 骨架残渣     含 → / 【 / [ / （推理模式 等 ⇒ 拒（剥不干净，喂进去就是噪声）
+ *   ③ 括号配对     [ ] 与 ( ) 数量不等 ⇒ 拒（截断/残渣的确定性标志）
+ *   ④ 标点密度     标点数 > 汉字数/2   ⇒ 拒（排版比内容多）
+ *
+ * 每条都打理由（PM_FEED_GATE_LOG=1 打开逐条日志），便于倒查"为什么放行/拦截"。 */
+#define FG_MIN_CJK   3
+static long g_fg_pass = 0, g_fg_reject = 0, g_fg_ai_off = 0;
+
+static int feed_gate_log_on(void) {
+    static int cached = -1;
+    if (cached < 0) { const char* e = getenv("PM_FEED_GATE_LOG"); cached = (e && e[0] == '1'); }
+    return cached;
+}
+
+static int feed_gate_check(const char* s, const char** why) {
+    if (!s || !s[0]) { *why = "空"; return 0; }
+    int cjk = 0, br_l = 0, br_r = 0, par_l = 0, par_r = 0;
+    int punc = 0, digit = 0, alpha = 0;
+    for (const char* p = s; *p; ) {
+        unsigned char c = (unsigned char)*p;
+        if (c < 0x80) {   /* ASCII 必须逐字节走：括号/数字都是单字节，
+                           * 交给 pm_utf8_decode 会返回长度而被当多字节跳过（判据失效）。 */
+            if (c == '[') br_l++;
+            else if (c == ']') br_r++;
+            else if (c == '(') par_l++;
+            else if (c == ')') par_r++;
+            else if (c >= '0' && c <= '9') digit++;
+            else if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) alpha++;
+            else if (c == ',' || c == '.' || c == '!' || c == '?') punc++;
+            p++;
+            continue;
+        }
+        unsigned cp = 0;
+        int b = pm_utf8_decode(p, &cp);
+        if (b <= 0) b = 1;
+        if (cp >= 0x4E00 && cp <= 0x9FFF) cjk++;
+        if (cp == 0xFF08) par_l++;
+        if (cp == 0xFF09) par_r++;
+        if ((cp >= 0x3000 && cp <= 0x303F) || (cp >= 0xFF01 && cp <= 0xFF0F)) punc++;
+        p += b;
+    }
+    if (cjk < FG_MIN_CJK) { *why = "①太短"; return 0; }
+    if (strstr(s, "→") || strstr(s, "【") || strstr(s, "[") ||
+        strstr(s, "推理模式") || strstr(s, "置信度")) { *why = "②骨架残渣"; return 0; }
+    if (br_l != br_r || par_l != par_r) { *why = "③括号不配对"; return 0; }
+    if (punc > cjk / 2) { *why = "④标点过密"; return 0; }
+    if (digit * 2 > cjk) { *why = "⑤数字过密"; return 0; }
+    if (alpha * 2 > cjk) { *why = "⑥字母过多"; return 0; }
+    return 1;
+}
+
 // ==================== 请求处理 ====================
 
 /* ============================================================================
@@ -129,7 +188,7 @@ void handle_chat(GatewaySystem* gw, int fd, const char* body) {
         }
         if (vocab && vocab->net) {
 #if LEARN_ASYNC_CHAT
-            LearnTask* t = learn_queue_push(msg, "", 1);   /* 入队 + flush 等待 */
+            LearnTask* t = learn_queue_push(msg, "", 1, LEARN_SRC_USER);   /* 来源=用户 */
             if (t) {
                 learn_task_wait(t);
             } else {
@@ -271,17 +330,49 @@ void handle_chat(GatewaySystem* gw, int fd, const char* body) {
                  * ⚠️ 只改「喂给学习的副本」，回复本身不受影响。 */
                 char* feed = bg19_strip_scaffold(response);
                 const char* feed_text = feed ? feed : response;
+                /* [来源标记 + 喂回开关] AI 回复的喂回默认【关闭】：
+                 * 回复多为词串（CX-11 实测），照收等于拿自己的输出当教材。
+                 * PIVOTMIND_FEED_AI_REPLY=1 才开（开了也仍要过下面的结构闸门）。 */
+                const char* sw = getenv("PIVOTMIND_FEED_AI_REPLY");
+                int allow_ai_reply = (sw && sw[0] == '1');
+                if (!allow_ai_reply) {
+                    __sync_fetch_and_add(&g_fg_ai_off, 1);
+                    free(feed);
+                } else {
+                /* [喂料质量闸门] 够格才喂：不让模型把自己的骨架残渣当教材。
+                 * ⚠ 先查【原文】：bg19 会把「推理模式/置信度」等标记吃掉，
+                 *   若只查剥后文本，判据②永远看不到它们（曾因此 60/60 全放行）。 */
+                const char* why = NULL;
+                if (!feed_gate_check(response, &why)) {
+                    __sync_fetch_and_add(&g_fg_reject, 1);
+                    if (feed_gate_log_on())
+                        fprintf(stderr, "[喂料闸门] 拦截（%s）：%.60s\n", why, response);
+                    free(feed);
+                } else {
+                    /* 原文合格 ⇒ 再剥骨架（多语料更干净），并对剥后文本复核一次 */
+                    if (!feed_gate_check(feed_text, &why)) {
+                        __sync_fetch_and_add(&g_fg_reject, 1);
+                        if (feed_gate_log_on())
+                            fprintf(stderr, "[喂料闸门] 拦截-剥后（%s）：%.60s\n", why, feed_text);
+                        free(feed);
+                    } else {
+                        __sync_fetch_and_add(&g_fg_pass, 1);
+                        if (feed_gate_log_on())
+                            fprintf(stderr, "[喂料闸门] 放行：%.60s\n", feed_text);
 #if LEARN_ASYNC_CHAT
-                learn_queue_push(feed_text, "", 0);   /* fire-and-forget，忽略返回值 */
+                        learn_queue_push(feed_text, "", 0, LEARN_SRC_AI);   /* 来源=AI */
 #else
-                EmergentPOS* ep = (gw->prefrontal && gw->prefrontal->controller)
-                                  ? gw->prefrontal->controller->emergent_pos : NULL;
-                int prev_id = -1;
-                int learned = _learn_tokens(vocab, feed_text, &prev_id, ep);
-                if (learned > 0)
-                    printf("[gateway] 回复中学习: +%d 个新词\n", learned);
+                        EmergentPOS* ep = (gw->prefrontal && gw->prefrontal->controller)
+                                          ? gw->prefrontal->controller->emergent_pos : NULL;
+                        int prev_id = -1;
+                        int learned = _learn_tokens(vocab, feed_text, &prev_id, ep);
+                        if (learned > 0)
+                            printf("[gateway] 回复中学习: +%d 个新词\n", learned);
 #endif
-                free(feed);
+                        free(feed);
+                    }
+                }
+                }
             }
         }
 
@@ -338,7 +429,7 @@ void handle_learn(GatewaySystem* gw, int fd, const char* body) {
      * v0.5.20 B4: 入队逻辑抽出为 learn_queue_push（handle_chat 复用）。 */
     char domain[64] = {0};
     json_extract_string(body, "domain", domain, sizeof(domain));
-    LearnTask* task = learn_queue_push(msg, domain, 0);   /* fire-and-forget */
+    LearnTask* task = learn_queue_push(msg, domain, 0, LEARN_SRC_USER);   /* 来源=用户 */
     if (!task) { http_json(fd, 500, "{\"error\":\"oom\"}"); return; }
 
     http_json(fd, 202, "{\"result\":\"accepted\"}");

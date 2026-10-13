@@ -166,7 +166,13 @@ void  gw_system_shutdown(GatewaySystem* gw);
 
 /* gateway_learn.c */
 int  _learn_tokens(SubTopology* vocab, const char* text, int* p_prev_id, EmergentPOS* ep);
-LearnTask* learn_queue_push(const char* msg, const char* domain, int flush);
+/* [来源标记] 学习任务的来源：0=用户输入（主信号）· 1=AI 回复（辅助信号）
+ * 为什么要标记：两条路以前喂进同一张表，事后分不出谁是谁 ⇒ 无法降权、
+ * 无法单独统计"自己学了多少"。纯归属信息，不涉及任何中文判断。 */
+#define LEARN_SRC_USER 0
+#define LEARN_SRC_AI   1
+
+LearnTask* learn_queue_push(const char* msg, const char* domain, int flush, int src);
 void learn_task_wait(LearnTask* task);
 void learn_queue_init(void);
 void learn_queue_shutdown(void);   /* v0.5.25 fix: 停 worker 并 join（关闭最前调用） */

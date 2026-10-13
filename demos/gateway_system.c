@@ -8,7 +8,8 @@
 
 #include "pivotmind_paths.h"
 #include "gateway_internal.h"
-#include "transition_model.h"   /* [PROB-ASSIST v0.6.11] 关闭时存转移计数 */
+#include "transition_model.h"
+#include "charpair.h"   /* [PROB-ASSIST v0.6.11] 关闭时存转移计数 */
 #include <sys/stat.h>   /* stat：判定既有种子是否有内容 */
 
 /* D1: 记忆种子加载状态。加载失败后，任何"用空内存覆盖有效种子"的存盘都要被拦下。
@@ -465,6 +466,12 @@ static int gw_system_init(GatewaySystem* gw) {
             printf("[gateway]   学习调度器已启动 (自学习=%d次/轮, 语料=%s)\n",
                    scfg.self_learn_cycles,
                    scfg.batch_corpus_path ? scfg.batch_corpus_path : "无(仅自学习)");
+            /* [喂料开关] 明确说出来：默认不把 AI 回复喂回学习（防自我强化回路） */
+            {
+                const char* sw = getenv("PIVOTMIND_FEED_AI_REPLY");
+                printf("[gateway] AI回复喂回学习：%s（PIVOTMIND_FEED_AI_REPLY=1 可开）\n",
+                       (sw && sw[0] == '1') ? "开" : "关（默认）");
+            }
         }
     }
 
@@ -506,6 +513,9 @@ void gw_system_shutdown(GatewaySystem* gw) {
      * 而存盘要读的只是 transition_model 自己的两块数组。开关关闭时
      * g_tm 为 NULL，tm_global_shutdown_save() 空转。 */
     tm_global_shutdown_save();
+
+    /* [词通路 段一] 字对计数同刻存盘（同一把锁的独立实例，理由同上）。 */
+    cpt_global_shutdown_save();
 
     // 1. 停止脑干 → 冻结所有活性节点 → 确保状态完整
     if (gw->brainstem) brainstem_stop(gw->brainstem);
