@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include "script_latin.h"
 
 // UTF-8字符长度判断
 int utf8_char_len(unsigned char c) {
@@ -61,20 +62,21 @@ int utf8_tokenize(const char* text, char** tokens, int max_tokens) {
                 if (tokens[count]) count++;
                 p++;
             }
-            // 字母/数字：连续收集作为一个 token（如 "agent""GPT4"）
+            // 字母/数字：交给独立英文处理区校验（v0.5.25 拦截 URL/循环串/超长垃圾）
             else {
-                const char* start = p;
-                while (*p && !isspace(*p) && !is_chinese(p) && !ispunct((unsigned char)*p)) {
-                    p++;
-                }
-                int token_len = p - start;
-                if (token_len > 0) {
-                    tokens[count] = (char*)malloc(token_len + 1);
+                int wlen = 0;
+                int ok = latin_extract_word(p, &wlen);
+                if (ok && wlen > 0) {
+                    tokens[count] = (char*)malloc(wlen + 1);
                     if (tokens[count]) {
-                        strncpy(tokens[count], start, token_len);
-                        tokens[count][token_len] = '\0';
+                        strncpy(tokens[count], p, wlen);
+                        tokens[count][wlen] = '\0';
                         count++;
                     }
+                    p += wlen;
+                } else {
+                    /* 垃圾串：跳过整个串（wlen>0）或单字符（wlen==0） */
+                    p += (wlen > 0) ? wlen : 1;
                 }
             }
         }

@@ -171,7 +171,19 @@ int web_extract_paragraphs(const char* html, char* out, int out_sz,
         int in_tag = 0;
         for (const char* bp = body; bp < end_tag && total < out_sz - 1; bp++) {
             if (*bp == '<') { in_tag = 1; continue; }
-            if (*bp == '>') { in_tag = 0; continue; }
+            if (*bp == '>') {
+                in_tag = 0;
+                /* 英文词边界修复：相邻字母间补空格（同 _legacy_extract_text） */
+                char prev = (total > 0) ? out[total - 1] : '\0';
+                char next = bp[1];
+                int prev_alpha = (prev>='a'&&prev<='z')||(prev>='A'&&prev<='Z');
+                int next_alpha = (next>='a'&&next<='z')||(next>='A'&&next<='Z');
+                if (prev_alpha && next_alpha && total < out_sz - 1 &&
+                    !(prev==' '||prev=='\n')) {
+                    out[total++] = ' ';
+                }
+                continue;
+            }
             if (in_tag) continue;
             if (*bp == '&') {
                 if (strncmp(bp, "&amp;", 5) == 0)  { out[total++] = '&'; bp += 4; continue; }
@@ -199,7 +211,18 @@ static int _legacy_extract_text(const char* html, char* out, int out_sz) {
     int pos=0, in_tag=0, last_ws=1;
     for (const char* p=html; *p&&pos<out_sz-1; p++) {
         if (*p=='<'){in_tag=1;continue;}
-        if(*p=='>'){in_tag=0;continue;}
+        if(*p=='>'){
+            in_tag=0;
+            /* 英文词边界修复：</tag>text 紧邻（如 the</span><span>phrase）
+             * 剥离后需在相邻字母间补空格，否则 PMI 词发现产出 thephrase 碎片。
+             * 仅 ASCII 字母间补空格，中文（UTF-8 多字节）不受影响。 */
+            char prev = (pos>0) ? out[pos-1] : '\0';
+            char next = p[1];
+            int prev_alpha = (prev>='a'&&prev<='z')||(prev>='A'&&prev<='Z');
+            int next_alpha = (next>='a'&&next<='z')||(next>='A'&&next<='Z');
+            if (prev_alpha && next_alpha && !last_ws) { out[pos++]=' '; last_ws=1; }
+            continue;
+        }
         if(in_tag)continue;
         if(*p=='&'){
             if(strncmp(p,"&amp;",5)==0){out[pos++]='&';p+=4;continue;}

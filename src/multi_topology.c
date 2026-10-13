@@ -3692,7 +3692,7 @@ int master_count_total_nodes(MasterTopology* master) {
     return total;
 }
 
-#define STATE_FORMAT_VERSION 8
+#define STATE_FORMAT_VERSION 9
 /* v0.5.20: 6 = 在每节点记录尾部追加 dist_sig[26]+dist_sig_count（虚词分类器
  * 位置画像，跨重启累积）。加载端向前兼容 v2..v5（旧文件无 dist_sig 段 → 归零）。
  * v0.5.21: 7 = 加载端迁移清洗——fmt_ver==6 状态加载时归零 dist_sig[0..21]
@@ -3725,6 +3725,12 @@ int master_count_total_nodes(MasterTopology* master) {
  * 08-10 事故同款：54 节点覆盖 387,889）。基准不因坏状态更新——主文件永远保留最好状态。*/
 static int g_last_saved_nodes = 0;
 void master_save_set_baseline(int nodes) { g_last_saved_nodes = nodes; }
+
+/* v0.5.24: 存盘最小间隔去重——autonomic_learner/brainstem/health_monitor 三处
+ * 各自触发 master_save_state，短时间（约 1.5min 周期内）可能连续双存盘。
+ * 统一在此去重：距上次成功存盘不足 MASTER_SAVE_MIN_INTERVAL_SEC 秒 → 跳过本轮。 */
+#define MASTER_SAVE_MIN_INTERVAL_SEC  55
+static time_t g_last_save_time = 0;
 
 /* =====================================================================
  * B3 (v0.5.20): 锁外快照式存盘——锁内全量深拷贝快照（纯内存），锁外写盘。
@@ -4460,6 +4466,13 @@ int master_save_state(MasterTopology* master, const char* file_path) {
     if (master_save_mode_is_locked())
         return master_save_state_locked(master, file_path);
 
+    /* v0.5.24 最小间隔去重：多触发点（learner/brainstem/health_monitor）短时间
+     * 连续调用时，距上次成功存盘 < 55s 直接跳过，避免无谓的重复写盘 I/O。 */
+    time_t now = time(NULL);
+    if (g_last_save_time != 0 && (now - g_last_save_time) < MASTER_SAVE_MIN_INTERVAL_SEC) {
+        return 0;  /* 跳过本轮，不报错（属正常去重） */
+    }
+
     /* 轻量门卫：系统 MemAvailable 极端枯竭（< 64MB）→ 跳过本轮（防极端 OOM），下轮重试。
      * 与旧「est+512MB」门卫不同：不再因内存紧张回退锁内写——那是饿死根源。 */
     size_t mem_avail = master_read_mem_available();
@@ -4587,6 +4600,7 @@ int master_save_state(MasterTopology* master, const char* file_path) {
     LOG_INFO("[状态持久化] 已保存到 %s (节点=%d, 链接=%d)",
              target_path, saved_nodes, saved_links);
     g_last_saved_nodes = saved_nodes;   /* v0.5.12: 更新防呆基准 */
+    g_last_save_time = time(NULL);      /* v0.5.24: 更新最小间隔去重时间戳 */
 
     return saved_nodes;
 }

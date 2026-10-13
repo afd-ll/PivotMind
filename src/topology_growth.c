@@ -811,8 +811,15 @@ int prune_node_importance(MasterTopology* master, int topo_id,
 static int is_junk_concept(const char* c) {
     if (!c || !c[0]) return 1;
     if (strstr(c, "//") || strstr(c, "http") || strstr(c, "www.")) return 1;
+    /* URL query / 编码特征（v0.5.25 补强：原只挡 // 和 http 前缀，漏了
+     * signup?ref_cta= / login?return_to= / %2F %3A 这类 query 参数和
+     * URL 编码，导致感知皮层抓到 774 个超长垃圾概念名） */
+    if (strchr(c, '?') || strchr(c, '=') || strchr(c, '%') || strchr(c, '&')) return 1;
     char ch = c[0];
-    if (ch == '/' || ch == '.' || ch == '-' || ch == '_' || ch == '\\' || ch == '#') return 1;
+    if (ch == '/' || ch == '.' || ch == '-' || ch == '_' || ch == '\\' ||
+        ch == '#' || ch == '&' || ch == '?' || ch == '=') return 1;
+    /* 超长概念名（>64 字节）几乎必是 URL/哈希/拼接垃圾 */
+    if (strlen(c) > 64) return 1;
     return 0;
 }
 

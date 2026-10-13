@@ -409,6 +409,13 @@ static WordEntry* _ar_find_or_add_word(ArticleReader* ar, const char* text) {
 /**
  * 从一行文本中提取有效的字符序列（中文+英文，跳过标点/空白/数字）
  * 结果写入 ar->line_chars[]
+ *
+ * 英文词边界哨兵（2026-09-06 源头治理）：原实现把英文词间空格直接跳过，
+ * 导致 "that Elizabeth" 被提取成连续字符流 "thatElizabeth"，PMI 词发现
+ * 贪婪合并后产出 "thatElizabeth"/"theshriek" 这类粘连碎片词。
+ * 现在检测到「英文字母 + 空格 + 英文字母」的英文词边界时，写入哨兵
+ * 单字节 0x01（SOH），供 PMI 合并循环识别并强制断词——英文词边界不再
+ * 被抹掉，合法英文词仍正常发现，中文（无空格）完全不受影响。
  */
 static int _ar_extract_chars(ArticleReader* ar, const char* line) {
     const char* p = line;
@@ -417,9 +424,22 @@ static int _ar_extract_chars(ArticleReader* ar, const char* line) {
     while (*p && count < 4096) {
         int bytes = get_char_bytes(p);
         if (bytes <= 0 || bytes > 4) { p++; continue; }
-        // 跳过空白
+        // 跳过空白——但「字母+空格+字母」是英文词边界，写入哨兵而非直接跳过
         if (bytes == 1 && (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')) {
-            p++; continue;
+            char prev_c = (count > 0) ? ar->line_chars[count - 1][0] : '\0';
+            char next_c = p[1];
+            int prev_alpha = (prev_c >= 'a' && prev_c <= 'z') ||
+                             (prev_c >= 'A' && prev_c <= 'Z');
+            int next_alpha = (next_c >= 'a' && next_c <= 'z') ||
+                             (next_c >= 'A' && next_c <= 'Z');
+            if (prev_alpha && next_alpha) {
+                /* 英文词间空格 → 写入哨兵 0x01（单字节，占一个槽位） */
+                ar->line_chars[count][0] = 0x01;
+                ar->line_chars[count][1] = '\0';
+                count++;
+            }
+            p++;
+            continue;
         }
         // 跳过不可打印字符
         if (bytes == 1 && (*p < 32 || *p > 126)) { p++; continue; }
@@ -729,12 +749,17 @@ int article_process_line(ArticleReader* ar, const char* line) {
 
     // 更新字符频率和共现统计
     for (int i = 0; i < n; i++) {
+        // 英文词边界哨兵（0x01）不参与字符/共现统计
+        if (ar->line_chars[i][0] == 0x01) continue;
+
         // 字符频率
         CharEntry* ce = _ar_find_char(ar, ar->line_chars[i]);
         if (ce) { ce->count++; ar->total_chars++; }
 
         // 窗口内共现
         for (int w = 1; w <= ar->cfg.window_size && (i + w) < n; w++) {
+            // 共现对跨哨兵（英文词边界）无意义，跳过
+            if (ar->line_chars[i + w][0] == 0x01) continue;
             PairEntry* pe = _ar_find_pair(ar, ar->line_chars[i],
                                            ar->line_chars[i + w]);
             if (pe) pe->co_count++;
@@ -787,6 +812,9 @@ int _article_flush_locked(ArticleReader* ar, SubTopology* topo,
     for (int i = 0; i < ar->seq_len - 1; i++) {
         pair_scores[i] = 0;
 
+        // 英文词边界哨兵（0x01）→ 强制断词，禁止跨词边界合并
+        if (ar->seq[i][0] == 0x01 || ar->seq[i + 1][0] == 0x01) continue;
+
         PairEntry* pe = _ar_find_pair(ar, ar->seq[i], ar->seq[i + 1]);
         if (!pe || pe->co_count < ar->cfg.min_freq) continue;
 
@@ -813,14 +841,14 @@ int _article_flush_locked(ArticleReader* ar, SubTopology* topo,
         // 连接奖励：如果附近也有高评分对（该字符对处于更长的上下文中）
         // 向前看一步：检查 seq[i+1] 与 seq[i+2] 是否也有有效 pair
         float conn_bonus = 0.0f;
-        if (i + 2 < ar->seq_len) {
+        if (i + 2 < ar->seq_len && ar->seq[i + 2][0] != 0x01) {
             PairEntry* next_pe = _ar_find_pair(ar, ar->seq[i + 1], ar->seq[i + 2]);
             if (next_pe && next_pe->co_count >= ar->cfg.min_freq) {
                 conn_bonus = 1.0f;
             }
         }
         // 向后看一步：检查 seq[i-1] 与 seq[i] 是否也有有效 pair
-        if (conn_bonus < 1.0f && i > 0) {
+        if (conn_bonus < 1.0f && i > 0 && ar->seq[i - 1][0] != 0x01) {
             PairEntry* prev_pe = _ar_find_pair(ar, ar->seq[i - 1], ar->seq[i]);
             if (prev_pe && prev_pe->co_count >= ar->cfg.min_freq) {
                 conn_bonus = 1.0f;
@@ -852,6 +880,7 @@ int _article_flush_locked(ArticleReader* ar, SubTopology* topo,
         char word_buf[AR_WORD_MAX_LEN * 4 + 1] = {0};
         int total_bytes = 0;
         for (int k = i; k <= end + 1 && k < ar->seq_len; k++) {
+            if (ar->seq[k][0] == 0x01) break;  /* 哨兵：英文词边界，绝不拼入词 */
             size_t blen = strlen(ar->seq[k]);
             if (blen == 0 || total_bytes + (int)blen >= (int)sizeof(word_buf) - 1) break;
             memcpy(word_buf + total_bytes, ar->seq[k], blen);

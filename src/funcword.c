@@ -366,9 +366,9 @@ static int funcword_scan_shadow(HuarongTopologyNet* vnet,
     /* 分类 + 影子打印（每 10 次扫描打印一次完整清单） */
     int func_candidates = 0;
     g_scan_count++;
-    /* 测试期每次都 verbose（影子模式验证需要看全量输出）；
-     * 阶段 1 转正式时改回 %10 限流 */
-    int verbose = 1;
+    /* 影子模式验证已结束，改回 %10 限流——避免每轮 900+ 行 [分类器]
+     * 日志刷屏（曾占全天日志 94%，严重耗 I/O 且淹没真错误）。 */
+    int verbose = (g_scan_count % 10 == 0);
 
     if (verbose)
         LOG_INFO("[分类器] ===== 影子模式扫描 #%d (节点=%d) =====", g_scan_count, vnet->node_count);
