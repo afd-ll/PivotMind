@@ -1165,6 +1165,35 @@ static int _anchor_stage_a(void) {
     return cached;
 }
 
+/* [段A 判据] 该词节点的 cross-link 是否真的是「词 → 组成字」：
+ * 按【链接创建顺序】把指向词汇层的目标字拼起来，须与词名完全相等。
+ * 为什么不用 relation 字段：它存盘时未写（master_serialize_tail 只写
+ * topo/node/weight/use_count）⇒ 加载后不可信。结构性判据无需改格式。
+ * 为什么按创建顺序而非 node_id 序：涌现是「先 A 后 B」建链，顺序即词序
+ * （node_id 序可能颠倒，如「那个」的字 id 是 个<那）。
+ * 返回组成字数（0 = 拼不回词名 ⇒ 非组成字链接，段A 应跳过）。 */
+#define _WORD_LINK_MAX 16
+static int _word_constituents(MasterTopology* master, HuarongTopologyNet* vocab,
+                              int cnid, const char* word, int* out_ids) {
+    if (!master || !vocab || !word || !out_ids || !word[0]) return 0;
+    int n = 0;
+    char buf[64]; int p = 0; buf[0] = 0;
+    for (int li = 0; li < master->cross_link_count && n < _WORD_LINK_MAX; li++) {
+        CrossTopologyLink* l = master->cross_links[li];
+        if (!l || l->from_topo_id != TOPO_CONCEPT || l->from_node_id != cnid) continue;
+        if (l->to_topo_id != TOPO_VOCABULARY) continue;
+        int vid = l->to_node_id;
+        if (vid < 0 || vid >= vocab->node_count) continue;
+        ReasoningNode* vn = vocab->nodes[vid];
+        if (!vn || !vn->concept || !vn->concept[0]) continue;
+        if (p + (int)strlen(vn->concept) >= (int)sizeof(buf) - 1) break;
+        p += snprintf(buf + p, sizeof(buf) - (size_t)p, "%s", vn->concept);
+        out_ids[n++] = vid;
+    }
+    if (n == 0 || strcmp(buf, word) != 0) return 0;
+    return n;
+}
+
 static int _anchor_guard(void) {
     static int cached = -1;
     if (cached < 0) {
@@ -1315,29 +1344,37 @@ int diffusion_generate(DiffusionCtx* ctx,
                     }
                 }
 
-                /* 词节点 → cross-link → 组成字，激活字节点 */
-                for (int li = 0; li < ctx->master->cross_link_count; li++) {
-                    CrossTopologyLink* l = ctx->master->cross_links[li];
-                    if (!l || l->from_topo_id != TOPO_CONCEPT ||
-                        l->from_node_id != cnid ||
-                        l->to_topo_id != TOPO_VOCABULARY) continue;
-                    int vid = l->to_node_id;
-                    if (vid < 0 || vid >= ctx->vocab->net->node_count) continue;
-                    ReasoningNode* vn = ctx->vocab->net->nodes[vid];
-                    if (!vn) continue;
-                    vn->activation += 0.3f;
-                    int dup = 0;
-                    for (int d = 0; d < active_count; d++)
-                        if (active_ids[d] == vid) { dup = 1; break; }
-                    if (_anchor_dbg()) {
-                        ReasoningNode* _cn = (cnid >= 0 && cnid < ctx->concept->net->node_count)
-                                             ? ctx->concept->net->nodes[cnid] : NULL;
-                        fprintf(stderr, "[ANCHOR] A bridge cnid=%d(%s) -> vid=%d(%s) w=%.3f uc=%d tr=%.3f\n",
-                                cnid, (_cn && _cn->concept) ? _cn->concept : "?",
-                                vid, vn->concept ? vn->concept : "?",
-                                (double)l->weight, l->use_count, (double)l->transfer_rate);
+                /* 词节点 → cross-link → 组成字，激活字节点。
+                 * [判据加固] 只走【确实拼回词名】的链接：老状态的 seed 链接
+                 * 语义是「概念↔概念关联」，走它会注入噪声（作者 v0.6.3 实测
+                 * 锚定集 49.6% 变脏即为此时关掉段A的原因）。 */
+                {
+                    ReasoningNode* _wn = (cnid >= 0 && cnid < ctx->concept->net->node_count)
+                                         ? ctx->concept->net->nodes[cnid] : NULL;
+                    int _vids[_WORD_LINK_MAX];
+                    int _nv = _wn ? _word_constituents(ctx->master, ctx->vocab->net,
+                                                       cnid, _wn->concept, _vids) : 0;
+                    if (_nv == 0) {
+                        if (_anchor_dbg() && _wn)
+                            fprintf(stderr,
+                                "[ANCHOR] A skip cnid=%d(%s)：cross-link 拼不回词名（非组成字链接）\n",
+                                cnid, _wn->concept ? _wn->concept : "?");
                     }
-                    if (!dup) active_ids[active_count++] = vid;
+                    for (int k = 0; k < _nv; k++) {
+                        int vid = _vids[k];
+                        if (vid < 0 || vid >= ctx->vocab->net->node_count) continue;
+                        ReasoningNode* vn = ctx->vocab->net->nodes[vid];
+                        if (!vn) continue;
+                        vn->activation += 0.3f;
+                        int dup = 0;
+                        for (int d = 0; d < active_count; d++)
+                            if (active_ids[d] == vid) { dup = 1; break; }
+                        if (_anchor_dbg())
+                            fprintf(stderr, "[ANCHOR] A bridge cnid=%d(%s) -> vid=%d(%s)\n",
+                                    cnid, _wn && _wn->concept ? _wn->concept : "?",
+                                    vid, vn->concept ? vn->concept : "?");
+                        if (!dup && active_count < DIFF_MAX_CANDIDATES) active_ids[active_count++] = vid;
+                    }
                 }
             }
             /* v0.6.3·批1 第17步：段A 命中后是否短路段B。
