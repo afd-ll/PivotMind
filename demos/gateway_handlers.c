@@ -496,6 +496,8 @@ void handle_status(GatewaySystem* gw, int fd) {
     const char* circadian_phase = gw->brainstem ? brainstem_get_circadian_phase(gw->brainstem) : "unknown";
     long cache_frozen = gw->brain_cache ? gw->brain_cache->total_freezes : 0;
     long cache_thawed = gw->brain_cache ? gw->brain_cache->total_thaws : 0;
+    /* [BG-51] 累计移出内存的边数：冻结把边挪走时必须留下账 */
+    long cache_edges_frozen = gw->brain_cache ? gw->brain_cache->total_edges_frozen : 0;
 
     char json[2048];
     snprintf(json, sizeof(json),
@@ -513,6 +515,7 @@ void handle_status(GatewaySystem* gw, int fd) {
         "\"template_voting\":%s,"
         "\"brain_frozen\":%ld,"
         "\"brain_thawed\":%ld,"
+        "\"edges_frozen\":%ld,"
         "\"topologies\":%d,"
         "\"port\":%d,"
         "\"version\":\"%s\""
@@ -529,6 +532,7 @@ void handle_status(GatewaySystem* gw, int fd) {
         gw->topology->use_template_voting ? "true" : "false",
         cache_frozen,
         cache_thawed,
+        cache_edges_frozen,
         gw->topology->sub_topo_count,
         gw->port, PIVOTMIND_VERSION);
 

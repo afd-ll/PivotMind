@@ -39,6 +39,7 @@ typedef struct NodeCache {
     int    total_cooled;        /* 当前冷却节点数 */
     long   total_thaws;         /* 累计唤醒次数 */
     long   total_freezes;       /* 累计冻结次数 */
+    long   total_edges_frozen;  /* [BG-51 记账] 累计被移出内存的边数（freeze 清 edge_count 前累加） */
     int    auto_thaw_ok;        /* 自动解冻开关：内存充足=1，紧张=0 */
 
     /* 索引表（内存驻留，O(1) 定位） */

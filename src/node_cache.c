@@ -261,6 +261,10 @@ int node_cache_freeze(NodeCache* nc, HuarongTopologyNet* net, ReasoningNode* nod
     int lock_idx = node->node_id & (PM_NODE_LOCK_COUNT - 1);
     pthread_mutex_lock(&net->node_locks[lock_idx]);
 
+    /* [BG-51 记账] 冻结会把 edge_count 清零、把边移出内存 —— 丢弃必须记账。
+     * 该计数经 /status 的 edges_frozen 露出，供「活跃图单调收缩」的量化对账。 */
+    __sync_fetch_and_add(&nc->total_edges_frozen, (long)node->edge_count);
+
     /* 2. 释放连接相关内存（Edges 和 conn_hash 都走延迟释放防 use-after-free）
      *    先置 NULL 断活引用，再入退役链表——防止 read 线程在 retire→free
      *    窗口内读到悬空指针。 */

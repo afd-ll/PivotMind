@@ -633,6 +633,7 @@ static void brainstem_tick_freeze(Brainstem* bs, const CircadianParams* cp) {
     if (bs->tick_count % freeze_interval != 0) return;
 
     int frozen = 0;
+    long edges_moved = 0;   /* [BG-51 记账] 本轮被移出内存的边数 */
     for (int t = 0; t < bs->master->sub_topo_count && frozen < max_freeze_per_tick; t++) {
         SubTopology* sub = bs->master->sub_topologies[t];
         if (!sub || !sub->net || sub->net->node_count == 0) continue;
@@ -645,15 +646,19 @@ static void brainstem_tick_freeze(Brainstem* bs, const CircadianParams* cp) {
             /* v0.5.13 fix: 冻结线 0.005→0.001——喂料节点保底激活 0.1，
              * 0.005 太严，衰减后必被冻（08-12 冻结风暴根因之一） */
             if (node->edge_count > 0 && node->activation < 0.001f) {
-                node_cache_freeze(nc, sub->net, node);
-                frozen++;
+                /* [BG-51 记账] freeze 内部会清零 edge_count ⇒ 先把边数取出来 */
+                long ne = (long)node->edge_count;
+                if (node_cache_freeze(nc, sub->net, node) == 0) {
+                    frozen++;
+                    edges_moved += ne;
+                }
             }
         }
         pthread_rwlock_unlock(&sub->rwlock);
     }
 
     if (frozen > 0 && bs->verbose) {
-        LOG_INFO("[脑干] 本轮冻结 %d 个冷节点 (健康=%s)", frozen,
+        LOG_INFO("[脑干] 本轮冻结 %d 个冷节点，移出 %ld 条边 (健康=%s)", frozen, edges_moved,
                  hl == HM_RED ? "RED" : hl == HM_YELLOW ? "YELLOW" : "GREEN");
     }
 
