@@ -65,6 +65,12 @@ typedef struct {
     float*  _tpl_scores;
     float*  _emo_scores;
     int     _vocab_cap;       /* 词汇层容量 */
+    /* [relevance 多跳表] 原实现是栈上固定数组 rel2_map[4096]，条件 vn<=4096 才启用；
+     * 词汇拓扑涨到 2.4 万后该条件恒假 ⇒ relevance 全 0 ⇒ 输出闸门
+     * (`relevance < 0.3 → continue`) 把主输出判空 ⇒ 悄悄走降级分支。
+     * 改为按需分配并缓存在 ctx（与 _vocab_scores 同款），容量随词汇增长。 */
+    float*  _rel2_map;
+    int     _rel2_cap;
     int     _sem_cap;         /* 语义层容量 */
     int     _tpl_cap;         /* 模板层容量 */
     int     _emo_cap;         /* 情绪层容量 */

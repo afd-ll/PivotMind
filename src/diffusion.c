@@ -769,6 +769,8 @@ void diffusion_cleanup(DiffusionCtx* ctx) {
     free(ctx->_sem_scores);   ctx->_sem_scores   = NULL;
     free(ctx->_tpl_scores);   ctx->_tpl_scores   = NULL;
     free(ctx->_emo_scores);   ctx->_emo_scores   = NULL;
+    free(ctx->_rel2_map);     ctx->_rel2_map     = NULL;
+    ctx->_rel2_cap  = 0;
     ctx->_vocab_cap = 0;
     ctx->_sem_cap   = 0;
     ctx->_tpl_cap   = 0;
@@ -969,8 +971,13 @@ static int words_share_char(const char* a, const char* b) {
  *  - 新词更长且包含旧词(strstr) → 替换旧词（后到"方鸿渐"替换先到"方鸿"）
  *  - 双方共享字符(等长边界重叠，如"方鸿"/"鸿渐") → 跳过新词
  * 返回 1=已插入/替换，0=跳过。 */
-static int word_prio_add(const char** word_prio, int* count, const char* w,
-                         int cap) {
+/* src 语义（用于输出侧的相关性闸门，见 CX-16/17）：
+ *   0 = 输入里直接命中的词（stage A）——**放行**（输入自己的词当然该输出）
+ *   1 = 语义场成员 / 概念桥推导出的词——**须过相关性闸门**（它们是"挑西"这类噪声的来源）
+ * 为什么要分：降级输出路径先把 word_prio 装满 4 个槽，而它原本一个闸门都没有，
+ * 于是推导出的垃圾词把 MAX_REPLY_WORDS 占满，相关性排序的 final[] 一个也进不来。 */
+static int word_prio_add(const char** word_prio, unsigned char* src, int* count,
+                         const char* w, int cap, unsigned char s) {
     if (!w || !w[0]) return 0;
     /* 用户可见输出判据：word_prio 是「词锚定/语义场优先输出队列」，其元素最终
      * 原样进 output_words → 回复文本。内部匿名节点 sem_<x>_<n> 在此一次挡掉，
@@ -983,11 +990,13 @@ static int word_prio_add(const char** word_prio, int* count, const char* w,
         if (strstr(ex, w)) return 0;               /* 旧更长覆盖新 → 跳过新 */
         if (strstr(w, ex)) {                       /* 新更长覆盖旧 → 替换旧 */
             word_prio[k] = w;
+            if (src) src[k] = s;
             return 1;
         }
         if (words_share_char(ex, w)) return 0;     /* 等长/边界字符重叠 → 跳过新 */
     }
     if (*count >= cap) return 0;
+    if (src) src[*count] = s;
     word_prio[(*count)++] = w;
     return 1;
 }
@@ -1165,6 +1174,35 @@ static int _anchor_stage_a(void) {
     return cached;
 }
 
+/* [段A 判据] 该词节点的 cross-link 是否真的是「词 → 组成字」：
+ * 按【链接创建顺序】把指向词汇层的目标字拼起来，须与词名完全相等。
+ * 为什么不用 relation 字段：它存盘时未写（master_serialize_tail 只写
+ * topo/node/weight/use_count）⇒ 加载后不可信。结构性判据无需改格式。
+ * 为什么按创建顺序而非 node_id 序：涌现是「先 A 后 B」建链，顺序即词序
+ * （node_id 序可能颠倒，如「那个」的字 id 是 个<那）。
+ * 返回组成字数（0 = 拼不回词名 ⇒ 非组成字链接，段A 应跳过）。 */
+#define _WORD_LINK_MAX 16
+static int _word_constituents(MasterTopology* master, HuarongTopologyNet* vocab,
+                              int cnid, const char* word, int* out_ids) {
+    if (!master || !vocab || !word || !out_ids || !word[0]) return 0;
+    int n = 0;
+    char buf[64]; int p = 0; buf[0] = 0;
+    for (int li = 0; li < master->cross_link_count && n < _WORD_LINK_MAX; li++) {
+        CrossTopologyLink* l = master->cross_links[li];
+        if (!l || l->from_topo_id != TOPO_CONCEPT || l->from_node_id != cnid) continue;
+        if (l->to_topo_id != TOPO_VOCABULARY) continue;
+        int vid = l->to_node_id;
+        if (vid < 0 || vid >= vocab->node_count) continue;
+        ReasoningNode* vn = vocab->nodes[vid];
+        if (!vn || !vn->concept || !vn->concept[0]) continue;
+        if (p + (int)strlen(vn->concept) >= (int)sizeof(buf) - 1) break;
+        p += snprintf(buf + p, sizeof(buf) - (size_t)p, "%s", vn->concept);
+        out_ids[n++] = vid;
+    }
+    if (n == 0 || strcmp(buf, word) != 0) return 0;
+    return n;
+}
+
 static int _anchor_guard(void) {
     static int cached = -1;
     if (cached < 0) {
@@ -1217,6 +1255,7 @@ int diffusion_generate(DiffusionCtx* ctx,
     /* 词锚定优先输出队列：命中的词节点 concept 直接进输出候选
      * （v0.6 Phase 2b：输入关联的实义词优先于散字联想） */
     const char* word_prio[16];
+    unsigned char word_prio_src[16];   /* 0=输入命中词 1=语义场/概念桥推导 */
     int word_prio_count = 0;
 
     /* ── 第0步A：词锚定（v0.6）──
@@ -1242,6 +1281,25 @@ int diffusion_generate(DiffusionCtx* ctx,
                             win_chars, sub, cnid, cnid < 0 ? " (miss)" : "");
                 if (cnid < 0) continue;
 
+                /* [词节点质量闸门 · CX-17] 只认「字↔词绑定成立」的词节点——
+                 * 其 cross-link 按创建顺序能拼回词名。概念层里存在大量 seed 期
+                 * 造出的垃圾词节点（如「挑西」：名字是任意二字组合，链接指向的
+                 * 字却毫无关系）。它们恰好是输入的 2 字子串 ⇒ 被当成"输入命中词"
+                 * 直接占满 MAX_REPLY_WORDS 槽位，相关性排序的 final[] 反而进不来。
+                 * 实测：skip 掉这些节点后，输出才可能由相关性排序决定。 */
+                {
+                    ReasoningNode* _wn0 = (cnid >= 0 && cnid < ctx->concept->net->node_count)
+                                          ? ctx->concept->net->nodes[cnid] : NULL;
+                    int _vids0[_WORD_LINK_MAX];
+                    if (!_wn0 || _word_constituents(ctx->master, ctx->vocab->net, cnid,
+                                                    _wn0->concept, _vids0) <= 0) {
+                        if (_anchor_dbg())
+                            fprintf(stderr, "[ANCHOR] A skip cnid=%d(%s)：绑定不成立（非组成词节点）\n",
+                                    cnid, (_wn0 && _wn0->concept) ? _wn0->concept : "?");
+                        continue;
+                    }
+                }
+
                 /* 词节点 concept 进优先输出队列（输入直接关联的实义词） */
                 if (cnid < ctx->concept->net->node_count) {
                     ReasoningNode* wnode = ctx->concept->net->nodes[cnid];
@@ -1260,8 +1318,8 @@ int diffusion_generate(DiffusionCtx* ctx,
                     if (wnode && wnode->concept && wnode->concept[0] &&
                         word_prio_count < 16) {
                         /* v0.5.20+ fix(C2): 字符级重叠去重（修"方鸿"+"鸿渐"裂词） */
-                        word_prio_add(word_prio, &word_prio_count,
-                                      wnode->concept, 16);
+                        word_prio_add(word_prio, word_prio_src, &word_prio_count,
+                                      wnode->concept, 16, 0);   /* 来源=输入命中 */
                         fprintf(stderr, "[词锚定DBG] win=%d 命中词节点: %s\n",
                                 win_chars, wnode->concept);
                     }
@@ -1278,8 +1336,8 @@ int diffusion_generate(DiffusionCtx* ctx,
                             if (w < 0.3f) continue;      /* 弱边不构成语义场 */
                             if (is_function_word(wnb->concept)) continue;
                             /* v0.5.20+ fix(C2): 字符级重叠去重 */
-                            word_prio_add(word_prio, &word_prio_count,
-                                          wnb->concept, 16);
+                            word_prio_add(word_prio, word_prio_src, &word_prio_count,
+                                          wnb->concept, 16, 1);   /* 来源=语义场 */
                             if (word_prio_count >= 16) break;
                         }
                     }
@@ -1306,8 +1364,8 @@ int diffusion_generate(DiffusionCtx* ctx,
                                 if (!mw || !mw->concept || !mw->concept[0]) continue;
                                 if (is_function_word(mw->concept)) continue;
                                 /* v0.5.20+ fix(C2): 字符级重叠去重 */
-                                word_prio_add(word_prio, &word_prio_count,
-                                              mw->concept, 16);
+                                word_prio_add(word_prio, word_prio_src, &word_prio_count,
+                                              mw->concept, 16, 1);   /* 来源=概念桥 */
                                 if (word_prio_count >= 16) break;
                             }
                             break;   /* 只查第一个语义概念 */
@@ -1315,29 +1373,37 @@ int diffusion_generate(DiffusionCtx* ctx,
                     }
                 }
 
-                /* 词节点 → cross-link → 组成字，激活字节点 */
-                for (int li = 0; li < ctx->master->cross_link_count; li++) {
-                    CrossTopologyLink* l = ctx->master->cross_links[li];
-                    if (!l || l->from_topo_id != TOPO_CONCEPT ||
-                        l->from_node_id != cnid ||
-                        l->to_topo_id != TOPO_VOCABULARY) continue;
-                    int vid = l->to_node_id;
-                    if (vid < 0 || vid >= ctx->vocab->net->node_count) continue;
-                    ReasoningNode* vn = ctx->vocab->net->nodes[vid];
-                    if (!vn) continue;
-                    vn->activation += 0.3f;
-                    int dup = 0;
-                    for (int d = 0; d < active_count; d++)
-                        if (active_ids[d] == vid) { dup = 1; break; }
-                    if (_anchor_dbg()) {
-                        ReasoningNode* _cn = (cnid >= 0 && cnid < ctx->concept->net->node_count)
-                                             ? ctx->concept->net->nodes[cnid] : NULL;
-                        fprintf(stderr, "[ANCHOR] A bridge cnid=%d(%s) -> vid=%d(%s) w=%.3f uc=%d tr=%.3f\n",
-                                cnid, (_cn && _cn->concept) ? _cn->concept : "?",
-                                vid, vn->concept ? vn->concept : "?",
-                                (double)l->weight, l->use_count, (double)l->transfer_rate);
+                /* 词节点 → cross-link → 组成字，激活字节点。
+                 * [判据加固] 只走【确实拼回词名】的链接：老状态的 seed 链接
+                 * 语义是「概念↔概念关联」，走它会注入噪声（作者 v0.6.3 实测
+                 * 锚定集 49.6% 变脏即为此时关掉段A的原因）。 */
+                {
+                    ReasoningNode* _wn = (cnid >= 0 && cnid < ctx->concept->net->node_count)
+                                         ? ctx->concept->net->nodes[cnid] : NULL;
+                    int _vids[_WORD_LINK_MAX];
+                    int _nv = _wn ? _word_constituents(ctx->master, ctx->vocab->net,
+                                                       cnid, _wn->concept, _vids) : 0;
+                    if (_nv == 0) {
+                        if (_anchor_dbg() && _wn)
+                            fprintf(stderr,
+                                "[ANCHOR] A skip cnid=%d(%s)：cross-link 拼不回词名（非组成字链接）\n",
+                                cnid, _wn->concept ? _wn->concept : "?");
                     }
-                    if (!dup) active_ids[active_count++] = vid;
+                    for (int k = 0; k < _nv; k++) {
+                        int vid = _vids[k];
+                        if (vid < 0 || vid >= ctx->vocab->net->node_count) continue;
+                        ReasoningNode* vn = ctx->vocab->net->nodes[vid];
+                        if (!vn) continue;
+                        vn->activation += 0.3f;
+                        int dup = 0;
+                        for (int d = 0; d < active_count; d++)
+                            if (active_ids[d] == vid) { dup = 1; break; }
+                        if (_anchor_dbg())
+                            fprintf(stderr, "[ANCHOR] A bridge cnid=%d(%s) -> vid=%d(%s)\n",
+                                    cnid, _wn && _wn->concept ? _wn->concept : "?",
+                                    vid, vn->concept ? vn->concept : "?");
+                        if (!dup && active_count < DIFF_MAX_CANDIDATES) active_ids[active_count++] = vid;
+                    }
                 }
             }
             /* v0.6.3·批1 第17步：段A 命中后是否短路段B。
@@ -1796,9 +1862,15 @@ int diffusion_generate(DiffusionCtx* ctx,
      * 口径：rel(n) = max( max_a w(a→n),  max_a max_m w(a→m)*w(m→n)*decay )
      *   预计算一次 O(|A|·deg²)（在 final 循环之外，不随候选数放大），候选查表 O(1)。
      *   decay 默认 0.7（env PIVOTMIND_WALK_REL_DECAY；<=0 ⇒ 退化为旧单跳行为）。 */
-    enum { REL2_MAXN = 4096 };
-    float rel2_map[REL2_MAXN];
-    int   rel2_ok = (vn > 0 && vn <= REL2_MAXN);
+    /* 容量不再写死 4096：按需分配并缓存在 ctx（词汇涨到 2.4 万后
+     * 原来的 vn<=4096 条件恒假 ⇒ relevance 全 0 ⇒ 主输出被判空）。 */
+    if (vn > 0 && (!ctx->_rel2_map || ctx->_rel2_cap < vn)) {
+        free(ctx->_rel2_map);
+        ctx->_rel2_map = (float*)calloc((size_t)vn, sizeof(float));
+        ctx->_rel2_cap = ctx->_rel2_map ? vn : 0;
+    }
+    float* rel2_map = ctx->_rel2_map;
+    int    rel2_ok  = (vn > 0 && rel2_map != NULL);
     float _rel2_decay = 0.7f;
     {
         const char* _rd = getenv("PIVOTMIND_WALK_REL_DECAY");
@@ -2049,6 +2121,9 @@ int diffusion_generate(DiffusionCtx* ctx,
         /* ═══ 涌现状词类系统重排：按词性优先级输出 ═══ */
         POSTag      word_pos[DIFF_MAX_SEQUENCE];    /* 栈数组 128B */
         const char* word_buf[DIFF_MAX_SEQUENCE];    /* 栈数组 256B */
+        /* [来源标记] 每个输出词来自哪条队列：0=word_prio(锚定派生) 1=final(相关性排序) 2=回退联想
+         * 用途：输出组装"最后一公里"的可数证据（谁占满了 MAX_REPLY_WORDS 这 4 个槽）。 */
+        unsigned char word_src[DIFF_MAX_SEQUENCE];
         int         word_count = 0;
 
         /* 第0.5遍: 词锚定优先 — 命中的词节点先入候选（输入直接关联的
@@ -2074,12 +2149,27 @@ int diffusion_generate(DiffusionCtx* ctx,
             /* v0.5.38 正梁：单个非表意字符（CJK 标点/假名/谚文等）不得进入输出 */
             if (pm_is_single_nonzh_char(word_prio[p])) continue;
             if (pm_is_single_char(word_prio[p]) && pm_is_zh_char(word_prio[p])) continue;
+            /* [相关性闸门] 推导来的 word_prio 条目（语义场/概念桥）必须证明
+             * 自己与输入相关（多跳 relevance >= 0.3），否则不占输出槽位——
+             * 否则 "挑西" 这类推导噪声会把 MAX_REPLY_WORDS 占满，
+             * 相关性排序的 final[] 一个也进不来（CX-16/17 实测）。 */
+            if (word_prio_src[p] == 1) {
+                int _wid = huarong_net_find_concept(ctx->vocab->net, word_prio[p]);
+                float _wrel = (rel2_ok && _wid >= 0 && _wid < vn) ? rel2_map[_wid] : 0.0f;
+                if (_wrel < 0.3f) {
+                    if (_anchor_dbg())
+                        fprintf(stderr, "[输出闸门] 丢弃推导词「%s」(rel=%.3f)\n",
+                                word_prio[p], (double)_wrel);
+                    continue;
+                }
+            }
             int dup = 0;
             for (int w = 0; w < word_count; w++) {
                 if (strcmp(word_prio[p], word_buf[w]) == 0) { dup = 1; break; }
             }
             if (dup) continue;
             word_buf[word_count] = word_prio[p];
+            word_src[word_count] = 0;   /* 来源：word_prio（锚定派生，不过相关性闸门） */
             word_pos[word_count] = emergent_pos_tag(
                 ctx->emergent_pos, ctx->master, word_prio[p]);
             if (word_pos[word_count] == POS_UNKNOWN)
@@ -2112,6 +2202,7 @@ int diffusion_generate(DiffusionCtx* ctx,
             if (dup) continue;
 
             word_buf[word_count] = final[i].word;
+            word_src[word_count] = 1;   /* 来源：final[]（相关性排序 + rel>=0.3） */
             word_pos[word_count] = emergent_pos_tag(
                 ctx->emergent_pos, ctx->master, final[i].word);
             /* 英文兜底: EmergentPOS (zh) 无法分类英文词 */
@@ -2148,6 +2239,7 @@ int diffusion_generate(DiffusionCtx* ctx,
                      * output_words → 回复文本，必须拒内部匿名节点 sem_<x>_<n>。 */
                     if (!concept_is_outputtable(nb->concept)) continue;
                     word_buf[word_count] = nb->concept;
+                    word_src[word_count] = 2;   /* 来源：回退联想（主输出为空时） */
                     word_pos[word_count] = emergent_pos_tag(
                         ctx->emergent_pos, ctx->master, nb->concept);
                     if (word_pos[word_count] == POS_UNKNOWN)
@@ -2163,6 +2255,15 @@ int diffusion_generate(DiffusionCtx* ctx,
          * 语法组装（assemble_grammar）暂缓：当前 POS 标注质量下
          * 组装反而乱序（"个人家后来说话..."），话题序更符合中文
          * 口语习惯——等词性标注成熟后再启用语法组装。 */
+        if (_anchor_dbg()) {
+            fprintf(stderr, "[输出] 候选 %d 个（上限 %d）：", word_count, MAX_REPLY_WORDS);
+            for (int w = 0; w < word_count; w++) {
+                const char* src = (word_src[w] == 0) ? "锚定" : (word_src[w] == 1) ? "相关" : "回退";
+                fprintf(stderr, "%s(%s)%s", word_buf[w] ? word_buf[w] : "?", src,
+                        (w == MAX_REPLY_WORDS - 1) ? " ||截断|| " : " ");
+            }
+            fprintf(stderr, "\n");
+        }
         out = 0;
         {
             const int max_reply_words = MAX_REPLY_WORDS;   /* 口语短句：≤4 实词 */
@@ -2188,6 +2289,20 @@ int diffusion_generate(DiffusionCtx* ctx,
             /* v0.5.38 正梁（PR #6）：单个非表意字符不得进入输出 */
             if (pm_is_single_nonzh_char(word_prio[p])) continue;
             if (pm_is_single_char(word_prio[p]) && pm_is_zh_char(word_prio[p])) continue;  /* 中文单字 */
+            /* [相关性闸门] 推导来的 word_prio 条目（语义场/概念桥）必须证明
+             * 自己与输入相关（多跳 relevance >= 0.3），否则不占输出槽位——
+             * 否则 "挑西" 这类推导噪声会把 MAX_REPLY_WORDS 占满，
+             * 相关性排序的 final[] 一个也进不来（CX-16/17 实测）。 */
+            if (word_prio_src[p] == 1) {
+                int _wid = huarong_net_find_concept(ctx->vocab->net, word_prio[p]);
+                float _wrel = (rel2_ok && _wid >= 0 && _wid < vn) ? rel2_map[_wid] : 0.0f;
+                if (_wrel < 0.3f) {
+                    if (_anchor_dbg())
+                        fprintf(stderr, "[输出闸门] 丢弃推导词「%s」(rel=%.3f)\n",
+                                word_prio[p], (double)_wrel);
+                    continue;
+                }
+            }
             output_words[out_fallback++] = word_prio[p];
             selected[sel++] = word_prio[p];
         }

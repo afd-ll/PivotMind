@@ -611,10 +611,10 @@ static void t9_pm_dir_invalid_which(void) {
 /* ============================ 用例 11 ============================ */
 
 static void t11_pm_file_contract(void) {
-    /* 12 个登记文件名在此【固化一份】：SSOT 的表内容必须被测试锁死，改表就得同步改本用例
+    /* 14 个登记文件名在此【固化一份】：SSOT 的表内容必须被测试锁死，改表就得同步改本用例
        （= 有意识的变更）。「文件名只在本表出现一次」的红线约束的是**调用点**，
        不约束作为「表校验器」的本单测。 */
-    static const char *const want_name[12] = {
+    static const char *const want_name[14] = {
         "pivotmind_state.dat",      /* PM_FILE_STATE         */
         "brain_state.dat",          /* PM_FILE_BRAIN_CACHE   */
         "features.bin",             /* PM_FILE_FEATURES      */
@@ -626,17 +626,29 @@ static void t11_pm_file_contract(void) {
         "pfe_strategy.bin",         /* PM_FILE_PFE_STRATEGY  */
         "pfe_workspace.bin",        /* PM_FILE_PFE_WORKSPACE */
         "pretrain_embeddings.bin",  /* PM_FILE_PRETRAIN_EMB  */
-        "gw_token"                  /* PM_FILE_TOKEN         */
+        "gw_token",                 /* PM_FILE_TOKEN         */
+        "transitions.bin",          /* PM_FILE_TRANSITIONS   */
+        "charpairs.bin"             /* PM_FILE_CHARPAIRS     */
     };
+    /* 编译期护栏（本用例第 11 支曾有过的真实崩溃）：
+       数组项数必须覆盖到 PM_FILE_CHARPAIRS 所在的位号，**漏项直接编译失败**，
+       而不是像修复前那样用 `for (i = 0; i < 14; i++)` 越界读到垃圾指针、
+       在 snprintf 的 strlen 里 SIGSEGV。14 = PM_FILE_CHARPAIRS 位号(13) + 1。 */
+    typedef char want_name_must_cover_all_file_bits[
+        (sizeof want_name / sizeof want_name[0]) >= 14u ? 1 : -1];
+    (void)sizeof(want_name_must_cover_all_file_bits);
     const char *data = pm_dir(PM_DIR_DATA);
     char want[PM_PATH_MAX];
     char buf[PM_PATH_MAX];
     int i, j;
 
-    T_START("11. pm_file(合法位) ⇒ <home>/data/<登记名>，与 pm_path 一致、指针稳定、12 项互异；非法位 ⇒ NULL");
+    /* [PROB-ASSIST v0.6.11] 登记表扩至 14 项（+PM_FILE_TRANSITIONS +PM_FILE_CHARPAIRS）。
+     * 注意 PM_FILE_ALL 仍是低 12 位：第 13/14 位刻意不进 ALL（独立存盘，
+     * 不参与 master_save_state 位图），故「互异」遍历到 14 而 ALL 断言不变。 */
+    T_START("11. pm_file(合法位) ⇒ <home>/data/<登记名>，与 pm_path 一致、指针稳定、14 项互异；非法位 ⇒ NULL");
     CHECK(data != NULL && data[0] == '/', "pm_dir(PM_DIR_DATA) 非法: %s", data ? data : "(NULL)");
 
-    for (i = 0; i < 12; i++) {
+    for (i = 0; i < 14; i++) {
         unsigned bit = 1u << i;
         const char *f = pm_file(bit);
 
@@ -655,9 +667,9 @@ static void t11_pm_file_contract(void) {
               i, (const void *)f, (const void *)pm_file(bit));
     }
 
-    /* 12 项两两互异（同一位表重复登记会立刻暴露） */
-    for (i = 0; i < 12; i++) {
-        for (j = i + 1; j < 12; j++) {
+    /* 14 项两两互异（同一位表重复登记会立刻暴露） */
+    for (i = 0; i < 14; i++) {
+        for (j = i + 1; j < 14; j++) {
             CHECK(strcmp(pm_file(1u << i), pm_file(1u << j)) != 0,
                   "1u<<%d 与 1u<<%d 撞车: %s", i, j, pm_file(1u << i));
         }
@@ -666,9 +678,12 @@ static void t11_pm_file_contract(void) {
     /* 位表自洽：PM_FILE_ALL = 12 位全置；相邻位号必须落在 data/ 下 */
     CHECK(PM_FILE_ALL == 0x00000FFFu, "PM_FILE_ALL 应为 0x00000FFF，实际 0x%08x", PM_FILE_ALL);
 
-    /* 非法 which ⇒ NULL（与 pm_dir 同构，绝不「悄悄返回 home」） */
+    /* 非法 which ⇒ NULL（与 pm_dir 同构，绝不「悄悄返回 home」）。
+     * 1u<<12 / 1u<<13 都是合法位（PM_FILE_TRANSITIONS / PM_FILE_CHARPAIRS）⇒ 越界位从 14 起。 */
     CHECK(pm_file(0u) == NULL, "pm_file(0) 应为 NULL");
-    CHECK(pm_file(1u << 12) == NULL, "pm_file(1u<<12) 应为 NULL（越界位）");
+    CHECK(pm_file(1u << 12) != NULL, "pm_file(1u<<12) 应为合法（PM_FILE_TRANSITIONS）");
+    CHECK(pm_file(1u << 13) != NULL, "pm_file(1u<<13) 应为合法（PM_FILE_CHARPAIRS）");
+    CHECK(pm_file(1u << 14) == NULL, "pm_file(1u<<14) 应为 NULL（越界位）");
     CHECK(pm_file(1u << 31) == NULL, "pm_file(1u<<31) 应为 NULL（越界位）");
     CHECK(pm_file(PM_FILE_STATE | PM_FILE_TOKEN) == NULL, "pm_file(多 bit) 应为 NULL");
     CHECK(pm_file(0xffffffffu) == NULL, "pm_file(全 1) 应为 NULL");

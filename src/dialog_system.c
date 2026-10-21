@@ -32,6 +32,8 @@
 #include "cognitive_controller.h"
 #include "diffusion.h"
 #include "perception.h"
+#include "transition_model.h"   /* [PROB-ASSIST v0.6.11] bigram 候选竞争 */
+#include "broca.h"            /* broca_wrap_response：候选词序列包装 */
 
 #include "error.h"
 #include <stdio.h>
@@ -58,6 +60,183 @@ static const char* get_confidence_level_name(CausalConfidenceLevel level);
 #define MAX_RESPONSE_LENGTH PM_MAX_RESPONSE_LEN
 #undef MAX_PATH_LENGTH
 #define MAX_PATH_LENGTH 10
+
+// ==================== [PROB-ASSIST v0.6.11] bigram 候选竞争 ====================
+//
+// 动机：纯走边（dialog_generate → broca 包装）产出词碎片的乱拼装，
+// 且 revise_and_retry 的 RETRY_FROM_POOL 分支原本空转（直接 continue），
+// 「竞争」名存实亡。此处用 transition_model 的 bigram 条件概率生成候选
+// 词序列，与 walk 结果按「内感受分 + bigram 几何平均概率」融合打分竞争；
+// 胜出者经 broca_wrap_response 包装后替换回复。候选同时 pool_save_path
+// 入认知调度中心的候选池（池机制自此真正启用）。
+//
+// 开关：PIVOTMIND_PROB_ASSIST=0 时 tm_global() 返回 NULL，整个函数第一关
+// 即返回 0，零成本完整回退。
+
+#define PA_MAX_CANDIDATES 4     /* 竞争候选数 */
+#define PA_MAX_CHAIN_LEN  10    /* 候选链最长词数（与 MAX_PATH_LENGTH 对齐） */
+#define PA_MIN_CHAIN_LEN  3     /* 低于此长度不参与竞争 */
+#define PA_ADVANCE_RETRY  4     /* 采样到不可输出词时的重试次数 */
+#define PA_BEAT_MARGIN    0.05f /* 候选须领先当前满意度的滞回 */
+
+typedef struct {
+    int   ids[PA_MAX_CHAIN_LEN];
+    char* words[PA_MAX_CHAIN_LEN];
+    int   len;
+    float final;      /* 融合分：0.65·内感受 + 0.35·bigram 几何平均概率 */
+} PA_Candidate;
+
+/* 链生成：从 seed 出发按 bigram 平滑分布采样；每步在 net 读锁内验证
+ * 节点存在、concept 可输出（concept_is_outputtable 是 BG-20 出口闸，
+ * 候选词必须过同一道闸），接受则 strdup concept。
+ * 返回链长（含 seed）；< PA_MIN_CHAIN_LEN 视为无效并自清理内部 words。
+ * words[0] 由调用方预置（seed 词借用），本函数不写 words[0]。 */
+static int pa_generate_chain(TransitionModel* tm, SubTopology* vocab,
+                             int32_t seed, uint32_t* rng, PA_Candidate* out) {
+    int len = 1;
+    int32_t cur = seed;
+    while (len < PA_MAX_CHAIN_LEN) {
+        int32_t nxt = -1;
+        char*   wcopy = NULL;
+        int     advance = 0;
+        for (int retry = 0; retry < PA_ADVANCE_RETRY && !advance; retry++) {
+            nxt = tm_sample_next(tm, cur, rng);
+            if (nxt < 0) break;   /* 无出边：终止链 */
+            pthread_rwlock_rdlock(&vocab->net->mutex);
+            if (nxt < vocab->net->node_count) {
+                ReasoningNode* nd = vocab->net->nodes[nxt];
+                if (nd && nd->concept && concept_is_outputtable(nd->concept)) {
+                    wcopy = strdup(nd->concept);
+                    if (wcopy) advance = 1;
+                }
+            }
+            pthread_rwlock_unlock(&vocab->net->mutex);
+        }
+        if (!advance) break;
+        out->ids[len]  = nxt;
+        out->words[len] = wcopy;
+        cur = nxt;
+        len++;
+        /* 长度 ≥4 后每步 ~15% 概率收尾，形成候选长度差异（上限 MAX_PATH_LENGTH） */
+        if (len >= 4) {
+            uint32_t x = *rng ? *rng : 0x9E3779B9u;
+            x ^= x << 13; x ^= x >> 17; x ^= x << 5; *rng = x;
+            if ((x & 0xFFFFu) < 0x2666u) break;
+        }
+    }
+    if (len < PA_MIN_CHAIN_LEN) {
+        for (int i = 1; i < len; i++) free(out->words[i]);
+        out->len = 0;
+        return 0;
+    }
+    out->len = len;
+    return len;
+}
+
+/* [PROB-ASSIST] 用 bigram 候选与 walk 结果竞争。
+ * 返回 1 表示候选胜出且 *response 已替换（调用方应结束重试循环）。 */
+static int prob_assist_compete(DialogSystem* sys, DialogInput* input,
+                               char** response, float current_satisfaction) {
+    if (!sys || !sys->master || !input || !response || !*response) return 0;
+    TransitionModel* tm = tm_global();
+    if (!tm) return 0;
+
+    /* 1. 词汇拓扑与其在 master->sub_topologies 里的池索引 */
+    SubTopology* vocab = master_get_sub_topology_by_type(sys->master, TOPO_VOCABULARY);
+    if (!vocab || !vocab->net) return 0;
+    int topo_idx = -1;
+    for (int i = 0; i < sys->master->sub_topo_count; i++) {
+        if (sys->master->sub_topologies[i] == vocab) { topo_idx = i; break; }
+    }
+
+    /* 2. seed = 输入 token 中最后一个已建词的节点（逆序找）。
+     * 训练时用户输入与 AI 回复连续喂料 ⇒ P(回复首词 | 输入尾词) 已在表中。 */
+    int32_t seed = -1;
+    char*   seed_word = NULL;
+    for (int i = input->token_count - 1; i >= 0 && seed < 0; i--) {
+        if (!input->tokens[i]) continue;
+        int nid = huarong_net_find_concept(vocab->net, input->tokens[i]);
+        if (nid >= 0) {
+            pthread_rwlock_rdlock(&vocab->net->mutex);
+            if (nid < vocab->net->node_count && vocab->net->nodes[nid] &&
+                vocab->net->nodes[nid]->concept) {
+                seed = nid;
+                seed_word = strdup(vocab->net->nodes[nid]->concept);
+            }
+            pthread_rwlock_unlock(&vocab->net->mutex);
+        }
+    }
+    if (seed < 0 || !seed_word) { free(seed_word); return 0; }
+
+    /* 3. 生成候选并逐条融合打分 */
+    EmergentPOS* ep = sys->controller ? sys->controller->emergent_pos : NULL;
+    PA_Candidate cands[PA_MAX_CANDIDATES];
+    memset(cands, 0, sizeof(cands));
+    uint32_t rng = (uint32_t)time(NULL) ^ (uint32_t)(uintptr_t)sys;
+    int ncand = 0;
+    for (int k = 0; k < PA_MAX_CANDIDATES; k++) {
+        PA_Candidate* c = &cands[ncand];
+        c->words[0] = seed_word;   /* 借用；清理时从 w=1 开始，seed_word 末尾统一 free */
+        if (pa_generate_chain(tm, vocab, seed, &rng, c) < PA_MIN_CHAIN_LEN) {
+            c->words[0] = NULL;    /* 短链：pa_generate_chain 已自清理 w≥1 */
+            continue;
+        }
+
+        PathResult pr;
+        memset(&pr, 0, sizeof(pr));
+        pr.topo_id = topo_idx;
+        pr.length = c->len;
+        float act = 0.0f, conf = 0.0f;
+        pthread_rwlock_rdlock(&vocab->net->mutex);
+        for (int i = 0; i < c->len && i < MAX_PATH_LENGTH; i++) {
+            pr.node_ids[i] = c->ids[i];
+            if (c->ids[i] >= 0 && c->ids[i] < vocab->net->node_count &&
+                vocab->net->nodes[c->ids[i]]) {
+                act  += vocab->net->nodes[c->ids[i]]->activation;
+                conf += vocab->net->nodes[c->ids[i]]->confidence;
+            }
+        }
+        pthread_rwlock_unlock(&vocab->net->mutex);
+        pr.act_sum  = act;
+        pr.conf_sum = conf;
+        pr.score    = (c->len > 0) ? act / (float)c->len : 0.0f;
+
+        float sat = sys->controller ? evaluate_draft(sys->controller, &pr, c->len) : 0.5f;
+        float avg_lp = tm_chain_logprob(tm, c->ids, c->len) / (float)c->len;
+        float geo = expf(avg_lp);
+        if (geo > 1.0f) geo = 1.0f;
+        c->final = 0.65f * sat + 0.35f * geo;
+
+        /* 候选入池：认知调度中心的 path_pool 自此有真实住户 */
+        if (topo_idx >= 0 && sys->controller) pool_save_path(sys->controller, topo_idx, &pr);
+        ncand++;
+    }
+
+    /* 4. 选最优并决定是否替换（滞回防抖动） */
+    int best = -1;
+    for (int k = 0; k < ncand; k++)
+        if (best < 0 || cands[k].final > cands[best].final) best = k;
+
+    int replaced = 0;
+    if (best >= 0 && cands[best].final > current_satisfaction + PA_BEAT_MARGIN) {
+        char* wrapped = broca_wrap_response(sys->master, ep,
+                                            (const char**)cands[best].words,
+                                            cands[best].len);
+        if (wrapped) {
+            free(*response);
+            *response = wrapped;
+            replaced = 1;
+            LOG_INFO("[PROB-ASSIST] bigram 候选胜出: 满意度 %.2f→%.2f, 链长 %d",
+                     current_satisfaction, cands[best].final, cands[best].len);
+        }
+    }
+
+    /* 5. 清理：words[0] 全是借用的 seed_word，w≥1 才是本函数 strdup 的 */
+    for (int k = 0; k < ncand; k++)
+        for (int w = 1; w < cands[k].len; w++) free(cands[k].words[w]);
+    free(seed_word);
+    return replaced;
+}
 #define DEFAULT_HOP_COUNT PM_DEFAULT_HOP_COUNT
 #define OUTPUT_CACHE_SIZE PM_OUTPUT_CACHE_SIZE
 
@@ -1858,8 +2037,14 @@ char* dialog_process(DialogSystem* sys, const char* user_input, DialogReasoning*
                 // --- RETRY_FROM_POOL: 从当前推理结果重排（不重搜） ---
                 if (retry_status == RETRY_FROM_POOL) {
                     ui_print_thinking_line("调度", "修正: 候选池重排");
-                    // 当前推理结果不变，仅用新意图权重重新生成回复
-                    // （未来接入束搜索候选池后，此处改为池内重选）
+                    /* [PROB-ASSIST v0.6.11] 空转分支落地：bigram 候选与 walk
+                     * 结果真竞争（概率辅助生成候选 + 池内重选）。胜出则替换
+                     * response 并结束重试；开关关闭时 prob_assist_compete
+                     * 首关返回 0，行为退化为原修正循环。 */
+                    if (prob_assist_compete(sys, input, &response, satisfaction)) {
+                        done = 1;
+                        break;
+                    }
                     continue;
                 }
 

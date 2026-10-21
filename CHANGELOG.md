@@ -1,5 +1,38 @@
 # Changelog
 
+## v0.6.11 — 2026-10-21
+
+> 来源：工作台 **CX-10 ~ CX-22**（词通路三段）＋ **PROB-ASSIST 成句**。
+> 本版把 10-14 以来只存在于部署工作树（`pm-deploy`）的改动收进主干 —— 此前**不在任何 git 仓库**里。
+
+### 核心变更
+
+| 段 | 模块 | 作用 |
+|---|---|---|
+| 段一 | `src/charpair.c` | 字对计数（字符串键、跨重启可读、可离线审计）⇒ `charpairs.bin` |
+| 段二 | `src/word_emerge.c` | 词涌现：词频 / PMI / 左右熵 三判据 ⇒ 候选词晋升 |
+| 段三 | `src/article_reader.c` | 段A 词锚定 ＋ **注册口质量闸门**（多字词须「词频 ≥ N」且「每个相邻字对 ≥ N」） |
+| 成句 | `src/transition_model.c` | bigram 条件概率竞争（add-λ 平滑），替换名存实亡的候选竞争 |
+
+### 修掉的断链（上线前阻塞）
+
+- `cp_observe_text()` **全仓零调用**（接线门禁以判据 B `(void)vocab` 报出）⇒ 字对表无写入源，
+  而注册口闸门以 `cpt_get()` 为判据 ⇒ 表空则所有多字词被拒、词层长不出来。
+  处置：删掉从未被读过的 `vocab` 形参 ＋ 接到 `article_process_line()`（文本进 reader 的唯一入口）。
+- `tests/unit/test_paths_unit.c` 登记表停在 13 项，源码已 14 项（+`PM_FILE_CHARPAIRS`）
+  ⇒ 同步到 14 并补齐编译期护栏（沿用该用例上次 SIGSEGV 的教训）。
+
+### 状态格式
+
+主状态 **fmt_ver 不变**（仍 v11）⇒ 旧数据可直接加载、回退 = 换回旧二进制。
+新增两张独立表：`transitions.bin` / `charpairs.bin`，**刻意不进 `PM_FILE_ALL`**（不参与 `master_save_state` 位图）。
+
+### 验证
+
+- `make all`：0 error / 0 warning
+- `make test`：**33 通过 / 0 失败**（含新增第 32 支 `test_transition_model_unit`）
+- `make check-wiring`：新增命中 0（白名单 1 / 基线 69）
+
 ## v0.6.10 — 2026-09-26
 
 > 来源：工作台 **BG-29 / BG-30-A2~A8 / BG-35 / BG-37 / BG-38**（同一轮内存审计）。

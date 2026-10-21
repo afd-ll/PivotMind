@@ -560,8 +560,17 @@ int concept_is_outputtable(const char* concept) {
  */
 #define CP_HASH_SIZE   65536
 #define CP_HASH_MASK   (CP_HASH_SIZE - 1)
-#define COMPOUND_N_MIN 10       /* 最少共现次数，防小样本噪声 */
+#define COMPOUND_N_MIN 10       /* 旧默认（保留兼容）；运行时由 PIVOTMIND_COMPOUND_N 覆盖 */
 #define COMPOUND_THETA 0.5f     /* 条件概率阈值 */
+/* [CX-18 上游治理] 旧判据只有「共现>=10 且 单向条件概率>=0.5」，**没有 PMI、没有熵**
+ * ⇒ 批量造出「挑西」「猴前」「道敢」这类 2 字垃圾词（实测词汇层 1,634 个多字词、
+ * 概念层 611 个坏绑定即由此而来），而它们的名字恰好是输入的子串 ⟹ 直接占满输出槽位。
+ * 新增 PMI 门槛（廉价：表里已有共现数与单字计数，再加一个总对数即可）：
+ *     PMI = log2( cooc * T / (count_a * count_b) )
+ * 默认阈值由 PIVOTMIND_COMPOUND_N（默认 20）与 PIVOTMIND_COMPOUND_PMI（默认 2.5）控制；
+ * 置 PIVOTMIND_COMPOUND_LEGACY=1 可完全回退旧行为（只查次数+条件概率）。 */
+#define COMPOUND_PMI_MIN 2.5f
+static long g_cp_total_pairs = 0;   /* 累计记录的相邻对数（PMI 的 T） */
 
 typedef struct {
     int node_a;   /* smaller node_id */
@@ -602,6 +611,7 @@ static void cp_tracker_ensure(int max_nodes) {
 
 static void cp_tracker_record(int id_a, int id_b) {
     pthread_mutex_lock(&g_cp_tracker_lock);
+    g_cp_total_pairs++;
     if (!g_pair_cooc || id_a < 0 || id_b < 0 || id_a == id_b) { pthread_mutex_unlock(&g_cp_tracker_lock); return; }
     /* v0.5.10: 持锁状态下内联扩容（不调 cp_tracker_ensure 防自锁死锁） */
     int max_id = id_a > id_b ? id_a : id_b;
@@ -656,13 +666,35 @@ static int cp_tracker_get_single(int id) {
 
 static int cp_tracker_should_create(int id_a, int id_b) {
     int cooc = cp_tracker_get_cooc(id_a, id_b);
-    if (cooc < COMPOUND_N_MIN) return 0;
+    /* 运行时阈值（默认比旧值严：20 / 2.5）；LEGACY=1 则完全回退旧行为 */
+    static int cached = -1;
+    static int   n_min = 20;
+    static float pmi_min = COMPOUND_PMI_MIN;
+    static int   legacy = 0;
+    if (cached < 0) {
+        const char* e;
+        legacy = ((e = getenv("PIVOTMIND_COMPOUND_LEGACY")) && e[0] == '1') ? 1 : 0;
+        n_min = COMPOUND_N_MIN;
+        if ((e = getenv("PIVOTMIND_COMPOUND_N"))) n_min = atoi(e);
+        if (!legacy && n_min < 20) n_min = 20;
+        if ((e = getenv("PIVOTMIND_COMPOUND_PMI"))) pmi_min = (float)atof(e);
+        cached = 1;
+    }
+    if (cooc < n_min) return 0;
     int ta = cp_tracker_get_single(id_a);
     int tb = cp_tracker_get_single(id_b);
     if (ta <= 0 || tb <= 0) return 0;
     float p_ba = (float)cooc / (float)ta;  /* P(B|A) */
     float p_ab = (float)cooc / (float)tb;  /* P(A|B) */
-    return (p_ba >= COMPOUND_THETA || p_ab >= COMPOUND_THETA) ? 1 : 0;
+    if (!legacy && !(p_ba >= COMPOUND_THETA || p_ab >= COMPOUND_THETA)) return 0;
+    if (legacy) return (p_ba >= COMPOUND_THETA || p_ab >= COMPOUND_THETA) ? 1 : 0;
+    /* PMI：cooc*T/(ta*tb)。T 用累计对数（同口径）。 */
+    if (g_cp_total_pairs > 0) {
+        double pmi = log2((double)cooc * (double)g_cp_total_pairs /
+                          ((double)ta * (double)tb));
+        if (pmi < (double)pmi_min) return 0;
+    }
+    return 1;
 }
 
 /* 继承源节点 A 和 B 的出边到组合节点 cn，权重取平均或按 0.7 折 */

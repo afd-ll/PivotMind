@@ -26,3 +26,5 @@
 #     ⇒ 全部登记进 wiring_baseline.txt（**不是**白名单）。当前白名单**仍为空**。
 # （下面这行是格式示例，已注释、不起作用。）
 # A example_public_api   # 示例：对外 API，按设计无仓内调用点
+B collect_cb ud   # cpt_foreach 的回调签名（CharPairCB）由 API 固定，上下文按契约可不用；
+                  # 不是「机制写了一半」——该函数每轮涌现都被 cpt_foreach 调用（word_emerge.c:114）

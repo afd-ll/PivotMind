@@ -13,6 +13,7 @@
  */
 
 #include "article_reader.h"
+#include "charpair.h"
 #include "huarong_topology.h"
 #include "topology_growth.h"
 #include "common.h"
@@ -558,6 +559,50 @@ static int _ar_register_word_node(ArticleReader* ar, SubTopology* topo,
             !has_vowel || !has_lower) return 0;
     }
 
+    /* ══ [CX-20 上游治理 3/3] 注册口质量闸门（唯一起作用的位置）══
+     * 旧行为：_ar_build_topo() 每次刷新都把【整张词表】无条件注册进拓扑，
+     * 中文一条判据都没有（只滤标点/ASCII）⇒ 基线 +5,000 行就长 ~4,300 个多字词；
+     * 名字恰是输入子串的（挑西/猴前/道敢）会被锚定当"输入命中词"占满输出槽位。
+     * 判据（可数、可倒查）：多字词须【词频 >= N】且【每个相邻字对在字对表里次数 >= N】。
+     *   · 字对表是我们今天的 charpair（字符串键、跨重启可读、可离线审计）
+     *   · freq < 0 表示受信任来源（内置种子词表），不受闸门约束
+     * env：PIVOTMIND_WORDGATE=0 关闭（A/B 用）；PIVOTMIND_WORDGATE_N 覆盖门槛（默认 20）。 */
+    if (freq >= 0) {
+        static int cached = -1, gate_on = 1, gate_n = 20;
+        if (cached < 0) {
+            const char* e;
+            gate_on = (!(e = getenv("PIVOTMIND_WORDGATE")) || e[0] != '0') ? 1 : 0;
+            if ((e = getenv("PIVOTMIND_WORDGATE_N"))) gate_n = atoi(e);
+            if (gate_n < 1) gate_n = 1;
+            cached = 1;
+        }
+        if (gate_on && !pm_is_ascii_text(text)) {
+            int nchar = 0;
+            for (const char* cp = text; *cp; ) {
+                int b = get_char_bytes(cp);
+                if (b <= 0) b = 1;
+                cp += b; nchar++;
+            }
+            if (nchar >= 2) {          /* 单字层：始终注册（基本单元） */
+                if (freq < gate_n) return 0;
+                CharPairTable* cpt = cpt_global();
+                if (!cpt) return 0;
+                const char* cp = text;
+                char prev[8] = {0};
+                while (*cp) {
+                    int b = get_char_bytes(cp);
+                    if (b <= 0) b = 1;
+                    char cur[8] = {0};
+                    if (b < 8) { memcpy(cur, cp, (size_t)b); cur[b] = 0; }
+                    cp += b;
+                    if (prev[0] && cur[0] && cpt_get(cpt, prev, cur) < (uint32_t)gate_n)
+                        return 0;
+                    snprintf(prev, sizeof(prev), "%s", cur);
+                }
+            }
+        }
+    }
+
     // insert_node_dynamic：具备自动扩容 + 全局统计
     nid = insert_node_dynamic(ar->master, topo->topo_id, text, NULL, 0);
     if (nid < 0) return -1;
@@ -629,7 +674,7 @@ static int _ar_build_topo(ArticleReader* ar, SubTopology* topo) {
         }
         for (int s = 0; s < seed_count && vtopo && vtopo->net; s++) {
             if (!seeds[s] || !seeds[s][0]) continue;
-            int rc = _ar_register_word_node(ar, vtopo, seeds[s], 5);
+            int rc = _ar_register_word_node(ar, vtopo, seeds[s], -1);  /* -1=受信任（种子词表），绕过质量闸门 */
             if (rc > 0) created++;
         }
     }
@@ -736,6 +781,13 @@ void article_reader_destroy(ArticleReader* ar) {
 
 int article_process_line(ArticleReader* ar, const char* line) {
     if (!ar || !line) return -1;
+
+    /* [CX-13 段一 · 接线补全] 字对计数：本函数是文本进 reader 的唯一入口，
+     * 字对表（charpair）必须在这里喂。理由：_ar_register_word_node 的注册口闸门
+     * （CX-20）以 cpt_get() 为判据，表空 ⇒ 每个相邻字对都 < gate_n ⇒ 所有多字词
+     * 被拒 ⇒ 词层永远长不出来。cp_observe_text 此前全仓零调用（接线门禁检出）。
+     * 放在 ar->mutex 之外：cpt 自带互斥，避免与外层锁序耦合。 */
+    cp_observe_text(line);
 
     pthread_mutex_lock(&ar->mutex);
 
@@ -965,6 +1017,38 @@ int _article_flush_locked(ArticleReader* ar, SubTopology* topo,
             // 检查 pair_table 中该字对是否高频
             PairEntry* pe = _ar_find_pair(ar, last_c, w2->text);
             if (!pe || pe->co_count < ar->cfg.min_freq) continue;
+
+            /* [CX-19 上游治理] 这条「词生长」路径原本**只有"共现>=min_freq(默认2)"**
+             * 一个判据——没有 PMI、没有熵 ⇒ 任意出现过两次的相邻字对都被合并成词节点。
+             * 实测：5,000 行小黄鸡语料就能造出 4,000+ 个多字词，而它们的名字恰好是
+             * 输入的子串 ⟹ 直接被锚定当"输入命中词"占满输出槽位（CX-17/18 根因）。
+             * 处置：补上与上面「贪婪合并」同一把尺子
+             *     score = α·PMI + β·频次奖励  >  pmi_threshold
+             * 关闭可回退：PIVOTMIND_AR_WORDGATE=0（A/B 用）。 */
+            {
+                static int cached = -1;
+                if (cached < 0) {
+                    const char* e = getenv("PIVOTMIND_AR_WORDGATE");
+                    cached = (!e || e[0] != '0') ? 1 : 0;
+                }
+                if (cached) {
+                    CharEntry* ce_a = _ar_find_char(ar, last_c);
+                    CharEntry* ce_b = _ar_find_char(ar, w2->text);
+                    if (!ce_a || !ce_b || ce_a->count == 0 || ce_b->count == 0) continue;
+                    float p_a  = (float)ce_a->count / ar->total_chars;
+                    float p_b  = (float)ce_b->count / ar->total_chars;
+                    float p_ab = (float)pe->co_count /
+                                 (float)(ar->total_chars > 1 ? ar->total_chars - 1 : 1);
+                    float pmi = 0.0f;
+                    if (p_a > 0 && p_b > 0 && p_ab > 0) {
+                        pmi = logf(p_ab / (p_a * p_b));
+                        if (pmi < 0) pmi = 0;
+                    }
+                    float freq_bonus = (float)pe->co_count / (pe->co_count + 5.0f);
+                    float score = ar->cfg.alpha * pmi + ar->cfg.beta * freq_bonus;
+                    if (score <= ar->cfg.pmi_threshold) continue;
+                }
+            }
 
             // 合并 — w1 也每次从索引读，防御内层循环中 _ar_find_or_add_word 的 realloc
             size_t w1len = strlen(ar->words[wi].text);

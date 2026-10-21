@@ -52,9 +52,9 @@ static const char *const g_subdir[PM_DIR_COUNT] = {
     "corpus"    /* PM_DIR_CORPUS  —— 书库（默认自动建） */
 };
 
-#define PM_FILE_COUNT 12
+#define PM_FILE_COUNT 14
 
-/* 位号 = 数组下标；PM_FILE_STATE(1u<<0)..PM_FILE_TOKEN(1u<<11)。
+/* 位号 = 数组下标；PM_FILE_STATE(1u<<0)..PM_FILE_TOKEN(1u<<11)..PM_FILE_TRANSITIONS(1u<<12)。
    数据文件名只在本表出现一次（SSOT）；调用点一律取 pm_file()。 */
 static const char *const g_filename[PM_FILE_COUNT] = {
     "pivotmind_state.dat",      /* PM_FILE_STATE         —— 主状态（脑干/健康监控/TrainMode/网关） */
@@ -68,7 +68,9 @@ static const char *const g_filename[PM_FILE_COUNT] = {
     "pfe_strategy.bin",         /* PM_FILE_PFE_STRATEGY  —— PFE 策略 */
     "pfe_workspace.bin",        /* PM_FILE_PFE_WORKSPACE —— PFE 工作区 */
     "pretrain_embeddings.bin",  /* PM_FILE_PRETRAIN_EMB  —— 预训练嵌入 */
-    "gw_token"                  /* PM_FILE_TOKEN         —— 网关凭据（0600，跨重启不变） */
+    "gw_token",                 /* PM_FILE_TOKEN         —— 网关凭据（0600，跨重启不变） */
+    "transitions.bin",          /* PM_FILE_TRANSITIONS   —— 转移计数（PROB-ASSIST；不进 PM_FILE_ALL） */
+    "charpairs.bin"             /* PM_FILE_CHARPAIRS     —— 字对计数（涌现判据依据；不进 PM_FILE_ALL） */
 };
 
 #define PM_ASSET_COUNT 4
