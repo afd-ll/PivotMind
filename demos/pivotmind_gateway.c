@@ -28,6 +28,8 @@
 
 #include "pivotmind_paths.h"
 #include "gateway_internal.h"
+#include "charpair.h"          /* [v0.6.11] 关闭时字对表落盘 */
+#include "transition_model.h"  /* [v0.6.11] 关闭时转移表落盘 */
 
 /* 全局网关实例：learn worker 等跨模块访问（见 gateway_internal.h extern）。
  * C1/P1-3: 它指向 main 里堆上的 GatewaySystem；关闭拆解完成后必须置 NULL
@@ -712,6 +714,14 @@ int main(int argc, char* argv[]) {
     }
 
     gw_system_shutdown(gw);
+
+    /* [v0.6.11 接线补全] 两张独立统计表在关闭时落盘。
+     * 它们刻意不进 PM_FILE_ALL（不参与 master_save_state 位图），
+     * 所以必须在主状态存盘之外单独保存。此前 cpt_global_shutdown_save /
+     * tm_global_shutdown_save 全仓零调用 ⇒ 关机即丢、重启从空表起步。
+     * 位置：在途连接已 join、gw_system_shutdown 已返回，无并发读者。 */
+    cpt_global_shutdown_save();
+    tm_global_shutdown_save();
 
     /* C1/P1-3: 拆完立刻断开全局指针，任何迟到线程都不会再解引用已释放的 gw */
     g_gw = NULL;
