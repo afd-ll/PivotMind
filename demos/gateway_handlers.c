@@ -105,6 +105,84 @@ static char* bg19_strip_scaffold(const char* src) {
     return out;
 }
 
+
+/* ── [BG-50] 纯虚词输入 ⇒ 直接不生成 ──
+ * 现象：输入「的了的在是我不」「the be of in to and」这类纯虚词串时，
+ * 生成器只能吐出虚词，或被「功能词兜底」换成「好的。」——而「好的。」本身就含「的」。
+ * 两种结果都算虚词泄漏（回归判据 tests/regression/test_filter.py：纯虚词输入
+ * 的回复必须是空/无回应，或完全不含虚词）。
+ * 判据集与回归测试保持一致（FW_ZH 核心 / FW_EN 核心）；这里不引 funcword.c，
+ * 因为那套需要节点上下文，而这一层只需要字面判定。 */
+static int _is_fw_zh_char(const char* p3) {
+    static const char* k[] = {
+        "的","了","在","是","我","你","他","她","它","们","不","这","那","也","就","都","还",
+        "把","被","和","与","或","对","从","到","向","给","让","要","能","会","可","以","很",
+        "最","更","一","个","些","里","中","上","下","得","地","着","过","吗","呢","吧", NULL
+    };
+    for (int i = 0; k[i]; i++) if (memcmp(p3, k[i], 3) == 0) return 1;
+    return 0;
+}
+
+static int _is_fw_en_word(const char* w, int n) {
+    static const char* k[] = {
+        "the","be","is","am","are","was","were","been","being","have","has","had","having",
+        "do","does","did","will","would","shall","should","may","might","must","can","could",
+        "of","in","to","for","with","on","at","from","by","about","up","down","out","off",
+        "over","under","not","no","nor","only","so","than","too","very","that","this","what",
+        "which","who","it","they","them","he","she","we","you","his","her","its","their",
+        "our","my","your","and","but","or","if","while","because","as", NULL
+    };
+    char buf[32];
+    if (n <= 0 || n >= (int)sizeof buf) return 0;
+    for (int i = 0; i < n; i++) {
+        char c = w[i];
+        if (c >= 'A' && c <= 'Z') c = (char)(c + 32);
+        buf[i] = c;
+    }
+    buf[n] = 0;
+    for (int i = 0; k[i]; i++) if (strcmp(buf, k[i]) == 0) return 1;
+    return 0;
+}
+
+/* 1 = 整条输入没有任何实义词 */
+static int msg_is_all_funcword(const char* msg) {
+    int hanzi = 0, ascii_words = 0, content = 0;
+    const char* p = msg;
+    while (p && *p) {
+        unsigned char c = (unsigned char)*p;
+        if (c < 0x80) {
+            if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
+                int n = 0;
+                const char* q = p;
+                while (*q) {
+                    unsigned char d = (unsigned char)*q;
+                    if (!((d >= 'a' && d <= 'z') || (d >= 'A' && d <= 'Z'))) break;
+                    q++; n++;
+                }
+                ascii_words++;
+                if (!_is_fw_en_word(p, n)) content = 1;
+                p = q;
+                continue;
+            }
+            p++;
+            continue;
+        }
+        int len = (c & 0xE0) == 0xC0 ? 2 : ((c & 0xF0) == 0xE0 ? 3 : 4);
+        if (len == 3) {
+            unsigned int cp = ((unsigned int)(p[0] & 0x0F) << 12)
+                            | ((unsigned int)(p[1] & 0x3F) << 6)
+                            |  (unsigned int)(p[2] & 0x3F);
+            if (cp >= 0x4E00 && cp <= 0x9FFF) {
+                hanzi++;
+                if (!_is_fw_zh_char(p)) content = 1;
+            }
+        }
+        p += len;
+    }
+    if (!content && (hanzi > 0 || ascii_words > 0)) return 1;
+    return 0;
+}
+
 // POST /chat - 对话
 void handle_chat(GatewaySystem* gw, int fd, const char* body) {
     char msg[2048] = {0};
@@ -116,6 +194,14 @@ void handle_chat(GatewaySystem* gw, int fd, const char* body) {
     /* ── v0.3 Phase 2: 复杂问题走 PFE 推理编排 ── */
     int use_pfe = 0;
     char* response = NULL;
+    /* [BG-50] 纯虚词输入：不生成。放在最前面 —— 先于 QA 记忆，
+     * 否则 QA 命中一句闲聊（「咸死了！呸呸」含「了」）同样算泄漏。 */
+    if (msg_is_all_funcword(msg)) {
+        LOG_INFO("[虚词闸门] 输入无实义词 ⇒ 不生成 输入=%.40s", msg);
+        http_json(fd, 200, "{\"reply\":\"(无回应)\",\"nodes\":0}");
+        return;
+    }
+
     /* CX-28 修复：QA 记忆命中也要过【语种闸门】再采纳。
      * 线上实测「天气」命中的是纯符号垃圾答案「= =」：它占住了 response 槽位 ⇒
      * 下面 `if (!response) prefrontal_chat(...)` 被跳过 ⇒ 最后语种兜底把「= =」扔掉
