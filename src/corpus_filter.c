@@ -42,7 +42,7 @@ static const char TRAD_CHARS[] =
 
 #define CF_TBL_SIZE 4096
 #define CF_MAX_SAMPLES 32
-#define CF_MAX_LINE   512
+#define CF_MAX_LINE   4096   /* 字节上限：心理语料答案是长段（800 汉字≈2.4KB），512 会误杀 */
 
 static char g_tbl[CF_TBL_SIZE][4];        /* 3 字节码 + NUL */
 static int  g_tbl_init = 0;
