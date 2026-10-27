@@ -11,6 +11,7 @@
 #include <string.h>
 #include <math.h>
 #include "error.h"
+#include "corpus_filter.h"   /* 加载口过滤：繁体/文言/无实义 */
 #include "word_prob.h"   /* CX-27: 写侧闸门（答案必须含实义字符） */
 #include "qa_memory.h"
 #include "utf8_tokenizer.h"
@@ -67,6 +68,14 @@ QAMemory* qa_memory_create(const char* pipe_path, int max_entries) {
 
         char* q = line;
         char* a = pipe + 1;
+
+        /* 🔴 加载路径不过 qa_memory_add，写入闸门管不到这里 ——
+         * 线上实证：「天气」命中的答案就是 "= ="（纯符号），把聊天主路径堵死（CX-28）。
+         * 所以加载口也要过同一套语料过滤（繁体/文言/无实义）。 */
+        {
+            int cfw = 0;
+            if (!cf_accept_qa(q, a, &cfw)) continue;
+        }
 
         char* tokens[MAX_TOKENS];
         int tc = utf8_tokenize(q, tokens, MAX_TOKENS);

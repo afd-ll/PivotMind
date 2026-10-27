@@ -192,6 +192,9 @@ $(BUILD_DIR)/seed_teacher: $(OBJ_DIR)/seed_teacher.o $(LIB_NAME)
 $(BUILD_DIR)/state_dump: $(OBJ_DIR)/state_dump.o $(LIB_NAME)
 	$(CC) $(CFLAGS) -o $@ $(OBJ_DIR)/state_dump.o -L. -lpivotmind $(LDFLAGS)
 
+$(BUILD_DIR)/qa_retrain: $(OBJ_DIR)/qa_retrain.o $(LIB_NAME)
+	$(CC) $(CFLAGS) -o $@ $(OBJ_DIR)/qa_retrain.o -L. -lpivotmind $(LDFLAGS)
+
 # ========== 工具二进制清单（SSOT：all: 与 tools: 共用同一份，禁止手抄）==========
 # 收录口径：tools/*.c 里所有「有 main 或可独立成二进制」的工具；
 # 唯一例外 probe_batch_contract（其独立门禁见文件末尾，刻意不进 all/test）。
@@ -214,7 +217,8 @@ TOOL_BINS = \
 	$(BUILD_DIR)/quick_chat \
 	$(BUILD_DIR)/reader \
 	$(BUILD_DIR)/seed_teacher \
-	$(BUILD_DIR)/state_dump
+	$(BUILD_DIR)/state_dump \
+	$(BUILD_DIR)/qa_retrain
 
 # ========== 构建目标 ==========
 
