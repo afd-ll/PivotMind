@@ -9,6 +9,7 @@
 #include "cingulate.h"
 #include "associative_reasoning.h"
 #include "broca.h"
+#include "dialog_system.h"   /* v0.6.13: recognize_intent（目标统筹·步1） */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -200,10 +201,37 @@ char* prefrontal_chat(Prefrontal* pf, const char* input) {
     }
 
     /* 意图推断 */
+    /* ── v0.6.13（目标统筹·步 1）：把意图识别接进主路径 ──
+     * 断点：`cognitive_controller_set_intent()` 全仓只有一个调用点
+     * （dialog_system.c:1890，旧 DialogSystem 路径），而对话主路径
+     * `/chat → prefrontal_chat → 扩散` **不经过它**
+     * ⇒ `intent_type` 恒为 INTENT_UNKNOWN(0)
+     * ⇒ `get_intent_base_weights()` 永远返回 default_base
+     * ⇒ 10 种意图的差异化拓扑配比**一行都没生效过**。
+     * `recognize_intent()` 是现成 public 接口（dialog_system.h:195），带 confidence。
+     * 必须放在 compute_intent 之前 —— 后者内部要读 intent_type 算基座权重。 */
+    {
+        IntentResult ir = recognize_intent(input);
+        if (ir.intent != INTENT_UNKNOWN) {
+            cognitive_controller_set_intent(pf->controller, (int)ir.intent);
+            LOG_INFO("[意图] 识别为 %d（置信 %.2f）⇒ 已设 intent_type（原来恒 0）",
+                     (int)ir.intent, (double)ir.confidence);
+        } else {
+            LOG_INFO("[意图] 未识别（保持 UNKNOWN）输入=%.30s", input);
+        }
+    }
     cognitive_controller_set_context(pf->controller, input, NULL);
     float ctx_activations[MAX_SUBTOPOS] = {0};
     calc_context_activations(pf->controller, ctx_activations);
     compute_intent(pf->controller, ctx_activations);
+    {
+        /* v0.6.13 可观测：把「意图 → 拓扑配比」打出来。
+         * 接之前这里永远是 default_base，接之后不同意图应出现不同配方。 */
+        const float* w = pf->controller->intent_weights;
+        LOG_INFO("[意图] 生效配比 词汇=%.2f 语义=%.2f 情绪=%.2f 语法=%.2f 上下文=%.2f 领域=%.2f 语用=%.2f",
+                 (double)w[0], (double)w[1], (double)w[2], (double)w[3],
+                 (double)w[4], (double)w[5], (double)w[6]);
+    }
 
     /* ── 多层扩散生成 + ACC 自适应门控 ── */
     char* response = NULL;
