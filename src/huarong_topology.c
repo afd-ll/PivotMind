@@ -44,7 +44,21 @@ ReasoningNode* create_reasoning_node(int node_id, const char* concept,
                                    float* features, int feature_dim) {
     ReasoningNode* node = (ReasoningNode*)malloc(sizeof(ReasoningNode));
     if (!node) return NULL;
-    
+
+    /* BG-63 (v0.6.12): malloc 非 calloc ⇒ 新字段靠人工逐项初始化，此前漏了 6 组，
+     * 复用到「曾被冻结 / 曾被绑定」的内存时读到脏值，实测后果：
+     *   · is_cooled 脏成 1 ⇒ 新节点一出生就「已冻结」：node_cache_freeze 直接
+     *     返回 -1（永不进账）、node_cache_thaw 因 bitmap 未置位永远「假解冻」
+     *     （BG-51 记账对账测试即栽在此：连做三轮 建网→冻结→销毁 后第 3 轮复现）；
+     *   · binding_count 脏成任意值 ⇒ autonomic_learner.c:1627 直接拿它当
+     *     binding_ref_topo[8] / binding_ref_node[8] 的下标写入 ⇒ 越界写；
+     *   · emergent_class_* 脏值让扩散/模板匹配读到不存在的词类。
+     * 修法：整体清零后再逐字段覆盖（需要非零默认值的都在下方显式赋值）。
+     * 同族先例：v0.5.19 修过 dist_sig/dist_sig_count 未清零。 */
+    memset(node, 0, sizeof(*node));
+    /* tpl_emergent_slot 的合法初值是 -1 而非 0（multi_topology.c:1880 以 <0 判「未设置」） */
+    for (int _i = 0; _i < 4; _i++) node->tpl_emergent_slot[_i] = -1;
+
     node->node_id = node_id;
     node->concept = strdup(concept);
     if (!node->concept) {
