@@ -7,6 +7,7 @@
  */
 
 #include "gateway_internal.h"
+#include "error.h"   /* CX-28: LOG_INFO 诊断 */
 #include "lang.h"
 #include "generation_feedback.h"   /* v0.6.3：GET /reach 读数 */
 
@@ -115,7 +116,23 @@ void handle_chat(GatewaySystem* gw, int fd, const char* body) {
     /* ── v0.3 Phase 2: 复杂问题走 PFE 推理编排 ── */
     int use_pfe = 0;
     char* response = NULL;
-    if (gw->qa_memory) { const char* qa = qa_memory_query(gw->qa_memory, msg); if (qa) { response = strdup(qa); } }
+    /* CX-28 修复：QA 记忆命中也要过【语种闸门】再采纳。
+     * 线上实测「天气」命中的是纯符号垃圾答案「= =」：它占住了 response 槽位 ⇒
+     * 下面 `if (!response) prefrontal_chat(...)` 被跳过 ⇒ 最后语种兜底把「= =」扔掉
+     * ⇒ 三条路全空 ⇒ (无回应)。答案不可用时必须当未命中放行，而不是先占位再丢弃。 */
+    if (gw->qa_memory) {
+        const char* qa = qa_memory_query(gw->qa_memory, msg);
+        if (qa) {
+            if (pm_has_zh(msg) && !pm_has_zh(qa)) {
+                LOG_INFO("[无回应诊断] ① QA记忆 命中但语种不符 ⇒ 弃用 答案=%.40s", qa);
+            } else {
+                response = strdup(qa);
+                LOG_INFO("[无回应诊断] ① QA记忆 命中并采纳 答案=%.40s", qa);
+            }
+        } else {
+            LOG_INFO("[无回应诊断] ① QA记忆 未命中 输入=%.40s", msg);
+        }
+    }
 
     /* v0.4.3: 对话中自动学习 — 将输入 token 注册到词汇拓扑
      * 这是端到端对话质量最大的瓶颈：不学习新词则扩散引擎 active_count=0
@@ -158,12 +175,15 @@ void handle_chat(GatewaySystem* gw, int fd, const char* body) {
 
     if (gw->pfe) {
         int complexity = pfe_assess_complexity(gw->pfe, msg);
+        LOG_INFO("[无回应诊断] ② PFE 复杂度=%d", complexity);
         /* v0.6 测试：PFE 门槛恢复 >0 验证（diffusion 降级路径已话题化，
          * PFE 的 answer_text 应随 diffusion 修复而修复） */
         if (complexity > 0) {
             /* 中高复杂度 → PFE 推理管线 */
             char pfe_answer[GW_MAX_RESPONSE];
             int pfe_ok = pfe_reason(gw->pfe, msg, pfe_answer, sizeof(pfe_answer));
+            LOG_INFO("[无回应诊断] ③ PFE 返回=%d 长度=%d 内容=%.60s",
+                     pfe_ok, (int)strlen(pfe_answer), pfe_answer);
             if (pfe_ok == 0 && strlen(pfe_answer) > 10) {
                 response = strdup(pfe_answer);
                 use_pfe   = 1;
@@ -179,7 +199,9 @@ void handle_chat(GatewaySystem* gw, int fd, const char* body) {
      * 词（"衣服"回复拼进"历史"输入 → 输出"衣服历史"），话题性
      * 阶段输入必须是纯当前话题。等上下文机制重做后再启用。 */
     if (!response) {
+        LOG_INFO("[无回应诊断] ④ 走 prefrontal_chat");
         response = prefrontal_chat(gw->prefrontal, msg);
+        LOG_INFO("[无回应诊断] ⑤ prefrontal_chat 返回 %s", response ? "有内容" : "NULL");
     }
 
     /* 最终兜底：QA 记忆检索（扩散和联想推理都无产出） */
@@ -197,7 +219,10 @@ void handle_chat(GatewaySystem* gw, int fd, const char* body) {
     if (response) {
         /* v0.5.35：改走语种 SSOT。原实现按「有无非 ASCII 字节」判中文 ——
          * emoji / 假名 / 带音标的拉丁字母都会被算成中文。现按【存在中文码点】判。 */
-        if (pm_has_zh(msg) && !pm_has_zh(response)) { free(response); response = NULL; }
+        if (pm_has_zh(msg) && !pm_has_zh(response)) {
+            LOG_INFO("[无回应诊断] ⑥ **语种兜底丢弃**（中文输入 + 非中文回复）内容=%.60s", response);
+            free(response); response = NULL;
+        }
     }
 
     /* 功能词兜底（v0.6）：回复若只有"很+X"类功能词组合（很大/很快）
@@ -298,6 +323,7 @@ void handle_chat(GatewaySystem* gw, int fd, const char* body) {
 
         free(response);
     } else {
+        LOG_INFO("[无回应诊断] ⑦ **最终无回应** 输入=%.40s", msg);
         http_json(fd, 200, "{\"reply\":\"(无回应)\",\"nodes\":0}");
     }
 }

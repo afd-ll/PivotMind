@@ -5,6 +5,7 @@
  */
 
 #include "prefrontal.h"
+#include "error.h"   /* CX-28: LOG_INFO 诊断 */
 #include "cingulate.h"
 #include "associative_reasoning.h"
 #include "broca.h"
@@ -48,7 +49,13 @@ void prefrontal_destroy(Prefrontal* pf) {
 }
 
 char* prefrontal_chat(Prefrontal* pf, const char* input) {
-    if (!pf || !pf->dialog || !input) return NULL;
+    /* CX-28 诊断：入口与前置守卫（若这里就返回 NULL，则「无回应」与扩散无关） */
+    LOG_INFO("[无回应诊断] 进入 prefrontal_chat pf=%p dialog=%p input=%s",
+             (void*)pf, (pf ? (void*)pf->dialog : NULL), input ? input : "(null)");
+    if (!pf || !pf->dialog || !input) {
+        LOG_INFO("[无回应诊断] **前置守卫失败 ⇒ 直接 NULL（pf/dialog/input 有空）**");
+        return NULL;
+    }
 
     /* ── 社交礼仪快速路由：先尝试从网络扩散生成，失败则用自然回退 ── */
     {
@@ -208,6 +215,9 @@ char* prefrontal_chat(Prefrontal* pf, const char* input) {
         int n = cingulate_diffusion_evaluate(pf->topology, input, temperature,
                                                pf->controller ? pf->controller->emergent_pos : NULL,
                                                &seq);
+        /* CX-28 诊断：扩散到底产出多少候选（n<2 直接跳过，是「无回应」第一道筛） */
+        LOG_INFO("[无回应诊断] 尝试%d/3 温度=%.2f 扩散候选=%d 字数=%d",
+                 attempt + 1, (double)temperature, n, seq.count);
         if (n < 2) continue;
 
         char gate_buf[128];
@@ -215,6 +225,9 @@ char* prefrontal_chat(Prefrontal* pf, const char* input) {
         printf("[前额叶] 脊前扣带评分: %s\n", summary ? summary : "?");
 
         CingulateGate gate = cingulate_gate(&seq, pf->accept_threshold);
+        LOG_INFO("[无回应诊断] 尝试%d 门控=%d(0通过/1回溯/2重写) 总分=%.3f 接受阈=%.3f 阻断阈=%.3f",
+                 attempt + 1, (int)gate, (double)seq.total_score,
+                 (double)pf->accept_threshold, (double)pf->block_threshold);
 
         if (gate == CINGULATE_BACKTRACK || gate == CINGULATE_REWRITE) {
             pf->total_retries++;
@@ -224,13 +237,19 @@ char* prefrontal_chat(Prefrontal* pf, const char* input) {
             continue;
         }
 
-        if (seq.total_score < pf->block_threshold) continue;
+        if (seq.total_score < pf->block_threshold) {
+            LOG_INFO("[无回应诊断] 尝试%d 总分%.3f < 阻断阈%.3f ⇒ 丢弃该轮",
+                     attempt + 1, (double)seq.total_score, (double)pf->block_threshold);
+            continue;
+        }
 
         char* wrapped = broca_wrap_response(
             pf->topology,
             pf->controller ? pf->controller->emergent_pos : NULL,
             seq.words, seq.count);
         if (!wrapped || !wrapped[0]) {
+            LOG_INFO("[无回应诊断] 尝试%d 扩散有候选但 broca 拼装为空 (字数=%d) ⇒ 丢弃该轮",
+                     attempt + 1, seq.count);
             free(wrapped);
             continue;
         }
@@ -260,6 +279,7 @@ char* prefrontal_chat(Prefrontal* pf, const char* input) {
         AssociativeEngine* assoc = assoc_engine_create(pf->topology);
         if (assoc) {
             int ac = associate_from_text(assoc, input, 0);
+            LOG_INFO("[无回应诊断] 三轮扩散全废 ⇒ 联想兜底 候选=%d", ac);
             if (ac > 1) {
                 response = generate_from_associations(assoc, 2048, input, ctx_activations);
                 if (response) {
@@ -268,7 +288,10 @@ char* prefrontal_chat(Prefrontal* pf, const char* input) {
             }
             assoc_engine_free(assoc);
         }
-        if (!response) return NULL;
+        if (!response) {
+            LOG_INFO("[无回应诊断] **联想也无产出 ⇒ 返回 NULL（(无回应)）** 输入=%.60s", input);
+            return NULL;
+        }
         return response;
     }
 
