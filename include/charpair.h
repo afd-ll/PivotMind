@@ -51,6 +51,15 @@ int cpt_load(CharPairTable* t, const char* path);
 CharPairTable* cpt_global(void);
 void cpt_global_shutdown_save(void);
 
+/** 把全局表重置为**空表**并禁用「启动即加载 charpairs.bin」。
+ *  为什么需要（2026-10-27 实测踩到）：qa_retrain 是「从零重训」——拓扑是新建的，
+ *  但 cpt_global() 会先把线上 charpairs.bin 读进来，本轮统计再叠加在上面 ⇒
+ *  计数翻倍、P(w)/PMI 全失真，**结果完全不可复现且看不出来**
+ *  （同一目录连跑两次：候选 38,562 → 54,884，词 16,993 → 11,586）。
+ *  因此从零重训的工具必须在**第一句 cp_observe_tokens 之前**调用本函数。
+ *  累积型工具（corpus_train 等）不要调用。 */
+void cpt_global_reset_empty(void);
+
 /** 把一段文本切 token 并累加【相邻 token 对】计数，返回 token 数。
  *  切分（v3 起中英双轨）：
  *    · CJK 单字      → 一个 token

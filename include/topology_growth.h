@@ -262,6 +262,31 @@ int prune_low_connectivity(MasterTopology* master, int topo_id,
  */
 int prune_isolated_nodes(MasterTopology* master, int topo_id);
 
+/**
+ * 移除「统计上不是词」的节点（CX-40 · 语义自清洗）。
+ *
+ * 为什么需要它：在跑的三条清洗全是结构量 —— 零边 / 连通度<1 / 边权<0.01。
+ * 切片词（如「公吵」= 老公吵架 的切片）天生带 2 条边、权重 0.8，**三重免疫**。
+ * 唯一能识别的信号是「词整体左右熵」，由 word_ctx 从语料回扫实测。
+ *
+ * 判据（全部满足才动手，任一不满足就放过）：
+ *   · 非冻结（is_cooled）· 有多字 CJK 词面 · 边数 > 0 · activation < 0.01（没在用）
+ *   · word_ctx **有实测记录**（没测过 = 不知道 ≠ 坏，一律不删）
+ *   · 次数 ≥ min_count · min(左熵,右熵) < min_ent
+ *
+ * 动作：只**清边**（本身出边 + 指向它的入边），不在这里删节点 ——
+ * 节点随后由 master_prune_dead_nodes 的批量压缩统一回收（那条路径已处理
+ * 重编号与跨拓扑端点重映射，见 multi_topology.c STEP3B）。这样做是刻意的：
+ * remove_node_dynamic 对每个节点做全图反查，批量删是 O(N·E)，跑不动。
+ *
+ * 调用契约：调用方须持 master 写锁（本函数会改 edge_count / conn_hash）。
+ * 无实测数据（wctx 未装载）时直接返回 0 —— 代码可以先上线、后置数据。
+ *
+ * @return 被标记清边的「非词」节点数
+ */
+int prune_nonwords(MasterTopology* master, int topo_id,
+                   double min_ent, unsigned long long min_count);
+
 // ========== 动态权重更新 ==========
 
 /**

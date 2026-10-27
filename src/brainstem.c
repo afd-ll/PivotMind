@@ -24,6 +24,7 @@
 #include "autonomic_learner.h"   /* autonomic_compound_consolidate 词巩固 */
 #include "topology_brain.h"
 #include "topology_growth.h"
+#include "word_ctx.h"
 #include "broca.h"
 #include "hypothalamus.h"
 #include "emergent_pos.h"
@@ -433,6 +434,40 @@ static int brainstem_tick_perception(Brainstem* bs) {
     return work;
 }
 
+/* 语义自清洗（CX-40）：把「统计上不是词」的节点清边，交给存盘前的批量压缩回收。
+ * · 逃生开关：PIVOTMIND_NONWORD_PRUNE=0 关闭。
+ * · 未装载 word_ctx.bin ⇒ 恒等操作（代码可以先上线、词级数据后置）。
+ * · 锁：本函数自取 master 写锁（prune_nonwords 会改 edge_count/conn_hash）；
+ *   调用点必须**不在**任何读锁区间内（见上方 brainstem_tick_synapse_scale 的锁纪律）。 */
+static void brainstem_prune_nonwords(Brainstem* bs) {
+    if (!bs || !bs->master) return;
+    const char* e = getenv("PIVOTMIND_NONWORD_PRUNE");
+    if (e && e[0] == '0') return;
+
+    /* 词级统计是懒加载的（正常由 word_prob 首次用到多字词时触发）。
+     * 清洗是第一个使用它的消费者，这里主动装一次。 */
+    static int tried = 0;
+    if (!tried) {
+        tried = 1;
+        const char* p = pm_file(PM_FILE_WORD_CTX);
+        if (p) wctx_load(p);
+    }
+    if (!wctx_ready()) return;
+
+    int total = 0;
+    pthread_rwlock_wrlock(&bs->master->rwlock);
+    for (int t = 0; t < bs->master->sub_topo_count; t++) {
+        SubTopology* s = bs->master->sub_topologies[t];
+        if (!s || !s->net) continue;
+        if (s->type != TOPO_VOCABULARY && s->type != TOPO_CONCEPT) continue;
+        total += prune_nonwords(bs->master, t, 2.0, 20);
+    }
+    pthread_rwlock_unlock(&bs->master->rwlock);
+
+    if (total > 0)
+        LOG_WARNING("[自清洗] 本轮标记 %d 个非词节点（边已清，存盘前由批量压缩回收）", total);
+}
+
 /* 突触缩放（每600tick≈10min） */
 static void brainstem_tick_synapse_scale(Brainstem* bs) {
     if (bs->tick_count % 600 != 0) return;
@@ -511,6 +546,12 @@ static void brainstem_tick_synapse_scale(Brainstem* bs) {
     if (bs->master) {
         master_reevaluate_cross_links(bs->master, 10.0f);
     }
+
+    /* 语义自清洗（CX-40）：与跨链重评估同节奏（600 tick ≈ 10 min）。
+     * 为什么放在这里：在跑的三条清洗（零边/连通度<1/边权<0.01）全是结构量，
+     * 切片词天生带 2 条边、权重 0.8 ⇒ 三重免疫。唯一能识别的是词整体左右熵，
+     * 由 word_ctx 从语料实测。**无 word_ctx.bin 时本调用是恒等操作**。 */
+    brainstem_prune_nonwords(bs);
 }
 
 /* 海马体巩固 + DMN梦境 */

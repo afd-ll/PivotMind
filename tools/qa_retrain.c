@@ -31,6 +31,7 @@
 #include "charpair.h"
 #include "corpus_filter.h"
 #include "word_prob.h"
+#include "word_ctx.h"
 #include "node_hash.h"
 #include "constants.h"
 
@@ -152,16 +153,39 @@ static void learn_chars(SubTopology* vocab, const char* text) {
 
 /* 第二阶段：字对 → 词节点（进词汇拓扑，生成侧才用得上）
  *
- * 判据与 word_emerge 同一套（PMI + 左右熵 + 次数），区别只是落点在词汇拓扑：
- *   · word_emerge 建在概念拓扑并 cross-link 回字（架构线「字拓扑保持纯单字」），
- *     但对话生成的候选池是词汇拓扑 ⇒ 只跑 word_emerge 会得到"没有词"的词表。
- *   · 这里按同样的统计门槛把词建进词汇拓扑，并双向连回组成字。
+ * 落点：word_emerge 建在概念拓扑并 cross-link 回字（架构线「字拓扑保持纯单字」），
+ *   但对话生成的候选池是词汇拓扑 ⇒ 只跑 word_emerge 会得到"没有词"的词表。
+ *   这里把词建进词汇拓扑，并双向连回组成字。
+ *
+ * 判据（CX-40 修：熵改成【词整体语料实测】）：
+ *   ① 次数 ≥ mc            ② PMI ≥ mp
+ *   ③ 词整体 min(左熵,右熵) ≥ me —— 由 word_ctx 回扫语料实测
+ *
+ * 🔴 **曾经有过第 ④ 条「两侧都出现边界即放行」，实测后撤掉了**（2026-10-27）：
+ *   · 放宽的理由是「吵架」——探针在小黄鸡 47 万对上测出它 min 熵 0.90（nats），
+ *     看似会被误杀。但全量 907k 对上词整体实测 min 熵 = **3.197 bit**，
+ *     它本来就能靠 ③ 过；理由本身不成立。
+ *   · 而 ④ 的实际效果是**放过高频切片**：`用太`(min熵 0.432)、`的原`(0.687)
+ *     两侧都偶有边界（高频对必然如此），全靠 ④ 混进词表，且它们
+ *     wp_is_wordlike = 0（两条判据当场打架）。
+ *   ⇒ 收紧成只看 ③。「能否独立出现」（lbound/rbound）保留为**诊断量**，不做放行条件。
+ *
  * 门槛可用环境变量覆盖（与 word_emerge 同名，便于统一调）：
- *   PIVOTMIND_EMERGE_MINCOUNT(20) / MINPMI(2.5) / MINENT(2.0) / MAX(20000)
+ *   PIVOTMIND_EMERGE_MINCOUNT(20) / MINPMI(2.5) / MINENT(2.0) / MAX(60000)
  */
 typedef struct { char a[18], b[18]; unsigned int c; } PairRec;   /* 与 word_prob 同口径，省内存 */
 static PairRec* g_pairs = NULL;
 static int g_npairs = 0;
+
+/* 候选（过了 ①② 的字对）—— 由 word_ctx 回扫实测 ③④ */
+typedef struct {
+    char     word[16];
+    char     a[4], b[4];
+    uint32_t count;
+    double   pmi;
+} Cand;
+static Cand* g_cand = NULL;
+static int   g_ncand = 0;
 
 static void _collect_pair(const char* a, const char* b, uint32_t c, void* ud) {
     int* np = (int*)ud;
@@ -172,38 +196,139 @@ static void _collect_pair(const char* a, const char* b, uint32_t c, void* ud) {
     (*np)++;
 }
 
-static int promote_words(SubTopology* vocab) {
+static void thresholds(unsigned* mc, double* mp, double* me, int* mx) {
+    unsigned c = 20; double p = 2.5, e = 2.0; int x = 60000;   /* 实测候选 31,167 个：20000 的帽子会砍掉一半 */
+    const char* v;
+    if ((v = getenv("PIVOTMIND_EMERGE_MINCOUNT"))) c = (unsigned)atoi(v);
+    if ((v = getenv("PIVOTMIND_EMERGE_MINPMI")))    p = atof(v);
+    if ((v = getenv("PIVOTMIND_EMERGE_MINENT")))    e = atof(v);
+    if ((v = getenv("PIVOTMIND_EMERGE_MAX")))       x = atoi(v);
+    *mc = c; *mp = p; *me = e; *mx = x;
+}
+
+/* 高频豁免门槛（CX-42）：次数 ≥ 本值 ⇒ 免 PMI 检查。
+ * 默认 0 = 关闭（先 A/B，确认没把切片放进来再决定要不要翻默认）。
+ * 为什么需要：PMI 对「两个都极高频的字」天然偏低 —— 实测「你好」25,258 次，
+ * P(你)≈1.4e-2 · P(好)≈7e-3 ⇒ PMI ≈ 1.23 bit < 2.5，直接进不了候选集，
+ * 于是连「词整体熵」都轮不到测。这类词恰恰是最高频的真词。 */
+static unsigned long long pmi_free_threshold(void) {
+    const char* v = getenv("PIVOTMIND_EMERGE_PMIFREE");
+    if (!v || !v[0]) return 0ULL;
+    return strtoull(v, NULL, 10);
+}
+
+/* ① ② 扫一遍字对表，凑出候选集。只收「两个中文单字」的对。 */
+static int collect_candidates(unsigned mc, double mp) {
     CharPairTable* cp = cpt_global();
-    if (!cp || !vocab || !vocab->net) return 0;
-
-    unsigned mc = 20; double mp = 2.5, me = 2.0; int mx = 60000;   /* 实测候选 31,167 个：20000 的帽子会砍掉一半 */
-    const char* e;
-    if ((e = getenv("PIVOTMIND_EMERGE_MINCOUNT"))) mc = (unsigned)atoi(e);
-    if ((e = getenv("PIVOTMIND_EMERGE_MINPMI")))    mp = atof(e);
-    if ((e = getenv("PIVOTMIND_EMERGE_MINENT")))    me = atof(e);
-    if ((e = getenv("PIVOTMIND_EMERGE_MAX")))       mx = atoi(e);
-
+    if (!cp) return 0;
     if (!g_pairs) {
         g_pairs = (PairRec*)calloc(1200000, sizeof(PairRec));   /* 实测 91.9 万对：40 万缓冲会抽样掉近 6 成候选 */
         if (!g_pairs) return 0;
+    }
+    if (!g_cand) {
+        g_cand = (Cand*)calloc(WCTX_MAX_CANDS, sizeof(Cand));
+        if (!g_cand) return 0;
     }
     g_npairs = 0;
     cpt_foreach(cp, _collect_pair, &g_npairs);
     if (g_npairs <= 0) return 0;
 
-    int created = 0;
-    for (int i = 0; i < g_npairs && created < mx; i++) {
+    g_ncand = 0;
+    unsigned long long pmi_free = pmi_free_threshold();
+    for (int i = 0; i < g_npairs; i++) {
         const char* A = g_pairs[i].a;
         const char* B = g_pairs[i].b;
         if (strlen(A) != 3 || strlen(B) != 3) continue;   /* 只晋升中文单字对 */
         if (g_pairs[i].c < mc) continue;
         double pmi = wp_pmi(A, B);
-        if (pmi < mp) continue;
-        double hl = wp_entropy(A, 0), hr = wp_entropy(B, 1);
-        if ((hl < hr ? hl : hr) < me) continue;
+        /* 高频免 PMI：切片风险由后面的「词整体熵」闸兜住，不靠 PMI 挡 */
+        if (pmi < mp && (unsigned long long)g_pairs[i].c < pmi_free) continue;
 
-        char word[16];
-        snprintf(word, sizeof(word), "%s%s", A, B);
+        if (g_ncand >= WCTX_MAX_CANDS) {
+            /* 显式记账，绝不静默截断（v0.6.12 三个上限叠起来砍掉 44% 且不报错） */
+            printf("[重训] !! 候选超上限 %d，丢弃 %d 个（需要就调大 WCTX_MAX_CANDS）\n",
+                   WCTX_MAX_CANDS, g_npairs - i);
+            break;
+        }
+        Cand* cd = &g_cand[g_ncand++];
+        snprintf(cd->word, sizeof(cd->word), "%s%s", A, B);
+        snprintf(cd->a, sizeof(cd->a), "%s", A);
+        snprintf(cd->b, sizeof(cd->b), "%s", B);
+        cd->count = g_pairs[i].c;
+        cd->pmi = pmi;
+    }
+    return g_ncand;
+}
+
+/* ③ 回扫语料，测出每个候选的【词整体】左右邻分布。
+ * 分批复扫：峰值内存与批大小成正比，与语料规模无关。 */
+static void measure_candidates(const char* qa_file, long max_pairs, long accepted_total) {
+    const int CHUNK = 16384;
+    if (g_ncand <= 0) return;
+
+    int nchunk = (g_ncand + CHUNK - 1) / CHUNK;
+    printf("[重训] 词级实测：%d 个候选 · 分 %d 批复扫（%ld 行已收）\n", g_ncand, nchunk, accepted_total);
+    time_t t0 = time(NULL);
+
+    for (int base = 0; base < g_ncand; base += CHUNK) {
+        int n = g_ncand - base;
+        if (n > CHUNK) n = CHUNK;
+
+        const char** words = (const char**)malloc((size_t)n * sizeof(char*));
+        if (!words) return;
+        for (int i = 0; i < n; i++) words[i] = g_cand[base + i].word;
+        int acc = wctx_begin(words, n);
+        free(words);
+        if (acc <= 0) continue;
+
+        FILE* f = fopen(qa_file, "rb");
+        if (!f) { fprintf(stderr, "!! 实测复扫打不开 %s\n", qa_file); return; }
+
+        char line[MAX_LINE];
+        long accepted = 0;
+        while (fgets(line, sizeof(line), f)) {
+            int len = (int)strlen(line);
+            while (len > 0 && (line[len-1] == '\n' || line[len-1] == '\r')) line[--len] = 0;
+            if (len < 3) continue;
+            char* bar = strchr(line, '|');
+            if (!bar) continue;
+            *bar = 0;
+            const char* q = line;
+            const char* a = bar + 1;
+            if (!q[0] || !a[0]) continue;
+            int why = 0;
+            if (!cf_accept_qa(q, a, &why)) continue;
+
+            wctx_scan_text(q);
+            wctx_scan_text(a);
+            accepted++;
+            if (max_pairs > 0 && accepted >= max_pairs) break;
+        }
+        fclose(f);
+        wctx_finish();
+        fprintf(stderr, "[重训] 实测 %d/%d · 收到候选 %d · %lds\n",
+                base + n, g_ncand, acc, (long)(time(NULL) - t0));
+    }
+}
+
+/* ③④ 双闸门晋升（判据见本段头注释） */
+static int promote_measured(SubTopology* vocab, unsigned mc, double me, int mx) {
+    if (!vocab || !vocab->net || !g_cand) return 0;
+
+    int created = 0, no_stat = 0, low_ent = 0;
+    for (int i = 0; i < g_ncand && created < mx; i++) {
+        const char* word = g_cand[i].word;
+        const char* A = g_cand[i].a;
+        const char* B = g_cand[i].b;
+
+        WctxStat st;
+        if (!wctx_query(word, &st)) { no_stat++; continue; }   /* 语料里没再出现 ⇒ 不晋级 */
+        if (st.count < mc) continue;
+
+        /* 只用 ③。lbound/rbound 只进诊断，不做放行条件（见本段头注释：④ 已撤） */
+        double mn = st.hl < st.hr ? st.hl : st.hr;
+        if (mn < me) { low_ent++; continue; }
+
         if (huarong_net_find_concept(vocab->net, word) >= 0) continue;
 
         /* 特征 = 两字均值 */
@@ -229,6 +354,8 @@ static int promote_words(SubTopology* vocab) {
                   add_or_strengthen(vocab->net, nb, wn, QA_W_REV, QA_MAX_REV); }
         created++;
     }
+    printf("[重训] 晋升闸门：通过 %d · 词整体熵不足 %d · 语料未复现 %d\n",
+           created, low_ent, no_stat);
     return created;
 }
 
@@ -241,6 +368,12 @@ int main(int argc, char** argv) {
     long max_pairs = (argc > 2) ? atol(argv[2]) : 0;
 
     srand((unsigned)time(NULL));
+
+    /* 🔴 从零重训：必须先清空字对表。
+     * 否则 cpt_global() 会把目标目录里已有的 charpairs.bin 读进来，本轮统计再叠加
+     * ⇒ 同一目录连跑两次结果不同（实测 候选 38,562 → 54,884、词 16,993 → 11,586），
+     * 而且工具自己一声不报。这条在 22:22 的一次重跑里真实发生过。 */
+    cpt_global_reset_empty();
 
     MasterTopology* master = master_topology_create(16);
     if (!master) { fprintf(stderr, "FAIL: master create\n"); return 1; }
@@ -302,9 +435,22 @@ int main(int argc, char** argv) {
     }
     fclose(f);
 
-    /* 第二阶段：字对 → 词（判据同 word_emerge：次数/PMI/左右熵） */
-    int words = promote_words(vocab);
-    printf("[重训] 词晋升：%d 个\n", words);
+    /* 第二阶段：字对 → 词
+     * ①② 字对表筛候选（次数 / PMI）→ ③ 回扫语料测【词整体】熵 → ④ 双闸门晋升 */
+    unsigned mc; double mp, me; int mx;
+    thresholds(&mc, &mp, &me, &mx);
+    int cands = collect_candidates(mc, mp);
+    printf("[重训] 候选（次数≥%u · PMI≥%.2f · 高频免PMI门槛=%llu）：%d 个\n",
+           mc, (double)mp, pmi_free_threshold(), cands);
+    measure_candidates(qa_file, max_pairs, accepted);
+    int words = promote_measured(vocab, mc, me, mx);
+    printf("[重训] 词晋升：%d 个（判据：词整体 min熵 ≥ %.2f）\n", words, me);
+
+    unsigned long long drop[3] = {0, 0, 0};
+    wctx_drop_stats(drop);
+    if (drop[0] || drop[1] || drop[2])
+        printf("[重训] word_ctx 丢弃：邻接 %llu · 候选超限 %llu · 非2token %llu\n",
+               drop[0], drop[1], drop[2]);
 
     /* 边权口径归一化：计数 ⇒ [0,1] 连续强度（见 normalize_edges 头部注释）。
      * 🔴 **默认关**（PIVOTMIND_EDGE_NORM=1 才开），原因：改了量纲，所有按旧量纲
@@ -318,15 +464,22 @@ int main(int argc, char** argv) {
         for (int t = 0; t < master->sub_topo_count; t++)
             if (master->sub_topologies[t]) normalize_edges(master->sub_topologies[t]);
     } else {
-        printf("[重训] 边权归一化：跳过（PIVOTMIND_EDGE_NORM 未设；阈值未重标前不要开）
-");
+        printf("[重训] 边权归一化：跳过（PIVOTMIND_EDGE_NORM 未设；阈值未重标前不要开）\n");
     }
 
     /* 存盘：特征 → 状态 → 字对表 */
     save_features(master, pm_file(PM_FILE_FEATURES));
-    if (master_save_state(master, pm_file(PM_FILE_STATE)) != 0)
+    /* ⚠ 约定是「返回已存节点数」，不是 0/1 —— 原来写 `!= 0` 会**每次成功都报失败**，
+     * 属于本仓最忌讳的「会骗人的提示」。全仓同族调用点都用 `>= 0` / `int saved =`。 */
+    if (master_save_state(master, pm_file(PM_FILE_STATE)) < 0)
         fprintf(stderr, "!! 状态存盘失败\n");
     cpt_global_shutdown_save();
+    /* 词级统计落盘：运行期 wp_entropy/wp_gain/wp_is_wordlike 的多字词分支读它。
+     * 缺这个文件时多字词一律「熵未知」⇒ 不会被乱判成合法词（宁缺毋滥）。 */
+    if (wctx_save(pm_file(PM_FILE_WORD_CTX)) == 0)
+        printf("[重训] 词级统计：%d 条 → %s\n", wctx_size(), pm_file(PM_FILE_WORD_CTX));
+    else
+        fprintf(stderr, "!! 词级统计存盘失败：%s\n", pm_file(PM_FILE_WORD_CTX));
 
     unsigned long long cf[5] = {0};
     cf_stats(cf);

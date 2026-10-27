@@ -205,6 +205,7 @@ int cpt_load(CharPairTable* t, const char* path) {
 /* ==================== 全局单例 ==================== */
 
 static CharPairTable* g_cpt = NULL;
+static int g_cpt_skip_load = 0;   /* 1 = 已显式重置为空表，cpt_global() 不再加载落盘表 */
 static pthread_mutex_t g_cpt_lock = PTHREAD_MUTEX_INITIALIZER;
 
 /* 与 PROB-ASSIST 共用开关：PIVOTMIND_PROB_ASSIST=0 时整体关。 */
@@ -218,7 +219,7 @@ CharPairTable* cpt_global(void) {
     pthread_mutex_lock(&g_cpt_lock);
     if (!g_cpt) {
         g_cpt = cpt_create();
-        if (g_cpt) {
+        if (g_cpt && !g_cpt_skip_load) {
             const char* p = pm_file(PM_FILE_CHARPAIRS);
             if (p) cpt_load(g_cpt, p);      /* 不存在/旧格式：空表起步 */
         }
@@ -226,6 +227,15 @@ CharPairTable* cpt_global(void) {
     CharPairTable* r = g_cpt;
     pthread_mutex_unlock(&g_cpt_lock);
     return r;
+}
+
+void cpt_global_reset_empty(void) {
+    pthread_mutex_lock(&g_cpt_lock);
+    if (g_cpt) { cpt_destroy(g_cpt); g_cpt = NULL; }
+    g_cpt_skip_load = 1;
+    g_cpt = cpt_create();
+    if (g_cpt) LOG_INFO("[charpair] 全局表已重置为空（后续存盘将覆盖旧文件）");
+    pthread_mutex_unlock(&g_cpt_lock);
 }
 
 void cpt_global_shutdown_save(void) {

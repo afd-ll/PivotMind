@@ -42,7 +42,13 @@ float wp_pnorm(const char* tok);
 /** 次数（token 作为左成员与右成员的计数和的一半，取整）。未知返回 0。 */
 unsigned long long wp_count(const char* tok);
 
-/** 左右熵：side=0 取左熵（左边 token 的分布），side=1 取右熵。未知返回 0。 */
+/** 左右熵：side=0 取左熵（左边 token 的分布），side=1 取右熵。未知返回 0。
+ *
+ * 两套口径（**别混**，CX-40）：
+ *   · 单 token（CJK 单字 / 拉丁词）⇒ charpair 的 token 级分布，精确。
+ *   · 纯 CJK 多字词 ⇒ 只认 word_ctx 里的【语料实测】词级分布；
+ *     没测过就是 0（未知），**绝不拿首字/末字的熵冒充**。
+ *     冒充的代价：切片词「公吵」报 6.58，真值 0.00 —— 唯一可识别特征被抹掉。 */
 double wp_entropy(const char* tok, int side);
 
 /** min(左熵,右熵)。 */
@@ -56,8 +62,10 @@ double wp_pmi(const char* tok_a, const char* tok_b);
  *       概率低且熵低 ⇒ 压（碎片/脏词）；单字与未知 token 恒 1.0（不奖不罚）。 */
 float wp_gain(const char* tok);
 
-/** 词形合法性（供写入闸门 / 存量体检）：
- *  CJK 单字 → 1（单字豁免）；多字与英文 → 需 min(HL,HR) ≥ min_ent 且次数 ≥ min_count。 */
+/** 词形合法性（供晋升闸门 / 存量体检）：
+ *  CJK 单字 → 1（单字豁免）；多字与英文 → 需 min(HL,HR) ≥ min_ent 且次数 ≥ min_count。
+ *  ⚠ 多字词的熵依赖 word_ctx（语料实测）。**没跑过 word_ctx 时多字词恒不合法**
+ *  —— 这是有意的：宁可「不知道就不晋级」，也不要「用错的判据乱晋级」。 */
 int wp_is_wordlike(const char* tok, double min_ent, unsigned long long min_count);
 
 /* ==================== 写侧结构闸门（CX-27） ====================

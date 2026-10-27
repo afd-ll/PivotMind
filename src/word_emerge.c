@@ -119,6 +119,11 @@ int word_emerge_tick(MasterTopology* master) {
         /* PMI 与左右熵统一走 word_prob（与生成侧同一套统计，口径只此一处） */
         double pmi = wp_pmi(A, B);
         if (pmi < mp) continue;
+        /* ⚠ 这里用的是【字级】代理：A 的左熵 + B 的右熵。
+         * CX-40 已证明它对切片词失效（「公吵」拿「公」的高左熵蒙混过关），
+         * 但本函数跑在网关上、手上没有语料可回扫，词整体熵只能由离线的
+         * qa_retrain + word_ctx 提供 ⇒ 在线路径暂时只能维持代理判据。
+         * 别把这个写法抄到有语料的路径上去；那边一律走 word_ctx。 */
         double hl = wp_entropy(A, 0);     /* A 的左熵 */
         double hr = wp_entropy(B, 1);     /* B 的右熵 */
         double mn = hl < hr ? hl : hr;

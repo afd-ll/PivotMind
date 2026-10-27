@@ -2,6 +2,8 @@
 #include "huarong_topology.h"
 #include "node_hash.h"
 #include "multi_topology.h"
+#include "word_ctx.h"
+#include "error.h"
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
@@ -845,6 +847,103 @@ int prune_isolated_nodes(MasterTopology* master, int topo_id) {
      * 立即清理会把知识当"孤立节点"连锁删光。 */
     if (master_load_protected(master)) return 0;
     return prune_low_connectivity(master, topo_id, 1);
+}
+
+/* 纯 CJK 多字词面：返回汉字数（2..6），否则 0。
+ * 含任何 ASCII/标点/其它文字 ⇒ 0（那些由 is_junk_concept / 结构清洗管）。 */
+static int _concept_cjk_len(const char* c) {
+    if (!c || !c[0]) return 0;
+    int n = 0;
+    const unsigned char* p = (const unsigned char*)c;
+    while (*p) {
+        if (p[0] < 0x80) return 0;
+        int len = (p[0] & 0xE0) == 0xC0 ? 2 :
+                  ((p[0] & 0xF0) == 0xE0 ? 3 : ((p[0] & 0xF8) == 0xF0 ? 4 : 0));
+        if (len != 3) return 0;
+        unsigned int cp = ((unsigned int)(p[0] & 0x0F) << 12) |
+                          ((unsigned int)(p[1] & 0x3F) << 6) |
+                           (unsigned int)(p[2] & 0x3F);
+        if (cp < 0x4E00 || cp > 0x9FFF) return 0;
+        n++;
+        p += 3;
+    }
+    return (n >= 2 && n <= 6) ? n : 0;
+}
+
+int prune_nonwords(MasterTopology* master, int topo_id,
+                   double min_ent, unsigned long long min_count) {
+    if (!master || !(min_ent > 0.0)) return 0;
+    SubTopology* sub = master_get_sub_topology(master, topo_id);
+    if (!sub || !sub->net) return 0;
+    if (master_load_protected(master)) return 0;
+    /* 没有实测数据 = 不知道，不等于坏 ⇒ 一律不动。
+     * 这条保证「代码先上线、word_ctx.bin 后置」时行为完全不变。 */
+    if (!wctx_ready()) return 0;
+
+    HuarongTopologyNet* net = sub->net;
+    int nc = net->node_count;
+    if (nc <= 0) return 0;
+
+    unsigned char* bad = (unsigned char*)calloc((size_t)nc, 1);
+    if (!bad) return 0;
+
+    /* 第一遍：只判定，不改图 */
+    int nbad = 0;
+    for (int i = 0; i < nc; i++) {
+        ReasoningNode* n = net->nodes[i];
+        if (!n || !n->concept || n->is_cooled) continue;
+        if (n->edge_count <= 0) continue;              /* 零边：交给别的清洗 */
+        if (n->activation >= 0.01f) continue;          /* 正在用：不动 */
+        if (!_concept_cjk_len(n->concept)) continue;   /* 只判纯中文多字词 */
+        WctxStat st;
+        if (!wctx_query(n->concept, &st)) continue;    /* 未实测：放过 */
+        if (st.count < min_count) continue;            /* 太罕见：交给别的清洗 */
+        double mn = st.hl < st.hr ? st.hl : st.hr;
+        if (mn >= min_ent) continue;
+        bad[i] = 1;
+        nbad++;
+    }
+    if (nbad == 0) { free(bad); return 0; }
+
+    /* 第二遍：清边（自己出边 + 指向坏节点的入边），一次过 O(E)。
+     * 刻意不调 remove_node_dynamic —— 它对每个节点做全图反查，批量删是 O(N·E)。
+     * 节点由 master_prune_dead_nodes 的批量压缩回收（那条路已处理重编号与跨链重映射）。 */
+    long cleared = 0;
+    for (int i = 0; i < nc; i++) {
+        ReasoningNode* n = net->nodes[i];
+        if (!n || !n->edges) continue;
+        int lock_idx = n->node_id & (PM_NODE_LOCK_COUNT - 1);
+        pthread_mutex_lock(&net->node_locks[lock_idx]);
+        int kept = 0;
+        for (int c = 0; c < n->edge_count; c++) {
+            ReasoningNode* tg = n->edges[c].target;
+            int tid = tg ? tg->node_id : -1;
+            int drop = bad[i] || (tid >= 0 && tid < nc && bad[tid]);
+            if (drop) { cleared++; continue; }
+            if (kept != c) n->edges[kept] = n->edges[c];
+            kept++;
+        }
+        __atomic_store_n(&n->edge_count, kept, __ATOMIC_RELEASE);
+        /* 边压缩后 conn_hash 索引全变：先置 NULL 再 free（同 _aggressive_prune 的序） */
+        {
+            void* old_hash = n->conn_hash;
+            n->conn_hash = NULL;
+            n->conn_hash_mask = -1;
+            n->conn_hash_entries = 0;
+            free(old_hash);
+        }
+        for (int ci = 0; ci < n->edge_count; ci++) {
+            if (n->edges[ci].target)
+                node_conn_hash_insert(NULL, n, n->edges[ci].target, ci);
+        }
+        pthread_mutex_unlock(&net->node_locks[lock_idx]);
+    }
+    free(bad);
+
+    if (cleared > 0)
+        LOG_WARNING("[自清洗] 语义剪除 %d 个非词节点 · 清 %ld 条边（%s）",
+                    nbad, cleared, sub->name ? sub->name : "?");
+    return nbad;
 }
 
 // ==================== 动态权重更新 ====================

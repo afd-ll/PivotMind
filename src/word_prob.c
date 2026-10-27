@@ -8,6 +8,8 @@
 
 #include "word_prob.h"
 #include "charpair.h"
+#include "word_ctx.h"
+#include "pivotmind_paths.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -255,11 +257,19 @@ typedef struct {
     int    nchar;     /* CJK 字数；非纯 CJK = -1 */
 } WInfo;
 
-/* 统计解析：token 直接命中优先；否则若是纯 CJK 多字词，用
+/* 统计解析（**字级口径**）：token 直接命中优先；否则若是纯 CJK 多字词，只合成
  *   计数 = 内部相邻字对的最小计数（最弱环节）
- *   左熵 = 首字的左熵   右熵 = 末字的右熵
- * 合成。为什么必须这样：中文 token 是【单字】，词不在表里，
- * 不合成的话「天气/学习」这类词概率恒 0、生成增益恒 1（等于没接）。 */
+ * 熵【不再合成】——见下方 _wctx_fill 与 CX-40。
+ *
+ * 为什么必须合成计数：中文 token 是【单字】，词不在表里，不合成的话
+ * 「天气/学习」这类词概率恒 0、生成增益恒 1（等于没接）。
+ *
+ * 为什么熵不能合成：charpair 存的是 (X,A)、(A,B)、(B,Y) 三条**独立**计数，
+ * 拿不出条件分布 (X | A 后接 B)。用「首字左熵 + 末字右熵」冒充，会把切片词
+ * 唯一的可识别特征（组成字自己用得很广、但词整体左邻唯一）正好抹掉：
+ * 实测「公吵」左熵报 6.58（=「公」的左熵），真值 0.00（左邻 100% 是「老」）。
+ * ⇒ 词级熵只认 word_ctx 里的语料实测值；没测过就是【未知】(0)，
+ *   绝不拿首末字冒充。 */
 static void _resolve_locked(const char* tok, WInfo* out) {
     memset(out, 0, sizeof(*out));
     out->nchar = _cjk_split(tok, NULL, NULL);
@@ -282,8 +292,6 @@ static void _resolve_locked(const char* tok, WInfo* out) {
     }
     if (out->nchar < 2) return;
 
-    char first[4] = {0}, last[4] = {0};
-    _cjk_split(tok, first, last);
     CharPairTable* cp = cpt_global();
     if (!cp) return;
 
@@ -304,52 +312,72 @@ static void _resolve_locked(const char* tok, WInfo* out) {
     }
     if (!got || !mn) return;
 
+    /* 只合成计数；熵保持 0（未知）。词级实测见 _wctx_fill。 */
     out->count = mn;
     out->known = 1;
-    int fi = _find_locked(first), li = _find_locked(last);
-    if (fi >= 0) {
-        unsigned long long t = 0;
-        for (int k = 0; k < g.tok[fi].left_n; k++) t += g.nb[g.tok[fi].left_off + k].cnt;
-        if (t) for (int k = 0; k < g.tok[fi].left_n; k++) {
-            double pr = (double)g.nb[g.tok[fi].left_off + k].cnt / (double)t;
-            if (pr > 0) out->hl -= pr * log2(pr);
-        }
-    }
-    if (li >= 0) {
-        unsigned long long t = 0;
-        for (int k = 0; k < g.tok[li].right_n; k++) t += g.nb[g.tok[li].right_off + k].cnt;
-        if (t) for (int k = 0; k < g.tok[li].right_n; k++) {
-            double pr = (double)g.nb[g.tok[li].right_off + k].cnt / (double)t;
-            if (pr > 0) out->hr -= pr * log2(pr);
-        }
-    }
+}
+
+/* 词级实测（CX-40）：只对「纯 CJK 多字词」有定义。
+ * 单字与拉丁词本身就是 token，charpair 给的是精确值，不需要也不该走词级口径。
+ * 命中返回 1（count/hl/hr 全部来自语料实测）；未测量返回 0（调用方回落字级）。
+ * ⚠ 本函数在 g_lock **之外**调用：word_ctx 有自己的锁，嵌套会引入锁序风险。 */
+static pthread_once_t g_wctx_once = PTHREAD_ONCE_INIT;
+
+/* 懒加载 word_ctx.bin：第一次用到多字词时才读。文件不存在 ⇒ 空表，
+ * 多字词熵一律「未知」（宁缺毋滥），绝不影响启动。
+ * 同进程内若已经构建过（qa_retrain 就是），不覆盖 —— 否则工具会把自己的实测结果读没。 */
+static void _wctx_load_once(void) {
+    if (wctx_ready()) return;      /* 同进程内已构建（qa_retrain）⇒ 不覆盖 */
+    const char* p = pm_file(PM_FILE_WORD_CTX);
+    if (p) wctx_load(p);
+}
+
+static int _wctx_fill(const char* tok, WInfo* out) {
+    memset(out, 0, sizeof(*out));
+    out->nchar = _cjk_split(tok, NULL, NULL);
+    if (out->nchar < 2) return 0;
+    pthread_once(&g_wctx_once, _wctx_load_once);
+    WctxStat st;
+    if (!wctx_query(tok, &st)) return 0;
+    out->count = st.count;
+    out->hl = st.hl;
+    out->hr = st.hr;
+    out->known = 1;
+    return 1;
+}
+
+/* 统一解析：先词级实测，再回落字级合成。 */
+static void _resolve(const char* tok, WInfo* out) {
+    if (_wctx_fill(tok, out)) return;
+    pthread_rwlock_rdlock(&g_lock);
+    _resolve_locked(tok, out);
+    pthread_rwlock_unlock(&g_lock);
 }
 
 unsigned long long wp_count(const char* tok) {
     wp_ensure();
-    pthread_rwlock_rdlock(&g_lock);
-    WInfo wi; _resolve_locked(tok, &wi);
-    pthread_rwlock_unlock(&g_lock);
+    WInfo wi; _resolve(tok, &wi);
     return wi.count;
 }
 
 double wp_p(const char* tok) {
     wp_ensure();
+    WInfo wi; _resolve(tok, &wi);
     pthread_rwlock_rdlock(&g_lock);
-    WInfo wi; _resolve_locked(tok, &wi);
-    double p = (wi.known && g.total) ? (double)wi.count / (double)g.total : 0.0;
+    double total = (double)g.total;
     pthread_rwlock_unlock(&g_lock);
-    return p;
+    return (wi.known && total > 0.0) ? (double)wi.count / total : 0.0;
 }
 
 float wp_pnorm(const char* tok) {
     wp_ensure();
+    WInfo wi; _resolve(tok, &wi);
     pthread_rwlock_rdlock(&g_lock);
-    WInfo wi; _resolve_locked(tok, &wi);
-    float r = 0.0f;
-    if (wi.known && g.max_cnt > 0)
-        r = (float)(log10(1.0 + (double)wi.count) / log10(1.0 + (double)g.max_cnt));
+    double maxc = (double)g.max_cnt;
     pthread_rwlock_unlock(&g_lock);
+    float r = 0.0f;
+    if (wi.known && maxc > 0.0)
+        r = (float)(log10(1.0 + (double)wi.count) / log10(1.0 + maxc));
     if (r < 0.0f) r = 0.0f;
     if (r > 1.0f) r = 1.0f;
     return r;
@@ -357,17 +385,13 @@ float wp_pnorm(const char* tok) {
 
 double wp_entropy(const char* tok, int side) {
     wp_ensure();
-    pthread_rwlock_rdlock(&g_lock);
-    WInfo wi; _resolve_locked(tok, &wi);
-    pthread_rwlock_unlock(&g_lock);
+    WInfo wi; _resolve(tok, &wi);
     return side ? wi.hr : wi.hl;
 }
 
 double wp_min_entropy(const char* tok) {
     wp_ensure();
-    pthread_rwlock_rdlock(&g_lock);
-    WInfo wi; _resolve_locked(tok, &wi);
-    pthread_rwlock_unlock(&g_lock);
+    WInfo wi; _resolve(tok, &wi);
     return wi.hl < wi.hr ? wi.hl : wi.hr;
 }
 
@@ -397,22 +421,23 @@ float wp_gain(const char* tok) {
     /* 单字不奖不罚：中文单字是合法单位，用熵去罚会把正常单字全压死 */
     if (_cjk_split(tok, first, NULL) == 1) return 1.0f;
     if (!wp_ensure()) return 1.0f;
+    WInfo wi; _resolve(tok, &wi);
     pthread_rwlock_rdlock(&g_lock);
-    WInfo wi; _resolve_locked(tok, &wi);
+    double maxc = (double)g.max_cnt;
+    pthread_rwlock_unlock(&g_lock);
     float gain = 1.0f;
     if (wi.known) {
         if (wi.count < 2) {
             gain = 0.70f;                       /* 只见过 1 次：不敢用 */
         } else {
-            float pn = (g.max_cnt > 0)
-                     ? (float)(log10(1.0 + (double)wi.count) / log10(1.0 + (double)g.max_cnt))
+            float pn = (maxc > 0.0)
+                     ? (float)(log10(1.0 + (double)wi.count) / log10(1.0 + maxc))
                      : 0.0f;
             double mn = wi.hl < wi.hr ? wi.hl : wi.hr;
             float en = (float)(mn > 4.0 ? 1.0 : mn / 4.0);
             gain = 0.55f + 0.45f * pn + 0.20f * en;
         }
     }
-    pthread_rwlock_unlock(&g_lock);
     if (gain < WP_GAIN_MIN) gain = WP_GAIN_MIN;
     if (gain > WP_GAIN_MAX) gain = WP_GAIN_MAX;
     return gain;

@@ -88,7 +88,11 @@ extern "C" {
  * 位图；legacy 布局审计多看它一眼无害（它没有旧布局位置，不会误报）。 */
 #define PM_FILE_TRANSITIONS   (1u << 12)  /* 转移计数 transitions.bin */
 #define PM_FILE_CHARPAIRS     (1u << 13)  /* 字对计数 charpairs.bin（涌现判据的可读依据；同样不进 PM_FILE_ALL） */
-#define PM_FILE_ALL           (0x00000FFFu)  /* 12 个位全置（不含 TRANSITIONS） */
+/* [CX-40] 词整体左右邻统计 word_ctx.bin（词级熵的唯一真值源）。
+ * 同样是【派生量缓存】：语料或候选集变了就重跑 qa_retrain，不是第二真值源，
+ * 因此与 TRANSITIONS/CHARPAIRS 一样**不进** PM_FILE_ALL。 */
+#define PM_FILE_WORD_CTX      (1u << 14)  /* 词级左右邻统计 word_ctx.bin */
+#define PM_FILE_ALL           (0x00000FFFu)  /* 12 个位全置（不含 TRANSITIONS/CHARPAIRS/WORD_CTX） */
 
 /* ---- 纯查询 ---- */
 

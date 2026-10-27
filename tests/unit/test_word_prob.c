@@ -14,6 +14,7 @@
 
 #include "word_prob.h"
 #include "charpair.h"
+#include "word_ctx.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -60,9 +61,16 @@ int main(void) {
     double mn_real = wp_min_entropy("中");     /* 左邻 4 种×1、右邻 4 种×1 ⇒ 各 2 bit */
     ASSERT_NEAR(mn_real, 2.0, 0.01, "中 的 min 左右熵应为 2.0 bit");
 
-    /* 中文多字词：token 是单字，词必须由字对合成 —— 不合成则恒 0（曾踩过） */
+    /* 中文多字词：token 是单字，词必须由字对合成出计数 —— 不合成则恒 0（曾踩过） */
     ASSERT_TRUE(wp_count("中一") >= 1, "中文多字词应由字对合成出计数");
-    ASSERT_TRUE(wp_entropy("中一", 0) > 0.0, "多字词左熵应取首字的左熵");
+
+    /* ⚠ CX-40 契约：词级熵【不许】用首字/末字冒充。
+     * 没有 word_ctx 实测时就是「未知」= 0.0；旧实现这里会返回「中」的左熵（>0）。
+     * 这一条是回归护栏：谁再把首字熵接回来，这里立刻红。 */
+    ASSERT_NEAR(wp_entropy("中一", 0), 0.0, 1e-9, "无实测时多字词左熵应为 0（不再是首字的左熵）");
+    ASSERT_NEAR(wp_entropy("中一", 1), 0.0, 1e-9, "无实测时多字词右熵应为 0（不再是末字的右熵）");
+    ASSERT_TRUE(wp_is_wordlike("中一", 0.5, 1) == 0, "没有词级实测的多字词不应被判为合法词");
+
     ASSERT_NEAR(wp_gain("中一"), 0.70, 0.01, "只见过 1 次的多字词增益应为 0.70");
 
     /* 英文碎片：同一个 token 反复自组合 ⇒ 左右邻居唯一 ⇒ 熵 0 */
@@ -84,6 +92,66 @@ int main(void) {
     ASSERT_TRUE(wp_gain("machine") >= 0.45f - 1e-6f && wp_gain("machine") <= 1.25f + 1e-6f,
                 "多字增益应落在 [0.45,1.25]");
     ASSERT_TRUE(wp_gain("未观测的怪词") >= 0.45f - 1e-6f, "未知多字词增益下界 0.45");
+
+    /* ---------- ②-bis 词整体左右邻（CX-40） ---------- */
+    /* 造一份最小语料，把 CX-40 的两个铁证摆进来：
+     *   · 「公吵」只出现在「老公吵架」里 ⇒ 左邻恒为「老」、右邻恒为「架」、两侧边界 0%
+     *     ⇒ 切片词，在语料里从不独立出现。
+     *   · 「公」自己用得很广（老/办/石/水/火 五种左邻）⇒ 字级左熵高。
+     *     旧实现拿「公」的左熵冒充「公吵」的左熵 ⇒ 切片词拿假高分。
+     *   · 「苹果」左邻 5 种、右邻 7 种，还能出现在句首 ⇒ 真词。
+     * 这一组的意义：判据本身是准的，坏的是实现 —— 所以钉在这里。 */
+    {
+        static const char* corpus[] = {
+            "老公吵架", "老公吵架", "老公吵架",
+            "办公，石公，水公，火公",
+            "吃苹果很甜", "买苹果贵", "看苹果大",
+            "苹果好吃", "苹果便宜", "红苹果甜", "大苹果香",
+        };
+        const int nline = (int)(sizeof(corpus) / sizeof(corpus[0]));
+        for (int i = 0; i < nline; i++) cp_observe_tokens(corpus[i]);
+        wp_invalidate();
+
+        ASSERT_TRUE(wp_entropy("公", 0) > 1.5, "「公」的字级左熵应高（5 种左邻）");
+
+        static const char* cands[] = { "公吵", "苹果" };
+        wctx_reset();     /* 从干净的结果表起步（本进程内可能已有别的构建） */
+        ASSERT_TRUE(wctx_begin(cands, 2) == 2, "word_ctx 应接受 2 个候选");
+        for (int i = 0; i < nline; i++) wctx_scan_text(corpus[i]);
+        wctx_finish();
+
+        WctxStat frag;
+        ASSERT_TRUE(wctx_query("公吵", &frag) == 1, "「公吵」应被实测到");
+        ASSERT_TRUE(frag.count >= 3, "「公吵」应出现 3 次");
+        ASSERT_NEAR(frag.hl, 0.0, 1e-9, "「公吵」词整体左熵应为 0（左邻只有「老」）");
+        ASSERT_NEAR(frag.hr, 0.0, 1e-9, "「公吵」词整体右熵应为 0（右邻只有「架」）");
+        ASSERT_TRUE(frag.lbound == 0 && frag.rbound == 0, "「公吵」两侧都不该出现边界");
+
+        WctxStat real;
+        ASSERT_TRUE(wctx_query("苹果", &real) == 1, "「苹果」应被实测到");
+        /* 边界【计入】分布（与 tools/word_ctx.py 探针一致）：
+         * 左邻 = {吃,买,看,红,大}×1 + <边界>×2 ⇒ H = 2.5216 bit
+         * 右邻 = {很,贵,大,好,便,甜,香}×1  ⇒ H = log2(7) = 2.8074 bit */
+        ASSERT_NEAR(real.hl, 2.5216, 0.01, "「苹果」词整体左熵应为 2.5216 bit（含边界类）");
+        ASSERT_NEAR(real.hr, log2(7.0), 0.01, "「苹果」词整体右熵应为 log2(7)");
+        ASSERT_TRUE(real.lbound == 2, "「苹果」应在段首出现 2 次");
+        ASSERT_TRUE(real.rbound == 0, "「苹果」不应在段尾出现");
+
+        /* 晋升闸门谓词（qa_retrain 用的就是这条）：只看词整体 min熵 ≥ me。
+         * 曾经还有「两侧都有边界即放行」的豁免，2026-10-27 实测后撤掉：
+         * 它放过了高频切片（用太 0.432 / 的原 0.687），而它当初想救的
+         * 「吵架」在全量语料上 min熵 3.197，本来就不需要救。 */
+        int frag_ok = (frag.hl < frag.hr ? frag.hl : frag.hr) >= 2.0;
+        int real_ok = (real.hl < real.hr ? real.hl : real.hr) >= 2.0;
+        ASSERT_TRUE(frag_ok == 0, "切片词「公吵」应被晋升闸门拒绝");
+        ASSERT_TRUE(real_ok == 1, "真词「苹果」应通过晋升闸门");
+
+        /* 读侧也必须走实测：给词级 0.0，而不是「公」的字级 2.3 */
+        ASSERT_NEAR(wp_entropy("公吵", 0), 0.0, 1e-9, "读侧应给出词整体左熵 0，不是首字的字级熵");
+        ASSERT_NEAR(wp_min_entropy("公吵"), 0.0, 1e-9, "读侧 min 熵应为 0");
+        ASSERT_TRUE(wp_is_wordlike("公吵", 2.0, 3) == 0, "「公吵」不应被判为合法词");
+        ASSERT_TRUE(wp_is_wordlike("苹果", 2.0, 3) == 1, "「苹果」应被判为合法词");
+    }
 
     /* ---------- ④ 写侧结构闸门（CX-27） ---------- */
     {
