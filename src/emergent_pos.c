@@ -5,6 +5,7 @@
 
 #include "pivotmind_paths.h"
 #include "emergent_pos.h"
+#include "word_embed.h"   /* v0.6.12: 邻词分布指纹（替代随机特征的余弦） */
 #include "multi_topology.h"
 #include "huarong_topology.h"
 #include "common.h"
@@ -21,6 +22,20 @@
 
 /* 前向声明 (classify 函数中调用, 定义在文件后面) */
 int emergent_pos_try_emerge(EmergentPOS* ep);
+
+/* ── v0.6.12 指纹分类的门槛与开关 ──
+ * 实测（tools/wemb_probe.c）：同类 0.15–0.45、跨类 0.004–0.26。
+ * 取 0.10 作入门槛 —— 宁可多分类（top-3 软输出吸收误判），也不退回随机特征。 */
+#define POS_EMBED_MIN_SIM 0.10f
+
+static int pos_embed_enabled(void) {
+    static int cached = -1;
+    if (cached < 0) {
+        const char* e = getenv("PIVOTMIND_POS_EMBED");
+        cached = (e && e[0] == '0') ? 0 : 1;
+    }
+    return cached;
+}
 
 /* ================================================================
  *  内部辅助: POS 标签名
@@ -506,6 +521,56 @@ void emergent_pos_tag_soft(EmergentPOS* ep, MasterTopology* master,
                 result->tags[0] = (POSTag)tag;
                 result->confs[0] = 1.0f;
                 result->count = 1;
+                return;
+            }
+        }
+    }
+
+    /* ── 第一点五层：邻词分布指纹匹配（v0.6.12）──
+     * 为什么插在这里：下面的第二层用 512 维 features 的余弦，而 features 在重训时是
+     * `rand()*0.1-0.05` 的**随机噪声** ⇒ 那一层实际等于随机分类。
+     * 指纹表示的是「这个词旁边出现哪些高频字」的真实分布（charpairs 1.1 亿次观测），
+     * 实测类内/类间相似度比 4.15x（tools/wemb_probe.c：很~太 0.455，吃~的 0.020）。
+     * 指纹缺失（多字词 / 表外字 / 未构建）⇒ 原样落到第二层，行为不变。
+     * 开关：PIVOTMIND_POS_EMBED=0 关闭。 */
+    if (pos_embed_enabled()) {
+        int dim = wemb_dim();
+        if (dim > 0 && dim <= 1024) {
+            float proto[1024];
+            float  best_sim[3] = {-2.0f, -2.0f, -2.0f};
+            POSTag best_tag[3] = {POS_UNKNOWN, POS_UNKNOWN, POS_UNKNOWN};
+            const float* vw = wemb_vector(word);
+            int vnnz = vw ? wemb_nnz(word) : 0;
+            if (vw && vnnz >= 3) {
+            for (int tag = POS_NOUN; tag < POS_COUNT; tag++) {
+                POSAnchor* anchor = &ep->anchors[tag];
+                if (!anchor->is_active || anchor->seed_count <= 0) continue;
+                /* 用「该类的种子原型（均值）」比，而不是逐个种子取 max：
+                 * 逐 max 会被单个异常种子带偏，均值是类的中心（原型理论的做法）。 */
+                if (wemb_centroid(anchor->seeds, anchor->seed_count, proto) <= 0) continue;
+                float sim = wemb_cosine(vw, proto);
+                if (sim < POS_EMBED_MIN_SIM) continue;
+                for (int k = 0; k < 3; k++) {           /* 插入前 3 名 */
+                    if (sim > best_sim[k]) {
+                        for (int j = 2; j > k; j--) {
+                            best_sim[j] = best_sim[j - 1];
+                            best_tag[j] = best_tag[j - 1];
+                        }
+                        best_sim[k] = sim;
+                        best_tag[k] = (POSTag)tag;
+                        break;
+                    }
+                }
+            }
+            }
+            if (best_tag[0] != POS_UNKNOWN) {
+                int c = 0;
+                for (int k = 0; k < 3 && best_tag[k] != POS_UNKNOWN; k++) {
+                    result->tags[c]  = best_tag[k];
+                    result->confs[c] = (best_sim[k] > 1.0f) ? 1.0f : best_sim[k];
+                    c++;
+                }
+                result->count = c;
                 return;
             }
         }

@@ -119,6 +119,38 @@ int main(int argc, char** argv) {
         printf("  [load后] %-10s active=%d member=%d\n", ep->anchors[tag].label_cn,
                ep->anchors[tag].is_active, ep->anchors[tag].member_count);
 
+    /* 关键判据 2：dist_sig[26]（真分布指纹）到底有没有数据？
+     * classify_soft 用的是 512 维 features 的余弦 —— 而重训时 features 是随机噪声
+     * （rand()*0.1-0.05），在噪声上算余弦等于随机分类。
+     * dist_sig 才是「上下文分布相同」的正确表示，但前提是它被真的写过。 */
+    printf("[探针] dist_sig 填充情况（抽查已知词）：\n");
+    {
+        const char* probe_words[] = {"的", "了", "在", "是", "人", "山", "吃", "看", "很", "不", NULL};
+        for (int w = 0; probe_words[w]; w++) {
+            int id = huarong_net_find_concept(vocab->net, probe_words[w]);
+            if (id < 0 || id >= nc || !vocab->net->nodes[id]) {
+                printf("  %s 未找到\n", probe_words[w]);
+                continue;
+            }
+            ReasoningNode* nd = vocab->net->nodes[id];
+            int nz = 0;
+            float sum = 0.0f;
+            char buf[320];
+            int off = 0;
+            off += snprintf(buf + off, sizeof(buf) - off, "  %s 非零维=", probe_words[w]);
+            for (int d = 0; d < 26; d++) {
+                if (nd->dist_sig[d] > 0.01f) {
+                    nz++;
+                    sum += nd->dist_sig[d];
+                    if (off < (int)sizeof(buf) - 20)
+                        off += snprintf(buf + off, sizeof(buf) - off, "[%d]=%.2f ", d,
+                                        (double)nd->dist_sig[d]);
+                }
+            }
+            printf("%s| 合计%.2f | dist_sig_count=%u\n", buf, (double)sum, nd->dist_sig_count);
+        }
+    }
+
     int inited = emergent_pos_init_centroids(ep, master);
     printf("[探针] emergent_pos_init_centroids 返回 = %d（0 可能只是「已激活，无需再初始化」）\n", inited);
     printf("[探针] emergent_pos_anchor_count = %d\n", emergent_pos_anchor_count(ep));
@@ -127,6 +159,40 @@ int main(int argc, char** argv) {
         printf("  %-10s active=%d member=%d stability=%.2f\n",
                a->label_cn ? a->label_cn : "?", a->is_active, a->member_count,
                (double)a->centroid_stability);
+    }
+
+    /* 关键判据 3：非种子词的分类准确率。
+     * 种子词会被 tag_soft 的第一层（strcmp）直接命中 ⇒ 测不出第二层。
+     * 所以这里全用**非种子词**，且覆盖多个类，看指纹层判得对不对。 */
+    printf("\n[探针] 非种子词分类（走指纹层）：\n");
+    {
+        struct { const char* w; const char* expect; } T[] = {
+            {"走", "动词"}, {"拿", "动词"}, {"睡", "动词"}, {"写", "动词"}, {"唱", "动词"},
+            {"更", "副词"}, {"太", "副词"}, {"也", "副词"}, {"还", "副词"}, {"又", "副词"},
+            {"树", "名词"}, {"河", "名词"}, {"车", "名词"}, {"鱼", "名词"}, {"门", "名词"},
+            {"慢", "形容词"}, {"甜", "形容词"}, {"苦", "形容词"}, {"冷", "形容词"},
+            {"过", "助词"}, {"呢", "助词"},
+            {"从", "介词"}, {"到", "介词"},
+            {"百", "数词"}, {"次", "数词"},
+        };
+        int n = (int)(sizeof(T) / sizeof(T[0])), ok = 0, got = 0;
+        for (int i = 0; i < n; i++) {
+            SoftClassResult r;
+            r.count = 0;
+            emergent_pos_tag_soft(ep, master, T[i].w, &r);
+            if (r.count <= 0) {
+                printf("  %s → （未分类）期望 %s\n", T[i].w, T[i].expect);
+                continue;
+            }
+            got++;
+            const char* got_name = emergent_pos_class_name(ep, (int)r.tags[0]);
+            int hit = (got_name && strcmp(got_name, T[i].expect) == 0);
+            if (hit) ok++;
+            printf("  %s → %-6s(%.2f) 期望 %-6s %s\n", T[i].w, got_name ? got_name : "?",
+                   (double)r.confs[0], T[i].expect, hit ? "✓" : "✗");
+        }
+        printf("  ⇒ 已分类 %d/%d，其中正确 %d（%.0f%%）\n",
+               got, n, ok, got ? 100.0 * ok / got : 0.0);
     }
 
     emergent_pos_destroy(ep);
