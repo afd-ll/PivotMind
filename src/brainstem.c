@@ -600,10 +600,16 @@ static void brainstem_tick_freeze(Brainstem* bs, const CircadianParams* cp) {
     Thalamus* th = bs->thalamus;
     if (!th) return;
 
-    /* 加载保护期：状态加载后 60 tick 内不执行冻结/修剪（v0.6）。
+    /* 加载保护期：状态加载后 PM_LOAD_PROTECT_SECONDS 内不执行冻结/修剪（v0.6）。
      * 加载大状态后 RSS 增长会误触发 RED → 每 tick 冻结+删除冷节点，
      * 把刚加载的知识当"死节点"连锁清光（实测 4 分钟 3 万→2 千）。
-     * 保护期内跳过，给自主学习/词巩固时间把知识"热"起来。 */
+     * 保护期内跳过，给自主学习/词巩固时间把知识"热"起来。
+     *
+     * 🔴 真实时长 = **1800 秒（30 分钟）**，按墙钟时间算、与 tick 速率无关
+     * （定义见 include/multi_topology.h 的 master_load_protected）。
+     * 本注释原写「60 tick」是旧口径 —— 照它算会得出"一分钟就过了"的错误结论。
+     * 2026-10-27 排查 BG-51 线上对账时真被带偏过一次：gateway 09:44 起，
+     * 到 10:14 才解除保护，期间一次都不冻，看着像"冻结机制没工作"。 */
     if (master_load_protected(bs->master)) return;
 
     NodeCache* nc = (NodeCache*)thalamus_get_utility(th, THAL_UTIL_NODE_CACHE);
