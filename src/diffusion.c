@@ -12,6 +12,7 @@
 #include "node_cache.h"   /* v0.5.10: 按需解冻 node_cache_thaw */
 #include "lang.h"
 #include "word_prob.h"   /* v0.6.12: 生成侧按词概率×左右熵加权 */
+#include "charpair.h"    /* v0.6.12: 连接符用字符级共现统计（1.1 亿次观测） */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1226,6 +1227,121 @@ static int _anchor_dbg(void) {
     return cached;
 }
 
+/* ══════════════════════════════════════════════════════════════════
+ * 连接符注入（v0.6.12）
+ *
+ * 病根：输出层有两道硬剔除 —— `is_function_word()` 剔虚词、
+ * `pm_is_single_char && pm_is_zh_char` 剔中文单字，而中文虚词几乎全是单字
+ * （的/了/在/是/就/也/都）。两者叠加 ⇒ 输出只可能由 ≥2 字实词组成
+ * ⇒ 句子没有关节，读起来是词串（实测「天气什么知道学习」）。
+ *
+ * 做法**不是**把虚词放回候选池 —— 那会让「的/了/在」劫持话题
+ *（v0.6 明确修过的 BUG，见 degree_penalty 注释）。而是在**已排好序的实词之间**
+ * 插连接符：
+ *     若语料里存在  A --w1--> fw --w2--> B  且 fw 是虚词，
+ *     取 min(w1,w2) 最高者插入。
+ * ⇒ 连接符来自**真实共现统计**，不是硬编码语法规则。语料没这么搭配就不插。
+ *
+ * 开关：PIVOTMIND_CONNECTIVE_INJECT=0 关闭（默认开）。
+ * ══════════════════════════════════════════════════════════════════ */
+static int _conn_inject_on(void) {
+    static int cached = -1;
+    if (cached < 0) {
+        const char* e = getenv("PIVOTMIND_CONNECTIVE_INJECT");
+        cached = (e && e[0] == '0') ? 0 : 1;
+    }
+    return cached;
+}
+
+/** 词级桥：A --w1--> fw --w2--> B（要求词表里真有这条语法边）。 */
+static const char* _find_connective_words(DiffusionCtx* ctx, const char* a, const char* b) {
+    if (!ctx || !ctx->vocab || !ctx->vocab->net || !a || !b) return NULL;
+    HuarongTopologyNet* net = ctx->vocab->net;
+    int ia = huarong_net_find_concept(net, a);
+    int ib = huarong_net_find_concept(net, b);
+    if (ia < 0 || ib < 0 || ia >= net->node_count || ib >= net->node_count) return NULL;
+    ReasoningNode* na = net->nodes[ia];
+    if (!na || !na->edges || na->edge_count <= 0) return NULL;
+
+    const char* best = NULL;
+    float best_v = 0.0f;
+    for (int e = 0; e < na->edge_count; e++) {
+        ReasoningNode* fw = na->edges[e].target;
+        if (!fw || !fw->concept) continue;
+        float w1 = na->edges[e].weight;
+        if (w1 <= best_v) continue;                        /* 剪枝：不可能更好 */
+        if (!is_function_word(fw->concept)) continue;      /* 只认虚词 */
+        if (strcmp(fw->concept, a) == 0 || strcmp(fw->concept, b) == 0) continue;
+        if (!fw->edges || fw->edge_count <= 0) continue;
+        for (int e2 = 0; e2 < fw->edge_count; e2++) {
+            ReasoningNode* t = fw->edges[e2].target;
+            if (!t || t->node_id != ib) continue;
+            float w2 = fw->edges[e2].weight;
+            float v = (w1 < w2) ? w1 : w2;                 /* 最弱环节决定可信度 */
+            if (v > best_v) { best_v = v; best = fw->concept; }
+            break;
+        }
+    }
+    return best;
+}
+
+/* 单字中文虚词候选 —— 必须写成**可遍历**的数组：is_function_word() 是查表函数，
+ * 不能用来枚举。内容与下方 is_function_word 的 stopwords[] 中文部分同源。
+ * 注意：这里只是**候选集**，最终选哪一个完全由字符共现计数决定（见下）。 */
+static const char* const FW_ONE_CHAR[] = {
+    "的", "了", "着", "过", "在", "是", "就", "也", "都", "不",
+    "和", "与", "或", "但", "而", "地", "得", "把", "被", "给",
+    "让", "对", "从", "到", "向", "为", "以", "因", "所", "之",
+    "其", "则", "及", "等", "啦", "吧", "啊", "呢", "吗", "呀", "嘛",
+    NULL
+};
+#define FW_MIN_COUNT 3   /* 至少共现 3 次才插（挡住语料里的偶然一次） */
+
+/** 字级桥：A 的末字 --c1--> fw --c2--> B 的首字（用 charpairs 的字符共现）。
+ *  为什么需要这一层：词级边建的是「同句共现的兄弟词」（电脑↔屏幕↔坏了），
+ *  不是语法后继，所以词级桥在真实词表上几乎不存在（实测 0 命中）。
+ *  而字符级有 1.1 亿次观测，能直接答出「脑..的..屏」这类搭配。 */
+static const char* _find_connective_chars(const char* a, const char* b) {
+    CharPairTable* cp = cpt_global();
+    if (!cp || !a || !a[0] || !b || !b[0]) return NULL;
+
+    /* A 的末字 */
+    size_t na = strlen(a);
+    int i = (int)na - 1;
+    while (i > 0 && ((unsigned char)a[i] & 0xC0) == 0x80) i--;
+    size_t la_len = na - (size_t)i;
+    if (la_len < 1 || la_len > 4) return NULL;
+    char la[8] = {0};
+    memcpy(la, a + i, la_len);
+
+    /* B 的首字 */
+    unsigned char c0 = (unsigned char)b[0];
+    int fb_len = (c0 < 0x80) ? 1 : ((c0 & 0xE0) == 0xC0 ? 2 : ((c0 & 0xF0) == 0xE0 ? 3 : 4));
+    if (fb_len > 4) return NULL;
+    char fb[8] = {0};
+    memcpy(fb, b, (size_t)fb_len);
+
+    const char* best = NULL;
+    uint32_t best_v = 0;
+    for (int k = 0; FW_ONE_CHAR[k]; k++) {
+        const char* fw = FW_ONE_CHAR[k];
+        uint32_t c1 = cpt_get(cp, la, fw);
+        if (c1 < FW_MIN_COUNT || c1 <= best_v) continue;
+        uint32_t c2 = cpt_get(cp, fw, fb);
+        if (c2 < FW_MIN_COUNT) continue;
+        uint32_t v = (c1 < c2) ? c1 : c2;                  /* 最弱环节 */
+        if (v > best_v) { best_v = v; best = fw; }
+    }
+    return best;
+}
+
+/** 连接符总入口：先试词级语法边，再退到字符共现。 */
+static const char* _find_connective(DiffusionCtx* ctx, const char* a, const char* b) {
+    const char* w = _find_connective_words(ctx, a, b);
+    if (w) return w;
+    return _find_connective_chars(a, b);
+}
+
 int diffusion_generate(DiffusionCtx* ctx,
                         const char* input,
                         const char** output_words,
@@ -2271,10 +2387,27 @@ int diffusion_generate(DiffusionCtx* ctx,
         }
         out = 0;
         {
-            const int max_reply_words = MAX_REPLY_WORDS;   /* 口语短句：≤4 实词 */
-            for (int w = 0; w < word_count && out < max_reply_words; w++) {
+            /* 口语短句：≤4 **实词**。连接符不占这个额度（它不加长语义，只加关节）。 */
+            const int max_reply_words = MAX_REPLY_WORDS;
+            const int inject = _conn_inject_on();
+            int real_cnt = 0;
+            for (int w = 0; w < word_count && real_cnt < max_reply_words; w++) {
                 if (!word_buf[w]) continue;
+                /* v0.6.12 连接符注入：在两个相邻实词之间插语料里的高频虚词。
+                 * 只有语料确实存在 A--fw-->B 的共现才插，所以不会凭空造出
+                 * 「的了的在」。 */
+                if (inject && real_cnt > 0 && out > 0 && (out + 1) < max_output) {
+                    const char* cw = _find_connective(ctx, output_words[out - 1], word_buf[w]);
+                    if (cw) {
+                        if (_anchor_dbg())
+                            fprintf(stderr, "[连接符] %s ↔ %s 插入「%s」\n",
+                                    output_words[out - 1], word_buf[w], cw);
+                        output_words[out++] = cw;
+                    }
+                }
+                if (out >= max_output) break;
                 output_words[out++] = word_buf[w];
+                real_cnt++;
             }
         }
     } else {
