@@ -11,6 +11,7 @@
 #include "cognitive_controller.h"
 #include "node_cache.h"   /* v0.5.10: 按需解冻 node_cache_thaw */
 #include "lang.h"
+#include "word_prob.h"   /* v0.6.12: 生成侧按词概率×左右熵加权 */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1965,8 +1966,12 @@ int diffusion_generate(DiffusionCtx* ctx,
             _rel_eff = (vocab_scores[i] / _peak) * _hop2_credit;
             if (_rel_eff > 1.0f) _rel_eff = 1.0f;
         }
+        /* v0.6.12: 概率项 —— 同一个词在真实语料里越常见、搭配越自由（左右熵高），
+         * 越应该被选中；低概率且低熵的组合（碎片/脏词）在这里被压下去。
+         * 单字恒 1.0（不奖不罚），见 word_prob.c:wp_gain。 */
+        float _wgain = wp_gain(n->concept);
         final[final_cnt].total_score    = vocab_scores[i] * degree_penalty *
-                                          (_rel_base + _rel_gain * _rel_eff);
+                                          (_rel_base + _rel_gain * _rel_eff) * _wgain;
         /* v0.6.3·批1 第9步：留一份**原始值**备查。
          * 借用 `emotion_score`（全程恒 0 且后续两段重排序不会改它）。
          * 用途：DUMP 同时打 raw 与 total ⇒ 一次量出中间被加了多少。 */

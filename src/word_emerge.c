@@ -9,6 +9,7 @@
 
 #include "word_emerge.h"
 #include "charpair.h"
+#include "word_prob.h"
 #include "multi_topology.h"
 #include "huarong_topology.h"
 #include "error.h"
@@ -20,63 +21,49 @@
 
 #define WE_MAXENT 200000
 
-typedef struct { char a[8]; char b[8]; unsigned int c; int used; } WEnt;
+typedef struct { char a[32]; char b[32]; unsigned int c; int used; } WEnt;
 static WEnt* g_e = NULL;
 static int    g_ne = 0;
 
 static void collect_cb(const char* a, const char* b, uint32_t c, void* ud) {
     (void)ud;
     if (g_ne >= WE_MAXENT) return;
-    snprintf(g_e[g_ne].a, 8, "%s", a);
-    snprintf(g_e[g_ne].b, 8, "%s", b);
+    snprintf(g_e[g_ne].a, 32, "%s", a);
+    snprintf(g_e[g_ne].b, 32, "%s", b);
     g_e[g_ne].c = c;
     g_e[g_ne].used = 0;
     g_ne++;
 }
 
-static int is_cjk_char3(const char* s) {
-    if (!s) return 0;
-    if (strlen(s) != 3) return 0;
+/* token 判据（v0.6.12 中英双轨）：
+ *   · CJK 单字（3 字节 U+4E00..U+9FFF）
+ *   · 纯拉丁/数字 token（1..31 字节，小写）—— 英文同样走熵/PMI 判据
+ * 用同一套公式，只是切分单位不同：中文按字，英文按词。 */
+static int we_is_token(const char* s) {
+    if (!s || !s[0]) return 0;
+    size_t n = strlen(s);
+    if (n == 3) {
+        unsigned cp = (((unsigned char)s[0] & 0x0F) << 12) |
+                      (((unsigned char)s[1] & 0x3F) << 6) |
+                       ((unsigned char)s[2] & 0x3F);
+        if (cp >= 0x4E00 && cp <= 0x9FFF) return 1;
+    }
+    if (n >= 1 && n <= 31) {
+        for (size_t i = 0; i < n; i++) {
+            unsigned char c = (unsigned char)s[i];
+            if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_')) return 0;
+        }
+        return 1;
+    }
+    return 0;
+}
+
+static int we_is_cjk1(const char* s) {
+    if (!s || strlen(s) != 3) return 0;
     unsigned cp = (((unsigned char)s[0] & 0x0F) << 12) |
                   (((unsigned char)s[1] & 0x3F) << 6) |
                    ((unsigned char)s[2] & 0x3F);
     return cp >= 0x4E00 && cp <= 0x9FFF;
-}
-
-/* out(X) = X 作为首字的计数和（只算中文单字对，与写入口径一致） */
-static unsigned long long out_sum(const char* X) {
-    unsigned long long t = 0;
-    for (int i = 0; i < g_ne; i++)
-        if (g_e[i].c && is_cjk_char3(g_e[i].b) && strcmp(g_e[i].a, X) == 0) t += g_e[i].c;
-    return t;
-}
-/* 左熵：H(前一个字 | A) */
-static double ent_left(const char* A) {
-    unsigned long long t = 0;
-    for (int i = 0; i < g_ne; i++)
-        if (g_e[i].c && is_cjk_char3(g_e[i].a) && strcmp(g_e[i].b, A) == 0) t += g_e[i].c;
-    if (!t) return 0.0;
-    double h = 0;
-    for (int i = 0; i < g_ne; i++) {
-        if (!g_e[i].c || !is_cjk_char3(g_e[i].a) || strcmp(g_e[i].b, A) != 0) continue;
-        double p = (double)g_e[i].c / (double)t;
-        h -= p * log2(p);
-    }
-    return h;
-}
-/* 右熵：H(后一个字 | B) */
-static double ent_right(const char* B) {
-    unsigned long long t = 0;
-    for (int i = 0; i < g_ne; i++)
-        if (g_e[i].c && is_cjk_char3(g_e[i].b) && strcmp(g_e[i].a, B) == 0) t += g_e[i].c;
-    if (!t) return 0.0;
-    double h = 0;
-    for (int i = 0; i < g_ne; i++) {
-        if (!g_e[i].c || !is_cjk_char3(g_e[i].b) || strcmp(g_e[i].a, B) != 0) continue;
-        double p = (double)g_e[i].c / (double)t;
-        h -= p * log2(p);
-    }
-    return h;
 }
 
 void word_emerge_thresholds(unsigned* min_count, double* min_pmi, double* min_ent, int* max_new) {
@@ -126,15 +113,14 @@ int word_emerge_tick(MasterTopology* master) {
         if (g_e[i].used) continue;
         const char* A = g_e[i].a;
         const char* B = g_e[i].b;
-        if (!is_cjk_char3(A) || !is_cjk_char3(B)) continue;
+        if (!we_is_token(A) || !we_is_token(B)) continue;
         if (g_e[i].c < mc) continue;
 
-        unsigned long long oa = out_sum(A), ob = out_sum(B);
-        if (!oa || !ob) continue;
-        double pmi = log2(((double)g_e[i].c / (double)total) /
-                          (((double)oa / (double)total) * ((double)ob / (double)total)));
+        /* PMI 与左右熵统一走 word_prob（与生成侧同一套统计，口径只此一处） */
+        double pmi = wp_pmi(A, B);
         if (pmi < mp) continue;
-        double hl = ent_left(A), hr = ent_right(B);
+        double hl = wp_entropy(A, 0);     /* A 的左熵 */
+        double hr = wp_entropy(B, 1);     /* B 的右熵 */
         double mn = hl < hr ? hl : hr;
         if (mn < me) continue;
 
@@ -143,8 +129,11 @@ int word_emerge_tick(MasterTopology* master) {
         int bid = huarong_net_find_concept(vocab->net, B);
         if (aid < 0 || bid < 0) continue;
 
-        char word[24];
-        snprintf(word, sizeof(word), "%s%s", A, B);
+        char word[96];
+        if (we_is_cjk1(A) && we_is_cjk1(B))
+            snprintf(word, sizeof(word), "%s%s", A, B);   /* 中文：拼成词 */
+        else
+            snprintf(word, sizeof(word), "%s %s", A, B);  /* 英文：保留空格（搭配） */
         if (huarong_net_find_concept(concept->net, word) >= 0) continue;   /* 已有 */
 
         ReasoningNode* wn = huarong_net_add_node(concept->net, word, NULL, 0);
@@ -158,8 +147,8 @@ int word_emerge_tick(MasterTopology* master) {
         master_add_cross_link(master, TOPO_CONCEPT, wn->node_id, TOPO_VOCABULARY, aid, w, "emerge");
         master_add_cross_link(master, TOPO_CONCEPT, wn->node_id, TOPO_VOCABULARY, bid, w, "emerge");
 
-        LOG_INFO("[词涌现] 新增「%s」次数=%u PMI=%.2f 左熵=%.2f 右熵=%.2f (字=%s+%s w=%.2f)",
-                 word, g_e[i].c, pmi, hl, hr, A, B, (double)w);
+        LOG_INFO("[词涌现] 新增「%s」次数=%u PMI=%.2f 左熵=%.2f 右熵=%.2f P=%.5f (成分=%s+%s w=%.2f)",
+                 word, g_e[i].c, pmi, hl, hr, wp_p(word), A, B, (double)w);
         created++;
     }
     return created;

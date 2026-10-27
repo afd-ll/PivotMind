@@ -27,6 +27,7 @@
  */
 
 #include "pivotmind_paths.h"
+#include "word_prob.h"   /* v0.6.12: /debug 露概率口径读数 */
 #include "gateway_internal.h"
 #include "charpair.h"          /* [v0.6.11] 关闭时字对表落盘 */
 #include "transition_model.h"  /* [v0.6.11] 关闭时转移表落盘 */
@@ -292,11 +293,18 @@ static void handle_connection_inner(GatewaySystem* gw, int client_fd, HttpReques
                     if (gw->topology->sub_topologies[t]->type == TOPO_TEMPLATE) tnodes = n;
                 }
             }
+            /* v0.6.12: 概率口径读数（派生量，从 charpairs 现算） */
+            int wp_tok = 0, wp_pairs = 0;
+            unsigned long long wp_total = 0;
+            wp_stats(&wp_tok, &wp_pairs, &wp_total);
+
             char dbg[512];
             snprintf(dbg, sizeof(dbg),
                 "{\"vocab_nodes\":%d,\"freq_entries\":%d,"
-                "\"total_nodes\":%d,\"template_nodes\":%d,\"sub_topos\":%d}",
-                vnodes, fentries, total, tnodes, gw->topology->sub_topo_count);
+                "\"total_nodes\":%d,\"template_nodes\":%d,\"sub_topos\":%d,"
+                "\"wp_tokens\":%d,\"wp_pairs\":%d,\"wp_total\":%llu}",
+                vnodes, fentries, total, tnodes, gw->topology->sub_topo_count,
+                wp_tok, wp_pairs, wp_total);
             http_json(client_fd, 200, dbg);
         } else if (strcmp(req->path, "/force_templates") == 0) {
             int built = broca_build_templates(gw->topology, 10, 4);

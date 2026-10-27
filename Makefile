@@ -365,6 +365,8 @@ $(BUILD_DIR)/test_forgetting_unit: tests/unit/test_forgetting.c $(LIB_NAME)
 # BG-51 记账对账：冻结/解冻的边数必须进账（total_edges_frozen / total_thaws）
 $(BUILD_DIR)/test_node_cache_account: tests/unit/test_node_cache_account.c $(LIB_NAME)
 	$(CC) $(CFLAGS) -I. -o $@ tests/unit/test_node_cache_account.c -L. -lpivotmind $(LDFLAGS)
+$(BUILD_DIR)/test_word_prob: tests/unit/test_word_prob.c $(LIB_NAME)
+	$(CC) $(CFLAGS) -I. -o $@ tests/unit/test_word_prob.c -L. -lpivotmind $(LDFLAGS)
 
 $(BUILD_DIR)/test_paths_unit: tests/unit/test_paths_unit.c $(LIB_NAME)
 	$(CC) $(CFLAGS) -I. -o $@ tests/unit/test_paths_unit.c -L. -lpivotmind $(LDFLAGS)
@@ -430,6 +432,7 @@ test-learner-unit: $(BUILD_DIR)/test_learner_unit
 test-causal-unit: $(BUILD_DIR)/test_causal_unit
 test-forgetting-unit: $(BUILD_DIR)/test_forgetting_unit
 test-node-cache-account: $(BUILD_DIR)/test_node_cache_account  # BG-51 冻结记账对账契约单测（第 32 支）
+test-word-prob: $(BUILD_DIR)/test_word_prob                    # 词概率/左右熵/PMI 契约单测（第 33 支）
 test-paths-unit: $(BUILD_DIR)/test_paths_unit                # 路径 SSOT 契约单测（第 27 支）
 test-lang-unit: $(BUILD_DIR)/test_lang_unit                  # 语种 SSOT 契约单测（第 28 支）
 test-lang-persist-unit: $(BUILD_DIR)/test_lang_persist_unit  # 语种标签落盘契约单测（第 29 支）
@@ -459,10 +462,10 @@ test-runner: $(BUILD_DIR)/test_runner
 # TEST_FAST_BINS 刻意是它的子集（排除 test_chinese 控制台 smoke、test_trainer、
 # test_web_fetch、test_tensor、test_cc、test_tensor_broadcast、test_semantic_growth、
 # test_integration 等较慢/依赖终端或网络的项）。两列表口径显式维护，禁止有“定义了却没人跑”的目标。
-TEST_BINS = $(BUILD_DIR)/test_tensor $(BUILD_DIR)/test_tensor_broadcast $(BUILD_DIR)/test_model $(BUILD_DIR)/test_metrics $(BUILD_DIR)/test_trainer $(BUILD_DIR)/test_chinese $(BUILD_DIR)/test_web_fetch $(BUILD_DIR)/test_dialog_unit $(BUILD_DIR)/test_diffusion_unit $(BUILD_DIR)/test_topology_unit $(BUILD_DIR)/test_memory_unit $(BUILD_DIR)/test_learner_unit $(BUILD_DIR)/test_causal_unit $(BUILD_DIR)/test_forgetting_unit $(BUILD_DIR)/test_media_reader $(BUILD_DIR)/test_visual_cortex $(BUILD_DIR)/test_pure $(BUILD_DIR)/test_search $(BUILD_DIR)/test_pfe_unit $(BUILD_DIR)/test_regression $(BUILD_DIR)/test_semantic_growth $(BUILD_DIR)/test_integration $(BUILD_DIR)/test_cognitive_controller $(BUILD_DIR)/test_cognitive_full $(BUILD_DIR)/test_paths_unit $(BUILD_DIR)/test_lang_unit $(BUILD_DIR)/test_lang_persist_unit $(BUILD_DIR)/test_concept_output $(BUILD_DIR)/test_random_seed_unit $(BUILD_DIR)/test_transition_model_unit $(BUILD_DIR)/test_node_cache_account
+TEST_BINS = $(BUILD_DIR)/test_tensor $(BUILD_DIR)/test_tensor_broadcast $(BUILD_DIR)/test_model $(BUILD_DIR)/test_metrics $(BUILD_DIR)/test_trainer $(BUILD_DIR)/test_chinese $(BUILD_DIR)/test_web_fetch $(BUILD_DIR)/test_dialog_unit $(BUILD_DIR)/test_diffusion_unit $(BUILD_DIR)/test_topology_unit $(BUILD_DIR)/test_memory_unit $(BUILD_DIR)/test_learner_unit $(BUILD_DIR)/test_causal_unit $(BUILD_DIR)/test_forgetting_unit $(BUILD_DIR)/test_media_reader $(BUILD_DIR)/test_visual_cortex $(BUILD_DIR)/test_pure $(BUILD_DIR)/test_search $(BUILD_DIR)/test_pfe_unit $(BUILD_DIR)/test_regression $(BUILD_DIR)/test_semantic_growth $(BUILD_DIR)/test_integration $(BUILD_DIR)/test_cognitive_controller $(BUILD_DIR)/test_cognitive_full $(BUILD_DIR)/test_paths_unit $(BUILD_DIR)/test_lang_unit $(BUILD_DIR)/test_lang_persist_unit $(BUILD_DIR)/test_concept_output $(BUILD_DIR)/test_random_seed_unit $(BUILD_DIR)/test_transition_model_unit $(BUILD_DIR)/test_node_cache_account $(BUILD_DIR)/test_word_prob
 TEST_FAST_BINS = $(BUILD_DIR)/test_model $(BUILD_DIR)/test_metrics $(BUILD_DIR)/test_visual_cortex $(BUILD_DIR)/test_dialog_unit $(BUILD_DIR)/test_diffusion_unit $(BUILD_DIR)/test_topology_unit $(BUILD_DIR)/test_memory_unit $(BUILD_DIR)/test_learner_unit $(BUILD_DIR)/test_causal_unit $(BUILD_DIR)/test_tensor_broadcast $(BUILD_DIR)/test_forgetting_unit $(BUILD_DIR)/test_media_reader $(BUILD_DIR)/test_pure $(BUILD_DIR)/test_search $(BUILD_DIR)/test_pfe_unit $(BUILD_DIR)/test_regression
 
-test: test-cc-full test-tensor test-tensor-broadcast test-model test-metrics test-trainer test-chinese test-web-fetch test-dialog-unit test-diffusion-unit test-topology-unit test-memory-unit test-learner-unit test-causal-unit test-forgetting-unit test-media-reader test-visual-cortex test-pure test-search test-pfe-unit test-regression test-semantic-growth test-integration test-cc test-paths-unit test-lang-unit test-lang-persist-unit test-concept-output test-random-seed-unit test-transition-model-unit test-node-cache-account
+test: test-cc-full test-tensor test-tensor-broadcast test-model test-metrics test-trainer test-chinese test-web-fetch test-dialog-unit test-diffusion-unit test-topology-unit test-memory-unit test-learner-unit test-causal-unit test-forgetting-unit test-media-reader test-visual-cortex test-pure test-search test-pfe-unit test-regression test-semantic-growth test-integration test-cc test-paths-unit test-lang-unit test-lang-persist-unit test-concept-output test-random-seed-unit test-transition-model-unit test-node-cache-account test-word-prob
 	@echo ""
 	@echo "╔══════════════════════════════════════╗"
 	@echo "║  运行单元测试...                     ║"

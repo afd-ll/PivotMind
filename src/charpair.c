@@ -16,9 +16,9 @@
 #include <pthread.h>
 
 #define CP_MAGIC      0x504D4350u   /* "PMCP" */
-#define CP_VERSION    2u
+#define CP_VERSION    3u            /* v3：键上限 8→32，中英双轨 token（旧表自动作废重建） */
 #define CPT_INIT_CAP  1024
-#define CP_MAXB       8             /* 单个字的字节上限（中文单字 3） */
+#define CP_MAXB       32            /* 单个 token 的字节上限（中文单字 3；英文词 ≤31） */
 #define CP_TOKEN_MAX  512
 
 typedef struct {
@@ -165,7 +165,10 @@ int cpt_load(CharPairTable* t, const char* path) {
     FILE* fp = fopen(path, "rb");
     if (!fp) return -1;
     uint32_t hdr[3] = {0};
-    if (fread(hdr, sizeof(uint32_t), 3, fp) != 3 || hdr[0] != CP_MAGIC || hdr[1] != CP_VERSION) {
+    /* 兼容 v2（键 ≤7 字节的中文单字表）：读得进，存盘时统一按 CP_VERSION 写。
+     * 2026-10-27 实测线上已有 288,468 条 v2 数据，直接作废等于把历史统计扔了。 */
+    if (fread(hdr, sizeof(uint32_t), 3, fp) != 3 || hdr[0] != CP_MAGIC ||
+        (hdr[1] != CP_VERSION && hdr[1] != 2u)) {
         fclose(fp);
         LOG_WARNING("[charpair] %s 头无效（旧格式或损坏），忽略", path);
         return -1;
@@ -239,32 +242,72 @@ void cpt_global_shutdown_save(void) {
     pthread_mutex_unlock(&g_cpt_lock);
 }
 
-int cp_observe_text(const char* text) {
-    /* v0.6.11 起不再需要词汇拓扑：按文本直接计。原来的 vocab 形参从未被读过
-     * （只写 (void)vocab 丢掉），接线检查判据 B 会把它记成「显式丢弃」⇒ 直接删形参。 */
+int cp_observe_tokens(const char* text) {
+    /* v0.6.12：从「只计中文单字」扩成「中英双轨 token 对」——
+     *   · CJK 单字     → 一个 token（3 字节）
+     *   · 拉丁字母/数字 → 一个 token（小写化，≤31 字节；英文按空格已是词）
+     *   · 空白/标点/emoji/其它文字 → 断链（不产生跨类假对）
+     * 中文语义不变（仍是逐字成对）；英文从此也能算 P(w) 与左右熵。
+     * 为什么英文也要：左熵/右熵判的是「这个单位的搭配自由度」，
+     * 对英文即「搭配词是否多样」—— 同一个公式，换切分单位即可。 */
     if (!text || !text[0]) return 0;
     CharPairTable* t = cpt_global();
     if (!t) return 0;
 
-    /* 逐字取中文单字（3 字节 UTF-8），相邻成对计数 */
     char prev[CP_MAXB] = {0};
     int used = 0, pairs = 0;
-    for (const char* p = text; *p; ) {
+    const char* p = text;
+    while (*p) {
         unsigned char c = (unsigned char)*p;
-        int len = (c < 0x80) ? 1 : ((c & 0xE0) == 0xC0 ? 2 : ((c & 0xF0) == 0xE0 ? 3 : 4));
-        char one[CP_MAXB] = {0};
-        if (len < CP_MAXB) { memcpy(one, p, (size_t)len); one[len] = '\0'; }
-        p += len;
-        if (len != 3) { prev[0] = '\0'; continue; }   /* 非中文单字 ⇒ 断开相邻关系 */
-        if (prev[0]) { cpt_observe(t, prev, one); pairs++; }
-        snprintf(prev, CP_MAXB, "%s", one);
-        used++;
+        if (c < 0x80) {
+            if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                (c >= '0' && c <= '9') || c == '_') {
+                char one[CP_MAXB];
+                int n = 0;
+                while (*p) {
+                    unsigned char d = (unsigned char)*p;
+                    if (!((d >= 'a' && d <= 'z') || (d >= 'A' && d <= 'Z') ||
+                          (d >= '0' && d <= '9') || d == '_')) break;
+                    if (n < CP_MAXB - 1) one[n++] = (char)((d >= 'A' && d <= 'Z') ? (char)(d + 32) : (char)d);
+                    p++;
+                }
+                one[n] = '\0';
+                if (prev[0]) { cpt_observe(t, prev, one); pairs++; }
+                snprintf(prev, CP_MAXB, "%s", one);
+                used++;
+                continue;
+            }
+            /* 空白 = 软分隔：中文"甲 乙"与英文"machine learning"都靠它分词，
+             * 因此**保留 prev**，让跨空白的相邻 token 仍成对（英文 bigram 靠这条）。
+             * 标点才是硬断链。 */
+            if (c == ' ' || c == '\t' || c == '\n' || c == '\r') { p++; continue; }
+            p++;                      /* 标点/其它 ASCII：断链 */
+            prev[0] = '\0';
+            continue;
+        }
+        int len = (c & 0xE0) == 0xC0 ? 2 : ((c & 0xF0) == 0xE0 ? 3 : ((c & 0xF8) == 0xF0 ? 4 : 1));
+        if (len == 3) {               /* CJK 单字 */
+            char one[CP_MAXB] = {0};
+            memcpy(one, p, 3);
+            p += 3;
+            if (prev[0]) { cpt_observe(t, prev, one); pairs++; }
+            snprintf(prev, CP_MAXB, "%s", one);
+            used++;
+            continue;
+        }
+        p += len;                     /* 2 字节拉丁扩展 / 4 字节 emoji：断链 */
+        prev[0] = '\0';
     }
     {
         static int cached = -1;
         if (cached < 0) { const char* e = getenv("CP_LOG"); cached = (e && e[0] == '1'); }
         if (cached)
-            fprintf(stderr, "[字对] 计数字数=%d 相邻对=%d 文本：%.40s\n", used, pairs, text);
+            fprintf(stderr, "[token对] 计数token=%d 相邻对=%d 文本：%.40s\n", used, pairs, text);
     }
     return used;
+}
+
+int cp_observe_text(const char* text) {
+    /* 保留旧名（article_reader 在用）：语义已扩为 token 双轨，中文行为不变。 */
+    return cp_observe_tokens(text);
 }

@@ -7,6 +7,7 @@
  */
 
 #include "gateway_internal.h"
+#include "charpair.h"   /* v0.6.12: 每次学习累加 token 对计数（概率/左右熵的唯一数据源） */
 
 /* 中文预处理：连续 CJK 字符间插入空格，使 strtok 能切出单字 */
 static void _cjk_insert_spaces(const char* src, char* dst, int dst_sz) {
@@ -288,6 +289,11 @@ static void* _learn_worker(void* arg) {
                 EmergentPOS* ep = (gw->prefrontal && gw->prefrontal->controller)
                                   ? gw->prefrontal->controller->emergent_pos : NULL;
                 _learn_tokens(topo, task->msg, &prev_id, ep);
+                /* v0.6.12: 每次学习同时累加 token 对计数。
+                 * 此前只有 article 路径在写（cp_observe_text 唯一调用点），
+                 * 对话学习完全不进统计 ⇒ 词概率永远冻结在训练语料那一版。
+                 * 接到这里之后：每学一次，P(w)/左右熵/PMI 都跟着动。 */
+                cp_observe_tokens(task->msg);
                 auto_learn_concepts(gw->topology, task->msg, NULL);
                 if (gw->perception) perception_feed_learn_text(gw->perception, task->msg);
                 __sync_fetch_and_add(&gw->total_learning_cycles, 1);
