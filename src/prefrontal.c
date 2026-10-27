@@ -9,7 +9,8 @@
 #include "cingulate.h"
 #include "associative_reasoning.h"
 #include "broca.h"
-#include "dialog_system.h"   /* v0.6.13: recognize_intent（目标统筹·步1） */
+#include "dialog_system.h"
+#include "intent_router.h"   /* v0.6.13: 意图概率路由（MoE 式） */   /* v0.6.13: recognize_intent（目标统筹·步1） */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -210,23 +211,40 @@ char* prefrontal_chat(Prefrontal* pf, const char* input) {
      * ⇒ 10 种意图的差异化拓扑配比**一行都没生效过**。
      * `recognize_intent()` 是现成 public 接口（dialog_system.h:195），带 confidence。
      * 必须放在 compute_intent 之前 —— 后者内部要读 intent_type 算基座权重。 */
-    {
+    IntentDist ir_d;
+    int ir_n = ir_classify(input, &ir_d);
+    if (ir_n > 0) {
+        /* 概率路由（照 DeepSeekMoE）：top1 设 intent_type 让 compute_intent 的基座正确，
+         * 之后再用 ir_mixed_topology_weights 做 shared+routed 混合覆盖。 */
+        cognitive_controller_set_intent(pf->controller, ir_d.top[0]);
+        LOG_INFO("[意图] 概率 %d=%.2f %d=%.2f 熵=%.2fbit（top1 已设 intent_type）",
+                 ir_d.top[0], (double)ir_d.g[0], ir_d.top[1], (double)ir_d.g[1],
+                 (double)ir_d.entropy);
+    } else {
+        /* 模型不可用 ⇒ 回退硬分类，行为与步 1 一致 */
         IntentResult ir = recognize_intent(input);
         if (ir.intent != INTENT_UNKNOWN) {
             cognitive_controller_set_intent(pf->controller, (int)ir.intent);
-            LOG_INFO("[意图] 识别为 %d（置信 %.2f）⇒ 已设 intent_type（原来恒 0）",
-                     (int)ir.intent, (double)ir.confidence);
-        } else {
-            LOG_INFO("[意图] 未识别（保持 UNKNOWN）输入=%.30s", input);
+            LOG_INFO("[意图] 模型不可用，回退硬分类 → %d（%.2f）", (int)ir.intent, (double)ir.confidence);
         }
     }
     cognitive_controller_set_context(pf->controller, input, NULL);
     float ctx_activations[MAX_SUBTOPOS] = {0};
     calc_context_activations(pf->controller, ctx_activations);
     compute_intent(pf->controller, ctx_activations);
+    /* ── shared + routed 混合（照 DeepSeekMoE）──
+     * compute_intent 给出的是 top1 单意图 + 上下文的配比；这里再按概率分布做一次
+     * top-K 混合，与 default_base（shared expert）按比例融合，然后与前者各半。
+     * 保留上下文影响（不直接覆盖），也引入概率混合。 */
+    if (ir_n > 0) {
+        float mixed[MAX_SUBTOPOS];
+        if (ir_mixed_topology_weights(&ir_d, mixed, MAX_SUBTOPOS)) {
+            for (int i = 0; i < MAX_SUBTOPOS; i++)
+                pf->controller->intent_weights[i] =
+                    0.5f * pf->controller->intent_weights[i] + 0.5f * mixed[i];
+        }
+    }
     {
-        /* v0.6.13 可观测：把「意图 → 拓扑配比」打出来。
-         * 接之前这里永远是 default_base，接之后不同意图应出现不同配方。 */
         const float* w = pf->controller->intent_weights;
         LOG_INFO("[意图] 生效配比 词汇=%.2f 语义=%.2f 情绪=%.2f 语法=%.2f 上下文=%.2f 领域=%.2f 语用=%.2f",
                  (double)w[0], (double)w[1], (double)w[2], (double)w[3],

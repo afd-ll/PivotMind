@@ -245,6 +245,10 @@ void calc_context_activations(CognitiveController* cc, float* ctx_activations);
  * @param cc        认知调度中心
  * @param ctx_activations 各个子拓扑的当前上下文激活度（可为NULL，退化到无上下文模式）
  */
+/* v0.6.13：意图 → 子拓扑基础配比。intent_type 传 INTENT_UNKNOWN 得 default_base。
+ * 意图路由（intent_router.c）复用它做 shared+routed 混合，避免配方两处维护。 */
+void get_intent_base_weights(int intent_type, float* base);
+
 void compute_intent(CognitiveController* cc, const float* ctx_activations);
 
 /**

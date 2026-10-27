@@ -368,7 +368,7 @@ static void calc_coherence_bonus(CognitiveController* cc,
  * 根据语义意图类型获取各拓扑的基准权重
  * 0=词汇 1=语义 2=情绪 3=语法 4=上下文 5=领域 6=语用 7=文化 8=概念
  */
-static void get_intent_base_weights(int intent_type, float* base) {
+void get_intent_base_weights(int intent_type, float* base) {   /* v0.6.13: 改 public，意图路由复用同一套配方 */
     // 默认：偏重词汇和语义拓扑（与 cognitive_controller_create 一致）
     static const float default_base[MAX_SUBTOPOS] = {
         0.20f, 0.18f, 0.10f, 0.10f, 0.12f, 0.08f, 0.07f, 0.05f, 0.10f
