@@ -2048,17 +2048,19 @@ int diffusion_generate(DiffusionCtx* ctx,
 
     DiffusionCandidate final[DIFF_MAX_CANDIDATES];
     int final_cnt = 0;
-    for (int i = 0; i < vn && final_cnt < DIFF_MAX_CANDIDATES; i++) {
+    int worst = -1;              /* 当前 top-N 里分数最低的下标（满了才有效） */
+    for (int i = 0; i < vn; i++) {
         if (vocab_scores[i] < 0.001f) continue;
         ReasoningNode* n = ctx->vocab->net->nodes[i];
         if (!n || !n->concept) continue;
         if (is_function_word(n->concept)) continue;
 
-        final[final_cnt].node_id       = i;
-        final[final_cnt].vocab_score   = vocab_scores[i];
-        final[final_cnt].semantic_score = 0;
-        final[final_cnt].template_score = 0;
-        final[final_cnt].emotion_score  = 0;
+        DiffusionCandidate cd;    /* 本候选，算完再决定是否进 top-N */
+        cd.node_id       = i;
+        cd.vocab_score   = vocab_scores[i];
+        cd.semantic_score = 0;
+        cd.template_score = 0;
+        cd.emotion_score  = 0;
         /* P1: 目标度惩罚 — 枢纽词(>10边)得分衰减，特定词优势放大
          *  10边 → 0.28x, 100边 → 0.15x, 1000边 → 0.10x
          *  解决扩散被高频共现枢纽词(很/大/的)劫持的问题 */
@@ -2086,16 +2088,37 @@ int diffusion_generate(DiffusionCtx* ctx,
          * 越应该被选中；低概率且低熵的组合（碎片/脏词）在这里被压下去。
          * 单字恒 1.0（不奖不罚），见 word_prob.c:wp_gain。 */
         float _wgain = wp_gain(n->concept);
-        final[final_cnt].total_score    = vocab_scores[i] * degree_penalty *
+        cd.total_score    = vocab_scores[i] * degree_penalty *
                                           (_rel_base + _rel_gain * _rel_eff) * _wgain;
         /* v0.6.3·批1 第9步：留一份**原始值**备查。
          * 借用 `emotion_score`（全程恒 0 且后续两段重排序不会改它）。
          * 用途：DUMP 同时打 raw 与 total ⇒ 一次量出中间被加了多少。 */
-        final[final_cnt].emotion_score  = final[final_cnt].total_score;
-        final[final_cnt].relevance      = relevance;
-        final[final_cnt].word = n->concept;
-        final[final_cnt].used = 0;
-        final_cnt++;
+        cd.emotion_score  = cd.total_score;
+        cd.relevance      = relevance;
+        cd.word = n->concept;
+        cd.used = 0;
+
+        /* ── 维护「分数最高的 DIFF_MAX_CANDIDATES 个」而不是「按 id 顺序前 N 个」──
+         * 🔴 原实现 for 条件里带 `final_cnt < DIFF_MAX_CANDIDATES`，即遍历节点 id
+         * 顺序、收满 256 就停。而重训（qa_retrain）**先建单字、后建双字词**，
+         * 单字 id 天然更小 ⇒ 256 个名额全被单字占满，多字词一个都进不来。
+         * 下游输出层又有「中文单字不输出」⇒ final[] 被整段砍空 ⇒ 只剩 1 个联想词
+         * ⇒ n<2 判失败。实测「山中落雪 / 我不开心 / 朋友吵架了 / 时间过得真快」
+         * 四个输入的丢弃计数都是「中文单字=256、其余全 0」，就是这条链。
+         * 改成按分数维护 top-N：满了以后只有更高分才替换当前最小值。 */
+        if (final_cnt < DIFF_MAX_CANDIDATES) {
+            final[final_cnt++] = cd;
+            if (final_cnt == DIFF_MAX_CANDIDATES) {
+                worst = 0;
+                for (int k = 1; k < final_cnt; k++)
+                    if (final[k].total_score < final[worst].total_score) worst = k;
+            }
+        } else if (worst >= 0 && cd.total_score > final[worst].total_score) {
+            final[worst] = cd;
+            worst = 0;
+            for (int k = 1; k < final_cnt; k++)
+                if (final[k].total_score < final[worst].total_score) worst = k;
+        }
     }
 
     qsort(final, final_cnt, sizeof(DiffusionCandidate), _cand_cmp);
@@ -2299,28 +2322,33 @@ int diffusion_generate(DiffusionCtx* ctx,
         }
 
         /* 第一遍: 收集有效候选词 + POS 标注 */
+        /* 丢弃原因计数（仅诊断）：final[] 被筛空时，必须知道是哪一条砍的。
+         * 实测「山中落雪」这类单字输入 ⇒ final[] 一个词都没进来 ⇒ 只剩 1 个联想
+         * 词 ⇒ n<2 判失败 ⇒ 线上靠 PFE/联想兜底。不计数就只能猜。 */
+        int dr_short = 0, dr_at = 0, dr_anon = 0, dr_lang = 0;
+        int dr_rel = 0, dr_fw = 0, dr_sym = 0, dr_single = 0, dr_dup = 0;
         for (int i = 0; i < final_cnt && word_count < DIFF_MAX_SEQUENCE; i++) {
             if (final[i].used) continue;
-            if (!final[i].word || strlen(final[i].word) < 2) continue;
+            if (!final[i].word || strlen(final[i].word) < 2) { dr_short++; continue; }
             if (final[i].word[0] == '@' || final[i].word[0] == '?' ||
-                (final[i].word[0] == 'H' && final[i].word[1] == 'e')) continue;
-            if (!concept_is_outputtable(final[i].word)) continue;   /* semantic_growth 匿名节点 */
-            if (!_lang_keep(final[i].word, lang_dom)) continue;
+                (final[i].word[0] == 'H' && final[i].word[1] == 'e')) { dr_at++; continue; }
+            if (!concept_is_outputtable(final[i].word)) { dr_anon++; continue; }   /* semantic_growth 匿名节点 */
+            if (!_lang_keep(final[i].word, lang_dom)) { dr_lang++; continue; }
             /* 话题分级（v0.6）：relevance<0.3 的候选是"高频噪声激活"
              * （如"时间"被无关输入激活），不进入主输出——话题聚焦 */
-            if (final[i].relevance < 0.3f) continue;
-            if (is_function_word(final[i].word)) continue;
+            if (final[i].relevance < 0.3f) { dr_rel++; continue; }
+            if (is_function_word(final[i].word)) { dr_fw++; continue; }
             /* 中文单字不输出（v0.6） */
             /* v0.5.38 正梁：单个非表意字符（CJK 标点/假名/谚文等）不得进入输出 */
-            if (pm_is_single_nonzh_char(final[i].word)) continue;
-            if (pm_is_single_char(final[i].word) && pm_is_zh_char(final[i].word)) continue;
+            if (pm_is_single_nonzh_char(final[i].word)) { dr_sym++; continue; }
+            if (pm_is_single_char(final[i].word) && pm_is_zh_char(final[i].word)) { dr_single++; continue; }
 
             /* 去重 */
             int dup = 0;
             for (int w = 0; w < word_count; w++) {
                 if (strcmp(final[i].word, word_buf[w]) == 0) { dup = 1; break; }
             }
-            if (dup) continue;
+            if (dup) { dr_dup++; continue; }
 
             word_buf[word_count] = final[i].word;
             word_src[word_count] = 1;   /* 来源：final[]（相关性排序 + rel>=0.3） */
@@ -2384,6 +2412,10 @@ int diffusion_generate(DiffusionCtx* ctx,
                         (w == MAX_REPLY_WORDS - 1) ? " ||截断|| " : " ");
             }
             fprintf(stderr, "\n");
+            fprintf(stderr, "[丢弃] final=%d 短=%d @=%d 匿名=%d 语种=%d 相关性=%d "
+                            "虚词=%d 符号=%d 中文单字=%d 重复=%d\n",
+                    final_cnt, dr_short, dr_at, dr_anon, dr_lang,
+                    dr_rel, dr_fw, dr_sym, dr_single, dr_dup);
         }
         out = 0;
         {

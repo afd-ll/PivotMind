@@ -81,6 +81,14 @@ int main(int argc, char** argv) {
     MasterTopology* master = load_master(argv[1]);
     if (!master) { fprintf(stderr, "加载失败: %s\n", argv[1]); return 1; }
 
+    /* 🔴 必须创建 emergent_pos 并传给扩散！
+     * diffusion_generate 的【整个输出段】包在 `if (ctx->emergent_pos)` 里（第4步 POS 重排），
+     * 传 NULL ⇒ 输出段整段跳过 ⇒ out 恒 0 ⇒ 看起来「纯扩散对某些输入无产出」。
+     * 第一版就是传了 NULL，得出了「4/10 输入无产出」的错误结论 —— 那是探针的 bug 不是引擎的。 */
+    EmergentPOS* ep = emergent_pos_create("zh");
+    if (ep) emergent_pos_init_centroids(ep, master);
+    fprintf(stderr, "[探针] emergent_pos=%s\n", ep ? "已创建（含锚点）" : "创建失败 ⇒ 输出段会被整段跳过");
+
     /* 温度档位：0 = 无扰动（自检基线）；0.06/0.15/0.32 = 熵调度的两端与中性点 */
     const float temps[MAX_TEMPS] = { 0.00f, 0.06f, 0.15f, 0.32f, 0.45f, 0.60f };
     const int n_temp = 6;
@@ -89,7 +97,11 @@ int main(int argc, char** argv) {
         "什么是爱", "盐", "山中落雪", "电脑屏幕坏了", "人工智能是什么",
         "时间过得真快", "我不开心", "学习有什么用", "朋友吵架了", "这本书好看吗"
     };
-    const int n_in = 10;
+    int n_in = 10;
+    /* TEMP_PROBE_INPUT=<文本> ⇒ 只跑这一个输入（配合 PIVOTMIND_WALK_ANCHOR=1
+     * 看 [输出] 候选 那条日志，定位「纯扩散无产出」的中间量） */
+    const char* only = getenv("TEMP_PROBE_INPUT");
+    if (only && only[0]) { inputs[0] = only; n_in = 1; }
 
     fprintf(out, "[探针] 状态=%s reps=%d\n", argv[1], reps);
     fprintf(out, "[探针] 判据① temp=0 必须多次完全一致（确定性自检）\n\n");
@@ -108,7 +120,7 @@ int main(int argc, char** argv) {
 
             for (int r = 0; r < reps; r++) {
                 GeneratedSequence seq = {0};
-                int n = cingulate_diffusion_evaluate(master, inputs[ii], temps[ti], NULL, &seq);
+                int n = cingulate_diffusion_evaluate(master, inputs[ii], temps[ti], ep, &seq);
                 if (n < 2) continue;                     /* 无产出，不计入 */
                 valid++;
                 cnt_sum += seq.count;
@@ -150,6 +162,7 @@ int main(int argc, char** argv) {
     fflush(out);
     fclose(out);
     fprintf(stderr, "[probe] result -> %s", outp);
+    if (ep) emergent_pos_destroy(ep);
     master_topology_destroy(master);
     return 0;
 }
