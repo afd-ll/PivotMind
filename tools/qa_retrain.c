@@ -34,14 +34,66 @@
 #include "node_hash.h"
 #include "constants.h"
 
-#define QA_W_FWD 0.8f
-#define QA_W_REV 0.6f
-#define QA_MAX_FWD 5.0f
-#define QA_MAX_REV 3.0f
+/* 🔴 边权的口径（2026-10-27 修）
+ *
+ * 原来：每次共现 +0.8（正向）/ +0.6（反向），上限 5.0 / 3.0。
+ * 问题：`huarong_net_add_connection` 新建时把 weight clamp 到 [0,1]，
+ * 而后续 `+= 0.8` 不 clamp ⇒ 实测线上边权只剩 **0.3 / 0.5 / 1.0 三档**，
+ * 完全没有连续强度。下游却全按 [0,1] 的连续语义写阈值：
+ *   · 交集分 `ew >= 0.3`      ⇒ 几乎每条边都过关（判据退化成「是否相邻」）
+ *   · 相关性闸门 `rel < 0.3`  ⇒ 恒不触发
+ *   · 联想回退窗口 `0.3 ≤ w < 0.6` ⇒ 几乎没有边落进去
+ * 实测后果：「山中落雪」的候选里 `不错` 拿到 rel=1.000（与某锚点边权满分），
+ * 排到第二位，压过真正相关的「散落 / 雪花」。
+ *
+ * 现在：权重当【共现计数】用（每次 +1，不封顶），全部学完后统一按
+ *   w' = log(1+w) / log(1+max_w)
+ * 压缩到 [0,1]。这样既保序又连续，下游的 0.3 / 0.6 阈值恢复原本语义。
+ */
+#define QA_W_FWD 1.0f          /* = 每共现一次 +1 次计数 */
+#define QA_W_REV 1.0f
+#define QA_MAX_FWD 1.0e9f      /* 不封顶，最后统一归一化 */
+#define QA_MAX_REV 1.0e9f
 #define MAX_LINE 4096
 
 static long g_created_nodes = 0;
 static long g_edges = 0;
+
+/* 把累加出来的【共现计数】压缩成 [0,1] 连续权重：w' = log(1+w)/log(1+max)。
+ * 保序、连续、有区分度；下游 0.3 / 0.6 这类阈值从此有原本语义。 */
+static void normalize_edges(SubTopology* vocab) {
+    if (!vocab || !vocab->net) return;
+    HuarongTopologyNet* net = vocab->net;
+    float mx = 1.0f;
+    long ne = 0;
+    for (int i = 0; i < net->node_count; i++) {
+        ReasoningNode* n = net->nodes[i];
+        if (!n || !n->edges) continue;
+        for (int e = 0; e < n->edge_count; e++) {
+            float w = n->edges[e].weight;
+            if (w > mx) mx = w;
+            ne++;
+        }
+    }
+    if (ne == 0) return;
+    double den = log(1.0 + (double)mx);
+    if (den < 1e-9) return;
+    long hi = 0, mid = 0, lo = 0;
+    for (int i = 0; i < net->node_count; i++) {
+        ReasoningNode* n = net->nodes[i];
+        if (!n || !n->edges) continue;
+        for (int e = 0; e < n->edge_count; e++) {
+            double w = (double)n->edges[e].weight;
+            if (w <= 0.0) { n->edges[e].weight = 0.0f; lo++; continue; }
+            float nw = (float)(log(1.0 + w) / den);
+            if (nw > 1.0f) nw = 1.0f;
+            n->edges[e].weight = nw;
+            if (nw >= 0.6f) hi++; else if (nw >= 0.3f) mid++; else lo++;
+        }
+    }
+    printf("[重训] 边权归一化: %ld 条边 · max计数=%.0f ⇒ [0,1] 连续"
+           "（≥0.6: %ld · 0.3–0.6: %ld · <0.3: %ld）\n", ne, (double)mx, hi, mid, lo);
+}
 
 static void add_or_strengthen(HuarongTopologyNet* net, ReasoningNode* from, ReasoningNode* to,
                               float add_weight, float max_weight) {
@@ -253,6 +305,22 @@ int main(int argc, char** argv) {
     /* 第二阶段：字对 → 词（判据同 word_emerge：次数/PMI/左右熵） */
     int words = promote_words(vocab);
     printf("[重训] 词晋升：%d 个\n", words);
+
+    /* 边权口径归一化：计数 ⇒ [0,1] 连续强度（见 normalize_edges 头部注释）。
+     * 🔴 **默认关**（PIVOTMIND_EDGE_NORM=1 才开），原因：改了量纲，所有按旧量纲
+     * 标定的阈值都必须同步重标才会自洽 —— 实测只改边权不改阈值时，
+     * 多字词节点的 rel 普遍只有 0.2（词节点与单字锚点之间本来就没有直接边，
+     * 只有两跳衰减值），而 final 筛选的 `rel < 0.3` 会把 256 个候选全砍光
+     * ⇒ 扩散产出 0 ⇒ 退到联想兜底吐一串高频泛用词（比改之前更差）。
+     * ⇒ 打开前必须同时重标：final 的 rel 阈值、交集分 ew 阈值、联想回退窗口。
+     * 详见工作台 CX-39。 */
+    if (getenv("PIVOTMIND_EDGE_NORM") && getenv("PIVOTMIND_EDGE_NORM")[0] == '1') {
+        for (int t = 0; t < master->sub_topo_count; t++)
+            if (master->sub_topologies[t]) normalize_edges(master->sub_topologies[t]);
+    } else {
+        printf("[重训] 边权归一化：跳过（PIVOTMIND_EDGE_NORM 未设；阈值未重标前不要开）
+");
+    }
 
     /* 存盘：特征 → 状态 → 字对表 */
     save_features(master, pm_file(PM_FILE_FEATURES));
