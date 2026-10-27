@@ -60,6 +60,11 @@ int main(void) {
     double mn_real = wp_min_entropy("中");     /* 左邻 4 种×1、右邻 4 种×1 ⇒ 各 2 bit */
     ASSERT_NEAR(mn_real, 2.0, 0.01, "中 的 min 左右熵应为 2.0 bit");
 
+    /* 中文多字词：token 是单字，词必须由字对合成 —— 不合成则恒 0（曾踩过） */
+    ASSERT_TRUE(wp_count("中一") >= 1, "中文多字词应由字对合成出计数");
+    ASSERT_TRUE(wp_entropy("中一", 0) > 0.0, "多字词左熵应取首字的左熵");
+    ASSERT_NEAR(wp_gain("中一"), 0.70, 0.01, "只见过 1 次的多字词增益应为 0.70");
+
     /* 英文碎片：同一个 token 反复自组合 ⇒ 左右邻居唯一 ⇒ 熵 0 */
     cp_observe_tokens("abab abab abab");
     wp_invalidate();

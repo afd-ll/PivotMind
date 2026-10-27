@@ -11,6 +11,7 @@
 #include "multi_topology.h"
 #include "huarong_topology.h"
 #include "common.h"
+#include "word_prob.h"
 
 static MasterTopology* load_master(const char* path) {
     MasterTopology* master = master_topology_create(16);
@@ -164,6 +165,27 @@ int main(int argc, char** argv) {
         int rc = do_stats(vocab);
         master_topology_destroy(master);
         return rc;
+    }
+
+    /* --prob:<词>  打印该词的语料统计（P / 左右熵 / 生成增益）——
+     * 与生成侧同一口径（word_prob），用于解释「为什么这个词被抬或被压」。 */
+    if (strncmp(list_path, "--prob:", 7) == 0) {
+        const char* w = list_path + 7;
+        if (strncmp(w, "en:", 3) == 0) w += 3;
+        printf("词\t%s\n", w);
+        printf("次数\t%llu\n", (unsigned long long)wp_count(w));
+        printf("P\t%.8f\n", wp_p(w));
+        printf("Pnorm\t%.4f\n", (double)wp_pnorm(w));
+        printf("左熵\t%.3f\n", wp_entropy(w, 0));
+        printf("右熵\t%.3f\n", wp_entropy(w, 1));
+        printf("min熵\t%.3f\n", wp_min_entropy(w));
+        printf("增益\t%.4f\n", (double)wp_gain(w));
+        printf("合法词\t%d\n", wp_is_wordlike(w, 2.0, 5));
+        { int tk = 0, pr = 0; unsigned long long tot = 0;
+          wp_stats(&tk, &pr, &tot);
+          fprintf(stderr, "[prob] tokens=%d pairs=%d total=%llu\n", tk, pr, tot); }
+        master_topology_destroy(master);
+        return 0;
     }
 
     /* --nbr:<词>  打印该词在 vocab 里的邻居构成（判「扩散被垃圾邻居带偏」） */
