@@ -141,6 +141,41 @@ int main(int argc, char** argv) {
         printf("\n");
     }
 
+    /* ── 碎片反查（TM_SCAN=<阈值>）──
+     * 判据：如果一个「词」的后继能以极高概率只接一个特定字，说明它跨了词边界
+     * ——「公吵」几乎总接「架」，正因为真正的词是「吵架」。
+     * 这里把「多字词 → 单字」的高概率转移全列出来，就是一份切分错误清单。 */
+    if (getenv("TM_SCAN")) {
+        float thr = (float)atof(getenv("TM_SCAN"));
+        int maxout = 80;
+        const char* mo = getenv("TM_SCAN_MAX");
+        if (mo && atoi(mo) > 0) maxout = atoi(mo);
+        printf("\n[tm] 碎片反查: prev 是多字词、next 是单字、P >= %.2f\n", (double)thr);
+        printf("%-10s → %-6s  P        prev出边  判读\n", "prev", "next");
+        int shown = 0, hits = 0;
+        for (int i = 0; i < vocab->net->node_count && shown < maxout; i++) {
+            ReasoningNode* n0 = vocab->net->nodes[i];
+            if (!n0 || !n0->concept) continue;
+            size_t L0 = strlen(n0->concept);
+            if (L0 < 6) continue;                 /* prev 必须多字词 */
+            int nid1[4];
+            if (tm_top_next(tm, i, nid1, 4) < 1) continue;
+            int c = nid1[0];
+            if (c < 0 || c >= vocab->net->node_count) continue;
+            ReasoningNode* n1 = vocab->net->nodes[c];
+            if (!n1 || !n1->concept) continue;
+            if (strlen(n1->concept) != 3) continue;   /* next 必须单字 */
+            float pr = tm_prob(tm, i, c);
+            if (pr < thr) continue;
+            hits++;
+            printf("%-10s → %-6s  %.3f    %-8u  %s%s\n",
+                   n0->concept, n1->concept, (double)pr, tm_out_count(tm, i),
+                   "疑似跨词界：", n0->concept);
+            shown++;
+        }
+        printf("[tm] 命中 %d 个（显示 %d）\n", hits, shown);
+    }
+
     /* 判读说明 */
     printf("\n[tm] 读法：\n");
     printf("  · 实词（雪/电脑/朋友）的后继应当具体 —— 「雪」→ 山/花/人/地 才算可用；\n");
