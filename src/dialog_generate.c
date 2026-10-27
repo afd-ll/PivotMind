@@ -13,7 +13,8 @@
 #include "diffusion.h"
 #include "funcword.h"
 #include "utf8_tokenizer.h"
-#include "word_prob.h"   /* CX-27: 写侧结构闸门（wp_word_gate） */
+#include "word_prob.h"
+#include "transition_model.h"   /* CX-24: 转移计数写侧接线 */   /* CX-27: 写侧结构闸门（wp_word_gate） */
 #include "string_pool.h"
 #include "common.h"
 #include "error.h"
@@ -801,6 +802,16 @@ void auto_learn_concepts(MasterTopology* master, const char* text, void* str_poo
         }
     }
     if (cjk_count <= 0) { pthread_rwlock_unlock(&master->rwlock); for (int i = 0; i < token_count; i++) free(tokens[i]); return; }
+
+    /* [CX-24] 转移模型写侧接线：把【原文顺序】的节点序列（cjk_ids 是按文本先后填的）
+     * 喂给 tm_observe_run，累计 N-gram 转移计数。
+     * 此前 tm_observe_* 全仓零调用 ⇒ 读侧（dialog_system 的 tm_sample_next）一直在读
+     * 一份自 10-14 起就没再变过的 transitions.bin。 */
+    {
+        TransitionModel* tm = tm_global();
+        if (tm && cjk_count > 1)
+            tm_observe_run(tm, (const int32_t*)cjk_ids, cjk_count);
+    }
 
     /* 收集所有参与节点（单字 + 将创建的组合词）用于后续建边 */
     int node_ids[128], node_count = 0;

@@ -300,6 +300,9 @@ static void handle_connection_inner(GatewaySystem* gw, int client_fd, HttpReques
             /* CX-27 闸门读数：0 通过 / 1 非法UTF8 / 2 纯符号 / 3 超长词 / 4 键超限 */
             unsigned long long gate[5] = {0};
             wp_gate_stats(gate);
+            /* CX-24：转移模型的写侧读数（此前写侧零调用，读侧在读一份死表） */
+            int tm_pairs = 0;
+            { TransitionModel* tm = tm_global(); if (tm) tm_pairs = tm_pair_count(tm); }
 
             char dbg[512];
             snprintf(dbg, sizeof(dbg),
@@ -307,11 +310,11 @@ static void handle_connection_inner(GatewaySystem* gw, int client_fd, HttpReques
                 "\"total_nodes\":%d,\"template_nodes\":%d,\"sub_topos\":%d,"
                 "\"wp_tokens\":%d,\"wp_pairs\":%d,\"wp_total\":%llu,"
                 "\"gate_ok\":%llu,\"gate_utf8\":%llu,\"gate_sym\":%llu,"
-                "\"gate_long\":%llu,\"gate_maxk\":%llu,\"qa_rejected\":%llu}",
+                "\"gate_long\":%llu,\"gate_maxk\":%llu,\"qa_rejected\":%llu,\"tm_pairs\":%d}",
                 vnodes, fentries, total, tnodes, gw->topology->sub_topo_count,
                 wp_tok, wp_pairs, wp_total,
                 gate[0], gate[1], gate[2], gate[3], gate[4],
-                gw->qa_memory ? qa_memory_rejected() : 0ULL);
+                gw->qa_memory ? qa_memory_rejected() : 0ULL, tm_pairs);
             http_json(client_fd, 200, dbg);
         } else if (strcmp(req->path, "/force_templates") == 0) {
             int built = broca_build_templates(gw->topology, 10, 4);
