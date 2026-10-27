@@ -50,6 +50,65 @@ void prefrontal_destroy(Prefrontal* pf) {
     free(pf);
 }
 
+/* ── 温度按意图熵调度（目标统筹·步 3，v0.6.13）──
+ *
+ * 问题：温度原来只有「发散」一个方向 —— `0.15 + attempt*0.12`，越试越随机，
+ * 而且对所有输入一视同仁。可熵是有信息的：`为什么要睡觉` 的意图熵 1.80bit
+ * （几乎确定 = 解释），`你好啊` 是 2.58bit（既像闲聊又像查询）。
+ * 拿不准的时候本来就该多探索，拿得准的时候瞎扰动只会把对的候选搅掉。
+ *
+ * 这不是拍脑袋的映射，是把「探索/利用」这条经典权衡接到已有的可观测量上：
+ *   · 熵低（确定）→ 低温：扰动小，更依赖原始边权 ⇒ 聚焦
+ *   · 熵高（含糊）→ 高温：扰动大，候选更分散 ⇒ 多试几个方向
+ *
+ * 实测熵区间 1.45（什么是爱 0.92/0.08）→ 2.90（我想学英语 0.59/0.41），
+ * 10 类均匀分布的熵是 log2(10)=3.32。
+ *
+ * 🔴 第一版把区间照【理论上限】定成 [1.0, 3.0] → [0.06, 0.30]，A/B 实测整体
+ * distinct 从 2.15 涨到 2.55 —— 因为实测熵都挤在 2.5–2.9，于是绝大多数输入拿到
+ * 0.25–0.29（比旧值 0.15 高 70%）。那不是「分化」，是「整体抬高」。
+ * ⇒ 映射必须按【实测分布】定锚，并以「中位熵 = 旧值 0.15」为中性点：
+ *   只有两端才偏离旧行为，中位输入与旧版一致（A/B 才有可对照性）。
+ *
+ * 分段线性（锚点全部来自实测）：
+ *   H=1.45（最低观测）→ 0.060   约旧值 −60%
+ *   H=2.70（观测中位）→ 0.150   = 旧值（中性点）
+ *   H=3.32（理论上限） → 0.320   约旧值 +113%
+ *
+ * 模型不可用（entropy 无意义）时退回原固定值，不改变回退路径的行为。
+ * 开关 PIVOTMIND_TEMP_BY_ENTROPY=0 可整体关掉，回到 0.15 起始。 */
+#define PF_TEMP_H_LO     1.45f   /* 观测到的最低熵 */
+#define PF_TEMP_H_MID    2.70f   /* 观测中位熵 ⇒ 中性点 */
+#define PF_TEMP_H_HI     3.32f   /* 理论上限 log2(10) */
+#define PF_TEMP_BASE_LO  0.06f
+#define PF_TEMP_BASE_MID 0.15f
+#define PF_TEMP_BASE_HI  0.32f
+#define PF_TEMP_LEGACY   0.15f   /* 旧版固定起点（也是模型不可用时的值） */
+#define PF_TEMP_STEP     0.12f   /* 每次重试的升温步长（沿用旧值） */
+#define PF_TEMP_CAP      0.60f   /* 最终温度上限，防高温+多次重试叠爆 */
+
+static int pf_temp_by_entropy(void) {
+    static int cached = -1;
+    if (cached < 0) {
+        const char* e = getenv("PIVOTMIND_TEMP_BY_ENTROPY");
+        cached = (e && e[0] == '0') ? 0 : 1;      /* 默认开 */
+    }
+    return cached;
+}
+
+/* 基础温度：熵越高越探索。model_ready=0 或开关关闭 ⇒ 旧版固定值。 */
+static float pf_temp_base(float entropy, int model_ready) {
+    if (!model_ready || !pf_temp_by_entropy()) return PF_TEMP_LEGACY;
+    float h = entropy;
+    if (h <= PF_TEMP_H_LO) return PF_TEMP_BASE_LO;
+    if (h >= PF_TEMP_H_HI) return PF_TEMP_BASE_HI;
+    if (h <= PF_TEMP_H_MID)
+        return PF_TEMP_BASE_LO +
+               (h - PF_TEMP_H_LO) * (PF_TEMP_BASE_MID - PF_TEMP_BASE_LO) / (PF_TEMP_H_MID - PF_TEMP_H_LO);
+    return PF_TEMP_BASE_MID +
+           (h - PF_TEMP_H_MID) * (PF_TEMP_BASE_HI - PF_TEMP_BASE_MID) / (PF_TEMP_H_HI - PF_TEMP_H_MID);
+}
+
 char* prefrontal_chat(Prefrontal* pf, const char* input) {
     /* CX-28 诊断：入口与前置守卫（若这里就返回 NULL，则「无回应」与扩散无关） */
     LOG_INFO("[无回应诊断] 进入 prefrontal_chat pf=%p dialog=%p input=%s",
@@ -254,8 +313,14 @@ char* prefrontal_chat(Prefrontal* pf, const char* input) {
     /* ── 多层扩散生成 + ACC 自适应门控 ── */
     char* response = NULL;
 
+    /* 温度起点由意图熵决定（见 pf_temp_base 的注释）；没有模型时退回旧值 */
+    const float temp_base = pf_temp_base(ir_n > 0 ? ir_d.entropy : 0.0f, ir_n > 0);
+    LOG_INFO("[温度] 意图熵=%.2fbit ⇒ 基础温度=%.3f（旧版固定 %.2f）",
+             ir_n > 0 ? (double)ir_d.entropy : 0.0, (double)temp_base, (double)PF_TEMP_LEGACY);
+
     for (int attempt = 0; attempt < 3; attempt++) {
-        float temperature = 0.15f + attempt * 0.12f;
+        float temperature = temp_base + attempt * PF_TEMP_STEP;
+        if (temperature > PF_TEMP_CAP) temperature = PF_TEMP_CAP;
 
         GeneratedSequence seq = {0};
         int n = cingulate_diffusion_evaluate(pf->topology, input, temperature,
