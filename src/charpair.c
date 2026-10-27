@@ -286,7 +286,14 @@ int cp_observe_tokens(const char* text) {
             continue;
         }
         int len = (c & 0xE0) == 0xC0 ? 2 : ((c & 0xF0) == 0xE0 ? 3 : ((c & 0xF8) == 0xF0 ? 4 : 1));
-        if (len == 3) {               /* CJK 单字 */
+        /* ⚠ 3 字节 ≠ 汉字：全角标点（，。：；！？、）与假名都是 3 字节。
+         * 只认 U+4E00..U+9FFF，其余当断链 —— 否则会造出「者：」这类「字+标点」对，
+         * 既污染 PMI/左右熵，又会被词晋升当成真词建进词表。 */
+        if (len == 3) {
+            unsigned int cp3 = ((unsigned int)(p[0] & 0x0F) << 12)
+                             | ((unsigned int)(p[1] & 0x3F) << 6)
+                             |  (unsigned int)(p[2] & 0x3F);
+            if (cp3 < 0x4E00 || cp3 > 0x9FFF) { p += 3; prev[0] = 0; continue; }
             char one[CP_MAXB] = {0};
             memcpy(one, p, 3);
             p += 3;

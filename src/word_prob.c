@@ -17,7 +17,7 @@
 #include <pthread.h>
 
 #define WP_TOK_MAX   65536      /* 不同 token 上限 */
-#define WP_PAIR_MAX  600000     /* 参与构建的 token 对上限 */
+#define WP_PAIR_MAX  1200000    /* 参与构建的 token 对上限（实测 91.9 万对，600k 会抽样掉 1/3） */
 #define WP_KEY       32
 #define WP_REBUILD_SEC 30
 
@@ -90,7 +90,7 @@ static int _intern(const char* tok) {
 }
 
 /* 收集用临时缓冲 */
-typedef struct { char a[WP_KEY], b[WP_KEY]; unsigned int c; } WPair;
+typedef struct { char a[18], b[18]; unsigned int c; } WPair;   /* CJK 3 字节 / 拉丁 ≤17，够用且省内存 */
 static WPair* g_pairs = NULL;
 static int    g_npairs = 0;
 
@@ -99,8 +99,8 @@ static void _collect(const char* a, const char* b, uint32_t c, void* ud) {
      * 接线门禁判据 B 会把「显式丢弃的形参」计成断链。 */
     int* np = (int*)ud;
     if (!np || *np < 0 || *np >= WP_PAIR_MAX) return;
-    snprintf(g_pairs[*np].a, WP_KEY, "%s", a);
-    snprintf(g_pairs[*np].b, WP_KEY, "%s", b);
+    snprintf(g_pairs[*np].a, sizeof(g_pairs[0].a), "%s", a);
+    snprintf(g_pairs[*np].b, sizeof(g_pairs[0].b), "%s", b);
     g_pairs[*np].c = c;
     (*np)++;
 }

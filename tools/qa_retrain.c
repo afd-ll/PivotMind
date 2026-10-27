@@ -107,13 +107,13 @@ static void learn_chars(SubTopology* vocab, const char* text) {
  * 门槛可用环境变量覆盖（与 word_emerge 同名，便于统一调）：
  *   PIVOTMIND_EMERGE_MINCOUNT(20) / MINPMI(2.5) / MINENT(2.0) / MAX(20000)
  */
-typedef struct { char a[32], b[32]; unsigned int c; } PairRec;
+typedef struct { char a[18], b[18]; unsigned int c; } PairRec;   /* 与 word_prob 同口径，省内存 */
 static PairRec* g_pairs = NULL;
 static int g_npairs = 0;
 
 static void _collect_pair(const char* a, const char* b, uint32_t c, void* ud) {
     int* np = (int*)ud;
-    if (!np || *np >= 400000) return;
+    if (!np || *np >= 1200000) return;
     snprintf(g_pairs[*np].a, sizeof(g_pairs[0].a), "%s", a);
     snprintf(g_pairs[*np].b, sizeof(g_pairs[0].b), "%s", b);
     g_pairs[*np].c = c;
@@ -124,7 +124,7 @@ static int promote_words(SubTopology* vocab) {
     CharPairTable* cp = cpt_global();
     if (!cp || !vocab || !vocab->net) return 0;
 
-    unsigned mc = 20; double mp = 2.5, me = 2.0; int mx = 20000;
+    unsigned mc = 20; double mp = 2.5, me = 2.0; int mx = 60000;   /* 实测候选 31,167 个：20000 的帽子会砍掉一半 */
     const char* e;
     if ((e = getenv("PIVOTMIND_EMERGE_MINCOUNT"))) mc = (unsigned)atoi(e);
     if ((e = getenv("PIVOTMIND_EMERGE_MINPMI")))    mp = atof(e);
@@ -132,7 +132,7 @@ static int promote_words(SubTopology* vocab) {
     if ((e = getenv("PIVOTMIND_EMERGE_MAX")))       mx = atoi(e);
 
     if (!g_pairs) {
-        g_pairs = (PairRec*)calloc(400000, sizeof(PairRec));
+        g_pairs = (PairRec*)calloc(1200000, sizeof(PairRec));   /* 实测 91.9 万对：40 万缓冲会抽样掉近 6 成候选 */
         if (!g_pairs) return 0;
     }
     g_npairs = 0;
