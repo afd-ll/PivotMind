@@ -93,6 +93,11 @@ typedef struct EmergentPOS {
     /* 新词类涌现池 */
     int       unclassified_pool_nodes[64]; /* 未分类节点 ID 池 (v0.5.9: 256→64, 聚类快16倍) */
     float     unclassified_feats[64][PM_NODE_FEATURE_DIM];
+    /* v0.6.12：池里再存一份【词名】。为什么需要：feats 是 512 维随机噪声（重训时
+     * rand() 初始化），在上面聚类等于随机分组。词名可以取 word_embed 的分布指纹
+     * 作聚类判据。单字（3 字节）才入池。**本字段不落盘**（save 只写 anchors +
+     * extra_classes），重启清空属预期。 */
+    char      unclassified_words[64][4];
     int       unclassified_count;
 
     /* 涌现出的新词类（超出 POS_COUNT 的词类） */

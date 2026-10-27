@@ -28,6 +28,31 @@ int emergent_pos_try_emerge(EmergentPOS* ep);
  * 取 0.10 作入门槛 —— 宁可多分类（top-3 软输出吸收误判），也不退回随机特征。 */
 #define POS_EMBED_MIN_SIM 0.10f
 
+/* 指纹尺度的簇紧密度门槛。
+ * 原 EMERGE_COHERENCE_THRESH=0.65 是为 512 维特征设计的，指纹的余弦小一个量级。
+ * 实测（tools/emerge_probe.c，动词组 6 + 副词组 6）：
+ *   组内均值 **0.126** · 组间均值 **0.039**（3.2x 区分度）· 全局最大 0.462
+ * ⇒ 取 0.06：0.126 是 30 对的【均值】，单 pair 大量低于它，取 0.10 会让簇永远
+ *   长不到 EMERGE_MIN_CLUSTER_SIZE；0.06 仍高于组间均值 0.039。 */
+#define EMERGE_FP_COHERENCE 0.06f
+/* 与【簇首】的最低相似度：比平均门槛宽松（组内也有低于 0.10 的 pair），
+ * 但必须高于组间均值 0.039 —— 实测 0.039 那档正是副词混进动词簇的位置。 */
+#define EMERGE_FP_SEED_SIM  0.05f
+
+/* 涌现出的额外类是否参与分类（默认**不参与**）。
+ * 原因：extra_classes 的 centroid 是 512 维 features 的均值，而 features 本身是
+ * 重训时的 rand() 噪声 ⇒ 拿它做余弦等于随机分类，会把已有分类结果搅坏。
+ * 现阶段额外类只用于「观察聚类是否真的在长」（日志 + /debug 计数）。
+ * 等新类 centroid 也建成指纹原型（结构改动）后再打开。 */
+static int extra_class_enabled(void) {
+    static int cached = -1;
+    if (cached < 0) {
+        const char* e = getenv("PIVOTMIND_POS_EXTRA_CLASS");
+        cached = (e && e[0] == '1') ? 1 : 0;
+    }
+    return cached;
+}
+
 static int pos_embed_enabled(void) {
     static int cached = -1;
     if (cached < 0) {
@@ -368,8 +393,8 @@ void emergent_pos_classify_soft(EmergentPOS* ep, const float* features,
         }
     }
 
-    /* 检查涌现出的额外词类 */
-    for (int ei = 0; ei < ep->extra_class_count && nc < SOFT_CAND_MAX; ei++) {
+    /* 检查涌现出的额外词类（默认不参与，见 extra_class_enabled 的说明） */
+    for (int ei = 0; extra_class_enabled() && ei < ep->extra_class_count && nc < SOFT_CAND_MAX; ei++) {
         if (!ep->extra_classes[ei].is_active) continue;
         float sim = cosine_similarity(features, ep->extra_classes[ei].centroid, PM_NODE_FEATURE_DIM);
         if (sim > ep->sim_threshold) {
@@ -606,6 +631,36 @@ void emergent_pos_tag_soft(EmergentPOS* ep, MasterTopology* master,
 
     emergent_pos_classify_soft(ep, _feat_copy, result);
 
+    /* ── v0.6.12（CX-34）：未分类 ⇒ 入池，等 try_emerge 聚成新词类 ──
+     * 原来 `unclassified_pool_nodes` 全仓除本文件外零引用 ⇒ 池永远是空的
+     * ⇒ `try_emerge` 永不触发 ⇒ `extra_class_count` 恒 0，聚类系统只活着不生长。
+     * 池里同时存【词名】：feats 是 512 维随机噪声，在上面聚类等于随机分组，
+     * 而词名能取 word_embed 的分布指纹作判据。
+     * 只收单字（3 字节）—— charpairs 指纹是字符级的，多字词没有指纹。 */
+    if (result->count == 0 && strlen(word) < 4) {
+        pthread_mutex_lock(&ep->lock);
+        int dup = 0;
+        for (int i = 0; i < ep->unclassified_count; i++)
+            if (ep->unclassified_words[i][0] && strcmp(ep->unclassified_words[i], word) == 0) {
+                dup = 1;
+                break;
+            }
+        if (!dup && ep->unclassified_count < (int)(sizeof(ep->unclassified_words) / 4)) {
+            int slot = ep->unclassified_count;
+            snprintf(ep->unclassified_words[slot], 4, "%s", word);
+            memcpy(ep->unclassified_feats[slot], _feat_copy, sizeof(_feat_copy));
+            ep->unclassified_count++;
+        }
+        ep->emerge_check_counter++;
+        int trig = (ep->emerge_check_counter >= EMERGE_CHECK_INTERVAL &&
+                    ep->unclassified_count >= EMERGE_POOL_TRIGGER);
+        if (trig) {
+            ep->emerge_check_counter = 0;
+            emergent_pos_try_emerge(ep);   /* 内部假定调用方持锁（与 classify_soft 一致） */
+        }
+        pthread_mutex_unlock(&ep->lock);
+    }
+
     /* v0.5.10 fix: 移除锁外回写词类到节点。
      * 原代码在 ar->mutex 锁外（article_flush 特意移出锁外避 O(n²) 聚类）
      * 写共享节点 emergent_class_ids/count——与扩容 realloc 并发时
@@ -658,7 +713,11 @@ int emergent_pos_try_emerge(EmergentPOS* ep) {
     if (ep->extra_class_count >= 16) return 0; /* 达上限 */
 
     int n = ep->unclassified_count;
-    fprintf(stderr, "[EmergentPOS] 涌现检查: 未分类池 %d 个词\n", n);
+    /* 判据尺度跟着表示走：指纹可用就用指纹尺度，否则沿用 512 维特征的旧门槛。 */
+    int use_fp = pos_embed_enabled() && ep->unclassified_words[0][0] != 0;
+    float coh_thresh = use_fp ? EMERGE_FP_COHERENCE : EMERGE_COHERENCE_THRESH;
+    fprintf(stderr, "[EmergentPOS] 涌现检查: 未分类池 %d 个词（判据=%s 阈值=%.2f）\n",
+            n, use_fp ? "分布指纹" : "512维特征", (double)coh_thresh);
 
     /* 构建 pairwise 余弦相似度矩阵 (上三角) */
     /* 动态分配避免大栈数组 */
@@ -668,7 +727,14 @@ int emergent_pos_try_emerge(EmergentPOS* ep) {
     for (int i = 0; i < n; i++) {
         sim_matrix[i * n + i] = 1.0f;
         for (int j = i + 1; j < n; j++) {
-            float s = cosine_similarity(ep->unclassified_feats[i],
+            /* v0.6.12：聚类判据优先用**分布指纹**。
+             * feats 是 512 维随机噪声（重训时 rand() 初始化），在其上算余弦
+             * 等于随机分组；指纹是「左右邻出现在哪些功能字旁」的真实分布。 */
+            float s = -1.0f;
+            if (pos_embed_enabled() && ep->unclassified_words[i][0] && ep->unclassified_words[j][0])
+                s = wemb_similar(ep->unclassified_words[i], ep->unclassified_words[j]);
+            if (s < 0.0f)
+                s = cosine_similarity(ep->unclassified_feats[i],
                                     ep->unclassified_feats[j],
                                     PM_NODE_FEATURE_DIM);
             sim_matrix[i * n + j] = s;
@@ -698,14 +764,17 @@ int emergent_pos_try_emerge(EmergentPOS* ep) {
         /* 找所有相似度超阈值的邻居 */
         for (int j = i + 1; j < n; j++) {
             if (visited[j]) continue;
-            /* 检查与簇内所有已有成员的相似度 (保守策略) */
+            /* 双判据：① 与簇内成员【平均】相似 ≥ 阈值；② 与【簇首（种子）】相似 ≥ 阈值。
+             * 只用平均会跨类漂移 —— 实测「走拿跳」这个簇把副词「更、太」也吸进来了
+             * （平均被稀释到刚过线），因为簇只有 1–2 个成员时平均没有约束力。
+             * 簇首锚定挡住了这条漂移，同时保留「渐进归并」（第一印象主导）。 */
+            float avg = 0.0f;
             int all_connected = 1;
-            for (int mi = 0; mi < cl->count; mi++) {
-                if (sim_matrix[cl->members[mi] * n + j] < EMERGE_COHERENCE_THRESH) {
-                    all_connected = 0;
-                    break;
-                }
-            }
+            for (int mi = 0; mi < cl->count; mi++)
+                avg += sim_matrix[cl->members[mi] * n + j];
+            avg /= (float)cl->count;
+            if (avg < coh_thresh) all_connected = 0;
+            if (use_fp && sim_matrix[cl->members[0] * n + j] < EMERGE_FP_SEED_SIM) all_connected = 0;
             if (all_connected) {
                 visited[j] = 1;
                 cl->members[cl->count++] = j;
@@ -744,9 +813,9 @@ int emergent_pos_try_emerge(EmergentPOS* ep) {
         }
         float coherence = (npairs > 0) ? total_sim / (float)npairs : 0.0f;
 
-        if (coherence < EMERGE_COHERENCE_THRESH) {
+        if (coherence < coh_thresh) {
             fprintf(stderr, "[EmergentPOS] 簇 %d 紧密度 %.3f < %.2f, 放弃\n",
-                    ci, coherence, EMERGE_COHERENCE_THRESH);
+                    ci, coherence, (double)coh_thresh);
             /* BG-29-v2: 不在中途释放（第二个循环仍要用 members），统一挪到其后 */
             continue;
         }
@@ -779,10 +848,23 @@ int emergent_pos_try_emerge(EmergentPOS* ep) {
             ep->extra_classes[ei].centroid[d] *= inv_n;
         }
 
-        /* 生成人类可读标签提示 */
-        snprintf(ep->extra_classes[ei].label_hint,
-                 sizeof(ep->extra_classes[ei].label_hint),
-                 "Emerge%d", ep->extra_classes[ei].class_id);
+        /* 生成人类可读标签：直接列成员词（前 8 个）。
+         * 原来只写 "Emerge%d"，验收时根本看不出这个类像什么。 */
+        {
+            int off = 0;
+            ep->extra_classes[ei].label_hint[0] = 0;
+            for (int mi = 0; mi < cl->count && mi < 8 && off + 3 < 32; mi++) {
+                const char* mw = ep->unclassified_words[cl->members[mi]];
+                if (!mw[0]) continue;
+                snprintf(ep->extra_classes[ei].label_hint + off,
+                         sizeof(ep->extra_classes[ei].label_hint) - (size_t)off, "%s", mw);
+                off += 3;
+            }
+            if (!ep->extra_classes[ei].label_hint[0])
+                snprintf(ep->extra_classes[ei].label_hint,
+                         sizeof(ep->extra_classes[ei].label_hint),
+                         "Emerge%d", ep->extra_classes[ei].class_id);
+        }
 
         ep->extra_class_count++;
         created++;
