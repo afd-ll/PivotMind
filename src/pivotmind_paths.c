@@ -19,6 +19,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>   /* strcasecmp：OP-24 大小写孪生目录判定 */
+#include <dirent.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -133,6 +135,7 @@ static int pm_join(char *dst, size_t n, const char *base, const char *sub) {
 
 /* 候选 home 值是否合法：非空、非全空白、绝对路径、不含 '~'、不是 "/"、长度留足拼接余量。
    v == NULL 表示「未设置」——不算非法（由调用方区分「未设置」与「设置了但非法」）。 */
+static void pm_warn_if_case_twin(const char* home);   /* OP-24：定义在后，先声明 */
 static int pm_home_value_ok(const char *v, const char **why) {
     size_t i;
     if (v == NULL) { *why = "未设置"; return 0; }
@@ -176,7 +179,10 @@ static void pm_resolve_once(void) {
         if (pm_trim_trailing_slash(buf, sizeof buf, env) != 0) {
             why = "空串";
         } else if (pm_home_value_ok(buf, &why)) {
-            if (pm_join(g_home, sizeof g_home, buf, "pivotmind") == 0) goto build_dirs;
+            if (pm_join(g_home, sizeof g_home, buf, "pivotmind") == 0) {
+                pm_warn_if_case_twin(g_home);   /* OP-24：只在真踩坑时出声 */
+                goto build_dirs;
+            }
             why = "拼接失败（长度超限）";
         }
         LOG_WARNING("pivotmind_paths: 忽略 $HOME=\"%s\"（%s），回退到编译期缺省 PM_HOME_DEFAULT",
@@ -304,6 +310,37 @@ static int pm_ensure_one(const char *path) {
 
     LOG_WARNING("pivotmind_paths: %s 反复无法就绪（mkdir 报 EEXIST 后复检仍不就绪）", path);
     return -1;
+}
+
+/**
+ * OP-24：$HOME/pivotmind（小写）是第 2 级兜底的固定名，而部署目录常写成 $HOME/PivotMind。
+ * Linux 上这是【两个不同目录】——没设 PIVOTMIND_HOME 的工具会读写另一个世界且不报错。
+ * 但「命中第 2 级」本身是合法解析顺序（有单元测试锁着，不许 WARN），
+ * 所以只在**同父目录下存在大小写不同的孪生目录**时才警告：那才是真遇到了分叉。
+ */
+static void pm_warn_if_case_twin(const char* home) {
+    char parent[1024];
+    const char* base = NULL;
+    size_t n = strlen(home);
+    if (n == 0 || n + 1u > sizeof parent) return;
+    memcpy(parent, home, n + 1u);
+    char* slash = strrchr(parent, '/');
+    if (!slash || slash == parent) return;          /* 根目录或无名，不判 */
+    *slash = 0;
+    base = slash + 1;
+    DIR* d = opendir(parent);
+    if (!d) return;
+    struct dirent* de;
+    while ((de = readdir(d)) != NULL) {
+        if (strcmp(de->d_name, base) == 0) continue;
+        if (strcasecmp(de->d_name, base) == 0) {
+            LOG_WARNING("pivotmind_paths: PM_HOME 落到第 2 级兜底 %s，但同目录另有大小写不同的 %s/%s —— "
+                        "两者是不同目录（OP-24：状态会被写进另一个世界）。请显式设 PIVOTMIND_HOME",
+                        home, parent, de->d_name);
+            break;
+        }
+    }
+    closedir(d);
 }
 
 const char *pm_home(void) {

@@ -40,6 +40,11 @@ typedef struct NodeCache {
     long   total_thaws;         /* 累计唤醒次数 */
     long   total_freezes;       /* 累计冻结次数 */
     long   total_edges_frozen;  /* [BG-51 记账] 累计被移出内存的边数（freeze 清 edge_count 前累加） */
+    /* [BG-64 记账] 最近被冻结的节点 id 环形缓冲（最新在前，由访问器整理）。
+     * 为什么要有：117 次冻结、数十万条边被移出内存，却不知道冻了【哪些】节点
+     * ⇒ 既无法追溯，也无法定向验证「解冻有没有回到这个节点」。 */
+    int    frozen_ids[64];
+    int    frozen_ring_next;
     int    auto_thaw_ok;        /* 自动解冻开关：内存充足=1，紧张=0 */
 
     /* 索引表（内存驻留，O(1) 定位） */
@@ -78,6 +83,9 @@ int node_cache_save_node(NodeCache* nc, HuarongTopologyNet* net, ReasoningNode* 
  * @return 0 成功, -1 失败
  */
 int node_cache_freeze(NodeCache* nc, HuarongTopologyNet* net, ReasoningNode* node);
+
+/** [BG-64] 取最近被冻结的节点 id（最新在前）。返回写入 out 的个数（≤ max 且 ≤ 64）。 */
+int node_cache_recent_frozen(const NodeCache* nc, int* out, int max);
 
 /**
  * 唤醒节点：从文件读回连接数据 + 重建内存结构

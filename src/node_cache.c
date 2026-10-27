@@ -44,6 +44,9 @@ NodeCache* node_cache_create(const char* filepath, int node_cap) {
     if (!filepath || node_cap < 1) return NULL;
 
     NodeCache* nc = (NodeCache*)calloc(1, sizeof(NodeCache));
+    if (nc) {
+        for (int i = 0; i < 64; i++) nc->frozen_ids[i] = -1;   /* [BG-64] 未使用槽位 = -1 */
+    }
     if (!nc) return NULL;
 
     strncpy(nc->filepath, filepath, sizeof(nc->filepath) - 1);
@@ -249,6 +252,19 @@ int node_cache_save_node(NodeCache* nc, HuarongTopologyNet* net, ReasoningNode* 
     return 0;
 }
 
+/* [BG-64] 最近冻结节点快照（最新在前） */
+int node_cache_recent_frozen(const NodeCache* nc, int* out, int max) {
+    if (!nc || !out || max <= 0) return 0;
+    int n = 0;
+    int nxt = nc->frozen_ring_next;
+    for (int k = 1; k <= 64 && n < max; k++) {
+        int idx = (nxt - k + 64) % 64;
+        if (nc->frozen_ids[idx] < 0) continue;   /* 未使用槽位（-1 初始化） */
+        out[n++] = nc->frozen_ids[idx];
+    }
+    return n;
+}
+
 int node_cache_freeze(NodeCache* nc, HuarongTopologyNet* net, ReasoningNode* node) {
     if (!nc || !node || node->is_cooled) return -1;
     /* v0.5.13 fix: node_id 越界保护（cap < 实际节点时写越界） */
@@ -281,6 +297,11 @@ int node_cache_freeze(NodeCache* nc, HuarongTopologyNet* net, ReasoningNode* nod
         if (old_hash)  huarong_net_retire_blob(net, old_hash);
     }
     node->is_cooled = 1;
+
+    /* [BG-64 记账] 记下被冻节点 id（环形缓冲，最新覆盖最旧）。
+     * 此处已持 node 锁；freeze 只在脑干单线程调用，无需额外加锁。 */
+    nc->frozen_ids[nc->frozen_ring_next] = node->node_id;
+    nc->frozen_ring_next = (nc->frozen_ring_next + 1) % 64;
 
     /* 3. 释放特征向量（惰性分配后也需腾出内存） */
     if (node->features) {

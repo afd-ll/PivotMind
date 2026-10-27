@@ -664,8 +664,17 @@ static void brainstem_tick_freeze(Brainstem* bs, const CircadianParams* cp) {
     }
 
     if (frozen > 0 && bs->verbose) {
-        LOG_INFO("[脑干] 本轮冻结 %d 个冷节点，移出 %ld 条边 (健康=%s)", frozen, edges_moved,
-                 hl == HM_RED ? "RED" : hl == HM_YELLOW ? "YELLOW" : "GREEN");
+        /* [BG-64 记账] 一并打出被冻节点 id —— 原来只记个数，
+         * 于是「几十万条边被移出内存」无法追溯、也无法定向验证解冻。 */
+        char ids[160] = {0};
+        int rid[64];
+        int rn = nc ? node_cache_recent_frozen(nc, rid, frozen < 64 ? frozen : 64) : 0;
+        int off = 0;
+        for (int i = 0; i < rn && off < (int)sizeof(ids) - 12; i++)
+            off += snprintf(ids + off, sizeof(ids) - (size_t)off, "%s%d", i ? "," : "", rid[i]);
+        LOG_INFO("[脑干] 本轮冻结 %d 个冷节点，移出 %ld 条边 (健康=%s) ids=[%s]",
+                 frozen, edges_moved,
+                 hl == HM_RED ? "RED" : hl == HM_YELLOW ? "YELLOW" : "GREEN", ids);
     }
 
     /* RED 级别：冻结后删孤立节点（冻结清空了边，正好清理）

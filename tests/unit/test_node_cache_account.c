@@ -209,6 +209,41 @@ static void test_roundtrip_preserves_edges(void) {
     TEST_END();
 }
 
+/* [BG-64] 冻结必须记下「冻了哪些节点」—— 原来只记个数，无法追溯、无法定向验证解冻 */
+static void test_freeze_records_node_ids(void) {
+    TEST_START("BG-64: freeze records node ids (ring buffer)");
+
+    remove(NC_FILE);
+    HuarongTopologyNet* net = mk_net(8);
+    ASSERT_NOT_NULL(net, "net create failed");
+    NodeCache* nc = node_cache_create(NC_FILE, NC_CAP);
+    ASSERT_NOT_NULL(nc, "node_cache_create failed");
+
+    int picked[5] = { 0 };
+    for (int i = 0; i < 5; i++) {
+        ReasoningNode* nd = net->nodes[i];
+        ASSERT_NOT_NULL(nd, "node missing");
+        picked[i] = nd->node_id;
+        ASSERT_TRUE(attach_edges(net, nd, 2) >= 0, "attach edges failed");
+        ASSERT_EQUAL(node_cache_freeze(nc, net, nd), 0, "freeze should succeed");
+    }
+
+    /* 最新在最前：取回来的顺序应是 picked[4..0] */
+    int out[64];
+    int n = node_cache_recent_frozen(nc, out, 64);
+    ASSERT_EQUAL(n, 5, "should record 5 frozen node ids");
+    for (int i = 0; i < 5; i++) {
+        ASSERT_EQUAL(out[i], picked[4 - i], "ring buffer must be newest-first");
+    }
+
+    /* 未使用槽位初始化为 -1：总数不应超过实际冻结数 */
+    ASSERT_TRUE(n <= 5, "unused slots must not be reported");
+
+    node_cache_destroy(nc);
+    huarong_net_destroy(net);
+    TEST_END();
+}
+
 int main(void) {
     printf("\n=== BG-51 记账对账（node_cache freeze/thaw）===\n\n");
 
@@ -217,6 +252,7 @@ int main(void) {
     test_accounting_equals_edges_moved();
     test_idempotent_counters();
     test_roundtrip_preserves_edges();
+    test_freeze_records_node_ids();
 
     printf("\n--- %d tests, %d passed, %d failed ---\n",
            tests_run, tests_passed, tests_failed);
