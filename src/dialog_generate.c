@@ -13,6 +13,7 @@
 #include "diffusion.h"
 #include "funcword.h"
 #include "utf8_tokenizer.h"
+#include "word_prob.h"   /* CX-27: 写侧结构闸门（wp_word_gate） */
 #include "string_pool.h"
 #include "common.h"
 #include "error.h"
@@ -729,6 +730,12 @@ static int get_or_create_concept(SubTopology* topo, const char* concept) {
     if (!topo || !topo->net || !concept) return -1;
     int existing = huarong_net_find_concept(topo->net, concept);
     if (existing >= 0) return existing;
+    /* CX-27 写侧闸门：非法 UTF-8 / 纯符号 / 汉字 >6 / 超长 一律不进库。
+     * 存量已经脏了（vocab 57% 垃圾），但源头必须掐住，否则清完还会长回来。 */
+    {
+        int why = 0;
+        if (!wp_word_gate(concept, &why)) return -1;
+    }
     float feat[NODE_FEATURE_DIM];
     for (int i = 0; i < NODE_FEATURE_DIM; i++)
         feat[i] = ((float)rand() / RAND_MAX - 0.5f) * 0.1f;
@@ -837,7 +844,13 @@ void auto_learn_concepts(MasterTopology* master, const char* text, void* str_poo
                 feat[d] = ((float)rand() / RAND_MAX - 0.5f) * 0.1f;
         }
 
-        ReasoningNode* cn = huarong_net_add_node(vocab->net, cname, feat, NODE_FEATURE_DIM);
+        /* CX-27 写侧闸门（组合词同一条口径；cname 是栈数组，用标志位而非置空） */
+        int gate_ok = 1;
+        {
+            int why = 0;
+            if (!wp_word_gate(cname, &why)) gate_ok = 0;
+        }
+        ReasoningNode* cn = gate_ok ? huarong_net_add_node(vocab->net, cname, feat, NODE_FEATURE_DIM) : NULL;
         if (cn) {
             cp_inherit_edges(vocab->net, cn, na, nb);
             /* 将新创建的组合节点也加入滑动窗口候选 */

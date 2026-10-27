@@ -60,6 +60,25 @@ float wp_gain(const char* tok);
  *  CJK 单字 → 1（单字豁免）；多字与英文 → 需 min(HL,HR) ≥ min_ent 且次数 ≥ min_count。 */
 int wp_is_wordlike(const char* tok, double min_ent, unsigned long long min_count);
 
+/* ==================== 写侧结构闸门（CX-27） ====================
+ * 与 wp_is_wordlike 的分工：
+ *   · 本闸门只看【结构】——非法 UTF-8 / 纯符号 / 超长。**不依赖统计**，
+ *     所以冷启动（新词第一次出现、charpair 还没有它）也能判。
+ *   · wp_is_wordlike 依赖统计，用于**存量体检与晋升**，不适合当写侧闸门
+ *     （新词必然 0 次，会被误杀）。
+ * reason 取值（wp_word_gate 回填）：
+ *   0 通过 · 1 非法UTF-8/控制字节/替换符 · 2 无实义字符（纯符号/空白）
+ *   3 汉字数 > 6（跨词过合并） · 4 超长（≥31 字节，charpair 键上限）
+ */
+int wp_word_gate(const char* w, int* reason);
+
+/** 文本是否含实义字符（汉字/字母/数字）——供 QA 答案这类【句子级】写入判据：
+ *  只拒「纯标点/纯空白」，不套用词的 6 字上限。 */
+int wp_text_has_content(const char* text);
+
+/** 闸门计数快照：out[0..4] 对应上面 5 个 reason 的累计次数（只读）。 */
+void wp_gate_stats(unsigned long long out[5]);
+
 /** 丢缓存（表被重置/大改后调用；下次 wp_ensure 重建）。 */
 void wp_invalidate(void);
 

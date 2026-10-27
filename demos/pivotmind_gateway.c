@@ -297,14 +297,21 @@ static void handle_connection_inner(GatewaySystem* gw, int client_fd, HttpReques
             int wp_tok = 0, wp_pairs = 0;
             unsigned long long wp_total = 0;
             wp_stats(&wp_tok, &wp_pairs, &wp_total);
+            /* CX-27 闸门读数：0 通过 / 1 非法UTF8 / 2 纯符号 / 3 超长词 / 4 键超限 */
+            unsigned long long gate[5] = {0};
+            wp_gate_stats(gate);
 
             char dbg[512];
             snprintf(dbg, sizeof(dbg),
                 "{\"vocab_nodes\":%d,\"freq_entries\":%d,"
                 "\"total_nodes\":%d,\"template_nodes\":%d,\"sub_topos\":%d,"
-                "\"wp_tokens\":%d,\"wp_pairs\":%d,\"wp_total\":%llu}",
+                "\"wp_tokens\":%d,\"wp_pairs\":%d,\"wp_total\":%llu,"
+                "\"gate_ok\":%llu,\"gate_utf8\":%llu,\"gate_sym\":%llu,"
+                "\"gate_long\":%llu,\"gate_maxk\":%llu,\"qa_rejected\":%llu}",
                 vnodes, fentries, total, tnodes, gw->topology->sub_topo_count,
-                wp_tok, wp_pairs, wp_total);
+                wp_tok, wp_pairs, wp_total,
+                gate[0], gate[1], gate[2], gate[3], gate[4],
+                gw->qa_memory ? qa_memory_rejected() : 0ULL);
             http_json(client_fd, 200, dbg);
         } else if (strcmp(req->path, "/force_templates") == 0) {
             int built = broca_build_templates(gw->topology, 10, 4);

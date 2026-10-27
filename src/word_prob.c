@@ -418,6 +418,73 @@ float wp_gain(const char* tok) {
     return gain;
 }
 
+/* ==================== 写侧结构闸门（CX-27） ====================
+ * 线上实测（10-27）：vocab 22,758 节点里真词只占 42.9%，非法 UTF-8 2,039、
+ * 纯符号 2,172、纯拉丁 5,650、中英混 4,146，且都有边。这些是【进库时】就没拦住。
+ * 本闸门只判结构（不依赖统计），因此新词第一句话就能拦，不受冷启动影响。 */
+
+static unsigned long long g_gate[5] = {0, 0, 0, 0, 0};
+
+void wp_gate_stats(unsigned long long out[5]) {
+    if (!out) return;
+    for (int i = 0; i < 5; i++) out[i] = g_gate[i];
+}
+
+/* 扫描：汉字数 / 拉丁字母数 / 数字数 / 是否有实义字符 / 是否非法或损坏 */
+typedef struct { int cjk, latin, digit, bad, repl, ctrl; } GateScan;
+
+static GateScan _gate_scan(const char* w) {
+    GateScan g;
+    memset(&g, 0, sizeof(g));
+    const unsigned char* p = (const unsigned char*)w;
+    while (p && *p) {
+        if (p[0] == 0xEF && p[1] == 0xBF && p[2] == 0xBD) { g.repl = 1; p += 3; continue; }
+        if (p[0] < 0x20 || p[0] == 0x7F) { g.ctrl = 1; p++; continue; }
+        if (p[0] < 0x80) {
+            if ((p[0] >= 'a' && p[0] <= 'z') || (p[0] >= 'A' && p[0] <= 'Z')) g.latin++;
+            else if (p[0] >= '0' && p[0] <= '9') g.digit++;
+            p++;
+            continue;
+        }
+        int len = (p[0] & 0xE0) == 0xC0 ? 2 : ((p[0] & 0xF0) == 0xE0 ? 3 : ((p[0] & 0xF8) == 0xF0 ? 4 : 0));
+        if (len == 0) { g.bad = 1; p++; continue; }
+        int ok = 1;
+        for (int k = 1; k < len; k++) if ((p[k] & 0xC0) != 0x80) { ok = 0; break; }
+        if (!ok) { g.bad = 1; p++; continue; }
+        if (len == 3) {
+            unsigned int cp = ((unsigned int)(p[0] & 0x0F) << 12)
+                            | ((unsigned int)(p[1] & 0x3F) << 6)
+                            |  (unsigned int)(p[2] & 0x3F);
+            if ((cp >= 0x4E00 && cp <= 0x9FFF) || (cp >= 0x3400 && cp <= 0x4DBF)) g.cjk++;
+        }
+        p += len;
+    }
+    return g;
+}
+
+int wp_word_gate(const char* w, int* reason) {
+    int r = 0;
+    if (!w || !w[0]) {
+        r = 2;
+    } else {
+        GateScan g = _gate_scan(w);
+        if (g.bad || g.repl || g.ctrl)      r = 1;
+        else if (g.cjk == 0 && g.latin == 0 && g.digit == 0) r = 2;
+        else if (g.cjk > 6)                 r = 3;
+        else if (strlen(w) >= WP_KEY - 1)   r = 4;
+    }
+    if (r) g_gate[r]++;
+    if (reason) *reason = r;
+    return r == 0;
+}
+
+int wp_text_has_content(const char* text) {
+    if (!text || !text[0]) return 0;
+    GateScan g = _gate_scan(text);
+    if (g.bad || g.repl || g.ctrl) return 0;
+    return (g.cjk > 0 || g.latin > 0 || g.digit > 0);
+}
+
 int wp_is_wordlike(const char* tok, double min_ent, unsigned long long min_count) {
     if (!tok || !tok[0]) return 0;
     char first[4] = {0};

@@ -10,6 +10,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include "error.h"
+#include "word_prob.h"   /* CX-27: 写侧闸门（答案必须含实义字符） */
 #include "qa_memory.h"
 #include "utf8_tokenizer.h"
 
@@ -173,8 +175,21 @@ int qa_memory_count(QAMemory* m) {
     return m ? m->count : 0;
 }
 
+/* CX-27 写侧闸门：QA 记忆同样在进垃圾。
+ * 线上实证（CX-28 诊断）：查询「天气」命中的答案是 "= ="、「世界」是 "=。="，
+ * 纯符号答案会占住聊天路径的 response 槽位（详见 CX-28）。
+ * 判据：问题与答案都必须含实义字符（汉字/字母/数字）；不套用词的 6 字上限（句子本来就长）。 */
+static unsigned long long g_qa_rejected = 0;
+
+unsigned long long qa_memory_rejected(void) { return g_qa_rejected; }
+
 int qa_memory_add(QAMemory* m, const char* question, const char* answer) {
     if (!m || !question || !answer || m->count >= m->capacity) return -1;
+    if (!wp_text_has_content(question) || !wp_text_has_content(answer)) {
+        g_qa_rejected++;
+        LOG_INFO("[QA闸门] 拒收无实义字符的条目：问=%.40s 答=%.40s", question, answer);
+        return -1;
+    }
 
     char* tokens[MAX_TOKENS];
     int tc = utf8_tokenize(question, tokens, MAX_TOKENS);

@@ -24,8 +24,12 @@ void qa_memory_destroy(QAMemory* m);
 /* 获取条目数 */
 int qa_memory_count(QAMemory* m);
 
-/* 运行时添加单条 QA 对（分词后存入） */
+/* 运行时添加单条 QA 对（分词后存入）。
+ * CX-27 起：问/答任一无实义字符（纯标点/空白）即拒收，返回 -1。 */
 int qa_memory_add(QAMemory* m, const char* question, const char* answer);
+
+/* 被写侧闸门拒收的条目数（累计，只读；供 /debug 读数） */
+unsigned long long qa_memory_rejected(void);
 
 #ifdef __cplusplus
 }

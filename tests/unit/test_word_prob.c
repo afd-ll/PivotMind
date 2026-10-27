@@ -85,7 +85,37 @@ int main(void) {
                 "多字增益应落在 [0.45,1.25]");
     ASSERT_TRUE(wp_gain("未观测的怪词") >= 0.45f - 1e-6f, "未知多字词增益下界 0.45");
 
-    /* ---------- ④ 读数一致性 ---------- */
+    /* ---------- ④ 写侧结构闸门（CX-27） ---------- */
+    {
+        int why = -1;
+        ASSERT_TRUE(wp_word_gate("天气", &why) == 1, "正常词应过闸");
+        ASSERT_TRUE(why == 0, "正常词 reason 应为 0");
+        ASSERT_TRUE(wp_word_gate("中", &why) == 1, "单字应过闸");
+
+        ASSERT_TRUE(wp_word_gate("= =", &why) == 0, "纯符号应被拒");
+        ASSERT_TRUE(why == 2, "纯符号 reason 应为 2");
+        ASSERT_TRUE(wp_word_gate("。", &why) == 0, "纯标点应被拒");
+
+        ASSERT_TRUE(wp_word_gate("一二三四五六七", &why) == 0, "7 个汉字应被拒（过合并）");
+        ASSERT_TRUE(why == 3, "超长词 reason 应为 3");
+
+        /* 非法 UTF-8：孤立的续字节 */
+        const char bad[] = {(char)0xE5, (char)0xB1, (char)0x80, (char)0x80, 0};
+        ASSERT_TRUE(wp_word_gate(bad, &why) == 0, "非法 UTF-8 应被拒");
+        ASSERT_TRUE(why == 1, "非法 UTF-8 reason 应为 1");
+
+        /* 句子级判据：不套 6 字上限 */
+        ASSERT_TRUE(wp_text_has_content("今天天气不错，我们去爬山吧") == 1, "句子应判有内容");
+        ASSERT_TRUE(wp_text_has_content("= =") == 0, "纯符号应判无内容");
+        ASSERT_TRUE(wp_text_has_content("") == 0, "空串应判无内容");
+
+        /* 计数应累计（拒收 4 次：纯符号 / 纯标点 / 超长 / 非法 UTF-8） */
+        unsigned long long gate[5] = {0};
+        wp_gate_stats(gate);
+        ASSERT_TRUE(gate[1] >= 1 && gate[2] >= 2 && gate[3] >= 1, "闸门分项计数应累计");
+    }
+
+    /* ---------- ⑤ 读数一致性 ---------- */
     int tok = 0, pairs = 0;
     unsigned long long total = 0;
     wp_stats(&tok, &pairs, &total);
