@@ -348,6 +348,9 @@ def main():
     ap.add_argument('--old-vocab', default=None, help='vocab_coverage --dump 的 tsv')
     ap.add_argument('--emit-vocab', default=None,
                     help='额外产出给 qa_retrain 用的词表（词	P	计数	长度）')
+    ap.add_argument('--indep-pmi', type=float, default=0.0,
+                    help='成分独立率闸门：PMI(切分后) 低于本值的双字词剪掉；0=关')
+    ap.add_argument('--no-sweep', action='store_true', help='跳过词表规模扫描（省时间）')
     ap.add_argument('--emit-min-count', type=float, default=20.0,
                     help='emit-vocab 的期望计数下限（默认 20，与旧 min_count 对齐）')
     a = ap.parse_args()
@@ -376,6 +379,29 @@ def main():
     probs, hist = em(train, vocab, chars, a.max_len, a.iters, init_counts=cnt,
                      penalty=a.len_penalty)
     new_vocab = set(probs)
+    # ---------------- 成分独立率闸门（CX-45 第二步）
+    # PMI_token(a,b) = log[ P(ab) / (P(a)·P(b)) ]，概率全部来自同一次 EM 的切分结果。
+    # 依据实测：碎片 性和 2.12 / 的原 0.77 / 是在 1.01 / 用太 -1.09；
+    # 真词 拍卖 8.68 / 因为 7.74 / 时候 12.16 / 机器 6.75；边界地带 你好 3.23 / 我就 3.57
+    # ⇒ 只砍「能证明是碎片」的低段（默认 2.5），中间地带不动（分不开就别硬分）。
+    if a.indep_pmi > 0:
+        dropped = []
+        for w in list(probs):
+            if len(w) != 2:
+                continue
+            pa = probs.get(w[0], 1e-12)
+            pb = probs.get(w[1], 1e-12)
+            pmi = math.log(probs[w] / (pa * pb)) if probs[w] > 0 else -99.0
+            if pmi < a.indep_pmi:
+                dropped.append((w, pmi))
+        for w, _ in dropped:
+            probs.pop(w, None)
+        Z = sum(probs.values()) or 1.0
+        probs = {w: p / Z for w, p in probs.items()}
+        dropped.sort(key=lambda kv: -len(kv[0]))
+        sys.stderr.write(('indep: PMI<%.2f 剪掉 %d 词，剩 %d（例：%s）' + chr(10))
+                         % (a.indep_pmi, len(dropped), len(probs),
+                            ' '.join(w for w, _ in dropped[:12])))
     sys.stderr.write('[new] 收敛词表 %d 词\n' % len(new_vocab))
 
     with open(os.path.join(a.out, 'vocab_new.tsv'), 'w', encoding='utf-8', newline='\n') as f:
@@ -407,7 +433,7 @@ def main():
 
     # ---------------- 规模扫描
     ks = [5000, 10000, 15000, 17609, 20000, 30000, 50000, len(probs)]
-    sweep_rows = sweep(train, held, dict(probs), a.max_len, ks, a.len_penalty)
+    sweep_rows = [] if a.no_sweep else sweep(train, held, dict(probs), a.max_len, ks, a.len_penalty)
     with open(os.path.join(a.out, 'sweep.tsv'), 'w', encoding='utf-8', newline='\n') as f:
         f.write('K\t实际词数\tlogP_per_char\tOOV\n')
         for n, lp, oov in sweep_rows:
