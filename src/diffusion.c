@@ -1303,6 +1303,30 @@ static int _pool_same_family(const char* a, const char* b) {
     return 0;
 }
 
+/* 是否 2 汉字词（3 字节/字）。三字词的熵恒 0（word_ctx 硬编码二元组，CX-47），
+ * 所以任何用熵做的判断都必须先过这一关，否则「计算机」会被当成最差的词。 */
+static int _pool_is_2han(const char* s) {
+    unsigned cp[8];
+    return _pool_cps(s, cp, 8) == 2;
+}
+
+/* 两个候选在输入中的字节区间是否相交（= 争夺同一段文本的切分） */
+static int _pool_overlap(int a, int b, const char** buf, const int* pos_in) {
+    if (pos_in[a] == INT_MAX || pos_in[b] == INT_MAX) return 0;
+    int sa = pos_in[a], ea = sa + (int)strlen(buf[a]);
+    int sb = pos_in[b], eb = sb + (int)strlen(buf[b]);
+    return (sa < eb && sb < ea);
+}
+
+/* 词整体左右邻的 min 熵；无实测数据返回 -1（-1 不参与比较）。
+ * 注意 wp_min_entropy 对「没有实测数据」的词返回 0，与「实测熵确实为 0」
+ * 无法区分，所以先用 wp_count 判有没有数据。 */
+static double _pool_ent(const char* w) {
+    if (!_pool_is_2han(w)) return -1.0;
+    if (wp_count(w) == 0)  return -1.0;
+    return wp_min_entropy(w);
+}
+
 /* a 是否应排在 b 之前：[命中输入, 输入内出现位置, 长度, 分数, 原序]。
  * 「输入内出现位置」是最强的一条：用户输入本身就是合法中文语序，
  * 命中词按原位置排 = 直接复用他的话序（实测「喜欢 听音乐」「最近 很累」
@@ -1391,15 +1415,43 @@ static int _pool_refine(const char** buf, POSTag* pos, unsigned char* src,
         /* ③ 同族收敛：按上面的顺序扫描，与已留项共享汉字就剔除。
          * 🔴 只收集下标、最后统一拷贝：order[] 是排序后的**乱序原索引**，
          * 边扫边写会覆盖还没读到的槽（实测「喜欢/音乐/欢乐/欢喜」把「音乐」
-         * 覆盖成「欢乐」，输出成「喜欢的欢喜」）。 */
+         * 覆盖成「欢乐」，输出成「喜欢的欢喜」）。
+         *
+         * CX-50 重叠裁决：同族里若两者在输入中**位置重叠**，说明它们争夺同一段
+         * 文本的切分（`我最`[0,2) vs `最近`[1,3)），默认按位置留先到的会选错
+         * ——`我最近很累` 留 `我最`、砍 `最近`。改用「词整体左右邻熵」裁决，
+         * 越大越像词（实测 我最 0.727 < 最近 1.640、份工 0.104 < 工作 5.087）。
+         * 好处：不在词表层面删任何词，只在**具体输入**上选更像词的切分，
+         * 所以 `因为`(2.66)/`时候`(2.07) 这类不与任何词重叠的真词完全不受影响。 */
         kept = 0;
         for (int i = 0; i < m; i++) {
             int idx = order[i];
             if (dedup) {
-                int fam = 0;
+                int fam_at = -1, conflicts = 0;
                 for (int k = 0; k < kept; k++)
-                    if (_pool_same_family(buf[idx], buf[keep_idx[k]])) { fam = 1; break; }
-                if (fam) continue;
+                    if (_pool_same_family(buf[idx], buf[keep_idx[k]])) {
+                        conflicts++;
+                        if (fam_at < 0) fam_at = k;
+                    }
+                /* 只有「唯一冲突 + 位置重叠」才算切分竞争，才允许熵裁决顶替。
+                 * 🔴 冲突 >1 时禁止顶替：`想学` 既是 `我想` 的重叠对手（都在
+                 * 「我想学习编程」的 pos 0~2 附近），又与 `学习编程` 共享「学」——
+                 * 一旦允许它顶替 `我想`，接着它又因同族砍掉 `学习编程`，
+                 * 整句退化成「想学学习编程」。桥接噪声必须整条丢弃。 */
+                if (conflicts == 1 && _pool_overlap(idx, keep_idx[fam_at], buf, pos_in)) {
+                    double e_new = _pool_ent(buf[idx]);
+                    double e_old = _pool_ent(buf[keep_idx[fam_at]]);
+                    /* 两边都要有实测熵才比（无数据的词返回 -1，不参与） */
+                    if (e_new >= 0.0 && e_old >= 0.0 && e_new > e_old + 0.05) {
+                        int old_idx = keep_idx[fam_at];
+                        keep_idx[fam_at] = idx;   /* 新的更像词 ⇒ 顶替，位置不变 */
+                        if (_anchor_dbg())
+                            fprintf(stderr, "[裁决] %s(熵%.2f) 顶替 %s(熵%.2f)\n",
+                                    buf[idx], e_new, buf[old_idx], e_old);
+                    }
+                    continue;
+                }
+                if (conflicts > 0) continue;
             }
             keep_idx[kept++] = idx;
         }
