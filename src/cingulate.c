@@ -208,31 +208,61 @@ const char* cingulate_summary(GeneratedSequence* seq, char* buf, int size) {
     return buf;
 }
 
-/* ── CX-39：用 bigram 链约束词序 ────────────────────────────────────────
- * 表来源：tools/qa_bigram 灌 907k QA 语料（当前 218 万唯一对）。
- * ⚠️ 表按 state 的节点 id 编址 ⇒ **换词表后必须重建**，否则 id 错位、整表作废。
+/* ── CX-39：bigram 降级为「候选组合打分器」（方案 B）────────────────────
+ * 表来源：tools/qa_bigram 灌 QA 语料（当前 218 万唯一对）。
+ * ⚠️ 表按 state 的**节点 id** 编址 ⇒ 换词表后必须重建，否则 id 错位、整表作废。
  *
- * 为什么要它：CX-32 拆掉 QA 遮罩后生成层第一次暴露 —— 选词对了但词序是乱的
- * （「学习的编程的我想和想学」）。扩散按强度选词，本来就没有语序约束。
+ * 为什么不做「沿边生成」：实测高频实词的分布天生是平的（`学习` 有 77,428 个后继、
+ * top-8 概率全 <1e-3、前 8 项熵 0.00 bit）⇒ 从它起步走一步等于在几万词里抽签，
+ * 剪枝也救不了（砍掉的不是噪音而是主要概率质量）。低熵词（`累` 1,583 后继、
+ * `累垮` 0.042）才走得动，覆盖面又太窄。
  *
- * 做法：**选词不动，只重排**。对每个起点做贪心（下一步取 P(next|prev) 最大），
- * 用 ΣlogP(命中) − 0.05×未命中 打分；只有明显优于原顺序（+0.3 nats）才替换。
- * ⚠️ 不改善就不动 —— 宁可保留原来的乱序，也不要引入新的乱序。
+ * 所以换用法：**不生成，只打分**。
+ *   1. 选词沿用扩散（强度竞争），本函数只决定**顺序**；
+ *   2. 两词之间的分数允许**一跳桥接** `A → x → B`（x 取 A 的 top-K 后继），
+ *      因为生成出来的词往往语义相关但从未相邻 —— 直连覆盖率太低；
+ *      桥接扣 1 nat，直连永远优先；
+ *   3. 顺序用子集 DP 求最优汉密尔顿路（n ≤ 10 → 1024×10×10），不是贪心；
+ *   4. 只有明显优于原顺序（+0.3 nats）才替换 —— 不改善就不动，
+ *      宁可保留原来的乱序，也不要引入新的乱序。
  * 开关：PIVOTMIND_TM_ORDER=0 关闭。 */
-#define TM_ORDER_MAXW 12
+#define TM_ORDER_MAXW 10
+#define TM_BRIDGE_K   24
+#define TM_UNSCORED   (-1e9f)
 
-static float _tm_chain_score(TransitionModel* tm, const int* id,
-                             const int* ord, int n, int* hit_out) {
-    float s = 0.0f;
-    int hit = 0;
-    for (int i = 0; i + 1 < n; i++) {
-        int a = id[ord[i]], b = id[ord[i + 1]];
-        if (a < 0 || b < 0) continue;
-        float p = tm_prob(tm, a, b);
-        if (p > 0.0f) { s += logf(p); hit++; }
+/* 两词分数：直连 logP，否则一跳桥接 logP(a→x)+logP(x→b)-1nat */
+static float _tm_pair_logp(TransitionModel* tm, int a, int b, int* bridged) {
+    if (a < 0 || b < 0) return TM_UNSCORED;
+    float p = tm_prob(tm, a, b);
+    if (p > 0.0f) return logf(p);
+    int32_t nx[TM_BRIDGE_K];
+    int k = tm_top_next(tm, a, nx, TM_BRIDGE_K);
+    float best = TM_UNSCORED;
+    for (int i = 0; i < k; i++) {
+        if (nx[i] == b) continue;
+        float p1 = tm_prob(tm, a, nx[i]);
+        if (p1 <= 0.0f) continue;
+        float p2 = tm_prob(tm, nx[i], b);
+        if (p2 <= 0.0f) continue;
+        float s = logf(p1) + logf(p2) - 1.0f;
+        if (s > best) best = s;
     }
-    if (hit_out) *hit_out = hit;
-    return s - 0.05f * (float)(n - 1 - hit);
+    if (best > TM_UNSCORED && bridged) (*bridged)++;
+    return best;
+}
+
+/* 一条顺序的总分：可评的相邻对累加，不可评的每对扣 0.5 nat */
+static float _tm_path_score(TransitionModel* tm, const int* id,
+                            const int* ord, int n, int* bridged_out) {
+    float s = 0.0f;
+    int bridged = 0;
+    for (int i = 0; i + 1 < n; i++) {
+        float v = _tm_pair_logp(tm, id[ord[i]], id[ord[i + 1]], &bridged);
+        if (!(v > TM_UNSCORED * 0.5f)) { s -= 0.5f; continue; }
+        s += v;
+    }
+    if (bridged_out) *bridged_out = bridged;
+    return s;
 }
 
 static void _tm_reorder_words(MasterTopology* topo, GeneratedSequence* seq) {
@@ -252,9 +282,8 @@ static void _tm_reorder_words(MasterTopology* topo, GeneratedSequence* seq) {
     if (!vocab || !vocab->net) return;
 
     int n = seq->count;
-    if (n > TM_ORDER_MAXW) n = TM_ORDER_MAXW;   /* 越长重排越不可靠，也越慢 */
+    if (n > TM_ORDER_MAXW) n = TM_ORDER_MAXW;   /* 越长越不可靠，也越慢 */
     int id[TM_ORDER_MAXW], ord[TM_ORDER_MAXW], best[TM_ORDER_MAXW];
-    int seqord[TM_ORDER_MAXW], used[TM_ORDER_MAXW];
     int mapped = 0;
     for (int i = 0; i < n; i++) {
         id[i] = huarong_net_find_concept(vocab->net, seq->words[i]);
@@ -264,43 +293,62 @@ static void _tm_reorder_words(MasterTopology* topo, GeneratedSequence* seq) {
     }
     if (mapped < 3) return;                     /* 词不在词汇拓扑里 ⇒ 无从评分 */
 
-    int hit0 = 0;
-    float base = _tm_chain_score(tm, id, ord, n, &hit0);
-    if (hit0 == 0) return;                      /* 一条可用转移都没有 ⇒ 不动 */
-    float bestScore = base;
+    /* 1) 预计算两两分数（含桥接）：n² 次，远少于 DP 里的调用 */
+    float w[TM_ORDER_MAXW][TM_ORDER_MAXW];
+    int bridged_pairs = 0;
+    for (int i = 0; i < n; i++)
+        for (int j = 0; j < n; j++)
+            w[i][j] = (i == j) ? TM_UNSCORED
+                               : _tm_pair_logp(tm, id[i], id[j], &bridged_pairs);
 
-    for (int s0 = 0; s0 < n; s0++) {
-        memset(used, 0, sizeof(int) * (size_t)n);
-        used[s0] = 1;
-        seqord[0] = s0;
-        for (int k = 1; k < n; k++) {
-            int prev = seqord[k - 1];
-            int pick = -1;
-            float pick_p = -1.0f;
-            for (int w = 0; w < n; w++) {
-                if (used[w]) continue;
-                float p = (id[prev] >= 0 && id[w] >= 0)
-                          ? tm_prob(tm, id[prev], id[w]) : 0.0f;
-                if (p > pick_p) { pick_p = p; pick = w; }
+    int hit0 = 0;
+    float base = _tm_path_score(tm, id, ord, n, &hit0);
+    if (!(base > TM_UNSCORED * 0.5f)) return;   /* 连原顺序都评不出来 ⇒ 不动 */
+
+    /* 2) 子集 DP：求最大分汉密尔顿路（n ≤ 10） */
+    int m = 1 << n;
+    float dp[1 << TM_ORDER_MAXW][TM_ORDER_MAXW];
+    signed char par[1 << TM_ORDER_MAXW][TM_ORDER_MAXW];
+    for (int mask = 0; mask < m; mask++)
+        for (int j = 0; j < n; j++) { dp[mask][j] = TM_UNSCORED; par[mask][j] = -1; }
+    for (int j = 0; j < n; j++) dp[1 << j][j] = 0.0f;
+
+    for (int mask = 1; mask < m; mask++) {
+        for (int j = 0; j < n; j++) {
+            if (!(mask & (1 << j))) continue;
+            if (!(dp[mask][j] > TM_UNSCORED * 0.5f)) continue;
+            for (int k2 = 0; k2 < n; k2++) {
+                if (mask & (1 << k2)) continue;
+                if (!(w[j][k2] > TM_UNSCORED * 0.5f)) continue;
+                float cand = dp[mask][j] + w[j][k2];
+                int nm = mask | (1 << k2);
+                if (cand > dp[nm][k2]) { dp[nm][k2] = cand; par[nm][k2] = (signed char)j; }
             }
-            if (pick < 0) break;
-            seqord[k] = pick;
-            used[pick] = 1;
-        }
-        int hit = 0;
-        float sc = _tm_chain_score(tm, id, seqord, n, &hit);
-        if (sc > bestScore) {
-            bestScore = sc;
-            memcpy(best, seqord, sizeof(int) * (size_t)n);
         }
     }
 
-    if (bestScore <= base + 0.3f) return;       /* 没明显改善 ⇒ 保持原序 */
+    int full = m - 1;
+    int end = -1;
+    float bestScore = TM_UNSCORED;
+    for (int j = 0; j < n; j++)
+        if (dp[full][j] > bestScore) { bestScore = dp[full][j]; end = j; }
+    if (end < 0 || !(bestScore > base + 0.3f)) return;   /* 没明显改善 ⇒ 保持原序 */
+
+    /* 3) 回溯顺序 */
+    int cur = end;
+    for (int mask = full; mask; ) {
+        best[__builtin_popcount((unsigned)mask) - 1] = cur;
+        int pj = par[mask][cur];
+        mask &= ~(1 << cur);
+        cur = pj;
+        if (cur < 0) break;
+    }
+
     const char* tmp[TM_ORDER_MAXW];
     for (int i = 0; i < n; i++) tmp[i] = seq->words[i];
     for (int i = 0; i < n; i++) seq->words[i] = tmp[best[i]];
-    fprintf(stderr, "[词序] bigram 重排 %.2f → %.2f（%d 词）\n",
-            (double)base, (double)bestScore, n);
+    fprintf(stderr, "[词序] bigram 打分重排 %.2f → %.2f（%d 词 · 桥接对 %d）\n",
+            (double)base, (double)bestScore, n, bridged_pairs);
 }
 
 /* ================================================================
