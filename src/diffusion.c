@@ -2423,18 +2423,23 @@ int diffusion_generate(DiffusionCtx* ctx,
             const int max_reply_words = MAX_REPLY_WORDS;
             const int inject = _conn_inject_on();
             int real_cnt = 0;
+            int inj_cnt = 0;          /* CX-39：连接符每次回复最多插 1 个 */
             for (int w = 0; w < word_count && real_cnt < max_reply_words; w++) {
                 if (!word_buf[w]) continue;
                 /* v0.6.12 连接符注入：在两个相邻实词之间插语料里的高频虚词。
                  * 只有语料确实存在 A--fw-->B 的共现才插，所以不会凭空造出
-                 * 「的了的在」。 */
-                if (inject && real_cnt > 0 && out > 0 && (out + 1) < max_output) {
+                 * 「的了的在」。
+                 * ⚠️ CX-39 实测：不设上限时几乎每对相邻实词都会插「的」
+                 * （它是最高频虚词）⇒ 短句被插成「学习的编程的想学的我想」。
+                 * 所以每次回复**最多插 1 个**，宁可少关节也不要满屏「的」。 */
+                if (inject && inj_cnt < 1 && real_cnt > 0 && out > 0 && (out + 1) < max_output) {
                     const char* cw = _find_connective(ctx, output_words[out - 1], word_buf[w]);
                     if (cw) {
                         if (_anchor_dbg())
                             fprintf(stderr, "[连接符] %s ↔ %s 插入「%s」\n",
                                     output_words[out - 1], word_buf[w], cw);
                         output_words[out++] = cw;
+                        inj_cnt++;
                     }
                 }
                 if (out >= max_output) break;

@@ -11,6 +11,7 @@
 #include "multi_topology.h"      /* v0.6.3：要写 master->feedback_ptr（需完整结构） */
 #include "generation_feedback.h" /* v0.6.3：生成端在线反馈 + 内调节 */
 #include "diffusion.h"
+#include "transition_model.h"    /* CX-39：bigram 链约束词序 */
 #include "utf8_tokenizer.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -207,6 +208,101 @@ const char* cingulate_summary(GeneratedSequence* seq, char* buf, int size) {
     return buf;
 }
 
+/* ── CX-39：用 bigram 链约束词序 ────────────────────────────────────────
+ * 表来源：tools/qa_bigram 灌 907k QA 语料（当前 218 万唯一对）。
+ * ⚠️ 表按 state 的节点 id 编址 ⇒ **换词表后必须重建**，否则 id 错位、整表作废。
+ *
+ * 为什么要它：CX-32 拆掉 QA 遮罩后生成层第一次暴露 —— 选词对了但词序是乱的
+ * （「学习的编程的我想和想学」）。扩散按强度选词，本来就没有语序约束。
+ *
+ * 做法：**选词不动，只重排**。对每个起点做贪心（下一步取 P(next|prev) 最大），
+ * 用 ΣlogP(命中) − 0.05×未命中 打分；只有明显优于原顺序（+0.3 nats）才替换。
+ * ⚠️ 不改善就不动 —— 宁可保留原来的乱序，也不要引入新的乱序。
+ * 开关：PIVOTMIND_TM_ORDER=0 关闭。 */
+#define TM_ORDER_MAXW 12
+
+static float _tm_chain_score(TransitionModel* tm, const int* id,
+                             const int* ord, int n, int* hit_out) {
+    float s = 0.0f;
+    int hit = 0;
+    for (int i = 0; i + 1 < n; i++) {
+        int a = id[ord[i]], b = id[ord[i + 1]];
+        if (a < 0 || b < 0) continue;
+        float p = tm_prob(tm, a, b);
+        if (p > 0.0f) { s += logf(p); hit++; }
+    }
+    if (hit_out) *hit_out = hit;
+    return s - 0.05f * (float)(n - 1 - hit);
+}
+
+static void _tm_reorder_words(MasterTopology* topo, GeneratedSequence* seq) {
+    if (!topo || !seq || seq->count < 3) return;
+    const char* v = getenv("PIVOTMIND_TM_ORDER");
+    if (v && v[0] == '0') return;
+    TransitionModel* tm = tm_global();
+    if (!tm || tm_pair_count(tm) < 1000) return;
+
+    SubTopology* vocab = NULL;
+    for (int t = 0; t < topo->sub_topo_count; t++)
+        if (topo->sub_topologies[t] &&
+            topo->sub_topologies[t]->type == TOPO_VOCABULARY) {
+            vocab = topo->sub_topologies[t];
+            break;
+        }
+    if (!vocab || !vocab->net) return;
+
+    int n = seq->count;
+    if (n > TM_ORDER_MAXW) n = TM_ORDER_MAXW;   /* 越长重排越不可靠，也越慢 */
+    int id[TM_ORDER_MAXW], ord[TM_ORDER_MAXW], best[TM_ORDER_MAXW];
+    int seqord[TM_ORDER_MAXW], used[TM_ORDER_MAXW];
+    int mapped = 0;
+    for (int i = 0; i < n; i++) {
+        id[i] = huarong_net_find_concept(vocab->net, seq->words[i]);
+        ord[i] = i;
+        best[i] = i;
+        if (id[i] >= 0) mapped++;
+    }
+    if (mapped < 3) return;                     /* 词不在词汇拓扑里 ⇒ 无从评分 */
+
+    int hit0 = 0;
+    float base = _tm_chain_score(tm, id, ord, n, &hit0);
+    if (hit0 == 0) return;                      /* 一条可用转移都没有 ⇒ 不动 */
+    float bestScore = base;
+
+    for (int s0 = 0; s0 < n; s0++) {
+        memset(used, 0, sizeof(int) * (size_t)n);
+        used[s0] = 1;
+        seqord[0] = s0;
+        for (int k = 1; k < n; k++) {
+            int prev = seqord[k - 1];
+            int pick = -1;
+            float pick_p = -1.0f;
+            for (int w = 0; w < n; w++) {
+                if (used[w]) continue;
+                float p = (id[prev] >= 0 && id[w] >= 0)
+                          ? tm_prob(tm, id[prev], id[w]) : 0.0f;
+                if (p > pick_p) { pick_p = p; pick = w; }
+            }
+            if (pick < 0) break;
+            seqord[k] = pick;
+            used[pick] = 1;
+        }
+        int hit = 0;
+        float sc = _tm_chain_score(tm, id, seqord, n, &hit);
+        if (sc > bestScore) {
+            bestScore = sc;
+            memcpy(best, seqord, sizeof(int) * (size_t)n);
+        }
+    }
+
+    if (bestScore <= base + 0.3f) return;       /* 没明显改善 ⇒ 保持原序 */
+    const char* tmp[TM_ORDER_MAXW];
+    for (int i = 0; i < n; i++) tmp[i] = seq->words[i];
+    for (int i = 0; i < n; i++) seq->words[i] = tmp[best[i]];
+    fprintf(stderr, "[词序] bigram 重排 %.2f → %.2f（%d 词）\n",
+            (double)base, (double)bestScore, n);
+}
+
 /* ================================================================
  *  公共管线：扩散生成 + ACC 评估
  *  消除 prefrontal.c / prefrontal_executive.c / DMN 的重复代码
@@ -246,6 +342,9 @@ int cingulate_diffusion_evaluate(MasterTopology* topo,
     for (int i = 0; i < n && i < MAX_GENERATED_WORDS; i++)
         out_seq->words[i] = words[i];
     out_seq->count = n < MAX_GENERATED_WORDS ? n : MAX_GENERATED_WORDS;
+
+    /* CX-39：先按 bigram 链重排，再交给 ACC 评估 —— 评价必须看到最终词序 */
+    _tm_reorder_words(topo, out_seq);
 
     /* v0.6.3 反馈（在线）：把「这次生成走出去了多远」就地写进注入位。
      *   边数 = dctx.spread_edges_out（diffusion_generate 刚算出）
