@@ -1364,6 +1364,12 @@ static int _pool_refine(const char** buf, POSTag* pos, unsigned char* src,
     if (peak > 1.0f + 1e-6f)
         for (int i = 0; i < n; i++) if (src[i] == 0) score[i] = peak;
 
+    /* CX-52 诊断：peak 的绝对值。重训后正常范围是 10~20（DUMP 里 total=14.65）；
+     * 若出现 1e6 量级，说明有异常节点主导了 peak，`0.25×peak` 的下限会失控
+     * （把正常候选全砍光 ⇒ 触发保底档无下限 ⇒ 候选全涌进 ⇒ 输出乱码）。 */
+    if (_anchor_dbg())
+        fprintf(stderr, "[阈值] peak=%.3f n=%d\n", (double)peak, n);
+
     float base_f = 0.25f;
     {
         /* 0.25 是实测定出来的：真正相关的候选 total 在 peak 的 0.5~1.0，
