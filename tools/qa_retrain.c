@@ -274,8 +274,7 @@ static int load_em_vocab(void) {
 /* 白名单模式下的候选：直接取词表里的词（2~3 字）。
  * 计数不在这里判 —— 交给 measure_candidates 用 word_ctx 在语料上实测，
  * 词表里出现了但语料里数不够的，晋升阶段会被 count<mc 挡掉。 */
-static int collect_candidates_em(unsigned mc) {
-    (void)mc;
+static int collect_candidates_em(void) {
     if (!g_em || g_em_wn <= 0) return 0;
     if (!g_cand) {
         g_cand = (Cand*)calloc(WCTX_MAX_CANDS, sizeof(Cand));
@@ -567,7 +566,7 @@ int main(int argc, char** argv) {
     int em = load_em_vocab();
     int cands;
     if (em) {
-        cands = collect_candidates_em(mc);
+        cands = collect_candidates_em();
         printf("[重训] 阶段二判据：EM 词表白名单（%d 词 · 次数≥%u）\n", g_em_n, mc);
         /* 白名单只替代「闸门」，不替代「测量」：word_ctx.bin 是 --prob 诊断与
          * 后续判据（成分独立率）的数据源，仍然要按语料实测出来。 */

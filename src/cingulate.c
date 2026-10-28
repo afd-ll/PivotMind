@@ -267,8 +267,14 @@ static float _tm_path_score(TransitionModel* tm, const int* id,
 
 static void _tm_reorder_words(MasterTopology* topo, GeneratedSequence* seq) {
     if (!topo || !seq || seq->count < 3) return;
+    /* CX-48 实测（线上 A/B）：这条重排在词序上帮不上忙，反而会打乱
+     * 「按输入出现位置」得到的语序 —— 「喜欢 / 听音乐」被排成
+     * 「听音乐 / 喜欢」、「你会 / 计算机」被排成「计算机 / 你会」。
+     * 成因是转移表分布天生平（学习 77,428 后继 / top-8 熵 0.00），
+     * 打分器分不出好坏，只会引入新的乱序。
+     * 现在默认**关**，PIVOTMIND_TM_ORDER=1 才启用（保留作对照）。 */
     const char* v = getenv("PIVOTMIND_TM_ORDER");
-    if (v && v[0] == '0') return;
+    if (!(v && v[0] == '1')) return;
     TransitionModel* tm = tm_global();
     if (!tm || tm_pair_count(tm) < 1000) return;
 

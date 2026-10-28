@@ -18,6 +18,7 @@
 #include <string.h>
 #include <math.h>
 #include <stdint.h>   /* opt: uint8_t seen[] bitmap 去重 */
+#include <limits.h>   /* CX-48: INT_MAX（候选池的输入位置哨兵） */
 
 /* 话题序/降级路径的回复词数上限（v0.5.20+ fix(C3)）：
  * 主路径 max_reply_words 与降级路径 out_fallback 截断共用同一常量，
@@ -1228,6 +1229,204 @@ static int _anchor_dbg(void) {
 }
 
 /* ══════════════════════════════════════════════════════════════════
+ * 候选池精修（CX-48）：同族收敛 + 相对分数下限
+ *
+ * 背景（线上 DUMP 实测，PIVOTMIND_WALK_ANCHOR/DUMP 打开时）：
+ * 候选池按分数排好序，但**同一字族连续占满 4 个输出槽**：
+ *   我想学习编程 → 学习编程(锚定) 学习 我想 编程 || 想学 想想 想吃 苹果 什么 …
+ *   他喜欢听音乐 → 喜欢 音乐 欢乐 欢喜 || 喜欢吃 惊喜 喜剧 乐器 快乐 喜悦 …
+ *   我最近很累   → 我最(锚定) 最近 很累 却很 || 最最 累坏 拖累 很近 心累 …
+ * 输出因此变成「学习的编程的我想编程」这种同族重复堆。
+ *
+ * 判据为什么用「共享汉字」而不是语义相似度：
+ *   word_embed.bin 只覆盖 7,061 词（WEMB_MIN_NNZ=3 过滤后），
+ *   实测 12 个待判词里只有 1 个有指纹，wemb_similar 对缺失词恒返 -1.000
+ *   ⇒ 指纹不能当主判据（要等 CX-47 把 N 元指纹补全）。
+ *
+ * 两条规则：
+ *  ① 相对分数下限：final 候选 total < peak × floor 的不入池。
+ *     DUMP 依据：「我想学习编程」真正相关的 4 个词 total 12.9~14.2，
+ *     之后陡降到 ≤1.6（差一个数量级）；这一刀只砍陡降之后的弱候选，
+ *     不碰陡降之前的近义族（那由 ② 处理）。
+ *  ② 同族收敛：与已留项共享任一汉字即剔除。
+ *     保留顺序按 [是否输入子串, 分数, 长度, 原序] 择优 —— 锚定词也可能是
+ *     切片：「我最近很累」里锚定的是「我最」，而「最近」才是输入子串。
+ *
+ * 开关：PIVOTMIND_POOL_DEDUP=0 关；PIVOTMIND_POOL_FLOOR 调下限（默认 0.10）。
+ * ══════════════════════════════════════════════════════════════════ */
+#define POOL_CP_MAX 16
+
+/* 取一个 UTF-8 码点；只认 3 字节 CJK（U+4E00..U+9FFF），其余返回 0。 */
+static unsigned _pool_cp(const unsigned char* p) {
+    if (p[0] >= 0xE4 && p[0] <= 0xE9 && p[1] && p[2])
+        return ((unsigned)p[0] << 16) | ((unsigned)p[1] << 8) | (unsigned)p[2];
+    return 0;
+}
+
+/* 解出全部 CJK 码点；含非汉字（英文/数字/标点）⇒ -1。 */
+static int _pool_cps(const char* s, unsigned* out, int max) {
+    if (!s || !s[0]) return 0;
+    const unsigned char* p = (const unsigned char*)s;
+    int n = 0;
+    while (*p) {
+        unsigned cp = _pool_cp(p);
+        if (!cp) return -1;
+        if (n < max) out[n] = cp;
+        n++;
+        p += 3;
+    }
+    return n;
+}
+
+/* 同族判定：共享任一汉字。至少一边含非汉字时退化为前缀判据（learn/learning）。 */
+static int _pool_same_family(const char* a, const char* b) {
+    if (!a || !b || !a[0] || !b[0]) return 0;
+    if (strcmp(a, b) == 0) return 1;
+    unsigned ca[POOL_CP_MAX], cb[POOL_CP_MAX];
+    int na = _pool_cps(a, ca, POOL_CP_MAX);
+    int nb = _pool_cps(b, cb, POOL_CP_MAX);
+    if (na > 0 && nb > 0) {
+        if (na > POOL_CP_MAX) na = POOL_CP_MAX;
+        if (nb > POOL_CP_MAX) nb = POOL_CP_MAX;
+        for (int i = 0; i < na; i++)
+            for (int k = 0; k < nb; k++)
+                if (ca[i] == cb[k]) return 1;
+        return 0;
+    }
+    if (na == -1 || nb == -1) {          /* 有英文/符号：只认前缀包含 */
+        size_t la = strlen(a), lb = strlen(b);
+        if (la == lb) return 0;
+        const char* sh = (la < lb) ? a : b;
+        const char* lo = (la < lb) ? b : a;
+        return strncmp(lo, sh, strlen(sh)) == 0;
+    }
+    return 0;
+}
+
+/* a 是否应排在 b 之前：[命中输入, 输入内出现位置, 长度, 分数, 原序]。
+ * 「输入内出现位置」是最强的一条：用户输入本身就是合法中文语序，
+ * 命中词按原位置排 = 直接复用他的话序（实测「喜欢 听音乐」「最近 很累」
+ * 「你会 计算机」都是这样排出来的；bigram 重排反而把它打乱）。
+ * 位置相同时先比长度：`计算机` 与 `计算` 同起点，留长的（语义超集）。 */
+static int _pool_better(int a, int b, const char** buf, const float* score,
+                        const int* in_msg, const int* pos_in) {
+    if (in_msg[a] != in_msg[b]) return in_msg[a] > in_msg[b];
+    if (in_msg[a] && pos_in[a] != pos_in[b]) return pos_in[a] < pos_in[b];
+    size_t la = strlen(buf[a]), lb = strlen(buf[b]);
+    if (in_msg[a] && in_msg[b] && la != lb) return la > lb;
+    if (score[a] != score[b])   return score[a] > score[b];
+    if (la != lb)               return la > lb;
+    return a < b;
+}
+
+/* 原地精修候选池，返回新长度。score 就地改写（锚定词按 peak 对齐）。 */
+static int _pool_refine(const char** buf, POSTag* pos, unsigned char* src,
+                        float* score, int n, const char* msg) {
+    if (n <= 0) return 0;
+    static int _on = -1;
+    if (_on < 0) {
+        const char* e = getenv("PIVOTMIND_POOL_DEDUP");
+        _on = !(e && e[0] == '0');
+    }
+
+    /* 锚定词没有 total_score：先占位 1.0，再按峰值对齐，避免被 final 候选
+     * 无脑压后（对齐后仍受「是否输入子串」这个更高优先级的键约束）。 */
+    for (int i = 0; i < n; i++) if (src[i] == 0) score[i] = 1.0f;
+
+    float peak = 0.0f;
+    for (int i = 0; i < n; i++)
+        if (score[i] > peak) peak = score[i];
+    if (peak <= 1e-9f) return n;          /* 无分数可用 ⇒ 保持原序，不冒险重排 */
+    if (peak > 1.0f + 1e-6f)
+        for (int i = 0; i < n; i++) if (src[i] == 0) score[i] = peak;
+
+    float base_f = 0.25f;
+    {
+        /* 0.25 是实测定出来的：真正相关的候选 total 在 peak 的 0.5~1.0，
+         * 跑题词在 0.10~0.20（「我想学习编程」里的「苹果」2.8 / peak 14.3 = 0.196、
+         * 「我想吃苹果」里的「编程」2.4 / 14.2 = 0.169）。0.10 拦不住这批，0.25 正好。 */
+        const char* e = getenv("PIVOTMIND_POOL_FLOOR");
+        if (e && e[0]) { float v = (float)atof(e); if (v >= 0.0f && v <= 1.0f) base_f = v; }
+    }
+
+    int order[DIFF_MAX_SEQUENCE];
+    int in_msg[DIFF_MAX_SEQUENCE];
+    int pos_in[DIFF_MAX_SEQUENCE];    /* 命中输入时的起始字节偏移；未命中 = INT_MAX */
+    int keep_idx[DIFF_MAX_SEQUENCE];
+    int m = 0, kept = 0;
+
+    /* 三档「先严后宽」：清空 pool 比留几个弱候选更糟 —— 池子 <2 会掉进字级
+     * 联想兜底，实测「我在学英语」输出 19 个单字串（输入覆盖 0%），
+     * 而弱候选拼起来至少覆盖 44%。所以下限逐档放宽，最后一档连收敛也关掉。
+     * 🔴 循环里只读 buf、不写 buf（收敛只收集下标），所以重试是安全的。 */
+    for (int attempt = 0; attempt < 3; attempt++) {
+        float f = (attempt == 0) ? base_f : (attempt == 1 ? 0.10f : 0.0f);
+        int dedup = _on && (attempt < 2);
+        float floor_v = (_on && peak > 1e-9f) ? peak * f : 0.0f;
+
+        memset(in_msg, 0, sizeof(in_msg));
+        for (int i = 0; i < n; i++) pos_in[i] = INT_MAX;
+        m = 0;
+        for (int i = 0; i < n; i++) {
+            if (!buf[i]) continue;
+            /* ① 相对分数下限：只对 final 候选生效（锚定/回退来源不参与） */
+            if (floor_v > 0.0f && src[i] == 1 && score[i] < floor_v) continue;
+            const char* hit = (msg && msg[0]) ? strstr(msg, buf[i]) : NULL;
+            in_msg[i] = hit ? 1 : 0;
+            pos_in[i] = hit ? (int)(hit - msg) : INT_MAX;
+            order[m++] = i;
+        }
+
+        /* ② 择优排序（插入排序，m <= 32，稳定且无 qsort 破坏） */
+        for (int i = 1; i < m; i++) {
+            int key = order[i];
+            int j = i - 1;
+            while (j >= 0 && _pool_better(key, order[j], buf, score, in_msg, pos_in)) {
+                order[j + 1] = order[j];
+                j--;
+            }
+            order[j + 1] = key;
+        }
+
+        /* ③ 同族收敛：按上面的顺序扫描，与已留项共享汉字就剔除。
+         * 🔴 只收集下标、最后统一拷贝：order[] 是排序后的**乱序原索引**，
+         * 边扫边写会覆盖还没读到的槽（实测「喜欢/音乐/欢乐/欢喜」把「音乐」
+         * 覆盖成「欢乐」，输出成「喜欢的欢喜」）。 */
+        kept = 0;
+        for (int i = 0; i < m; i++) {
+            int idx = order[i];
+            if (dedup) {
+                int fam = 0;
+                for (int k = 0; k < kept; k++)
+                    if (_pool_same_family(buf[idx], buf[keep_idx[k]])) { fam = 1; break; }
+                if (fam) continue;
+            }
+            keep_idx[kept++] = idx;
+        }
+        if (kept >= 2 || n < 2) break;
+    }
+    {
+        const char* b2[DIFF_MAX_SEQUENCE];
+        POSTag      p2[DIFF_MAX_SEQUENCE];
+        unsigned char s2[DIFF_MAX_SEQUENCE];
+        float       c2[DIFF_MAX_SEQUENCE];
+        for (int k = 0; k < kept; k++) {
+            b2[k] = buf[keep_idx[k]];
+            p2[k] = pos[keep_idx[k]];
+            s2[k] = src[keep_idx[k]];
+            c2[k] = score[keep_idx[k]];
+        }
+        for (int k = 0; k < kept; k++) {
+            buf[k]   = b2[k];
+            pos[k]   = p2[k];
+            src[k]   = s2[k];
+            score[k] = c2[k];
+        }
+    }
+    return kept;
+}
+
+/* ══════════════════════════════════════════════════════════════════
  * 连接符注入（v0.6.12）
  *
  * 病根：输出层有两道硬剔除 —— `is_function_word()` 剔虚词、
@@ -2268,6 +2467,9 @@ int diffusion_generate(DiffusionCtx* ctx,
         /* [来源标记] 每个输出词来自哪条队列：0=word_prio(锚定派生) 1=final(相关性排序) 2=回退联想
          * 用途：输出组装"最后一公里"的可数证据（谁占满了 MAX_REPLY_WORDS 这 4 个槽）。 */
         unsigned char word_src[DIFF_MAX_SEQUENCE];
+        /* CX-48：候选分数，仅用于池精修（同族收敛时择优）。
+         * final 候选填 total_score；锚定词无分数，refine 里按峰值对齐。 */
+        float       word_score[DIFF_MAX_SEQUENCE];
         int         word_count = 0;
 
         /* 第0.5遍: 词锚定优先 — 命中的词节点先入候选（输入直接关联的
@@ -2314,6 +2516,7 @@ int diffusion_generate(DiffusionCtx* ctx,
             if (dup) continue;
             word_buf[word_count] = word_prio[p];
             word_src[word_count] = 0;   /* 来源：word_prio（锚定派生，不过相关性闸门） */
+            word_score[word_count] = 0.0f;   /* 由 _pool_refine 按 final 峰值对齐 */
             word_pos[word_count] = emergent_pos_tag(
                 ctx->emergent_pos, ctx->master, word_prio[p]);
             if (word_pos[word_count] == POS_UNKNOWN)
@@ -2352,6 +2555,7 @@ int diffusion_generate(DiffusionCtx* ctx,
 
             word_buf[word_count] = final[i].word;
             word_src[word_count] = 1;   /* 来源：final[]（相关性排序 + rel>=0.3） */
+            word_score[word_count] = final[i].total_score;
             word_pos[word_count] = emergent_pos_tag(
                 ctx->emergent_pos, ctx->master, final[i].word);
             /* 英文兜底: EmergentPOS (zh) 无法分类英文词 */
@@ -2389,6 +2593,7 @@ int diffusion_generate(DiffusionCtx* ctx,
                     if (!concept_is_outputtable(nb->concept)) continue;
                     word_buf[word_count] = nb->concept;
                     word_src[word_count] = 2;   /* 来源：回退联想（主输出为空时） */
+                    word_score[word_count] = w; /* 边权即分数（池精修排序用） */
                     word_pos[word_count] = emergent_pos_tag(
                         ctx->emergent_pos, ctx->master, nb->concept);
                     if (word_pos[word_count] == POS_UNKNOWN)
@@ -2396,6 +2601,18 @@ int diffusion_generate(DiffusionCtx* ctx,
                     word_count++;
                 }
             }
+        }
+
+        /* 候选池精修（CX-48）：同族收敛 + 相对分数下限。
+         * 必须在这里做（池已建完、还没进组装）——否则同族词会各自占满
+         * MAX_REPLY_WORDS 的 4 个槽，输出成「学习的编程的我想编程」。 */
+        {
+            int _before = word_count;
+            word_count = _pool_refine(word_buf, word_pos, word_src, word_score,
+                                      word_count, input);
+            if (_anchor_dbg() && _before != word_count)
+                fprintf(stderr, "[精修] 候选 %d → %d（同族收敛 + 分数下限）\n",
+                        _before, word_count);
         }
 
         /* 话题序输出（v0.6）：word_buf 已按话题相关性排序
@@ -2408,7 +2625,9 @@ int diffusion_generate(DiffusionCtx* ctx,
             fprintf(stderr, "[输出] 候选 %d 个（上限 %d）：", word_count, MAX_REPLY_WORDS);
             for (int w = 0; w < word_count; w++) {
                 const char* src = (word_src[w] == 0) ? "锚定" : (word_src[w] == 1) ? "相关" : "回退";
-                fprintf(stderr, "%s(%s)%s", word_buf[w] ? word_buf[w] : "?", src,
+                int _inp = (input && word_buf[w] && strstr(input, word_buf[w])) ? 1 : 0;
+                fprintf(stderr, "%s(%s,%.1f,%s)%s", word_buf[w] ? word_buf[w] : "?", src,
+                        (double)word_score[w], _inp ? "入" : "-",
                         (w == MAX_REPLY_WORDS - 1) ? " ||截断|| " : " ");
             }
             fprintf(stderr, "\n");
@@ -2433,13 +2652,24 @@ int diffusion_generate(DiffusionCtx* ctx,
                  * （它是最高频虚词）⇒ 短句被插成「学习的编程的想学的我想」。
                  * 所以每次回复**最多插 1 个**，宁可少关节也不要满屏「的」。 */
                 if (inject && inj_cnt < 1 && real_cnt > 0 && out > 0 && (out + 1) < max_output) {
-                    const char* cw = _find_connective(ctx, output_words[out - 1], word_buf[w]);
-                    if (cw) {
-                        if (_anchor_dbg())
-                            fprintf(stderr, "[连接符] %s ↔ %s 插入「%s」\n",
-                                    output_words[out - 1], word_buf[w], cw);
-                        output_words[out++] = cw;
-                        inj_cnt++;
+                    /* CX-48：两个词都命中输入、且顺序与输入一致 ⇒ 我们只是在复述
+                     * 用户的话，他的话本身就是通顺中文，不该再插关节。
+                     * 实测插坏的例子：「我想」+「学习编程」→「我想和学习编程」、
+                     * 「喜欢」+「听音乐」→「喜欢和听音乐」、
+                     * 「你」+「计算机」→「你会的计算机」。 */
+                    const char* _pa = (input && input[0]) ? strstr(input, output_words[out - 1]) : NULL;
+                    const char* _pb = (input && input[0]) ? strstr(input, word_buf[w]) : NULL;
+                    if (_pa && _pb && _pa < _pb) {
+                        /* 输入里同序出现 ⇒ 直接拼接，不插连接符 */
+                    } else {
+                        const char* cw = _find_connective(ctx, output_words[out - 1], word_buf[w]);
+                        if (cw) {
+                            if (_anchor_dbg())
+                                fprintf(stderr, "[连接符] %s ↔ %s 插入「%s」\n",
+                                        output_words[out - 1], word_buf[w], cw);
+                            output_words[out++] = cw;
+                            inj_cnt++;
+                        }
                     }
                 }
                 if (out >= max_output) break;
