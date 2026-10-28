@@ -2287,8 +2287,22 @@ int diffusion_generate(DiffusionCtx* ctx,
 
     /* v0.6.3·批1 第6步：relevance 乘子的动态范围可配。
      * 乘子 = _rel_base + _rel_gain * relevance。
-     * 第5步结论：范围越大 ⇒ 产出越高但输出越同质；越小 ⇒ 更聚集但可能无输出。
-     * 均为 env 可配（默认 0.3 / 1.7 = 原行为）。 */
+     * 均为 env 可配（默认 0.3 / 1.7 = 原行为）。
+     *
+     * 🔴 CX-49（10-28 实测）**不要动这两个默认值**：
+     * 结论是 relevance **表达不了「话题相关」**（四种口径全试过）：
+     *   · wmax（原 relevance） 学习 1.000 / 苹果 1.000 —— 恒等，零区分
+     *   · 按锚定归一 wnorm    学习 1.000 / 苹果 1.000 —— 每个锚定的最强出边也是 1.0
+     *   · 锚定个数 wcnt       学习 9 / 苹果 10 —— **反向**，单字锚定度数极大
+     *   · 权重和 wsum         学习 8.60 / 苹果 7.22 —— 1.4 倍，而 vocab_score 有 7.5 倍
+     * 根因：图里边权普遍打满（add_or_strengthen 受 QA_W_FWD/QA_MAX_FWD 上限约束），
+     * 「有满权边」只代表有边，不代表语义相关。
+     *
+     * 但它**不是纯常数**，仍在区分「跳数」：满权一跳候选乘子 2.0，
+     * 两跳候选（relevance==0，走 (vs/peak)*credit 回退）约 0.6 —— 这正是
+     * 「两跳该降权」的机制。实测把它中性化成 1.0 后输出立刻变差
+     * （`我想学习编程` 多出 `苹果`、`我在学英语` 多出 `我想`）⇒ 已回滚。
+     * 要改的话是**换信号**（vocab_score 已承担相关性，区分度 7.5 倍），不是调这两个数。 */
     float _rel_base = 0.3f, _rel_gain = 1.7f;
     {
         const char* _rb = getenv("PIVOTMIND_WALK_REL_BASE");
@@ -2462,6 +2476,60 @@ int diffusion_generate(DiffusionCtx* ctx,
                    (double)final[_d].emotion_score,
                    (double)final[_d].relevance, (double)final[_d].total_score,
                    (double)(final[_d].total_score - final[_d].emotion_score));
+        }
+    }
+
+    /* ── CX-49 诊断：relevance 口径比较（PIVOTMIND_REL_DIAG 非空时打印）──
+     * 病：现有 relevance = max_a w(a→n)，而图里边权普遍打满 ⇒ 恒 1.000，
+     *     所有话题闸门空转。这里同时算四种候选口径，用「候选是否出现在输入里」
+     *     当客观参照（出现在输入 = 强相关），看哪种能把 in=1 排在 in=0 前面。
+     * 纯只读：不改任何行为，只在诊断开关下多跑一遍锚定边扫描（O(|A|·deg)）。 */
+    if (final_cnt > 0 && getenv("PIVOTMIND_REL_DIAG")) {
+        int _top = final_cnt < 32 ? final_cnt : 32;
+        int   did[32];
+        float dwmax[32], dwsum[32], dwnorm[32], dwncnt[32];
+        for (int d = 0; d < _top; d++) {
+            did[d] = final[d].node_id;
+            dwmax[d] = dwsum[d] = dwnorm[d] = 0.0f;
+            dwncnt[d] = 0.0f;
+        }
+        for (int a = 0; a < active_count; a++) {
+            int aid = active_ids[a];
+            if (aid < 0 || aid >= vn) continue;
+            ReasoningNode* an = ctx->vocab->net->nodes[aid];
+            if (!an || !an->edges || an->edge_count <= 0) continue;
+            float amax = 0.0f;                    /* 该锚定自己的最强出边 */
+            for (int e = 0; e < an->edge_count; e++)
+                if (an->edges[e].weight > amax) amax = an->edges[e].weight;
+            if (amax <= 1e-9f) continue;
+            for (int e = 0; e < an->edge_count; e++) {
+                ReasoningNode* t = an->edges[e].target;
+                if (!t) continue;
+                int tid = t->node_id;
+                for (int d = 0; d < _top; d++) {
+                    if (did[d] != tid) continue;
+                    float w = an->edges[e].weight;
+                    if (w > dwmax[d]) dwmax[d] = w;
+                    dwsum[d] += w;
+                    dwncnt[d] += 1.0f;
+                    float nv = w / amax;
+                    if (nv > dwnorm[d]) dwnorm[d] = nv;
+                    break;
+                }
+            }
+        }
+        /* 锚定个数归一：被越多锚定连到，越可能是话题内 */
+        float acnt = (active_count > 0) ? (float)active_count : 1.0f;
+        printf("[RELD] 锚定=%d\n", active_count);
+        for (int d = 0; d < _top; d++) {
+            const char* w = final[d].word ? final[d].word : "?";
+            int in_msg = (input && input[0] && strstr(input, w)) ? 1 : 0;
+            printf("  R#%02d %-12s in=%d wmax=%.3f wsum=%.2f wcnt=%-5.0f wnorm=%.3f "
+                   "rel=%.3f vs=%.3f total=%.3f\n",
+                   d, w, in_msg, (double)dwmax[d], (double)dwsum[d], (double)dwncnt[d],
+                   (double)dwnorm[d], (double)final[d].relevance,
+                   (double)final[d].vocab_score, (double)final[d].total_score);
+            (void)acnt;
         }
     }
     const char* tpl_pattern = NULL;
