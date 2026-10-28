@@ -167,6 +167,19 @@ int main(int argc, char** argv) {
         return rc;
     }
 
+    /* --dump  导出全部词条（词名 \t 边数 \t 冻结标记 \t 激活值），
+     * 供离线按「词整体左右邻熵」重算后回填删除名单。 */
+    if (strcmp(list_path, "--dump") == 0) {
+        for (int i = 0; i < vocab->node_count; i++) {
+            ReasoningNode* nd = vocab->nodes[i];
+            if (!nd || !nd->concept) continue;
+            printf("%s\t%d\t%d\t%.4f\n", nd->concept, nd->edge_count,
+                   nd->is_cooled, (double)nd->activation);
+        }
+        master_topology_destroy(master);
+        return 0;
+    }
+
     /* --prob:<词>  打印该词的语料统计（P / 左右熵 / 生成增益）——
      * 与生成侧同一口径（word_prob），用于解释「为什么这个词被抬或被压」。 */
     if (strncmp(list_path, "--prob:", 7) == 0) {
