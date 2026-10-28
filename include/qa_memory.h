@@ -18,6 +18,19 @@ QAMemory* qa_memory_create(const char* pipe_path, int max_entries);
 /* 检索：对 input 分词后，计算与所有 Q 的 token 交集分数，返回最高分 A */
 const char* qa_memory_query(QAMemory* m, const char* input);
 
+/* 带阈值的检索（CX-32）。
+ *
+ * 旧实现的问题：score = match / sqrt(词条 token 数 + 1)，且 `match > 0` 即算命中
+ * ⇒ 输入只要与某条 Q 共用一个字就命中（中文是按字分词的）⇒ 实测命中率 4/4，
+ * 抢占 response 槽位，扩散/组装/连接符整条生成层从不被调用。
+ *
+ * 现改为 Dice 系数（2·|交集| / (|输入| + |词条|)），并要求：
+ *   score >= min_score 且 match >= min_match
+ * 阈值可经环境变量覆盖：PIVOTMIND_QA_MIN_SCORE(0.50) / PIVOTMIND_QA_MIN_MATCH(2)。
+ * 命中时把实际分数写进 *out_score（可为 NULL），便于调参与 /debug 观测。 */
+const char* qa_memory_query_ex(QAMemory* m, const char* input,
+                               float min_score, int min_match, float* out_score);
+
 /* 释放 */
 void qa_memory_destroy(QAMemory* m);
 

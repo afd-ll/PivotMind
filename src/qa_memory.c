@@ -114,7 +114,20 @@ QAMemory* qa_memory_create(const char* pipe_path, int max_entries) {
     return m;
 }
 
-const char* qa_memory_query(QAMemory* m, const char* input) {
+static float qa_env_min_score(void) {
+    const char* v = getenv("PIVOTMIND_QA_MIN_SCORE");
+    if (v && v[0]) return (float)atof(v);
+    return 0.50f;                     /* Dice：低于这个值基本是「共用一个字」的噪音 */
+}
+
+static int qa_env_min_match(void) {
+    const char* v = getenv("PIVOTMIND_QA_MIN_MATCH");
+    if (v && v[0]) return atoi(v);
+    return 2;                         /* 至少重合 2 个 token（中文按字分词，1 个太松） */
+}
+
+const char* qa_memory_query_ex(QAMemory* m, const char* input,
+                               float min_score, int min_match, float* out_score) {
     if (!m || !input || !input[0]) return NULL;
 
     char* tokens[MAX_TOKENS];
@@ -133,7 +146,8 @@ const char* qa_memory_query(QAMemory* m, const char* input) {
     }
 
     int best_idx = -1;
-    float best_score = 0.0f;  /* 最低阈值：消除单字重叠噪音 */
+    float best_score = 0.0f;
+    int   best_match = 0;
     const char* best_answer = NULL;
 
     for (int i = 0; i < m->count; i++) {
@@ -147,9 +161,15 @@ const char* qa_memory_query(QAMemory* m, const char* input) {
                 }
             }
         }
-        float score = (float)match / sqrtf((float)e->token_count + 1);
-        if (match > 0 && score > best_score) {
+        if (match <= 0) continue;
+        /* CX-32：改成 Dice 系数（两边长度都归一）——
+         * 旧式 match/sqrt(词条长度+1) 完全不看输入长度，且 match>0 即命中，
+         * 一个共同字就能抢占 response 槽位，导致生成层从不被调用。 */
+        float denom = (float)(utc + e->token_count);
+        float score = denom > 0.0f ? (2.0f * (float)match) / denom : 0.0f;
+        if (score > best_score) {
             best_score = score;
+            best_match = match;
             best_idx = i;
             best_answer = e->answer;
         }
@@ -157,14 +177,23 @@ const char* qa_memory_query(QAMemory* m, const char* input) {
 
     for (int i = 0; i < tc; i++) free(tokens[i]);
 
-    if (best_idx >= 0) {
-        fprintf(stderr, "[QA记忆] 命中 #%d score=%.3f Q=\"%s\" A=\"%s\"\n",
-                best_idx, (double)best_score,
-                m->entries[best_idx].question,
-                best_answer ? best_answer : "(null)");
+    if (best_idx >= 0 && best_score >= min_score && best_match >= min_match) {
+        if (out_score) *out_score = best_score;
+        fprintf(stderr, "[QA记忆] 命中 #%d score=%.3f match=%d 门槛=%.2f/%d Q=\"%s\"\n",
+                best_idx, (double)best_score, best_match, (double)min_score, min_match,
+                m->entries[best_idx].question);
         return best_answer;
     }
+    if (best_idx >= 0) {   /* 有候选但没过门槛：留痕，便于观测「以前会命中的输入」 */
+        fprintf(stderr, "[QA记忆] 未达门槛 best=%.3f match=%d 门槛=%.2f/%d Q=\"%s\"\n",
+                (double)best_score, best_match, (double)min_score, min_match,
+                m->entries[best_idx].question);
+    }
     return NULL;
+}
+
+const char* qa_memory_query(QAMemory* m, const char* input) {
+    return qa_memory_query_ex(m, input, qa_env_min_score(), qa_env_min_match(), NULL);
 }
 
 void qa_memory_destroy(QAMemory* m) {

@@ -202,21 +202,29 @@ void handle_chat(GatewaySystem* gw, int fd, const char* body) {
         return;
     }
 
-    /* CX-28 修复：QA 记忆命中也要过【语种闸门】再采纳。
-     * 线上实测「天气」命中的是纯符号垃圾答案「= =」：它占住了 response 槽位 ⇒
-     * 下面 `if (!response) prefrontal_chat(...)` 被跳过 ⇒ 最后语种兜底把「= =」扔掉
-     * ⇒ 三条路全空 ⇒ (无回应)。答案不可用时必须当未命中放行，而不是先占位再丢弃。 */
+    /* CX-32：QA 记忆只在【几乎逐字相同】时才直接回，避免截流生成层。
+     *
+     * 实测（按字重合度）：盐是什么味道 ↔ 屎是什么味道 = 0.833、
+     * 你会用计算机吗 ↔ 你是计算机吗 = 0.769、今天天气怎么样 ↔ 今天运气怎么样 = 0.923
+     * —— 按字重合度**分不开语义**，靠调阈值治不了。所以策略改成：
+     *   ① 近逐字重复（>= PIVOTMIND_QA_EXACT，默认 0.95）⇒ 直接回，省一次生成；
+     *   ② 其余一律交给生成层；生成交白卷时再回落 QA（见下方兜底，那里用宽松阈值）。
+     * 分词与 QA 索引本身不动（仍按字切），只改「什么时候允许它接管回复」。 */
     if (gw->qa_memory) {
-        const char* qa = qa_memory_query(gw->qa_memory, msg);
+        float qa_sc = 0.0f;
+        const char* exact = getenv("PIVOTMIND_QA_EXACT");
+        float qa_exact = (exact && exact[0]) ? (float)atof(exact) : 0.95f;
+        const char* qa = qa_memory_query_ex(gw->qa_memory, msg, qa_exact, 2, &qa_sc);
         if (qa) {
             if (pm_has_zh(msg) && !pm_has_zh(qa)) {
                 LOG_INFO("[无回应诊断] ① QA记忆 命中但语种不符 ⇒ 弃用 答案=%.40s", qa);
             } else {
                 response = strdup(qa);
-                LOG_INFO("[无回应诊断] ① QA记忆 命中并采纳 答案=%.40s", qa);
+                LOG_INFO("[无回应诊断] ① QA记忆 逐字命中(%.3f>=%.2f) 采纳 答案=%.40s",
+                         (double)qa_sc, (double)qa_exact, qa);
             }
         } else {
-            LOG_INFO("[无回应诊断] ① QA记忆 未命中 输入=%.40s", msg);
+            LOG_INFO("[无回应诊断] ① QA记忆 未逐字命中 ⇒ 交给生成层 输入=%.40s", msg);
         }
     }
 
@@ -290,9 +298,11 @@ void handle_chat(GatewaySystem* gw, int fd, const char* body) {
         LOG_INFO("[无回应诊断] ⑤ prefrontal_chat 返回 %s", response ? "有内容" : "NULL");
     }
 
-    /* 最终兜底：QA 记忆检索（扩散和联想推理都无产出） */
+    /* 最终兜底：QA 记忆检索（扩散和联想推理都无产出）
+     * CX-32：这里用**宽松阈值**（0.30 / 重合 1）—— 走得到这一步说明生成层已经交了白卷，
+     * 此时弱命中（只共用一个词）也比空回复强。前面那处（抢占 response 的）必须是严格阈值。 */
     if (!response && gw->qa_memory) {
-        const char* qa_answer = qa_memory_query(gw->qa_memory, msg);
+        const char* qa_answer = qa_memory_query_ex(gw->qa_memory, msg, 0.30f, 1, NULL);
         if (qa_answer) {
             response = strdup(qa_answer);
             printf("[gateway] QA记忆命中\n");
