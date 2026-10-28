@@ -353,6 +353,8 @@ def main():
     ap.add_argument('--no-sweep', action='store_true', help='跳过词表规模扫描（省时间）')
     ap.add_argument('--emit-min-count', type=float, default=20.0,
                     help='emit-vocab 的期望计数下限（默认 20，与旧 min_count 对齐）')
+    ap.add_argument('--emit-max-len', type=int, default=2,
+                    help='emit-vocab 收进词表的最大汉字数（默认 2；3=放开三字词）')
     a = ap.parse_args()
 
     os.makedirs(a.out, exist_ok=True)
@@ -379,27 +381,41 @@ def main():
     probs, hist = em(train, vocab, chars, a.max_len, a.iters, init_counts=cnt,
                      penalty=a.len_penalty)
     new_vocab = set(probs)
-    # ---------------- 成分独立率闸门（CX-45 第二步）
-    # PMI_token(a,b) = log[ P(ab) / (P(a)·P(b)) ]，概率全部来自同一次 EM 的切分结果。
-    # 依据实测：碎片 性和 2.12 / 的原 0.77 / 是在 1.01 / 用太 -1.09；
-    # 真词 拍卖 8.68 / 因为 7.74 / 时候 12.16 / 机器 6.75；边界地带 你好 3.23 / 我就 3.57
-    # ⇒ 只砍「能证明是碎片」的低段（默认 2.5），中间地带不动（分不开就别硬分）。
+    # ---------------- 成分独立率闸门（CX-45 第二步；第三步推广到多字）
+    # 2 字：PMI = log[ P(ab) / (P(a)·P(b)) ]，概率取自同一次 EM 的切分结果。
+    #   实测碎片 性和 2.12 / 的原 0.77 / 是在 1.01 / 用太 -1.09；
+    #   真词 拍卖 8.68 / 因为 7.74 / 时候 12.16 / 机器 6.75；边界 你好 3.23 / 我就 3.57
+    #   ⇒ 只砍「能证明是碎片」的低段（默认 2.5），中间地带不动（分不开就别硬分）。
+    # 3+ 字：取【所有二分切法】里最保守的那个 MI（最小值）。
+    #   道理：真词（计算机）怎么切，成分概率乘积都低 ⇒ MI 高；
+    #   短语块（是一个 = 是|一个）只要有一种切法能拼出高频组合，那一项 MI 就很低 ⇒ 被压掉。
+    #   这正是上次 max_len=3 时「3 字词 68.9%、一半是短语」的解法。
     if a.indep_pmi > 0:
         dropped = []
         for w in list(probs):
-            if len(w) != 2:
+            if len(w) < 2:
                 continue
-            pa = probs.get(w[0], 1e-12)
-            pb = probs.get(w[1], 1e-12)
-            pmi = math.log(probs[w] / (pa * pb)) if probs[w] > 0 else -99.0
-            if pmi < a.indep_pmi:
-                dropped.append((w, pmi))
+            pw = probs[w]
+            if pw <= 0:
+                dropped.append((w, -99.0))
+                continue
+            best = None
+            for cut in range(1, len(w)):
+                pa = probs.get(w[:cut])
+                pb = probs.get(w[cut:])
+                if not pa or not pb:
+                    continue
+                v = math.log(pw / (pa * pb))
+                if best is None or v < best:
+                    best = v
+            if best is not None and best < a.indep_pmi:
+                dropped.append((w, best))
         for w, _ in dropped:
             probs.pop(w, None)
         Z = sum(probs.values()) or 1.0
         probs = {w: p / Z for w, p in probs.items()}
         dropped.sort(key=lambda kv: -len(kv[0]))
-        sys.stderr.write(('indep: PMI<%.2f 剪掉 %d 词，剩 %d（例：%s）' + chr(10))
+        sys.stderr.write(('indep: MI<%.2f 剪掉 %d 词，剩 %d（例：%s）' + chr(10))
                          % (a.indep_pmi, len(dropped), len(probs),
                             ' '.join(w for w, _ in dropped[:12])))
     sys.stderr.write('[new] 收敛词表 %d 词\n' % len(new_vocab))
@@ -421,15 +437,15 @@ def main():
         with open(a.emit_vocab, 'w', encoding='utf-8', newline=NL) as f:
             f.write(TAB.join(['词', 'P', '期望计数', '长度']) + NL)
             for w, p in sorted(probs.items(), key=lambda kv: -kv[1]):
-                if len(w) != 2:
+                if len(w) < 2 or len(w) > a.emit_max_len:
                     continue
                 cnt = p * nchar_train
                 if cnt < a.emit_min_count:
                     continue
-                f.write(TAB.join([w, '%.10g' % p, '%.1f' % cnt, '2']) + NL)
+                f.write(TAB.join([w, '%.10g' % p, '%.1f' % cnt, str(len(w))]) + NL)
                 n_emit += 1
-        sys.stderr.write('[emit] 词表 %d 词（双字 · 期望计数>=%.0f）-> %s%s'
-                         % (n_emit, a.emit_min_count, a.emit_vocab, NL))
+        sys.stderr.write('[emit] 词表 %d 词（2~%d 字 · 期望计数>=%.0f）-> %s%s'
+                         % (n_emit, a.emit_max_len, a.emit_min_count, a.emit_vocab, NL))
 
     # ---------------- 规模扫描
     ks = [5000, 10000, 15000, 17609, 20000, 30000, 50000, len(probs)]

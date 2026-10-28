@@ -178,10 +178,12 @@ typedef struct { char a[18], b[18]; unsigned int c; } PairRec;   /* 与 word_pro
 static PairRec* g_pairs = NULL;
 static int g_npairs = 0;
 
-/* 候选（过了 ①② 的字对）—— 由 word_ctx 回扫实测 ③④ */
+/* 候选（过了 ①② 的字对 / 或 EM 白名单）—— 由 word_ctx 回扫实测
+ * CX-45 第三步：词长从固定 2 放开到 2~3，故用 parts[] 存组成字 */
 typedef struct {
     char     word[16];
-    char     a[4], b[4];
+    char     parts[3][4];
+    int      nparts;
     uint32_t count;
     double   pmi;
 } Cand;
@@ -211,6 +213,12 @@ static void _collect_pair(const char* a, const char* b, uint32_t c, void* ud) {
  * 而旧路径是已验证过的退路。 */
 static DictTable* g_em = NULL;
 static int        g_em_n = 0;
+/* 词表里的词（2~3 字），按原样存一份：第三步的词长放开后，
+ * 候选不再只能来自字对表（字对表只有 2 字），只能来自词表本身 */
+#define EM_WORDS_MAX 60000
+static char g_em_words[EM_WORDS_MAX][16];
+static int  g_em_cnt[EM_WORDS_MAX];
+static int  g_em_wn = 0;
 
 static const char* em_vocab_path(void) {
     const char* v = getenv("PIVOTMIND_EM_VOCAB");
@@ -249,51 +257,52 @@ static int load_em_vocab(void) {
         (void)prob;
         if (!line[0]) continue;
         if (dict_table_insert(g_em, line, (int)(cnt > 0 ? cnt : 1.0), "") == 0) g_em_n++;
+        /* 只收 2~3 汉字的词（9 字节 = 3 汉字）；纯 ASCII 或更长的跳过 */
+        size_t wl = strlen(line);
+        if ((wl == 6 || wl == 9) && g_em_wn < EM_WORDS_MAX) {
+            snprintf(g_em_words[g_em_wn], sizeof(g_em_words[0]), "%s", line);
+            g_em_cnt[g_em_wn] = (int)(cnt > 0 ? cnt : 0);
+            g_em_wn++;
+        }
     }
     fclose(f);
-    printf("[重训] EM 词表已装载：%s · %d 条（判据换成白名单，跳过 PMI/熵）\n", path, g_em_n);
+    printf("[重训] EM 词表已装载：%s · %d 条（其中 2~3 字词 %d 个；判据换成白名单）\n",
+           path, g_em_n, g_em_wn);
     return g_em_n > 0;
 }
 
-/* 白名单模式下的候选：字对表 ∩ EM 词表（不再看 PMI）。 */
+/* 白名单模式下的候选：直接取词表里的词（2~3 字）。
+ * 计数不在这里判 —— 交给 measure_candidates 用 word_ctx 在语料上实测，
+ * 词表里出现了但语料里数不够的，晋升阶段会被 count<mc 挡掉。 */
 static int collect_candidates_em(unsigned mc) {
-    CharPairTable* cp = cpt_global();
-    if (!cp || !g_em) return 0;
-    if (!g_pairs) {
-        g_pairs = (PairRec*)calloc(1200000, sizeof(PairRec));
-        if (!g_pairs) return 0;
-    }
+    (void)mc;
+    if (!g_em || g_em_wn <= 0) return 0;
     if (!g_cand) {
         g_cand = (Cand*)calloc(WCTX_MAX_CANDS, sizeof(Cand));
         if (!g_cand) return 0;
     }
-    g_npairs = 0;
-    cpt_foreach(cp, _collect_pair, &g_npairs);
-
     g_ncand = 0;
-    long hit_total = 0, miss_em = 0;
-    for (int i = 0; i < g_npairs; i++) {
-        const char* A = g_pairs[i].a;
-        const char* B = g_pairs[i].b;
-        if (strlen(A) != 3 || strlen(B) != 3) continue;
-        if (g_pairs[i].c < mc) continue;
-        char w[16];
-        snprintf(w, sizeof(w), "%s%s", A, B);
-        if (!dict_table_lookup(g_em, w)) { miss_em++; continue; }
-        hit_total++;
+    int n2 = 0, n3 = 0;
+    for (int i = 0; i < g_em_wn; i++) {
+        const char* w = g_em_words[i];
+        size_t wl = strlen(w);
+        int np = (wl == 6) ? 2 : ((wl == 9) ? 3 : 0);
+        if (np == 0) continue;
         if (g_ncand >= WCTX_MAX_CANDS) {
-            printf("[重训] !! 白名单候选超上限 %d，丢弃 %ld 个\n", WCTX_MAX_CANDS, hit_total - g_ncand);
+            printf("[重训] !! 白名单候选超上限 %d，丢弃 %d 个\n", WCTX_MAX_CANDS, g_em_wn - i);
             break;
         }
         Cand* cd = &g_cand[g_ncand++];
         snprintf(cd->word, sizeof(cd->word), "%s", w);
-        snprintf(cd->a, sizeof(cd->a), "%s", A);
-        snprintf(cd->b, sizeof(cd->b), "%s", B);
-        cd->count = g_pairs[i].c;
+        cd->nparts = np;
+        for (int k = 0; k < np; k++) {
+            snprintf(cd->parts[k], sizeof(cd->parts[0]), "%.3s", w + k * 3);
+        }
+        cd->count = (uint32_t)g_em_cnt[i];   /* EM 期望计数（2 字词随后由实测覆盖语义） */
         cd->pmi = 0.0;
+        if (np == 2) n2++; else n3++;
     }
-    printf("[重训] 白名单命中 %ld · 字对表里但词表没有的 %ld · 总字对 %d\n",
-           hit_total, miss_em, g_npairs);
+    printf("[重训] 白名单候选 %d（2 字 %d · 3 字 %d），计数待语料实测\n", g_ncand, n2, n3);
     return g_ncand;
 }
 
@@ -353,8 +362,9 @@ static int collect_candidates(unsigned mc, double mp) {
         }
         Cand* cd = &g_cand[g_ncand++];
         snprintf(cd->word, sizeof(cd->word), "%s%s", A, B);
-        snprintf(cd->a, sizeof(cd->a), "%s", A);
-        snprintf(cd->b, sizeof(cd->b), "%s", B);
+        cd->nparts = 2;
+        snprintf(cd->parts[0], sizeof(cd->parts[0]), "%s", A);
+        snprintf(cd->parts[1], sizeof(cd->parts[1]), "%s", B);
         cd->count = g_pairs[i].c;
         cd->pmi = pmi;
     }
@@ -416,52 +426,61 @@ static void measure_candidates(const char* qa_file, long max_pairs, long accepte
 static int promote_measured(SubTopology* vocab, unsigned mc, double me, int mx, int em_mode) {
     if (!vocab || !vocab->net || !g_cand) return 0;
 
-    int created = 0, no_stat = 0, low_ent = 0;
+    int created = 0, no_stat = 0, low_ent = 0, bad_parts = 0;
     for (int i = 0; i < g_ncand && created < mx; i++) {
         const char* word = g_cand[i].word;
-        const char* A = g_cand[i].a;
-        const char* B = g_cand[i].b;
+        int np = g_cand[i].nparts;
+        if (np < 2 || np > 3) continue;
 
+        WctxStat st;
+        int have = wctx_query(word, &st);
         if (!em_mode) {
-            WctxStat st;
-            if (!wctx_query(word, &st)) { no_stat++; continue; }   /* 语料里没再出现 ⇒ 不晋级 */
+            if (!have) { no_stat++; continue; }   /* 语料里没再出现 ⇒ 不晋级 */
             if (st.count < mc) continue;
 
             /* 只用 ③。lbound/rbound 只进诊断，不做放行条件（见本段头注释：④ 已撤） */
             double mn = st.hl < st.hr ? st.hl : st.hr;
             if (mn < me) { low_ent++; continue; }
+        } else if (np == 2) {
+            /* 白名单模式：EM 已定成员资格，这里只核对「语料里真出现过」+ 计数 */
+            if (!have || st.count < mc) { no_stat++; continue; }
         } else {
-            /* 白名单模式：EM 已用全局似然定过成员资格，这里只核对语料计数 */
-            if (g_cand[i].count < mc) continue;
+            /* 🔴 3 字词：word_ctx 的数据模型是硬编码二元组（wctx_finish 用 a+b 还原词面），
+             * 测不了三字词 ⇒ 改用 EM 期望计数门控（离线已按 >=200 筛过，阈值加倍保守） */
+            if (g_cand[i].count < mc * 10) { no_stat++; continue; }
         }
 
         if (huarong_net_find_concept(vocab->net, word) >= 0) continue;
 
-        /* 特征 = 两字均值 */
-        int ia = huarong_net_find_concept(vocab->net, A);
-        int ib = huarong_net_find_concept(vocab->net, B);
-        if (ia < 0 || ib < 0) continue;
-        ReasoningNode* na = (ia < vocab->net->node_count) ? vocab->net->nodes[ia] : NULL;
-        ReasoningNode* nb = (ib < vocab->net->node_count) ? vocab->net->nodes[ib] : NULL;
+        /* 特征 = 组成字特征均值；任一组成字不是节点 ⇒ 跳过（连不上边） */
+        ReasoningNode* parts[3] = {NULL, NULL, NULL};
+        int ok = 1;
+        for (int k = 0; k < np; k++) {
+            int idx = huarong_net_find_concept(vocab->net, g_cand[i].parts[k]);
+            if (idx < 0 || idx >= vocab->net->node_count) { ok = 0; break; }
+            parts[k] = vocab->net->nodes[idx];
+            if (!parts[k] || !parts[k]->features) { ok = 0; break; }
+        }
+        if (!ok) { bad_parts++; continue; }
+
         float feat[PM_NODE_FEATURE_DIM];
         for (int d = 0; d < PM_NODE_FEATURE_DIM; d++) {
-            if (na && na->features && nb && nb->features)
-                feat[d] = (na->features[d] + nb->features[d]) * 0.5f;
-            else
-                feat[d] = 0.0f;
+            float s = 0.0f;
+            for (int k = 0; k < np; k++) s += parts[k]->features[d];
+            feat[d] = s / (float)np;
         }
         ReasoningNode* wn = huarong_net_add_node(vocab->net, word, feat, PM_NODE_FEATURE_DIM);
         if (!wn) continue;
         node_hash_add(vocab->node_hash, wn);
         /* 词 ↔ 组成字（双向），让扩散能从词走回字、也能从字走到词 */
-        if (na) { add_or_strengthen(vocab->net, wn, na, QA_W_FWD, QA_MAX_FWD);
-                  add_or_strengthen(vocab->net, na, wn, QA_W_REV, QA_MAX_REV); }
-        if (nb) { add_or_strengthen(vocab->net, wn, nb, QA_W_FWD, QA_MAX_FWD);
-                  add_or_strengthen(vocab->net, nb, wn, QA_W_REV, QA_MAX_REV); }
+        for (int k = 0; k < np; k++) {
+            add_or_strengthen(vocab->net, wn, parts[k], QA_W_FWD, QA_MAX_FWD);
+            add_or_strengthen(vocab->net, parts[k], wn, QA_W_REV, QA_MAX_REV);
+        }
         created++;
     }
-    printf("[重训] 晋升闸门：通过 %d · 词整体熵不足 %d · 语料未复现 %d\n",
-           created, low_ent, no_stat);
+    printf("[重训] 晋升闸门：通过 %d · 熵不足 %d · 语料未复现 %d · 组成字缺失 %d\n",
+           created, low_ent, no_stat, bad_parts);
     return created;
 }
 
@@ -550,6 +569,9 @@ int main(int argc, char** argv) {
     if (em) {
         cands = collect_candidates_em(mc);
         printf("[重训] 阶段二判据：EM 词表白名单（%d 词 · 次数≥%u）\n", g_em_n, mc);
+        /* 白名单只替代「闸门」，不替代「测量」：word_ctx.bin 是 --prob 诊断与
+         * 后续判据（成分独立率）的数据源，仍然要按语料实测出来。 */
+        measure_candidates(qa_file, max_pairs, accepted);
     } else {
         cands = collect_candidates(mc, mp);
         printf("[重训] 候选（次数≥%u · PMI≥%.2f · 高频免PMI门槛=%llu）：%d 个\n",
