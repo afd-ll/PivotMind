@@ -346,6 +346,10 @@ def main():
     ap.add_argument('--iters', type=int, default=10)
     ap.add_argument('--out', required=True)
     ap.add_argument('--old-vocab', default=None, help='vocab_coverage --dump 的 tsv')
+    ap.add_argument('--emit-vocab', default=None,
+                    help='额外产出给 qa_retrain 用的词表（词	P	计数	长度）')
+    ap.add_argument('--emit-min-count', type=float, default=20.0,
+                    help='emit-vocab 的期望计数下限（默认 20，与旧 min_count 对齐）')
     a = ap.parse_args()
 
     os.makedirs(a.out, exist_ok=True)
@@ -382,6 +386,24 @@ def main():
         f.write('iter\tlogP_per_char\tvocab\tsec\n')
         for it, lp, n, sec in hist:
             f.write('%d\t%.6f\t%d\t%.1f\n' % (it, lp, n, sec))
+
+    # ---------------- 给 qa_retrain 的正式词表（只取双字词，按期望计数下限截断）
+    if a.emit_vocab:
+        n_emit = 0
+        NL = chr(10)
+        TAB = chr(9)
+        with open(a.emit_vocab, 'w', encoding='utf-8', newline=NL) as f:
+            f.write(TAB.join(['词', 'P', '期望计数', '长度']) + NL)
+            for w, p in sorted(probs.items(), key=lambda kv: -kv[1]):
+                if len(w) != 2:
+                    continue
+                cnt = p * nchar_train
+                if cnt < a.emit_min_count:
+                    continue
+                f.write(TAB.join([w, '%.10g' % p, '%.1f' % cnt, '2']) + NL)
+                n_emit += 1
+        sys.stderr.write('[emit] 词表 %d 词（双字 · 期望计数>=%.0f）-> %s%s'
+                         % (n_emit, a.emit_min_count, a.emit_vocab, NL))
 
     # ---------------- 规模扫描
     ks = [5000, 10000, 15000, 17609, 20000, 30000, 50000, len(probs)]

@@ -28,6 +28,7 @@
 #include "multi_topology.h"
 #include "huarong_topology.h"
 #include "feature_io.h"
+#include "dict_loader.h"
 #include "charpair.h"
 #include "corpus_filter.h"
 #include "word_prob.h"
@@ -196,6 +197,106 @@ static void _collect_pair(const char* a, const char* b, uint32_t c, void* ud) {
     (*np)++;
 }
 
+/* ---------------- EM 词表白名单模式（CX-45 第一步，2026-10-28） ----------------
+ *
+ * 判据来源：tools/unigram_lm.py 离线跑 Unigram LM + EM（全量 3477.6 万汉字）得到的
+ * 词表 + 概率。实测 held-out logP/char 比「PMI≥2.5 + min熵≥2.0」高 5.7~7.4%
+ * （同长度上限、同规模对比）。白名单命中的字对直接晋升，不再跑 PMI 与词整体熵。
+ *
+ * 开关：默认读 data/word_lm_vocab.tsv（相对 PIVOTMIND_HOME）；
+ *   PIVOTMIND_EM_VOCAB=<path> 指定别的文件；PIVOTMIND_EM_VOCAB=0 强制回落到旧判据。
+ * 文件格式：`词 \t 概率 \t 期望计数 \t 长度`（首行表头可省；也接受一行一个词）。
+ *
+ * 为什么要留回落：判据换轨必须是可逆的 —— 词表换错会让整条生成链变差，
+ * 而旧路径是已验证过的退路。 */
+static DictTable* g_em = NULL;
+static int        g_em_n = 0;
+
+static const char* em_vocab_path(void) {
+    const char* v = getenv("PIVOTMIND_EM_VOCAB");
+    if (v && v[0]) {
+        if (v[0] == '0' && v[1] == '\0') return NULL;   /* =0 强制关闭 */
+        return v;
+    }
+    return "data/word_lm_vocab.tsv";
+}
+
+static int load_em_vocab(void) {
+    const char* path = em_vocab_path();
+    if (!path) return 0;
+    FILE* f = fopen(path, "rb");
+    if (!f) return 0;                       /* 文件不在 ⇒ 静默回落旧判据 */
+    g_em = dict_table_create(131072);
+    if (!g_em) { fclose(f); return 0; }
+
+    char line[512];
+    int first = 1;
+    while (fgets(line, sizeof(line), f)) {
+        int len = (int)strlen(line);
+        while (len > 0 && (line[len-1] == '\n' || line[len-1] == '\r')) line[--len] = 0;
+        if (len <= 0) continue;
+        /* 表头（以 ASCII 开头，例如「词\tP\t...」）跳过 */
+        if (first) {
+            first = 0;
+            if (!(((unsigned char)line[0]) & 0x80)) continue;
+        }
+        double prob = 0.0, cnt = 0.0;
+        char* tab = strchr(line, '\t');
+        if (tab) {
+            *tab = 0;
+            sscanf(tab + 1, "%lf\t%lf", &prob, &cnt);   /* 第2列概率 · 第3列期望计数 */
+        }
+        (void)prob;
+        if (!line[0]) continue;
+        if (dict_table_insert(g_em, line, (int)(cnt > 0 ? cnt : 1.0), "") == 0) g_em_n++;
+    }
+    fclose(f);
+    printf("[重训] EM 词表已装载：%s · %d 条（判据换成白名单，跳过 PMI/熵）\n", path, g_em_n);
+    return g_em_n > 0;
+}
+
+/* 白名单模式下的候选：字对表 ∩ EM 词表（不再看 PMI）。 */
+static int collect_candidates_em(unsigned mc) {
+    CharPairTable* cp = cpt_global();
+    if (!cp || !g_em) return 0;
+    if (!g_pairs) {
+        g_pairs = (PairRec*)calloc(1200000, sizeof(PairRec));
+        if (!g_pairs) return 0;
+    }
+    if (!g_cand) {
+        g_cand = (Cand*)calloc(WCTX_MAX_CANDS, sizeof(Cand));
+        if (!g_cand) return 0;
+    }
+    g_npairs = 0;
+    cpt_foreach(cp, _collect_pair, &g_npairs);
+
+    g_ncand = 0;
+    long hit_total = 0, miss_em = 0;
+    for (int i = 0; i < g_npairs; i++) {
+        const char* A = g_pairs[i].a;
+        const char* B = g_pairs[i].b;
+        if (strlen(A) != 3 || strlen(B) != 3) continue;
+        if (g_pairs[i].c < mc) continue;
+        char w[16];
+        snprintf(w, sizeof(w), "%s%s", A, B);
+        if (!dict_table_lookup(g_em, w)) { miss_em++; continue; }
+        hit_total++;
+        if (g_ncand >= WCTX_MAX_CANDS) {
+            printf("[重训] !! 白名单候选超上限 %d，丢弃 %ld 个\n", WCTX_MAX_CANDS, hit_total - g_ncand);
+            break;
+        }
+        Cand* cd = &g_cand[g_ncand++];
+        snprintf(cd->word, sizeof(cd->word), "%s", w);
+        snprintf(cd->a, sizeof(cd->a), "%s", A);
+        snprintf(cd->b, sizeof(cd->b), "%s", B);
+        cd->count = g_pairs[i].c;
+        cd->pmi = 0.0;
+    }
+    printf("[重训] 白名单命中 %ld · 字对表里但词表没有的 %ld · 总字对 %d\n",
+           hit_total, miss_em, g_npairs);
+    return g_ncand;
+}
+
 static void thresholds(unsigned* mc, double* mp, double* me, int* mx) {
     unsigned c = 20; double p = 2.5, e = 2.0; int x = 60000;   /* 实测候选 31,167 个：20000 的帽子会砍掉一半 */
     const char* v;
@@ -311,8 +412,8 @@ static void measure_candidates(const char* qa_file, long max_pairs, long accepte
     }
 }
 
-/* ③④ 双闸门晋升（判据见本段头注释） */
-static int promote_measured(SubTopology* vocab, unsigned mc, double me, int mx) {
+/* ③④ 双闸门晋升（判据见本段头注释）；em_mode=1 时改按白名单，不跑熵 */
+static int promote_measured(SubTopology* vocab, unsigned mc, double me, int mx, int em_mode) {
     if (!vocab || !vocab->net || !g_cand) return 0;
 
     int created = 0, no_stat = 0, low_ent = 0;
@@ -321,13 +422,18 @@ static int promote_measured(SubTopology* vocab, unsigned mc, double me, int mx) 
         const char* A = g_cand[i].a;
         const char* B = g_cand[i].b;
 
-        WctxStat st;
-        if (!wctx_query(word, &st)) { no_stat++; continue; }   /* 语料里没再出现 ⇒ 不晋级 */
-        if (st.count < mc) continue;
+        if (!em_mode) {
+            WctxStat st;
+            if (!wctx_query(word, &st)) { no_stat++; continue; }   /* 语料里没再出现 ⇒ 不晋级 */
+            if (st.count < mc) continue;
 
-        /* 只用 ③。lbound/rbound 只进诊断，不做放行条件（见本段头注释：④ 已撤） */
-        double mn = st.hl < st.hr ? st.hl : st.hr;
-        if (mn < me) { low_ent++; continue; }
+            /* 只用 ③。lbound/rbound 只进诊断，不做放行条件（见本段头注释：④ 已撤） */
+            double mn = st.hl < st.hr ? st.hl : st.hr;
+            if (mn < me) { low_ent++; continue; }
+        } else {
+            /* 白名单模式：EM 已用全局似然定过成员资格，这里只核对语料计数 */
+            if (g_cand[i].count < mc) continue;
+        }
 
         if (huarong_net_find_concept(vocab->net, word) >= 0) continue;
 
@@ -439,12 +545,20 @@ int main(int argc, char** argv) {
      * ①② 字对表筛候选（次数 / PMI）→ ③ 回扫语料测【词整体】熵 → ④ 双闸门晋升 */
     unsigned mc; double mp, me; int mx;
     thresholds(&mc, &mp, &me, &mx);
-    int cands = collect_candidates(mc, mp);
-    printf("[重训] 候选（次数≥%u · PMI≥%.2f · 高频免PMI门槛=%llu）：%d 个\n",
-           mc, (double)mp, pmi_free_threshold(), cands);
-    measure_candidates(qa_file, max_pairs, accepted);
-    int words = promote_measured(vocab, mc, me, mx);
-    printf("[重训] 词晋升：%d 个（判据：词整体 min熵 ≥ %.2f）\n", words, me);
+    int em = load_em_vocab();
+    int cands;
+    if (em) {
+        cands = collect_candidates_em(mc);
+        printf("[重训] 阶段二判据：EM 词表白名单（%d 词 · 次数≥%u）\n", g_em_n, mc);
+    } else {
+        cands = collect_candidates(mc, mp);
+        printf("[重训] 候选（次数≥%u · PMI≥%.2f · 高频免PMI门槛=%llu）：%d 个\n",
+               mc, (double)mp, pmi_free_threshold(), cands);
+        measure_candidates(qa_file, max_pairs, accepted);
+    }
+    int words = promote_measured(vocab, mc, me, mx, em);
+    if (em) printf("[重训] 词晋升：%d 个（判据：EM 白名单）\n", words);
+    else    printf("[重训] 词晋升：%d 个（判据：词整体 min熵 ≥ %.2f）\n", words, me);
 
     unsigned long long drop[3] = {0, 0, 0};
     wctx_drop_stats(drop);
