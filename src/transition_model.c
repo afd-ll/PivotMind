@@ -250,20 +250,38 @@ int tm_top_next(const TransitionModel* tm, int32_t prev_id, int32_t* out_ids, in
     /* 锁内只收集 (id,count)，排序在锁外做（tm_prob 也要加锁，锁内调会自死锁；
      * 且 DEFAULT 互斥锁非递归 —— 项目哲学「递归锁优先」但此处结构体已建，
      * 保持最小改动，靠「锁内零外部调用」纪律规避）。 */
-    int32_t ids[16];
-    uint32_t cnts[16];
+    /* ð´ ä¿®ï¼åå®ç° `if (n < 16)` åªæ¶å 16 ä¸ªå¹éé¡¹å°±æªæ­ï¼
+     * èåå¸è¡¨éåé¡ºåºæ¯**ä»»æç** â æ¶å°çæ¯ãéæº 16 ä¸ªåç»§」ã
+     * åå¨è¿ 16 ä¸ªéæåºæ k ä¸ª â è¿åçä¸æ¯ãæå¯è½ç k ä¸ªåç»§」ã
+     * åç»§æ° > 16 çè¯ï¼æ / ç / æ¯ / å­¦ä¹  â¦ï¼å¨é½è¢«æ±¡æï¼
+     * CX-39 çã bigram å°é¡¶äºãå°±æ¯å¨è¿ä¸ª bug ä¸æµåºæ¥çã
+     *
+     * ç°æ¹ä¸ºæ å top-k éæ©ï¼éåå¨è¡¨ï¼ç»´æ¤å¤§å°ä¸º k çåééï¼
+     * ä¸åä¸¢å¼ç¬¬ k+1 ä¸ªä¹åçå¹éã */
+    #define TM_TOPK_MAX 32
+    int32_t ids[TM_TOPK_MAX];
+    uint32_t cnts[TM_TOPK_MAX];
+    int kk = (k < TM_TOPK_MAX) ? k : TM_TOPK_MAX;
     int n = 0;
     pthread_mutex_lock((pthread_mutex_t*)&tm->lock);
     for (int i = 0; i < tm->capacity; i++) {
         if (tm->counts[i] != 0 && (tm->keys[i] & 0xFFFFFFFF00000000ULL) == hi) {
-            if (n < 16) {
-                ids[n] = (int32_t)(uint32_t)(tm->keys[i] & 0xFFFFFFFFULL);
-                cnts[n] = tm->counts[i];
+            int32_t id = (int32_t)(uint32_t)(tm->keys[i] & 0xFFFFFFFFULL);
+            uint32_t c = tm->counts[i];
+            if (n < kk) {
+                ids[n] = id;
+                cnts[n] = c;
                 n++;
+            } else {
+                /* æ¾å½å k ä¸ªéæå°çï¼èè¿å®å°±é¡¶æ */
+                int mi = 0;
+                for (int j = 1; j < kk; j++) if (cnts[j] < cnts[mi]) mi = j;
+                if (c > cnts[mi]) { ids[mi] = id; cnts[mi] = c; }
             }
         }
     }
     pthread_mutex_unlock((pthread_mutex_t*)&tm->lock);
+    /* n å·²ç»ä¸è¶è¿ kkï¼ä¸é¢ç `if (n > k) n = k;` ä¿çä½åéä¿é© */
     if (n == 0) return 0;
     if (n > k) n = k;
 
