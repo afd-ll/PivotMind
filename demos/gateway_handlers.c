@@ -7,6 +7,7 @@
  */
 
 #include "gateway_internal.h"
+#include <stdlib.h>   /* CX-53: getenv */
 #include "error.h"   /* CX-28: LOG_INFO 诊断 */
 #include "lang.h"
 #include "generation_feedback.h"   /* v0.6.3：GET /reach 读数 */
@@ -267,7 +268,20 @@ void handle_chat(GatewaySystem* gw, int fd, const char* body) {
         }
     }
 
-    if (gw->pfe) {
+    /* ── CX-53 探针：PFE 可关（PIVOTMIND_PFE=0）──
+     * 基线（20 条）显示：complexity>0 这个门槛几乎全中，5 条走 PFE 全是模板空转
+     * （今天天气怎么样 → 今天天气天气），且延迟 3~4s 是普通路径的 10 倍。
+     * 加开关只为做「开/关」对照，默认仍开 = 线上行为不变。 */
+    static int _pfe_on = -1;
+    if (_pfe_on < 0) {
+        const char* _pfe_e = getenv("PIVOTMIND_PFE");
+        /* A/B 证明：PFE 开着只是把「复述」换成「模板套壳」，废输出率同为 65%，
+         * 代价是延迟 +69%、输出长 10 倍 ⇒ 默认关，退出输出路径。
+         * 推理内核不删，下一步降级为「上游候选词源」，由构式槽位组句。
+         * PIVOTMIND_PFE=1 可临时开回来。 */
+        _pfe_on = (_pfe_e && _pfe_e[0] == '1') ? 1 : 0;
+    }
+    if (gw->pfe && _pfe_on) {
         int complexity = pfe_assess_complexity(gw->pfe, msg);
         LOG_INFO("[无回应诊断] ② PFE 复杂度=%d", complexity);
         /* v0.6 测试：PFE 门槛恢复 >0 验证（diffusion 降级路径已话题化，
