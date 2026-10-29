@@ -2024,7 +2024,8 @@ int diffusion_generate(DiffusionCtx* ctx,
         static int _sc_on = -1;
         if (_sc_on < 0) {
             const char* _e = getenv("PIVOTMIND_ACT_SCALE");
-            _sc_on = (_e && _e[0] == '1') ? 1 : 0;
+            /* A/B 通过（10/12 逐字一致、激活分布回到其他拓扑同一量级）⇒ 默认开 */
+            _sc_on = (_e && _e[0] == '0') ? 0 : 1;
         }
         if (_sc_on && ctx && ctx->vocab && ctx->vocab->net &&
             ctx->vocab->net->nodes && ctx->vocab->net->node_count > 0) {
