@@ -887,6 +887,30 @@ void diffusion_side_inhibit(DiffusionCandidate* cands, int count,
     }
 }
 
+/* ── CX-52 第一步：activation 有界化（软饱和，正常值逐位不变）──
+ * 病根：本文件后面 `node->activation *= boost`（boost∈[0.5,1.5]）每轮对所有前沿节点做乘性更新，
+ *       hub 节点 jac≈1 时连续乘 1.5 ⇒ 指数增长（1.5^80≈2.4e14）；叠加 `+= strength` 的加性累加。
+ *       线上实测（state_dump data/pivotmind_state.dat）：词汇拓扑平均激活 45.67、最高 "济"=3454.6，
+ *       而其他 11 个子拓扑都在 0.30~0.34 的正常初值量级 ⇒ 只有词汇拓扑在膨胀。
+ *       历史最坏见过 P90=8.3e7、max=8.9e22，且被存盘继承（重启不消失）。
+ * 做法：不改正常语义区间（正常节点 activation 都在 0.2~0.85）——
+ *       a ≤ CAP 原样返回；a > CAP 返回 CAP + ln(1 + a − CAP)，3454 也只落到 18 左右。
+ *       保序、不硬切、对正常值零影响 ⇒ 改前改后同一输入的输出应当逐字一致。
+ * 开关：PIVOTMIND_ACT_BOUND=0 关闭（回落原行为）。
+ * ⚠️ 第一步只治「爆炸」，不治「偏高」：稳态仍会停在 CAP 附近，把均值拉回 0.3 量级
+ *    需要第二步（Cache LM 式的泄漏积分器），那是行为改动，要另做 A/B。 */
+#define PM_ACT_CAP 10.0f
+static float _act_bound(float a) {
+    static int on = -1;
+    if (on < 0) {
+        const char* e = getenv("PIVOTMIND_ACT_BOUND");
+        on = (e && e[0] == '0') ? 0 : 1;
+    }
+    if (!on) return a;
+    if (!(a > PM_ACT_CAP)) return a;   /* 含 NaN：NaN 比较恒假 ⇒ 原样返回 */
+    return PM_ACT_CAP + logf(a - PM_ACT_CAP + 1.0f);
+}
+
 /* ================================================================
  *  模板评分
  * ================================================================ */
@@ -904,7 +928,7 @@ float diffusion_template_score(DiffusionCtx* ctx,
             ReasoningNode* tn = ctx->template->net->nodes[j];
             if (!tn || !tn->concept) continue;
             if (strstr(tn->concept, words[i]) && strstr(tn->concept, words[i+1]))
-                score += tn->activation;
+                score += _act_bound(tn->activation);
         }
         pairs++;
     }
@@ -1135,7 +1159,7 @@ static int _spread_compete(SpreadEntry* pool, int pool_count,
                                     nid, pool[i].strength);
             if (slot < 0) { seen[nid] = 0; (*fail_out)++; dropped++; continue; }
             seen[nid] = slot + 1;                           /* 已点亮标记（当前只当布尔用） */
-            if (nodes[nid]) nodes[nid]->activation += pool[i].strength;
+            if (nodes[nid]) nodes[nid]->activation = _act_bound(nodes[nid]->activation + pool[i].strength);
             lit++;
         } else {                                            /* 竞争落选 */
             seen[nid] = 0;                                  /* 归还标记：不点亮、不参与后续 */
@@ -1768,7 +1792,7 @@ int diffusion_generate(DiffusionCtx* ctx,
                         if (vid < 0 || vid >= ctx->vocab->net->node_count) continue;
                         ReasoningNode* vn = ctx->vocab->net->nodes[vid];
                         if (!vn) continue;
-                        vn->activation += 0.3f;
+                        vn->activation = _act_bound(vn->activation + 0.3f);
                         int dup = 0;
                         for (int d = 0; d < active_count; d++)
                             if (active_ids[d] == vid) { dup = 1; break; }
@@ -1827,7 +1851,7 @@ int diffusion_generate(DiffusionCtx* ctx,
                 }
                 if (!dup) {
                     active_ids[active_count++] = nid;
-                    ctx->vocab->net->nodes[nid]->activation += 0.2f;
+                    ctx->vocab->net->nodes[nid]->activation = _act_bound(ctx->vocab->net->nodes[nid]->activation + 0.2f);
                 }
             }
         }
@@ -1985,7 +2009,7 @@ int diffusion_generate(DiffusionCtx* ctx,
         /* Jaccard ≈ shared / node->edge_count，映射到 [0.5, 1.5] 乘数 */
         float jac = (node->edge_count > 0) ? (float)shared / (float)node->edge_count : 0.0f;
         float boost = 0.5f + jac;  /* jac=0→0.5x, jac=1.0→1.5x */
-        node->activation *= boost;
+        node->activation = _act_bound(node->activation * boost);
     }
     /* (N17-fix) 统一出口：本批扩散堆分配（seen/front/pool）在此一次性释放。
      * 本行之后的所有 return（评分数组分配失败等）都在释放之后，故同样无泄漏；
