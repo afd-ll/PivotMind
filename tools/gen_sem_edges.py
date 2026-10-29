@@ -16,9 +16,10 @@ import os
 import sys
 from collections import Counter, defaultdict
 
-VOCAB = "/home/ubuntu/PivotMind/data/word_lm_vocab.tsv"
-OUT = "/home/ubuntu/PivotMind/data/sem_edges.tsv"
-CORPORA = [
+VOCAB = os.environ.get("GEN_VOCAB", "/home/ubuntu/PivotMind/data/word_lm_vocab.tsv")
+OUT = os.environ.get("GEN_OUT", "/home/ubuntu/PivotMind/data/sem_edges.tsv")
+_c = os.environ.get("GEN_CORPORA")
+CORPORA = _c.split(":") if _c else [
     "/home/ubuntu/PivotMind/corpus/xiaohuangji_pipe.txt",
     "/home/ubuntu/lccc/lccc_300k.txt",
 ]
