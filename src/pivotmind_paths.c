@@ -54,7 +54,7 @@ static const char *const g_subdir[PM_DIR_COUNT] = {
     "corpus"    /* PM_DIR_CORPUS  —— 书库（默认自动建） */
 };
 
-#define PM_FILE_COUNT 15
+#define PM_FILE_COUNT 16
 
 /* 位号 = 数组下标；PM_FILE_STATE(1u<<0)..PM_FILE_TOKEN(1u<<11)..PM_FILE_TRANSITIONS(1u<<12)。
    数据文件名只在本表出现一次（SSOT）；调用点一律取 pm_file()。 */
@@ -73,7 +73,8 @@ static const char *const g_filename[PM_FILE_COUNT] = {
     "gw_token",                 /* PM_FILE_TOKEN         —— 网关凭据（0600，跨重启不变） */
     "transitions.bin",          /* PM_FILE_TRANSITIONS   —— 转移计数（PROB-ASSIST；不进 PM_FILE_ALL） */
     "charpairs.bin",            /* PM_FILE_CHARPAIRS     —— 字对计数（涌现判据依据；不进 PM_FILE_ALL） */
-    "word_ctx.bin"              /* PM_FILE_WORD_CTX      —— 词级左右邻统计（CX-40；不进 PM_FILE_ALL） */
+    "word_ctx.bin",             /* PM_FILE_WORD_CTX      —— 词级左右邻统计（CX-40；不进 PM_FILE_ALL） */
+    "causal_graph.dat"          /* PM_FILE_CAUSAL  —— 因果图（CX-56 接线；不进 ALL） */
 };
 
 #define PM_ASSET_COUNT 4

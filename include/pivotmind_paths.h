@@ -92,6 +92,10 @@ extern "C" {
  * 同样是【派生量缓存】：语料或候选集变了就重跑 qa_retrain，不是第二真值源，
  * 因此与 TRANSITIONS/CHARPAIRS 一样**不进** PM_FILE_ALL。 */
 #define PM_FILE_WORD_CTX      (1u << 14)  /* 词级左右邻统计 word_ctx.bin */
+/* CX-56 接线：因果图落盘（此前只创建、从不保存，重启即丢）。
+ * 与 TRANSITIONS/CHARPAIRS/WORD_CTX 同理，**不进 PM_FILE_ALL** —— 它不是状态保存链的成员，
+ * 有自己的生命周期（由 gateway 的 init/shutdown 显式 load/save）。 */
+#define PM_FILE_CAUSAL        (1u << 15)  /* 因果图 causal_graph.dat */
 #define PM_FILE_ALL           (0x00000FFFu)  /* 12 个位全置（不含 TRANSITIONS/CHARPAIRS/WORD_CTX） */
 
 /* ---- 纯查询 ---- */

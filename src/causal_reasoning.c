@@ -2880,10 +2880,12 @@ CausalGraph* causal_graph_load_from_file(const char* filepath) {
     
     fclose(fp);
     
-    if (node_count <= 0 || edge_count <= 0) return NULL;
+    /* 只校验节点数：edge_count==0 是**合法状态**（因果图当前还没有生产者，
+     * 拿共现边充当因果边是语义错误）。把空图当失败会让每次启动都刷一条假错误。 */
+    if (node_count <= 0) return NULL;
     
     // 创建因果图
-    CausalGraph* graph = causal_graph_create(node_count, edge_count * 2);
+    CausalGraph* graph = causal_graph_create(node_count, (edge_count > 0 ? edge_count * 2 : 1));
     if (!graph) return NULL;
     
     // 重新打开文件解析边
@@ -2893,20 +2895,25 @@ CausalGraph* causal_graph_load_from_file(const char* filepath) {
         return NULL;
     }
     
-    int cause_id, effect_id, edge_type;
-    float strength, probability, confidence;
-    int bidirectional;
-    long observed_at, last_confirmed;
+    /* 全部给默认值：下面是逐行 sscanf，失败时**不写入**变量，
+     * 不初始化就会把栈垃圾写进因果边。 */
+    int cause_id = -1, effect_id = -1, edge_type = 0;
+    float strength = 0.0f, probability = 0.0f, confidence = 0.0f;
+    int bidirectional = 0;
+    long observed_at = 0, last_confirmed = 0;
     
     // 跳过前两行
-    if (!fgets(line, sizeof(line), fp)) { fclose(fp); return 0; }
-    if (!fgets(line, sizeof(line), fp)) { fclose(fp); return 0; }
+    if (!fgets(line, sizeof(line), fp)) { fclose(fp); causal_graph_destroy(graph); return NULL; }
+    if (!fgets(line, sizeof(line), fp)) { fclose(fp); causal_graph_destroy(graph); return NULL; }
     
     while (fgets(line, sizeof(line), fp)) {
         if (strstr(line, "\"edges\":")) continue;
         if (strstr(line, "[")) continue;
         if (strstr(line, "{")) {
-            // 解析边
+            // 解析边（每条边开头先重置，避免上一条的值渗过来）
+            cause_id = -1; effect_id = -1; edge_type = 0;
+            strength = 0.0f; probability = 0.0f; confidence = 0.0f;
+            bidirectional = 0; observed_at = 0; last_confirmed = 0;
             while (fgets(line, sizeof(line), fp)) {
                 if (strstr(line, "}")) break;
                 sscanf(line, "      \"cause_id\": %d", &cause_id);
@@ -2914,12 +2921,17 @@ CausalGraph* causal_graph_load_from_file(const char* filepath) {
                 sscanf(line, "      \"type\": %d", &edge_type);
                 sscanf(line, "      \"strength\": %f", &strength);
                 sscanf(line, "      \"probability\": %f", &probability);
-                sscanf(line, "      \"bidirectional\": %d", &bidirectional);
+                /* 🔴 文件写的是 true/false，原来用 %d 永远解析不出来 */
+                if (strstr(line, "\"bidirectional\"")) {
+                    bidirectional = (strstr(line, "true") != NULL) ? 1 : 0;
+                }
                 sscanf(line, "      \"confidence\": %f", &confidence);
                 sscanf(line, "      \"observed_at\": %ld", &observed_at);
                 sscanf(line, "      \"last_confirmed\": %ld", &last_confirmed);
             }
             
+            /* cause/effect 没解析出来 ⇒ 这条边是坏的，不要往图里塞 */
+            if (cause_id < 0 || effect_id < 0) continue;
             // 添加边
             CausalEdge* edge = (CausalEdge*)object_pool_acquire((ObjectPool*)graph->edge_pool);
             if (edge) {

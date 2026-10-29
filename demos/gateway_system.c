@@ -75,6 +75,26 @@ static int gw_system_init(GatewaySystem* gw) {
     // 3. 因果图
     gw->causal_graph = causal_graph_create(1000, 5000);
     if (!gw->causal_graph) { fprintf(stderr, "[gateway] 因果图创建失败\n"); return -1; }
+    /* 🔴 CX-56 接线：因果图此前**只创建、从不落盘**（审计发现 save_to_file/load_from_file
+     * 四个函数全仓零调用）⇒ 每次重启因果结构全丢。这里按「有文件就加载、失败回落空图」处理，
+     * 加载失败绝不阻断启动（因果图不是启动必需项）。 */
+    {
+        const char* cg_path = pm_file(PM_FILE_CAUSAL);
+        FILE* cg_f = (cg_path && cg_path[0]) ? fopen(cg_path, "rb") : NULL;
+        if (cg_f) {
+            fclose(cg_f);
+            CausalGraph* cg_loaded = causal_graph_load_from_file(cg_path);
+            if (cg_loaded) {
+                causal_graph_destroy(gw->causal_graph);
+                gw->causal_graph = cg_loaded;
+                /* 打印节点/边数：否则“已加载”分不出是空图还是真图 */
+                printf("[gateway]   因果图已加载: %s（%d 节点 %d 边）\n", cg_path,
+                       cg_loaded->node_count, cg_loaded->edge_count);
+            } else {
+                fprintf(stderr, "[gateway] 因果图加载失败（用空图继续）: %s\n", cg_path);
+            }
+        }
+    }
     printf("[gateway]   因果图就绪\n");
 
     // 4. 学习器
@@ -600,6 +620,16 @@ void gw_system_shutdown(GatewaySystem* gw) {
     if (gw->learner)     { active_learner_destroy(gw->learner);  gw->learner = NULL; }
     if (gw->prefrontal)  { prefrontal_destroy(gw->prefrontal);   gw->prefrontal = NULL; }
     gw->dialog = NULL;        /* 别名（prefrontal->dialog），已随 prefrontal 释放 */
+    /* 🔴 CX-56 接线：退出前把因果图落盘（此前从不保存，重启即丢） */
+    if (gw->causal_graph) {
+        const char* cg_path = pm_file(PM_FILE_CAUSAL);
+        if (cg_path && cg_path[0]) {
+            if (causal_graph_save_to_file(gw->causal_graph, cg_path) == 0)
+                printf("[gateway]   因果图已保存: %s\n", cg_path);
+            else
+                fprintf(stderr, "[gateway] 因果图落盘失败: %s\n", cg_path);
+        }
+    }
     if (gw->causal_graph){ causal_graph_destroy(gw->causal_graph); gw->causal_graph = NULL; }
     if (gw->topology)    { master_topology_destroy(gw->topology); gw->topology = NULL; }
     if (gw->memory)      { memory_system_destroy(gw->memory);     gw->memory = NULL; }
