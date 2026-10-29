@@ -797,14 +797,31 @@ int diffusion_spread(SubTopology* layer,
         if (nid < 0 || nid >= layer->net->node_count) continue;
         ReasoningNode* node = layer->net->nodes[nid];
         if (!node) continue;
-        /* 枢纽词跳过: >2000 边的超级连通节点 (如"你"8000边、"是"8000边) 扩散噪声太大 */
-        if (node->edge_count > 2000) continue;
+        /* ── CX-54：枢纽词不再整条跳过（PIVOTMIND_HUB_SPREAD=1 才开；默认走原逻辑）──
+         * 原行为：>2000 边直接 continue。可输入里往往全是高频词（你 2648 / 我 2648 / 的 3001 边），
+         * 从它们出发的一跳扩散全被砍掉 ⇒ 激活集只剩输入自己 ⇒ 生成只能复述（实测 100%）。
+         * 改为：按步长**均匀抽样**最多 64 条边（保广度、控噪声），
+         *      并把度数归一从 1/√deg 放宽到 1/log(1+deg)（8000 边：0.011 → 0.111，10 倍）。 */
+        static int _hub_on = -1;
+        if (_hub_on < 0) {
+            const char* _he = getenv("PIVOTMIND_HUB_SPREAD");
+            _hub_on = (_he && _he[0] == '1') ? 1 : 0;
+        }
+        int _ec   = node->edge_count;
+        int _step = 1;
+        if (_hub_on) {
+            if (_ec > 64) { _step = _ec / 64; if (_step < 1) _step = 1; }
+        } else if (_ec > 2000) {
+            continue;
+        }
 
-        for (int c = 0; c < node->edge_count; c++) {
+        for (int c = 0; c < _ec; c += _step) {
             int tid = node->edges[c].target ? node->edges[c].target->node_id : -1;
             if (tid < 0 || tid >= layer->net->node_count) continue;
             float w = node->edges[c].weight * decay;
-            if (node->edge_count > 0) w /= sqrtf((float)node->edge_count);
+            if (_ec > 0) {
+                w /= _hub_on ? logf(1.0f + (float)_ec) : sqrtf((float)_ec);
+            }
             // 温度扰动：如果 temperature > 0，添加随机噪声
             if (temperature > 0.0f) {
                 float noise = ((float)(rand() % 201) - 100.0f) / 100.0f;  // -1.0 ~ 1.0
@@ -1414,6 +1431,13 @@ static int _pool_refine(const char** buf, POSTag* pos, unsigned char* src,
      * 而弱候选拼起来至少覆盖 44%。所以下限逐档放宽，最后一档连收敛也关掉。
      * 🔴 循环里只读 buf、不写 buf（收敛只收集下标），所以重试是安全的。 */
     for (int attempt = 0; attempt < 3; attempt++) {
+        /* ── CX-56 实测结论：这里改 0.10f 对输出**没有影响**（已回退）──
+         * 实测（PIVOTMIND_POOL_DIAG=1）：「我喜欢音乐」入池 32 个，其中 20+ 个是 0.1~0.3 分的垃圾；
+         * 把第三档 floor 从 0.0f 改成 0.10f，池子 32→5，但**输出逐字不变**（前 3 个词就够拼那句）
+         * ⇒ 无收益，且属于「无条件行为改动」，不该夹在诊断里进主干，已原样恢复。
+         * 真正的病根在下面的 `kept >= 2`：同族收敛把「喜欢音乐/喜欢/音乐」收成 1 个
+         * ⇒ kept=1 < 2 ⇒ 降档到第三档（dedup 关）⇒ 同族词全回来 ⇒ 输出重复刷。
+         * 修它要同时解「池子只剩 1 个词时怎么输出」（CX-54 尾账），不是改个数就行。 */
         float f = (attempt == 0) ? base_f : (attempt == 1 ? 0.10f : 0.0f);
         int dedup = _on && (attempt < 2);
         float floor_v = (_on && peak > 1e-9f) ? peak * f : 0.0f;
@@ -1485,6 +1509,15 @@ static int _pool_refine(const char** buf, POSTag* pos, unsigned char* src,
             }
             keep_idx[kept++] = idx;
         }
+        /* ── CX-56b：原条件 `kept >= 2` 太严 ──
+         * 同族收敛把「喜欢音乐/喜欢/音乐」收到 1~2 个时，会被误判成「池子不够」
+         * ⇒ 降档到第三档（dedup 关）⇒ 同族词全放回来
+         * ⇒ 输出「喜欢音乐的喜欢音乐欢乐」：同一个词刷三遍。
+         * 只有 kept==0（真的全被砍）才该降档 —— 留 1 个干净词远好过 3 个同族词重复。 */
+        /* 🔴 退回 kept>=2（CX-56b 的 kept>=1 已实测有害）：
+         * 池子只剩 1 个词时会掉进**字级联想兜底**，实测「我喜欢音乐」→
+         * 「动也里馆宾犬齿鲸捕以恒程种渠多诸葛齐看」19 个随机单字，比重复刷更糟。
+         * 这条注释原来就写明了「清空 pool 比留几个弱候选更糟」，是我改之前没读全。 */
         if (kept >= 2 || n < 2) break;
     }
     {
@@ -1503,6 +1536,21 @@ static int _pool_refine(const char** buf, POSTag* pos, unsigned char* src,
             pos[k]   = p2[k];
             src[k]   = s2[k];
             score[k] = c2[k];
+        }
+    }
+    /* ── 候选池诊断（PIVOTMIND_POOL_DIAG=1）──
+     * 打印 refine **之后**真正留下的词：`词*` = 命中输入，`词` = 输入外，括号是分数。
+     * 用来回答「池子里到底只剩输入词，还是混进了外词（且外词质量如何）」。 */
+    {
+        const char* _pd = getenv("PIVOTMIND_POOL_DIAG");
+        if (_pd && _pd[0] == '1') {
+            fprintf(stderr, "[池] 入池%3d → 留%2d:", n, kept);
+            for (int k = 0; k < kept && k < 24; k++) {
+                int hit = (msg && msg[0] && buf[k] && strstr(msg, buf[k])) ? 1 : 0;
+                fprintf(stderr, " %s%s(%.1f)/s%d", buf[k] ? buf[k] : "?",
+                        hit ? "*" : "", (double)score[k], (int)src[k]);
+            }
+            fprintf(stderr, "\n");
         }
     }
     return kept;
@@ -2100,7 +2148,7 @@ int diffusion_generate(DiffusionCtx* ctx,
     /* 调试: 打印输入激活的词和其邻居 */
     {
         printf("[扩散] 输入=\"%.60s\" 激活 %d 节点:", input, active_count);
-        for (int a = 0; a < active_count && a < 5; a++) {
+        for (int a = 0; a < active_count && a < 24; a++) {   /* CX-54: 5→24，看清激活集里有没有外词 */
             ReasoningNode* an = ctx->vocab->net->nodes[active_ids[a]];
             printf(" %s(%d边)", an ? an->concept : "?", an ? an->edge_count : 0);
         }
