@@ -2011,6 +2011,48 @@ int diffusion_generate(DiffusionCtx* ctx,
         float boost = 0.5f + jac;  /* jac=0→0.5x, jac=1.0→1.5x */
         node->activation = _act_bound(node->activation * boost);
     }
+    /* ── CX-52 第二步：扩散后的稳态缩放（synaptic scaling）──
+     * 第一步只把「爆炸」压住了，但稳态仍停在 CAP 附近（实测词汇拓扑均值 1.81、最高 12.6），
+     * 而其余 11 个子拓扑都在 0.30~0.34 —— 词汇拓扑的 activation 语义整体偏高一个量级。
+     * 原因：`*= boost` 对所有前沿节点是纯乘性更新，E[boost] 略大于 1 就是单边上涨。
+     * 做法：每轮乘完 boost 后，对词汇拓扑做一次**全局等比缩放**使 max 回到 1.0
+     *      （突触稳态缩放的工程近似）：保相对序、不硬切、不产生并列。
+     * 🔴 默认关（PIVOTMIND_ACT_SCALE=1 才开）：这是**行为改动**，会改变输出，
+     *    必须先用固定 state 副本做 A/B 再决定是否默认开。
+     */
+    {
+        static int _sc_on = -1;
+        if (_sc_on < 0) {
+            const char* _e = getenv("PIVOTMIND_ACT_SCALE");
+            _sc_on = (_e && _e[0] == '1') ? 1 : 0;
+        }
+        if (_sc_on && ctx && ctx->vocab && ctx->vocab->net &&
+            ctx->vocab->net->nodes && ctx->vocab->net->node_count > 0) {
+            float _mx = 0.0f;
+            int _i;
+            for (_i = 0; _i < ctx->vocab->net->node_count; _i++) {
+                ReasoningNode* _n = ctx->vocab->net->nodes[_i];
+                if (_n && _n->activation > _mx) _mx = _n->activation;
+            }
+            if (_mx > 1.0f) {
+                float _k = 1.0f / _mx;
+                for (_i = 0; _i < ctx->vocab->net->node_count; _i++) {
+                    ReasoningNode* _n = ctx->vocab->net->nodes[_i];
+                    if (_n) _n->activation *= _k;
+                }
+                static int _dbg = -1;
+                if (_dbg < 0) {
+                    const char* _d = getenv("PIVOTMIND_ACT_SCALE_DBG");
+                    _dbg = (_d && _d[0] == '1') ? 1 : 0;
+                }
+                if (_dbg) {
+                    fprintf(stderr, "[ACT-SCALE] max=%.3f → 1.000 缩放到 %d 节点\n",
+                            _mx, ctx->vocab->net->node_count);
+                }
+            }
+        }
+    }
+
     /* (N17-fix) 统一出口：本批扩散堆分配（seen/front/pool）在此一次性释放。
      * 本行之后的所有 return（评分数组分配失败等）都在释放之后，故同样无泄漏；
      * 那些 return 也冗余调用 _spread_release（幂等），保持"每条控制流都释放"。 */
