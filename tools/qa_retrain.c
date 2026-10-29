@@ -483,6 +483,110 @@ static int promote_measured(SubTopology* vocab, unsigned mc, double me, int mx, 
     return created;
 }
 
+
+/* ==================== 阶段三：PPMI 语义边（CX-59） ====================
+ *
+ * 背景：本工具此前只建 **相邻边**（`learn_chars` 里 prev→当前字，distance=1），
+ * 于是词汇拓扑只有「语序邻居」，没有「语义邻居」——
+ * 实测 `学习编程` 的图邻居只有 `学习/编程/我想/想学/苹果/什么/想想`，
+ * 而语料里明明有 `java / 编程语言 / 编程比赛`。
+ * 根因：`java|很好用的编程语言` 里两者隔 4 个词，相邻边永远连不上。
+ *
+ * 解法（文献依据见 docs/玄枢-定向判据-文献与方案-20261029.md）：
+ *   - 连接范围 = **同句共现**（不是相邻，也不是 ±k 窗口）—— 同句是天然的话题单元
+ *   - 权重 = **PPMI**，压掉 function word inflation（`的/是/你` 与任何词共现都高）
+ *   - 句边界按标点切；最小共现次数 >= 5（PMI 对稀疏不敏感，低频巧合要挡）
+ *   - 刻意**不用依存句法**：Levy&Goldberg 虽证明它更好，但给的是 functional similarity
+ *     （同类词），玄枢要的是 topical relatedness（相关词），方向不同。
+ *
+ * 权重上限 0.25：与相邻边（1.0）**靠量级分开**，避免「一个字段两个语义」
+ * （activation / relevance / 词表 已经踩过三次）。
+ */
+static int sem_find_edge(ReasoningNode* from, ReasoningNode* to, float* w) {
+    if (!from || !from->edges) return -1;
+    for (int i = 0; i < from->edge_count; i++) {
+        if (from->edges[i].target == to) {
+            if (w) *w = from->edges[i].weight;
+            return i;
+        }
+    }
+    return -1;
+}
+
+static int load_sem_edges(SubTopology* vocab) {
+    const char* on = getenv("PIVOTMIND_SEM_EDGE");
+    if (!on || on[0] != '1') return 0;                 /* 默认关 */
+
+    const char* path = getenv("PIVOTMIND_SEM_EDGES_FILE");
+    if (!path || !path[0]) path = "data/sem_edges.tsv";
+    FILE* f = fopen(path, "rb");
+    if (!f) {
+        fprintf(stderr, "[重训] 语义边: 打不开 %s（跳过阶段三）\n", path);
+        return 0;
+    }
+
+    char line[512];
+    int added = 0, raised = 0, kept = 0, missing = 0, bad = 0;
+    while (fgets(line, sizeof(line), f)) {
+        int len = (int)strlen(line);
+        while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r')) line[--len] = 0;
+        if (len < 5) continue;
+
+        char* t1 = strchr(line, '\t');
+        if (!t1) { bad++; continue; }
+        *t1 = 0;
+        char* t2 = strchr(t1 + 1, '\t');
+        if (!t2) { bad++; continue; }
+        *t2 = 0;
+        char* t3 = strchr(t2 + 1, '\t');
+        if (t3) *t3 = 0;
+
+        const char* wa = line;
+        const char* wb = t1 + 1;
+        float ppmi = (float)atof(t2 + 1);
+        if (ppmi <= 0.0f) { bad++; continue; }
+
+        int ia = huarong_net_find_concept(vocab->net, wa);
+        int ib = huarong_net_find_concept(vocab->net, wb);
+        if (ia < 0 || ib < 0) { missing++; continue; }
+
+        /* PPMI 3~15 ⇒ 0.075~0.25 */
+        float w = 0.25f * (ppmi / 10.0f);
+        if (w > 0.25f) w = 0.25f;
+        if (w < 0.05f) w = 0.05f;
+
+        ReasoningNode* na = vocab->net->nodes[ia];
+        ReasoningNode* nb = vocab->net->nodes[ib];
+        if (!na || !nb) { missing++; continue; }
+
+        /* 🔴 只升不降：已存在的相邻边（1.0）绝不能被语义边覆盖 */
+        float cur = 0.0f;
+        if (sem_find_edge(na, nb, &cur) >= 0) {
+            if (w > cur + 1e-6f) {
+                if (huarong_net_add_connection(vocab->net, ia, ib, w) == 0) raised++;
+            } else {
+                kept++;
+            }
+        } else if (huarong_net_add_connection(vocab->net, ia, ib, w) == 0) {
+            added++;
+        }
+        cur = 0.0f;
+        if (sem_find_edge(nb, na, &cur) >= 0) {
+            if (w > cur + 1e-6f) {
+                if (huarong_net_add_connection(vocab->net, ib, ia, w) == 0) raised++;
+            } else {
+                kept++;
+            }
+        } else if (huarong_net_add_connection(vocab->net, ib, ia, w) == 0) {
+            added++;
+        }
+    }
+    fclose(f);
+    fprintf(stderr, "[重训] 语义边(PPMI): 新增 %d · 提升 %d · 已更强跳过 %d · 词不在图 %d · 坏行 %d\n",
+            added, raised, kept, missing, bad);
+    return added + raised;
+}
+
 int main(int argc, char** argv) {
     if (argc < 2) {
         fprintf(stderr, "用法: qa_retrain <qa_file> [max_pairs]\n");
@@ -580,6 +684,9 @@ int main(int argc, char** argv) {
     int words = promote_measured(vocab, mc, me, mx, em);
     if (em) printf("[重训] 词晋升：%d 个（判据：EM 白名单）\n", words);
     else    printf("[重训] 词晋升：%d 个（判据：词整体 min熵 ≥ %.2f）\n", words, me);
+
+    /* 阶段三：PPMI 语义边（默认关，PIVOTMIND_SEM_EDGE=1 才开） */
+    load_sem_edges(vocab);
 
     unsigned long long drop[3] = {0, 0, 0};
     wctx_drop_stats(drop);
