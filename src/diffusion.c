@@ -3133,6 +3133,33 @@ int diffusion_generate(DiffusionCtx* ctx,
                     fprintf(stderr, "[模板原料] 记入 %d 个三元组（词 %d 个）\n", rec, _m);
             }
         }
+                /* 输出层同名去重（CX-52 尾账配套）
+                 * 扩散主路径没有任何防重复机制：heat 那个疲劳度字段只被走边路径
+                 * 当打分乘子用，这里从来不看。结果就是
+                 *   「我喜欢音乐」→「喜欢音乐的喜欢音乐音效」
+                 * 池子里 喜欢音乐 / 喜欢 / 音乐 三个变体都在，拼起来前两段完全相同。
+                 * 只比字面，不比同族/子串 —— 免得误伤「喜欢」+「音乐」这种正常组合。 */
+                {
+                    static int _dd_on = -1;
+                    if (_dd_on < 0) {
+                        const char* _e = getenv("PIVOTMIND_DEDUP");
+                        _dd_on = (_e && _e[0] == '1');   /* 默认关，A/B 通过再改默认 */
+                    }
+                    if (_dd_on && word_buf[w]) {
+                        int _dup = 0;
+                        for (int _k = 0; _k < out; _k++) {
+                            if (output_words[_k] && strcmp(output_words[_k], word_buf[w]) == 0) {
+                                _dup = 1;
+                                break;
+                            }
+                        }
+                        if (_dup) {
+                            if (_anchor_dbg())
+                                fprintf(stderr, "[去重] 跳过重复词 %s\n", word_buf[w]);
+                            continue;
+                        }
+                    }
+                }
                 output_words[out++] = word_buf[w];
                 real_cnt++;
             }
@@ -3212,6 +3239,40 @@ int diffusion_generate(DiffusionCtx* ctx,
     }
 
     /* ── 静态数组不释放 (ctx生命周期管理) ── */
+
+
+    /* ── 重要性记账（CX-52 尾账第一步）──
+     * 结构里本来有两个专责字段，实测线上全是死的（heat 99.8%==1.0、
+     * selection_count 100%==0），所以 activation 被迫同时当「扩散温度」
+     * 和「重要性」用。这里先把「被选中」这件事记下来：
+     *   selection_count++   → 累计使用次数 = 重要性 / 频次
+     *   heat *= 0.97        → 疲劳度预算递减（原设计语义，防同一节点反复被选）
+     * 纯记账：全仓没有读这两个字段做决策的地方，所以对输出零影响。
+     * 开关 PIVOTMIND_SELECTION_RECORD=0 可关。 */
+    {
+        static int _sr_on = -1;
+        if (_sr_on < 0) {
+            const char* _e = getenv("PIVOTMIND_SELECTION_RECORD");
+            _sr_on = !(_e && _e[0] == '0');
+        }
+        if (_sr_on && ctx && ctx->vocab && ctx->vocab->net && out > 0) {
+            int _hit = 0;
+            for (int i = 0; i < out; i++) {
+                if (!output_words[i] || !output_words[i][0]) continue;
+                int nid = huarong_net_find_concept(ctx->vocab->net, output_words[i]);
+                if (nid < 0) continue;
+                ReasoningNode* _rn = ctx->vocab->net->nodes[nid];
+                if (!_rn) continue;
+                if (_rn->selection_count < 1000000000) _rn->selection_count++;
+                _rn->heat *= 0.97f;
+                if (_rn->heat < 0.05f) _rn->heat = 0.05f;
+                _hit++;
+            }
+            if (_anchor_dbg() && _hit > 0)
+                fprintf(stderr, "[重要性] 本轮记账 %d 个输出词\n", _hit);
+        }
+    }
+
 
     return out;
 }
