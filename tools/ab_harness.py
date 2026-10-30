@@ -46,12 +46,35 @@ def log(msg):
 
 
 def make_base():
-    """把生产 data 目录复制成 base 快照（一次性）。"""
+    """把生产 data 目录复制成 base 快照。
+
+    🔴🔴 必须先停服（2026-10-30 踩到的）：`pivotmind_state.dat` 只在 gateway
+    shutdown 时才落盘，运行中磁盘上那个文件还是**上一次停服时**的旧状态。
+    所以不停服就采，采到的是旧快照 —— 线上跑一整天对话后，base 与线上已经
+    分叉（实测：测量台 `学习编程 → 学习编程`，线上 `→ 学习编程的学习编程古文`），
+    A/B 结论没法外推。
+
+    代价：停服 + 起服约 35 秒（起服要加载 30MB state）。A/B 本来就是离线分析，
+    这个代价可以接受；不接受就只能在「拿旧快照」和「拿真状态」之间二选一。
+    """
     src = os.path.join(HOME, "data")
-    if os.path.exists(BASE):
-        shutil.rmtree(BASE)
-    os.makedirs(ABROOT, exist_ok=True)
-    shutil.copytree(src, BASE)
+    svc = "pivotmind-gateway"
+    was_active = subprocess.call(["systemctl", "is-active", "--quiet", svc],
+                                 stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL) == 0
+    if was_active:
+        log("[base] 线上在跑 ⇒ 先停服让 state 落盘（否则采到的是旧状态）")
+        subprocess.call(["systemctl", "stop", svc])
+        time.sleep(3)
+    try:
+        if os.path.exists(BASE):
+            shutil.rmtree(BASE)
+        os.makedirs(ABROOT, exist_ok=True)
+        shutil.copytree(src, BASE)
+    finally:
+        if was_active:
+            log("[base] 起服（约 28s 才 ready，但 A/B 用独立实例，不等它）")
+            subprocess.call(["systemctl", "start", svc])
     n = 0
     for name in os.listdir(BASE):
         p = os.path.join(BASE, name)
@@ -63,7 +86,9 @@ def make_base():
                       if os.path.isfile(os.path.join(BASE, f))) / 1048576.0))
     st = os.path.join(BASE, "pivotmind_state.dat")
     if os.path.exists(st):
-        log("[base] state %.0f MB" % (os.path.getsize(st) / 1048576.0))
+        log("[base] state %.0f MB · mtime %s" %
+            (os.path.getsize(st) / 1048576.0,
+             time.strftime("%H:%M:%S", time.localtime(os.path.getmtime(st)))))
 
 
 def token_of(d):
@@ -178,6 +203,16 @@ def main():
     if not os.path.isdir(BASE):
         log("!! 没有 base 快照，先跑 --make-base")
         return 2
+
+    # base 陈旧告警：快照越旧，A/B 结论越不能外推到线上（2026-10-30 教训）
+    st_path = os.path.join(BASE, "pivotmind_state.dat")
+    if os.path.exists(st_path):
+        age_h = (time.time() - os.path.getmtime(st_path)) / 3600.0
+        log("[base] 快照 age=%.1f 小时 · %.0f MB" %
+            (age_h, os.path.getsize(st_path) / 1048576.0))
+        if age_h > 2.0:
+            log("[base] ⚠️ 快照超过 2 小时，线上 state 可能已漂移 ⇒ "
+                "结论只代表「该快照下」的对比，别直接外推到线上")
 
     qs = ([x for x in args.questions.split(",") if x] or DEFAULT_QS)
     envs = []
