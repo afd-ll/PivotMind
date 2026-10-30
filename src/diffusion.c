@@ -815,9 +815,28 @@ int diffusion_spread(SubTopology* layer,
             continue;
         }
 
+        /* ── CX-59：跳过「词 → 自己的组成字」这条边（PIVOTMIND_SKIP_CHAR_EDGE=1）──
+         * 词→组成字 权重是 1.0（跟语序边同级），而真正的语义边只有 0.25；两者各除 √deg
+         * 之后打平，但单字节点动辄 300~700 个边、候选多二十倍 ⇒ 垃圾（脑残/吉姆/两台）必然占满。
+         * 只跳过这一跳：不删边、不改图、不动锚定。 */
+        static int _skip_ce = -1;
+        if (_skip_ce < 0) {
+            const char* _e = getenv("PIVOTMIND_SKIP_CHAR_EDGE");
+            _skip_ce = (_e && _e[0] == '1') ? 1 : 0;
+        }
+        const char* _fn = (node->concept && node->concept[0]) ? node->concept : NULL;
+
         for (int c = 0; c < _ec; c += _step) {
             int tid = node->edges[c].target ? node->edges[c].target->node_id : -1;
             if (tid < 0 || tid >= layer->net->node_count) continue;
+            if (_skip_ce && _fn) {
+                const char* _tn = node->edges[c].target->concept;
+                /* 源是多字词、目标是单字、且该字出现在源词里 ⇒ 这是「写法」不是「语义」。
+                 * 🔴 不能写 `_tn[1]==' '` —— 汉字在 UTF-8 里是 3 字节，那样永远不成立。 */
+                if (_tn && pm_is_single_char(_tn) && pm_is_zh_char(_tn) &&
+                    !pm_is_single_char(_fn) && strstr(_fn, _tn))
+                    continue;
+            }
             float w = node->edges[c].weight * decay;
             if (_ec > 0) {
                 w /= _hub_on ? logf(1.0f + (float)_ec) : sqrtf((float)_ec);
@@ -3002,8 +3021,17 @@ int diffusion_generate(DiffusionCtx* ctx,
         }
         out = 0;
         {
-            /* 口语短句：≤4 **实词**。连接符不占这个额度（它不加长语义，只加关节）。 */
-            const int max_reply_words = MAX_REPLY_WORDS;
+            /* 口语短句：≤4 **实词**。连接符不占这个额度（它不加长语义，只加关节）。
+             * PIVOTMIND_MAX_WORDS：仅实验用（08-15 测过 6 词只放大拼接垃圾，
+             * 但那是接语义边之前；条件变了要能重测）。不设 = 原值 4。 */
+            static int _mrw = -1;
+            if (_mrw < 0) {
+                const char* e = getenv("PIVOTMIND_MAX_WORDS");
+                _mrw = (e && e[0]) ? atoi(e) : MAX_REPLY_WORDS;
+                if (_mrw < 2) _mrw = 2;
+                if (_mrw > MAX_REPLY_WORDS * 3) _mrw = MAX_REPLY_WORDS * 3;
+            }
+            const int max_reply_words = _mrw;
             const int inject = _conn_inject_on();
             int real_cnt = 0;
             int inj_cnt = 0;          /* CX-39：连接符每次回复最多插 1 个 */
