@@ -7,6 +7,7 @@
  */
 
 #include "diffusion.h"
+#include "path_encoding.h"
 #include "emergent_pos.h"
 #include "cognitive_controller.h"
 #include "node_cache.h"   /* v0.5.10: 按需解冻 node_cache_thaw */
@@ -3065,6 +3066,73 @@ int diffusion_generate(DiffusionCtx* ctx,
                     }
                 }
                 if (out >= max_output) break;
+        /* ── 模板原料：给 freq_table 接上生产端（CX-59 二次接线）──
+         * freq_table 原本只有 topology_walk_greedy_impl 在写，
+         * 但生产主路径是扩散，走边只是「策略 3 最终回退」
+         * ⇒ entry_count 恒 0 ⇒ template_auto_build 每次第一行就 return
+         *   （线上实测 2799 次「freq 不足: entries=0」）
+         * 这里把本轮输出的词序列按三元组记进去。
+         * 纯记账、不改输出。 */
+        {
+            static int _fr_on = -1;
+            if (_fr_on < 0) {
+                const char* _e = getenv("PIVOTMIND_FREQ_RECORD");
+                _fr_on = !(_e && _e[0] == '0');
+            }
+            /* 也记用户输入：我们自己的回复普遍只有 2 个词（实测 40 轮只出 6 个三元组），
+             * 光从回复学语法 = 让只会说两个字的人自己悟语法。用户说的是真句子。
+             * 分词：最长匹配（4→3→2→1 汉字），与 qa_bigram 口径一致。 */
+            if (_fr_on && ctx->master && ctx->master->freq_table && input && input[0]) {
+                int _iid[DIFF_MAX_SEQUENCE];
+                int _im = 0;
+                const char* _p = input;
+                while (*_p && _im < DIFF_MAX_SEQUENCE) {
+                    int _hit = 0;
+                    for (int L = 12; L >= 3; L -= 3) {
+                        char _w[16];
+                        if (L >= (int)sizeof(_w)) continue;
+                        memcpy(_w, _p, (size_t)L);
+                        _w[L] = 0;
+                        int nid = huarong_net_find_concept(ctx->vocab->net, _w);
+                        if (nid >= 0) { _iid[_im++] = nid; _p += L; _hit = 1; break; }
+                    }
+                    if (!_hit) {
+                        if (((unsigned char)*_p) < 0x80) { _p++; continue; }
+                        char _w[8];
+                        memcpy(_w, _p, 3);
+                        _w[3] = 0;
+                        int nid = huarong_net_find_concept(ctx->vocab->net, _w);
+                        if (nid >= 0) _iid[_im++] = nid;
+                        _p += 3;
+                    }
+                }
+                for (int i = 0; i + 2 < _im; i++) {
+                    if (_iid[i] == _iid[i + 1] || _iid[i + 1] == _iid[i + 2]) continue;
+                    path_freq_table_record(ctx->master->freq_table, ctx->vocab->topo_id,
+                                           _iid[i], _iid[i + 1], _iid[i + 2]);
+                }
+                if (_anchor_dbg())
+                    fprintf(stderr, "[模板原料] 输入分词 %d 词\n", _im);
+            }
+            if (_fr_on && ctx->master && ctx->master->freq_table && out >= 3) {
+                int _ids[DIFF_MAX_SEQUENCE];
+                int _m = 0;
+                for (int i = 0; i < out; i++) {
+                    if (!output_words[i]) continue;
+                    int nid = huarong_net_find_concept(ctx->vocab->net, output_words[i]);
+                    if (nid >= 0) _ids[_m++] = nid;
+                }
+                int rec = 0;
+                for (int i = 0; i + 2 < _m; i++) {
+                    if (_ids[i] == _ids[i + 1] || _ids[i + 1] == _ids[i + 2]) continue;
+                    path_freq_table_record(ctx->master->freq_table, ctx->vocab->topo_id,
+                                           _ids[i], _ids[i + 1], _ids[i + 2]);
+                    rec++;
+                }
+                if (_anchor_dbg())
+                    fprintf(stderr, "[模板原料] 记入 %d 个三元组（词 %d 个）\n", rec, _m);
+            }
+        }
                 output_words[out++] = word_buf[w];
                 real_cnt++;
             }
