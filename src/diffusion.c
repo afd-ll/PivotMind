@@ -1320,19 +1320,64 @@ static int _pool_cps(const char* s, unsigned* out, int max) {
 }
 
 /* 同族判定：共享任一汉字。至少一边含非汉字时退化为前缀判据（learn/learning）。 */
-static int _pool_same_family(const char* a, const char* b) {
+static int _pool_same_family_mode(const char* a, const char* b, int strict_arg) {
     if (!a || !b || !a[0] || !b[0]) return 0;
     if (strcmp(a, b) == 0) return 1;
+
+    /* ── CX-59 严格模式（PIVOTMIND_FAMILY_STRICT=1，默认关）──
+     * 默认「共享任一汉字 ⇒ 同族」在语义边接上后过严：音效/音箱/杂音/影音 是四个不同的
+     * 东西，却被判成一族 ⇒ 只剩最高分那个，反而让不共享汉字的「欢欢」溜进池子。
+     * 严格模式只认：字集相同（换序）/ 互相包含 / 共享 ≥2 字。 */
+    /* 环境变量只作实验用的全局强制；正常走调用方按通道传入的 strict_arg */
+    /* PIVOTMIND_FAMILY_STRICT: 1=全局强制严(实验)  0=全局强制宽(旧行为，用于 A/B 对照)
+     * 未设 = 按通道（输入宽 / 外词严），默认行为。 */
+    static int _force = -2;
+    if (_force == -2) {
+        const char* e = getenv("PIVOTMIND_FAMILY_STRICT");
+        if (!e || !e[0]) _force = -1;
+        else _force = (e[0] == '1') ? 1 : 0;
+    }
+    int _strict = (_force >= 0) ? _force : strict_arg;
+
     unsigned ca[POOL_CP_MAX], cb[POOL_CP_MAX];
     int na = _pool_cps(a, ca, POOL_CP_MAX);
     int nb = _pool_cps(b, cb, POOL_CP_MAX);
     if (na > 0 && nb > 0) {
         if (na > POOL_CP_MAX) na = POOL_CP_MAX;
         if (nb > POOL_CP_MAX) nb = POOL_CP_MAX;
+        if (!_strict) {
+            for (int i = 0; i < na; i++)
+                for (int k = 0; k < nb; k++)
+                    if (ca[i] == cb[k]) return 1;
+            return 0;
+        }
+        /* ③ 互相包含（同表 utf8 子串即可） */
+        size_t la = strlen(a), lb = strlen(b);
+        if (la != lb) {
+            const char* sh = (la < lb) ? a : b;
+            const char* lo = (la < lb) ? b : a;
+            if (strstr(lo, sh) != NULL) return 1;
+        }
+        /* ② 字集相同（换序） */
+        if (na == nb) {
+            unsigned ta[POOL_CP_MAX], tb[POOL_CP_MAX];
+            memcpy(ta, ca, sizeof(unsigned) * (size_t)na);
+            memcpy(tb, cb, sizeof(unsigned) * (size_t)nb);
+            for (int i = 0; i < na; i++)
+                for (int k = i + 1; k < na; k++) {
+                    if (ta[k] < ta[i]) { unsigned t = ta[i]; ta[i] = ta[k]; ta[k] = t; }
+                    if (tb[k] < tb[i]) { unsigned t = tb[i]; tb[i] = tb[k]; tb[k] = t; }
+                }
+            int same = 1;
+            for (int i = 0; i < na; i++) if (ta[i] != tb[i]) { same = 0; break; }
+            if (same) return 1;
+        }
+        /* ④ 共享 ≥2 个字 */
+        int shared = 0;
         for (int i = 0; i < na; i++)
             for (int k = 0; k < nb; k++)
-                if (ca[i] == cb[k]) return 1;
-        return 0;
+                if (ca[i] == cb[k]) { shared++; break; }
+        return shared >= 2 ? 1 : 0;
     }
     if (na == -1 || nb == -1) {          /* 有英文/符号：只认前缀包含 */
         size_t la = strlen(a), lb = strlen(b);
@@ -1410,6 +1455,35 @@ static int _pool_refine(const char** buf, POSTag* pos, unsigned char* src,
      * （把正常候选全砍光 ⇒ 触发保底档无下限 ⇒ 候选全涌进 ⇒ 输出乱码）。 */
     if (_anchor_dbg())
         fprintf(stderr, "[阈值] peak=%.3f n=%d\n", (double)peak, n);
+    if (_anchor_dbg()) {
+        /* 双通道峰值诊断（CX-59）：决定「按全局 peak 设下限」是否把外词砍光。
+         * in_msg 此时还没算，用 strstr 现算。 */
+        float in_pk = 0.0f, ex_pk = 0.0f;
+        int in_n = 0, ex_n = 0;
+        for (int i = 0; i < n; i++) {
+            if (!buf[i]) continue;
+            int hit = (msg && msg[0] && strstr(msg, buf[i])) ? 1 : 0;
+            if (hit) { in_n++; if (score[i] > in_pk) in_pk = score[i]; }
+            else     { ex_n++; if (score[i] > ex_pk) ex_pk = score[i]; }
+        }
+        fprintf(stderr, "[通道] in_n=%d in_pk=%.2f | ex_n=%d ex_pk=%.2f | 全局peak=%.2f\n",
+                in_n, (double)in_pk, ex_n, (double)ex_pk, (double)peak);
+        /* 外词前 8 名（按分数），看「保底名额」能捞到什么 */
+        int shown = 0;
+        float last = 1e9f;
+        for (int r = 0; r < 8; r++) {
+            int best = -1;
+            for (int i = 0; i < n; i++) {
+                if (!buf[i]) continue;
+                if (msg && msg[0] && strstr(msg, buf[i])) continue;
+                if (score[i] >= last) continue;
+                if (best < 0 || score[i] > score[best]) best = i;
+            }
+            if (best < 0) break;
+            fprintf(stderr, "[外词] %d) %s = %.2f\n", ++shown, buf[best], (double)score[best]);
+            last = score[best];
+        }
+    }
 
     float base_f = 0.12f;
     {
@@ -1428,6 +1502,30 @@ static int _pool_refine(const char** buf, POSTag* pos, unsigned char* src,
         const char* e = getenv("PIVOTMIND_POOL_FLOOR");
         if (e && e[0]) { float v = (float)atof(e); if (v >= 0.0f && v <= 1.0f) base_f = v; }
     }
+
+    /* ── CX-59 双通道下限（2026-10-30）──
+     * 两条通道的分数尺度天生差 3~30 倍：输入词吃相邻边(1.0)，外词吃语义边(0.25) 还要再除 √deg。
+     * 用同一个「0.12×全局peak」卡，等于永远只放一个外词进来。
+     * 判别量 = ex_pk/in_pk：外词通道真有信号时（音箱/杂音/影音、教程/学者）才按自己峰值设下限；
+     * 没信号时（苹果 → 就吃/吃烤/吃屎）维持原样，不给自己制造跑题。 */
+    float in_pk = 0.0f, ex_pk = 0.0f;
+    for (int i = 0; i < n; i++) {
+        if (!buf[i]) continue;
+        int _h = (msg && msg[0] && strstr(msg, buf[i])) ? 1 : 0;
+        if (_h) { if (score[i] > in_pk) in_pk = score[i]; }
+        else    { if (score[i] > ex_pk) ex_pk = score[i]; }
+    }
+    float _ex_ratio_min = 0.30f;
+    {
+        const char* e = getenv("PIVOTMIND_EX_RATIO");
+        if (e && e[0]) { float v = (float)atof(e); if (v > 0.0f) _ex_ratio_min = v; }
+    }
+    int ex_channel_ok = (in_pk > 1e-6f && (ex_pk / in_pk) >= _ex_ratio_min);
+    if (_anchor_dbg())
+        fprintf(stderr, "[双通道] in_pk=%.2f ex_pk=%.2f 比=%.2f 闸=%s\n",
+                (double)in_pk, (double)ex_pk,
+                (double)(in_pk > 1e-6f ? ex_pk / in_pk : 0.0f),
+                ex_channel_ok ? "开(外词按自己峰值)" : "关(维持全局下限)");
 
     int order[DIFF_MAX_SEQUENCE];
     int in_msg[DIFF_MAX_SEQUENCE];
@@ -1457,8 +1555,14 @@ static int _pool_refine(const char** buf, POSTag* pos, unsigned char* src,
         for (int i = 0; i < n; i++) {
             if (!buf[i]) continue;
             /* ① 相对分数下限：只对 final 候选生效（锚定/回退来源不参与） */
-            if (floor_v > 0.0f && src[i] == 1 && score[i] < floor_v) continue;
-            const char* hit = (msg && msg[0]) ? strstr(msg, buf[i]) : NULL;
+            const char* hit0 = (msg && msg[0]) ? strstr(msg, buf[i]) : NULL;
+            if (floor_v > 0.0f && src[i] == 1) {
+                /* 双通道：外词对 ex_pk 比，输入词对 in_pk 比（闸没开就一律用全局 floor_v） */
+                float _pk = hit0 ? in_pk : ex_pk;
+                float _fl = (ex_channel_ok && !hit0 && _pk > 1e-6f) ? _pk * f : floor_v;
+                if (score[i] < _fl) continue;
+            }
+            const char* hit = hit0;
             in_msg[i] = hit ? 1 : 0;
             pos_in[i] = hit ? (int)(hit - msg) : INT_MAX;
             order[m++] = i;
@@ -1498,7 +1602,10 @@ static int _pool_refine(const char** buf, POSTag* pos, unsigned char* src,
                      * å®æµ：å¤è¯ `é³æ` ä¸è¾å¥è¯ `é³ä¹` å±äº«ãé³ã â è¢«åæ
                      * â `æåæ¬¢é³ä¹` åªè½è¾åºãåæ¬¢é³ä¹çåæ¬¢é³ä¹ãã */
                     if ((in_msg[idx] ? 1 : 0) != (in_msg[keep_idx[k]] ? 1 : 0)) continue;
-                    if (_pool_same_family(buf[idx], buf[keep_idx[k]])) {
+                    /* 按通道取严格度：两边都是输入词 ⇒ 宽（切分竞争）；两边都是外词 ⇒ 严 */
+                    int _same = _pool_same_family_mode(buf[idx], buf[keep_idx[k]],
+                                                       (in_msg[idx] && in_msg[keep_idx[k]]) ? 0 : 1);
+                    if (_same) {
                         conflicts++;
                         if (fam_at < 0) fam_at = k;
                     }
