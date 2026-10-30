@@ -806,7 +806,7 @@ int diffusion_spread(SubTopology* layer,
         static int _hub_on = -1;
         if (_hub_on < 0) {
             const char* _he = getenv("PIVOTMIND_HUB_SPREAD");
-            _hub_on = (_he && _he[0] == '1') ? 1 : 0;
+            _hub_on = !(_he && _he[0] == '0');   /* 默认开：须与语义提名闸配套（单独开会带噪声）*/
         }
         int _ec   = node->edge_count;
         int _step = 1;
@@ -1450,7 +1450,8 @@ static int _pool_better(int a, int b, const char** buf, const float* score,
 }
 
 /* 原地精修候选池，返回新长度。score 就地改写（锚定词按 peak 对齐）。 */
-static int _pool_refine(const char** buf, POSTag* pos, unsigned char* src,
+static int _pool_refine(DiffusionCtx* ctx,
+                        const char** buf, POSTag* pos, unsigned char* src,
                         float* score, int n, const char* msg) {
     if (n <= 0) return 0;
     static int _on = -1;
@@ -1502,6 +1503,60 @@ static int _pool_refine(const char** buf, POSTag* pos, unsigned char* src,
             if (best < 0) break;
             fprintf(stderr, "[外词] %d) %s = %.2f\n", ++shown, buf[best], (double)score[best]);
             last = score[best];
+        }
+    }
+
+    /* ── 语义提名闸（CX-59 · 2026-10-30，v2 剔除版）──
+     * 外词候选必须有一条「语义边」（权重 <= 0.35）连回输入词，否则**剔除**。
+     * 依据：`编程` 的 50 条边里，1.0 的是语序/组成字（疗程/怎么/需要），
+     * 0.25 的才是语义（范式/编译器/语言/程序员）；而语料 217 万行里
+     * 「编程」与「疗程」从不同时出现 —— 那条 1.0 不是共现。语序边从此只排顺序。
+     * v1 只降权 0.15：实测 `影音`/`弹簧` 掉出前 4 了，但 `疗程` 原来分高、×0.15 后
+     * 仍在下限之上（输出还是「编程的疗程难民」）。所以改为：
+     *   不够用的才降权 —— 剩下 >=3 个就整批剔除（score=0 交给下限砍），
+     *   否则退回降权，避免池子空掉掉进字级兜底（历史实测 19 个随机单字串）。
+     * 默认开（A/B 5 改善 / 0 变差后转正），PIVOTMIND_SEM_NOMINATE=0 关。 */
+    {
+        static int _sn = -1;
+        if (_sn < 0) {
+            const char* _e = getenv("PIVOTMIND_SEM_NOMINATE");
+            _sn = !(_e && _e[0] == '0');   /* 默认开：=0 才关 */
+        }
+        if (_sn && ctx && ctx->vocab && ctx->vocab->net && msg && msg[0]) {
+            unsigned char _bad[DIFF_MAX_SEQUENCE];
+            int _ex_all = 0, _bad_n = 0;
+            for (int i = 0; i < n; i++) {
+                _bad[i] = 0;
+                if (!buf[i] || !buf[i][0]) continue;
+                if (strstr(msg, buf[i])) continue;       /* 输入通道：不参与提名 */
+                _ex_all++;
+                int _nid = huarong_net_find_concept(ctx->vocab->net, buf[i]);
+                if (_nid < 0) continue;
+                ReasoningNode* _nd = ctx->vocab->net->nodes[_nid];
+                if (!_nd || !_nd->edges) continue;
+                int _has_sem = 0;
+                for (int _c = 0; _c < _nd->edge_count; _c++) {
+                    ReasoningNode* _tg = _nd->edges[_c].target;
+                    if (!_tg || !_tg->concept || !_tg->concept[0]) continue;
+                    if (_nd->edges[_c].weight > 0.35f) continue;   /* 语序边不提名 */
+                    if (strstr(msg, _tg->concept)) { _has_sem = 1; break; }
+                }
+                if (!_has_sem) { _bad[i] = 1; _bad_n++; }
+            }
+            int _hard = (n - _bad_n >= 3);
+            int _applied = 0;
+            for (int i = 0; i < n; i++) {
+                if (!_bad[i]) continue;
+                if (_hard) score[i] = 0.0f;      /* 交给后面的下限砍掉 */
+                else       score[i] *= 0.15f;    /* 池子不够用，只降权 */
+                _applied++;
+                if (_anchor_dbg())
+                    fprintf(stderr, "[语义提名] %s 无语义来源，%s\n",
+                            buf[i], _hard ? "剔除" : "降权");
+            }
+            if (_anchor_dbg())
+                fprintf(stderr, "[语义提名] 外词 %d · 无来源 %d · 模式=%s · 处理 %d\n",
+                        _ex_all, _bad_n, _hard ? "剔除" : "降权", _applied);
         }
     }
 
@@ -2992,7 +3047,7 @@ int diffusion_generate(DiffusionCtx* ctx,
          * MAX_REPLY_WORDS 的 4 个槽，输出成「学习的编程的我想编程」。 */
         {
             int _before = word_count;
-            word_count = _pool_refine(word_buf, word_pos, word_src, word_score,
+            word_count = _pool_refine(ctx, word_buf, word_pos, word_src, word_score,
                                       word_count, input);
             if (_anchor_dbg() && _before != word_count)
                 fprintf(stderr, "[精修] 候选 %d → %d（同族收敛 + 分数下限）\n",
