@@ -28,7 +28,7 @@
 /** 每个词类种子词数上限（中英文各一个表）
  *  v2.1 阶段0-A：5 → 32 —— 名词需 10~20 个单字种子（喂料路径按单字切分，
  *  多字种子永不命中，名词是配价宾语最关键类却只有"人"1 个单字种子）。 */
-#define POS_ANCHOR_MAX_SEEDS    32
+#define POS_ANCHOR_MAX_SEEDS    320
 
 /** 涌现词类最大数（预留扩展，当前只用 10 个硬编码锚点） */
 #define MAX_EMERGENT_CLASSES    32
@@ -46,6 +46,7 @@
 #define EMERGE_CHECK_INTERVAL   500
 
 /** 默认相似度阈值 — 低于此值不归入任何已知词类 */
+#define POS_ANCHOR_MIN_EDGES   30
 #define POS_ANCHOR_DEFAULT_THRESHOLD 0.50f
 
 /** 锚点中心微调学习率（小步慢移，保证稳定） */

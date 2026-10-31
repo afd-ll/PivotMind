@@ -27,7 +27,7 @@ CORPORA = _c.split(":") if _c else [
 MIN_DF = 20          # 词频下限（PMI 对稀疏不敏感，低频词统计不可靠）
 MIN_CO = 5           # 最小共现次数（实测 c4 的「出身/及格」是巧合）
 PPMI_MIN = 3.0       # PPMI 阈值
-MAX_PER_WORD = 40    # 每词最多保留多少条语义边（防爆）
+MAX_PER_WORD = 0     # 0 = 不限（上游全开放；质量由 PPMI_MIN / MIN_CO 把关，不再按条数硬截断）
 MAX_SENT_WORDS = 40  # 超长句不统计（避免 O(n^2) 爆炸）
 MAX_LEN = 4
 
@@ -132,7 +132,7 @@ def main():
     per = defaultdict(int)
     out = []
     for a, b, p, c in edges:
-        if per[a] >= MAX_PER_WORD or per[b] >= MAX_PER_WORD:
+        if MAX_PER_WORD > 0 and (per[a] >= MAX_PER_WORD or per[b] >= MAX_PER_WORD):
             continue
         per[a] += 1
         per[b] += 1
