@@ -7,6 +7,7 @@
  */
 
 #include "diffusion.h"
+#include "transition_model.h"   /* CX-39: 走边生成用转移表 */
 #include "path_encoding.h"
 #include "emergent_pos.h"
 #include "cognitive_controller.h"
@@ -2257,6 +2258,90 @@ int diffusion_generate(DiffusionCtx* ctx,
         float boost = 0.5f + jac;  /* jac=0→0.5x, jac=1.0→1.5x */
         node->activation = _act_bound(node->activation * boost);
     }
+    /* ──️ 前沿回写：让扩散真的能走出去 ──────────────────────
+     * 病灶：active_ids[] 在本文件只有两个写入点（段A/段B 输入子串滑窗），
+     * 而扩散算出来的 front[] 只用来给 node->activation 乘 boost，
+     * **从不回写** active_ids。于是下一轮扩散的起点还是那批输入词
+     * ⇒ 生成只能复述输入。这是「激活集 100% 是输入词」的真正成因。
+     *
+     * 改法：把前沿里够强的节点回写进 active_ids，让下一轮从它们出发。
+     *
+     * 三道闸（都保守）：
+     *   1. 只收 front[] 里已点亮的（pool 里没过闸的不算）
+     *   2. 激活值 >= 输入锚点均值 × WALK_RATIO（默认 1.0）
+     *   3. 回写后总数 <= 原 active_count 的 WALK_MAXFOLD 倍（默认 2），
+     *      且不超 DIFF_MAX_CANDIDATES
+     *
+     * 🔴 默认关（PIVOTMIND_WALK_OUT=1 才开）——这是行为改动，
+     *    必须先用固定 state 副本做 A/B 再决定默认开不开。
+     *    跟 PIVOTMIND_HUB_SPREAD / PIVOTMIND_ACT_SCALE / PIVOTMIND_TM_ORDER 同一套开关风格。
+     */
+    {
+        static int _walk_on = -1;
+        static float _walk_ratio = 1.0f;
+        static int _walk_maxfold = 2;
+        if (_walk_on < 0) {
+            const char* _e = getenv("PIVOTMIND_WALK_OUT");
+            _walk_on = (_e && _e[0] == '1') ? 1 : 0;
+            const char* _r = getenv("PIVOTMIND_WALK_RATIO");
+            if (_r && _r[0]) { float _f = (float)atof(_r); if (_f > 0.0f) _walk_ratio = _f; }
+            const char* _m = getenv("PIVOTMIND_WALK_MAXFOLD");
+            if (_m && _m[0]) { int _v = atoi(_m); if (_v >= 1) _walk_maxfold = _v; }
+            if (_walk_on) {
+                fprintf(stderr, "[WALK-OUT] 开启: ratio=%.2f maxfold=%d\n", _walk_ratio, _walk_maxfold);
+            }
+        }
+        if (_walk_on && front && total_spread > 0 && active_count > 0) {
+            /* 锚点强度基准：输入激活集的均值 */
+            double _anchor_sum = 0.0;
+            int    _anchor_n   = 0;
+            for (int _a = 0; _a < active_count; _a++) {
+                int _id = active_ids[_a];
+                if (_id < 0 || _id >= ctx->vocab->net->node_count) continue;
+                ReasoningNode* _an = ctx->vocab->net->nodes[_id];
+                if (!_an) continue;
+                _anchor_sum += (double)_an->activation;
+                _anchor_n++;
+            }
+            float _anchor_avg = (_anchor_n > 0) ? (float)(_anchor_sum / _anchor_n) : 0.0f;
+            float _thr = _anchor_avg * _walk_ratio;
+
+            int _cap = active_count * _walk_maxfold;
+            if (_cap > DIFF_MAX_CANDIDATES) _cap = DIFF_MAX_CANDIDATES;
+
+            int _added = 0;
+            for (int _si = 0; _si < total_spread; _si++) {
+                if (active_count >= _cap) break;
+                int _nid = front[_si].node_id;
+                if (_nid < 0 || _nid >= ctx->vocab->net->node_count) continue;
+                ReasoningNode* _n = ctx->vocab->net->nodes[_nid];
+                if (!_n || _n->edge_count == 0) continue;
+                if (_n->activation < _thr) continue;   /* 闸 2：太弱的不要 */
+
+                /* 去重：已在 active_ids 里就跳过 */
+                int _dup = 0;
+                for (int _d = 0; _d < active_count; _d++) {
+                    if (active_ids[_d] == _nid) { _dup = 1; break; }
+                }
+                if (_dup) continue;
+
+                active_ids[active_count++] = _nid;
+                _added++;
+            }
+
+            static int _walk_dbg = -1;
+            if (_walk_dbg < 0) {
+                const char* _d = getenv("PIVOTMIND_WALK_DBG");
+                _walk_dbg = (_d && _d[0] == '1') ? 1 : 0;
+            }
+            if (_walk_dbg) {
+                fprintf(stderr, "[WALK-OUT] 输入%d → 回写%d → 总%d / 上限%d（锚点均%.3f 阈%.3f）\n",
+                        active_count - _added, _added, active_count, _cap, _anchor_avg, _thr);
+            }
+            ctx->walk_added_out = _added;   /* 记账，供诊断用 */
+        }
+    }
+
     /* ── CX-52 第二步：扩散后的稳态缩放（synaptic scaling）──
      * 第一步只把「爆炸」压住了，但稳态仍停在 CAP 附近（实测词汇拓扑均值 1.81、最高 12.6），
      * 而其余 11 个子拓扑都在 0.30~0.34 —— 词汇拓扑的 activation 语义整体偏高一个量级。
@@ -3002,6 +3087,151 @@ int diffusion_generate(DiffusionCtx* ctx,
                 word_pos[word_count] = english_pos_lookup(final[i].word);
             word_count++;
             final[i].used = 1;
+        }
+
+        /* ── CX-39 走边生成：用转移表给候选词定顺序 ─────────────────
+         *
+         * 位置说明（重要）：这段必须在**主路径**（有 EmergentPOS 的 if 分支），
+         * 不在 else 降级路径。之前一版插错了位置，日志里完全没有痕迹——
+         * 教训：加诊断日志要用「无条件打印」确认代码真的在跑。
+         *
+         * 做什么：word_buf[] 是主路径的候选词集（已过相关性闸门、虚词过滤、
+         * 单字过滤）。现在用转移表 tm_top_next/tm_prob 重排它，
+         * 让相邻词在语料里真的见过面。
+         *
+         * 三条退路（对应 CX-39 要求）：
+         *   · 走死：当前词没后继 → 停在已排好的部分
+         *   · 重复：已用词不再进
+         *   · 不回到话题：只接受**池内**的后继（池 = word_buf），池外一律不选
+         *
+         * 长度归一化：用平均 logP 比较，不用总和。
+         *
+         * 🔴 默认关（PIVOTMIND_WALK_GEN=1 才开）。
+         */
+        {
+            static int _wg_on = -1;
+            static int _wg_maxturn = 3;
+            if (_wg_on < 0) {
+                const char* _e = getenv("PIVOTMIND_WALK_GEN");
+                _wg_on = (_e && _e[0] == '1') ? 1 : 0;
+                if (_wg_on) fprintf(stderr, "[WALK-GEN] 开启\n");
+            }
+
+            fprintf(stderr, "[WALK-GEN-CHK] on=%d word_count=%d\n", _wg_on, word_count);
+
+            if (_wg_on && word_count >= 2 && ctx && ctx->vocab && ctx->vocab->net) {
+                TransitionModel* _tm = tm_global();
+                int _pairs = _tm ? tm_pair_count(_tm) : 0;
+                fprintf(stderr, "[WALK-GEN-CHK] tm_pairs=%d\n", _pairs);
+
+                if (_tm && _pairs > 0) {
+                    /* 词 → node_id */
+                    int _ids[DIFF_MAX_SEQUENCE];
+                    int _n = 0;
+                    for (int _w = 0; _w < word_count && _n < DIFF_MAX_SEQUENCE; _w++) {
+                        int _nid = huarong_net_find_concept(ctx->vocab->net, word_buf[_w]);
+                        if (_nid < 0) continue;
+                        _ids[_n++] = _nid;
+                    }
+
+                    if (_n >= 2) {
+                        /* 走链：从第一个词出发，每步在**候选池内**找后继 */
+                        int _walk[DIFF_MAX_SEQUENCE];
+                        int _wn = 0;
+                        unsigned char _used[DIFF_MAX_SEQUENCE];
+                        memset(_used, 0, sizeof(_used));
+
+                        _walk[_wn++] = _ids[0];
+
+                        { int _nb[16]; int _cnt = tm_top_next(_tm, _ids[0], _nb, 16); (void)0;
+                          { int _hit=0; for(int _q=0;_q<_cnt;_q++) for(int _z=0;_z<_n;_z++) if(_ids[_z]==_nb[_q]) _hit++; fprintf(stderr,"[WALK-DBG] 后继%d个/池内命中%d\n", _cnt, _hit); }
+                          fprintf(stderr, "[WALK-DBG] 起始词=%s(id=%d) 后继数=%d 池内=%d\n",
+                                  word_buf[0], _ids[0], _cnt, _n); }
+                        _used[0] = 1;
+                        int _cur = _ids[0];
+                        int _dead = 0;
+                        int _nextbuf[32];
+
+                        while (_wn < _n) {
+                            int _nn = tm_top_next(_tm, _cur, _nextbuf, 32);
+                            if (_nn <= 0) break;                 /* 退路①：走死 */
+
+                            int _pick = -1;
+                            float _bp = -1.0f;
+                            for (int _j = 0; _j < _nn; _j++) {
+                                for (int _p = 0; _p < _n; _p++) {
+                                    if (_ids[_p] != _nextbuf[_j]) continue;
+                                    if (_used[_p]) continue;      /* 退路②：不重复 */
+                                    float _pr = tm_prob(_tm, _cur, _nextbuf[_j]);
+                                    if (_pr > _bp) { _bp = _pr; _pick = _p; }
+                                    break;
+                                }
+                            }
+                            if (_pick < 0) {
+                                /* 池内没有可用后继 —— 退路③：不再硬凑 */
+                                if (++_dead >= _wg_maxturn) break;
+                                break;
+                            }
+                            _used[_pick] = 1;
+                            _cur = _ids[_pick];
+                            _walk[_wn++] = _cur;
+                            _dead = 0;
+                        }
+
+                        /* 长度归一化比较：走链平均 vs 原序平均 */
+                        float _wlp = (float)tm_chain_logprob(_tm, _walk, _wn);
+                        float _wavg = (_wn > 1) ? _wlp / (float)(_wn - 1) : -99.0f;
+                        float _olp = (float)tm_chain_logprob(_tm, _ids, _n);
+                        float _oavg = (_n > 1) ? _olp / (float)(_n - 1) : -99.0f;
+
+                        int _adopt = (_wavg > _oavg + 0.2f);
+
+                        fprintf(stderr, "[WALK-GEN] 走%d步 平均%.3f vs 原序%.3f ⇒ %s\n",
+                                _wn, (double)_wavg, (double)_oavg, _adopt ? "采用" : "保持");
+
+                        if (_adopt) {
+                            /* 按走链顺序重排 word_buf / word_pos */
+                            const char* _tmpw[DIFF_MAX_SEQUENCE];
+                            POSTag      _tmpp[DIFF_MAX_SEQUENCE];
+                            int _c = 0;
+                            for (int _i = 0; _i < _wn; _i++) {
+                                for (int _p = 0; _p < _n; _p++) {
+                                    if (_ids[_p] != _walk[_i]) continue;
+                                    /* 找到 _p 对应的 word_buf 下标 */
+                                    int _wi = -1;
+                                    for (int _w = 0; _w < word_count; _w++) {
+                                        if (huarong_net_find_concept(ctx->vocab->net, word_buf[_w]) == _ids[_p]) { _wi = _w; break; }
+                                    }
+                                    if (_wi >= 0 && _c < word_count) {
+                                        _tmpw[_c] = word_buf[_wi];
+                                        _tmpp[_c] = word_pos[_wi];
+                                        _c++;
+                                    }
+                                    break;
+                                }
+                            }
+                            /* 没走到的词补在后面 */
+                            for (int _w = 0; _w < word_count && _c < word_count; _w++) {
+                                int _seen = 0;
+                                for (int _i = 0; _i < _c; _i++) {
+                                    if (_tmpw[_i] == word_buf[_w]) { _seen = 1; break; }
+                                }
+                                if (_seen) continue;
+                                _tmpw[_c] = word_buf[_w];
+                                _tmpp[_c] = word_pos[_w];
+                                _c++;
+                            }
+                            if (_c == word_count) {
+                                for (int _i = 0; _i < word_count; _i++) {
+                                    word_buf[_i] = _tmpw[_i];
+                                    word_pos[_i] = _tmpp[_i];
+                                }
+                            }
+                        }
+                        ctx->walk_gen_len = _wn;
+                    }
+                }
+            }
         }
 
         /* 有界联想回退（v0.6）：主输出为空（relevance 过滤后无候选）

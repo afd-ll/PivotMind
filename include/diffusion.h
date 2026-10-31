@@ -27,7 +27,7 @@ extern "C" {
 
 #define DIFF_MAX_CANDIDATES  256
 #define DIFF_MAX_PATH_DEPTH  5
-#define DIFF_MAX_SEQUENCE     32
+#define DIFF_MAX_SEQUENCE     96
 
 /* 前向声明 — 避免引入 emergent_pos.h 循环依赖 */
 typedef struct EmergentPOS EmergentPOS;
@@ -87,7 +87,11 @@ typedef struct {
      * 不做统计、不落盘 ⇒ 口径唯一。0 = 本轮没有扩散。 */
     int spread_edges_out;
 
-    /* v0.6.3 走边生成·②：回跳（restart）强度 alpha ∈ [0,1]。
+    
+    int walk_added_out;   /* 本轮前沿回写了多少个节点（WALK_OUT）*/
+    int walk_gen_len;     /* 本轮走边生成走了多少步（WALK_GEN）*/
+
+/* v0.6.3 走边生成·②：回跳（restart）强度 alpha ∈ [0,1]。
      * 每跳把 (1-alpha) 的权重重新计给【锚定集】（输入命中的节点），
      * 压制"到处都能到"的枢纽节点 —— 度归一化罚的是**出度**，
      * 对目标节点的**入度**无效（实测线上 24 个输入输出高度同质）。
