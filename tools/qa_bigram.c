@@ -30,7 +30,60 @@
 #include "multi_topology.h"
 #include "huarong_topology.h"
 #include "transition_model.h"
-#include "corpus_filter.h"   /* 与重训同一套语料闸门（繁体/文言/无实义） */
+#include "corpus_filter.h"
+
+/* ── 虚词过滤（CX-39 · 2026-10-31）───────────────────────────
+ *
+ * 为什么要有：实测转移表 top-8 后续大量是虚词（和/的/来/去/或者/等等/中/里），
+ * 因为虚词在任何语料里都高频相邻。而扩散候选池已经过 `is_function_word()`
+ * 全剔（100+ 虚词），两边过滤口径相反 ⇒ 走边时「池内命中 0」。
+ *
+ * 治本做法：**灌表时就不记含虚词的 bigram** —— 让转移表只含「实词→实词」，
+ * 和候选池同口径。遇到虚词**断链**（不跨过它记 bigram），而不是跳过它继续连。
+ *
+ * 词表来源：从 diffusion.c 的 is_function_word 里摘最高频的那批。
+ * 不求全（那有 100+ 条），只覆盖真正会把 top-8 占满的。
+ * 环境变量 PIVOTMIND_WBIGRAM_KEEP_FW=1 可关掉这个过滤做对照。
+ */
+static int skip_funcword(const char* w) {
+    static int _keep = -1;
+    if (_keep < 0) {
+        const char* e = getenv("PIVOTMIND_WBIGRAM_KEEP_FW");
+        _keep = (e && e[0] == '1') ? 1 : 0;
+    }
+    if (_keep) return 0;
+    if (!w || !w[0]) return 1;
+
+    /* 单字高频虚词（这是把 top-8 占满的主力） */
+    static const char* ONE[] = {
+        "\u7684","\u4e86","\u662f","\u5728","\u6709","\u6765","\u53bb","\u628a","\u88ab",
+        "\u8ba9","\u7ed9","\u7740","\u8fc7","\u5f97","\u548c","\u4e0e","\u53ca","\u6216",
+        "\u5c31","\u90fd","\u4e5f","\u8fd8","\u53c8","\u5f88","\u592a","\u66f4","\u6700",
+        "\u4e0d","\u6ca1","\u4e0a","\u4e0b","\u4e2d","\u91cc","\u5916","\u524d","\u540e",
+        "\u5bf9","\u4ece","\u5411","\u4e8e","\u4e3a","\u4ee5","\u56e0","\u6240","\u800c",
+        "\u5219","\u4e14","\u5e76","\u5982","\u82e5","\u5373","\u4e4b","\u5176","\u6b64",
+        "\u90a3","\u8fd9","\u54ea","\u4ec0","\u4e48","\u5462","\u5427","\u554a","\u5417",
+        "\u4e00","\u4e8c","\u4e09","\u56db","\u4e94","\u516d","\u4e03","\u516b","\u4e5d","\u5341",
+        NULL
+    };
+    /* 双字虚词 */
+    static const char* TWO[] = {
+        "\u6216\u8005","\u7b49\u7b49","\u4f46\u662f","\u56e0\u4e3a","\u6240\u4ee5",
+        "\u5982\u679c","\u867d\u7136","\u8fd8\u662f","\u5c31\u662f","\u4e0d\u662f",
+        "\u8fd9\u4e2a","\u90a3\u4e2a","\u4ec0\u4e48","\u600e\u4e48","\u4e3a\u4ec0",
+        "\u4e00\u4e2a","\u4e00\u4e9b","\u4e00\u79cd","\u5df2\u7ecf","\u53ef\u4ee5",
+        "\u5e94\u8be5","\u9700\u8981","\u8fd9\u6837","\u90a3\u6837","\u540c\u65f6",
+        NULL
+    };
+    size_t L = strlen(w);
+    if (L == 3) {
+        for (int i = 0; ONE[i]; i++) if (strcmp(w, ONE[i]) == 0) return 1;
+    } else if (L == 6) {
+        for (int i = 0; TWO[i]; i++) if (strcmp(w, TWO[i]) == 0) return 1;
+    }
+    return 0;
+}
+   /* 与重训同一套语料闸门（繁体/文言/无实义） */
 #include "common.h"
 
 /* ---------- 无锁局部哈希：token → node_id ----------
@@ -153,6 +206,14 @@ static void feed_text(const char* s) {
             buf[need] = 0;
             int id = lh_find(buf);
             if (id >= 0) {
+                if (skip_funcword(buf)) {
+                    /* 虚词：**断链**——先把当前链冲掉，然后不把它记进序列。
+                     * 这样「和/的/来」这些就不会出现在任何 bigram 里。 */
+                    _flush(ids, &n);
+                    p += need;
+                    matched = 1;
+                    break;
+                }
                 if (n >= (int)(sizeof(ids)/sizeof(ids[0])) - 1) _flush(ids, &n);
                 ids[n++] = id;
                 p += need;

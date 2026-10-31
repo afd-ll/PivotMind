@@ -90,7 +90,7 @@ int main(int argc, char** argv) {
             ReasoningNode* nx = vocab->net->nodes[nid[j]];
             if (!nx || !nx->concept) continue;
             float pr = tm_prob(tm, id, nid[j]);
-            printf("  %s(%.3f)", nx->concept, (double)pr);
+            printf("  %s(%g)", nx->concept, (double)pr);
             if (pr > 1e-9f) H -= (double)pr * log2((double)pr);
             shown++;
         }
